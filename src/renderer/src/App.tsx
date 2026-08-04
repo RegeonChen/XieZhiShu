@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react'
 import TopBar from './components/TopBar'
 import SideNav, { type PageKey } from './components/SideNav'
 import EmptyState from './components/EmptyState'
+import SourceList from './components/SourceList'
+import TagManager from './components/TagManager'
+import TemplateManager from './components/TemplateManager'
 import { zhCN } from './i18n/zh-CN'
 
 interface AppInfo {
@@ -16,47 +19,79 @@ const NAV_ITEMS: { key: PageKey; label: string }[] = [
   { key: 'settings', label: zhCN.nav.settings }
 ]
 
-const PAGE_PANES: Record<PageKey, { listTitle: string; listEmpty: string; detailTitle: string; detailHint: string }> = {
-  sources: zhCN.panes.sources,
-  writing: zhCN.panes.writing,
-  versions: zhCN.panes.versions,
-  settings: zhCN.panes.settings
-}
-
 export default function App() {
   const [page, setPage] = useState<PageKey>('sources')
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
+  const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
     window.api
       .getAppInfo()
-      .then((info) => {
-        if (!cancelled) setAppInfo(info)
+      .then((res) => {
+        if (!cancelled && res.ok && res.data) setAppInfo(res.data)
       })
       .catch(() => {
         if (!cancelled) setAppInfo(null)
       })
-    return () => {
-      cancelled = true
-    }
+    return () => { cancelled = true }
   }, [])
 
-  const panes = PAGE_PANES[page]
   const pageTitle = NAV_ITEMS.find((item) => item.key === page)?.label ?? ''
+
+  const renderCenterPane = () => {
+    switch (page) {
+      case 'sources':
+        return (
+          <section className="center-pane">
+            <h3 className="center-pane__title">{zhCN.panes.sources.listTitle}</h3>
+            <SourceList onSelect={(id) => setSelectedSourceId(id)} />
+          </section>
+        )
+      default:
+        return (
+          <section className="center-pane">
+            <h3 className="center-pane__title">{zhCN.panes[page].listTitle}</h3>
+            <p className="center-pane__empty">{zhCN.panes[page].listEmpty}</p>
+          </section>
+        )
+    }
+  }
+
+  const renderWorkPane = () => {
+    switch (page) {
+      case 'sources':
+        return (
+          <main className="work-pane">
+            {selectedSourceId ? (
+              <TagManager sourceId={selectedSourceId} sourceTags={[]} onTagsChange={() => {}} />
+            ) : (
+              <EmptyState title="资料详情" hint="点击左侧资料可查看详情与标签管理。" />
+            )}
+          </main>
+        )
+      case 'settings':
+        return (
+          <main className="work-pane">
+            <TemplateManager />
+          </main>
+        )
+      default:
+        return (
+          <main className="work-pane">
+            <EmptyState title={zhCN.panes[page].detailTitle} hint={zhCN.panes[page].detailHint} />
+          </main>
+        )
+    }
+  }
 
   return (
     <div className="app-shell">
       <TopBar pageTitle={pageTitle} appInfo={appInfo} />
       <div className="app-body">
         <SideNav current={page} items={NAV_ITEMS} onSelect={setPage} />
-        <section className="center-pane">
-          <h3 className="center-pane__title">{panes.listTitle}</h3>
-          {panes.listEmpty ? <p className="center-pane__empty">{panes.listEmpty}</p> : null}
-        </section>
-        <main className="work-pane">
-          <EmptyState title={panes.detailTitle} hint={panes.detailHint} />
-        </main>
+        {renderCenterPane()}
+        {renderWorkPane()}
       </div>
     </div>
   )
