@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+out/
+release/
+
+# Local data (user materials / database / logs)
+data/
+*.db
+*.sqlite
+logs/
+
+# Env & credentials
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# External project reference files (not part of this repo)
+参考-agents.md
+参考-PLAN.md
