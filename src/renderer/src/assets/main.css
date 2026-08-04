@@ -1,0 +1,158 @@
+:root {
+  --bg-primary: #f5f6f8;
+  --bg-panel: #ffffff;
+  --border: #e2e4e8;
+  --fg: #1f2329;
+  --fg-soft: #6b7280;
+  --accent: #2f6fed;
+  --accent-soft: #e8effd;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+  color: var(--fg);
+  background: var(--bg-primary);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- 三栏工作台外壳 ---------- */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 48px;
+  padding: 0 16px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.topbar__left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.topbar__app-title {
+  font-weight: 600;
+}
+
+.topbar__divider {
+  width: 1px;
+  height: 16px;
+  background: var(--border);
+}
+
+.topbar__page-title {
+  color: var(--fg-soft);
+}
+
+.topbar__meta {
+  color: var(--fg-soft);
+  font-size: 12px;
+}
+
+.app-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* ---------- 左栏：一级导航 ---------- */
+.side-nav {
+  width: 180px;
+  flex-shrink: 0;
+  padding: 8px;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.side-nav__item {
+  display: block;
+  width: 100%;
+  padding: 9px 12px;
+  margin-bottom: 2px;
+  text-align: left;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.side-nav__item:hover {
+  background: var(--accent-soft);
+}
+
+.side-nav__item--active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* ---------- 中栏：列表区 ---------- */
+.center-pane {
+  width: 280px;
+  flex-shrink: 0;
+  padding: 14px;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.center-pane__title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.center-pane__empty {
+  color: var(--fg-soft);
+}
+
+/* ---------- 右栏：工作区 ---------- */
+.work-pane {
+  flex: 1;
+  min-width: 0;
+  padding: 32px;
+  overflow: auto;
+}
+
+.empty-state {
+  max-width: 480px;
+  margin: 48px auto;
+  text-align: center;
+  color: var(--fg-soft);
+}
+
+.empty-state__title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--fg);
+  margin-bottom: 8px;
+}
+
+.empty-state__hint {
+  line-height: 1.7;
+}
