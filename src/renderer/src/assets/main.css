@@ -156,3 +156,247 @@ body {
 .empty-state__hint {
   line-height: 1.7;
 }
+
+/* ---------- 资料列表 ---------- */
+.source-list__toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.source-list__btn {
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-panel);
+  color: var(--fg);
+  font-size: 13px;
+  cursor: pointer;
+}
+.source-list__btn:hover { background: var(--accent-soft); }
+.source-list__btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.source-list__btn--primary {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.source-list__btn--primary:hover { opacity: 0.9; }
+
+.source-list__status {
+  color: var(--fg-soft);
+  font-size: 13px;
+}
+
+.source-list__items {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.source-list__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 5px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.source-list__item:hover { background: var(--accent-soft); }
+
+.source-list__item-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-list__item-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.source-list__item-badge--ready { background: #dcfce7; color: #166534; }
+.source-list__item-badge--failed { background: #fee2e2; color: #991b1b; }
+.source-list__item-badge--pending,
+.source-list__item-badge--processing { background: #fef3c7; color: #92400e; }
+
+.source-list__item-kind {
+  font-size: 11px;
+  color: var(--fg-soft);
+  flex-shrink: 0;
+}
+
+.source-list__url-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.source-list__url-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 13px;
+  outline: none;
+}
+.source-list__url-input:focus { border-color: var(--accent); }
+
+.source-list__error {
+  color: #dc2626;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+/* ---------- 标签筛选 ---------- */
+.source-list__tag-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 10px;
+}
+
+.source-list__tag-chip {
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-panel);
+  color: var(--fg-soft);
+  font-size: 12px;
+  cursor: pointer;
+}
+.source-list__tag-chip:hover { opacity: 0.8; }
+.source-list__tag-chip--active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+/* ---------- 标签管理 ---------- */
+.tag-manager {
+  max-width: 400px;
+}
+
+.tag-manager__title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.tag-manager__create {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.tag-manager__input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 13px;
+  outline: none;
+}
+.tag-manager__input:focus { border-color: var(--accent); }
+
+.tag-manager__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.tag-manager__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.tag-manager__swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.tag-manager__name {
+  flex: 1;
+  font-size: 14px;
+}
+
+/* ---------- 范本管理 ---------- */
+.template-manager {
+  max-width: 600px;
+}
+
+.template-manager__toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.template-manager__body {
+  display: flex;
+  gap: 16px;
+  min-height: 200px;
+}
+
+.template-manager__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  width: 220px;
+  flex-shrink: 0;
+}
+
+.template-manager__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  border-radius: 5px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.template-manager__item:hover { background: var(--accent-soft); }
+.template-manager__item--active { background: var(--accent-soft); font-weight: 600; }
+
+.template-manager__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.template-manager__outline {
+  flex: 1;
+  min-width: 0;
+}
+
+.template-manager__outline-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+/* ---------- 篇目大纲树 ---------- */
+.outline-tree {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 13px;
+}
+
+.outline-tree__item {
+  padding: 2px 0;
+}
+
+.outline-tree__title {
+  color: var(--fg-soft);
+}
