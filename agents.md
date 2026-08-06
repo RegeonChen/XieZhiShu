@@ -125,7 +125,11 @@
 
 ## 当前状态
 
-截至 2026-08-03：
+截至 2026-08-05：
+
+- **Phase 3 Task 3.2/3.3 已完成**（撰写闭环）：本地 RAG 检索（bigram 词法打分 + 来源位置标注，`writing:retrieve` 预览）→ 初稿生成（提示词工程 + JSON 解析校验 + 失败重试 + 片段来源落库）→ 撰写页 UI（任务列表 / 新建 / 工作台）。验证通过：typecheck 零错误、26 项单测、生产构建成功。下一步 Phase 4（版本迭代与管控）。
+- **Phase 3 Task 3.1 已完成**（LLM Provider 配置）：`llm:*` 四通道（list/save/delete/test）与 `settings:*` 两通道全部落地——Provider 增删改查、safeStorage（Windows DPAPI）加密存密钥、连通性测试（net.fetch 调 /chat/completions，错误映射 LLM 错误码）、"设为当前"默认 Provider；设置页 UI 接入，范本管理独立为导航项。验证通过：typecheck 零错误、13 项单测、生产构建成功。下一步 Task 3.2（本地 RAG 检索）。
+- **Phase 2.1 全部完成**：资料删除（Task 2.1.1）与标签系统重构（Task 2.1.2）均通过验收。**2026-08-05 移除标签颜色功能**：标签统一显示，标题前缀格式为 `[tag:name]`，Migration 002 删除 `tags.color` 列。下一步 Phase 3（撰写闭环）。
 
 - 项目处于**需求与规划阶段**：已完成两篇 AI 赋能修志行业文章研读，产出公务员访谈提纲（见 `init.md`）。
 - 技术架构选型**已确认**：Electron + React + TypeScript；`PLAN.md` 已按该方案调整。
@@ -136,7 +140,10 @@
 - **Phase 1 Task 1.2 已完成**（2026-08-03）：落地 `src/shared/types.ts`（10 类核心实体 + ApiResult/ErrorCodes）与 `src/shared/ipc.ts`（7 组 32 个 IPC 通道常量 + 请求/响应类型 + IpcMapping 类型安全映射）。
 - **Phase 1 Task 1.3 已完成**（2026-08-03）：better-sqlite3 本地数据库、嵌入式迁移框架（Migration 001 含全部 10 张表 + FTS5 全文索引 + 触发器自动同步）、sources/tags repository 层、`sources:list` 与 `tags:list` 两个 IPC handler 端到端验证。验证通过：typecheck 零错误、5 项单测（创建表/迁移幂等/CRUD/FTS5 同步）、生产构建。
 - **Phase 1 全部 Task 已完成**（2026-08-03）。
-- **Phase 2 Task 2.4 已完成**（2026-08-03）：范本上传与解析（Markdown 标题层级提取，支持 .txt/.md/.docx/.pdf）。TemplateManager UI（导入/列表/篇目大纲树）。IPC: `templates:list/import/get/delete`。Phase 2 全部通过验收。下一步进入 Phase 3（撰写闭环）。 个 IPC handler：create/update/delete/addToSource/removeFromSource）。TagManager 组件（创建/删除标签 + 彩色标记 + 为资料打标/取消标签）。SourceList 标签筛选（按标签筛选资料列表）。验证通过。下一步 Task 2.4（范本）。
+- **Phase 2 Task 2.1 已完成**（2026-08-03）：多格式文件导入。**Phase 2.1（2026-08-03）：** 标签系统深度增强——标签嵌入标题前缀 `[tag:name|color]`、事务安全操作 + 级联标题重建、颜色选择器、`sources:get` IPC handler。参照海地小纵队项目 Phase 4.1.3 方案实现。下一步 Phase 3（撰写闭环）。 个 IPC handler：create/update/delete/addToSource/removeFromSource）。TagManager 组件（创建/删除标签 + 彩色标记 + 为资料打标/取消标签）。SourceList 标签筛选（按标签筛选资料列表）。验证通过。下一步 Task 2.4（范本）。
+- **Phase 2.1 Task 2.1.1 已完成**（2026-08-04）：资料删除功能——右键菜单删除单个资料（含二次确认）；中栏"全部资料"标题右侧功能菜单按钮 → "资料管理"批量勾选删除（全选/取消全选、已选计数）。新增 `sources:deleteMany` IPC 通道（事务批量删除）、仓库 `deleteSources`、preload `deleteSource/deleteSources`。验证通过：typecheck 零错误、生产构建成功。下一步 Task 2.1.2（标签系统重构）。
+- **Phase 2.1 Task 2.1.2 已完成**（2026-08-04）：标签系统重构——标签管理界面四个功能模块（新建标签带相似标签 Top5 建议、批量添加标签、删除标签二次确认、按标签多选交集检索）。新增 `tags:search`/`tags:batchAdd`/`tags:sourcesByTag` IPC 通道、`searchTags`（bigram 相似度）与 `getSourceIdsByTag` 仓库函数；`sources:list` 多标签检索改为 AND 语义（HAVING COUNT）。验证通过：typecheck 零错误、生产构建成功。下一步 Phase 3（撰写闭环）。
+- **2026-08-05：标签颜色功能移除**——标签统一显示，不再支持自定义颜色。`Tag` 类型与 `tags:create`/`tags:update` 请求移除 `color`；标题前缀格式由 `[tag:name|color]` 改为 `[tag:name]`（解析兼容旧格式，旧数据仅取标签名）；Migration 002 删除 `tags.color` 列；TagManager 移除颜色选择器与色块、SourceList/SourceViewer 移除颜色内联样式、zh-CN.ts/main.css 同步清理；迁移幂等测试改为按 MIGRATIONS 总数断言。验证通过：typecheck 零错误、5 项单测通过、生产构建成功。下一步 Phase 3（撰写闭环）。
 
 ## 设计决策
 
@@ -146,6 +153,7 @@
 - 人机协同：矛盾裁定、事件补充、文段修改、终审定稿由人工主导。
 - 版本管控：以"第 n 稿"为版本单元，人工确认即产生新版本，支持查看、对比、回滚。
 - 技术选型：采用 Electron + React + TypeScript（2026-08-03 确认）。
+- RAG 检索方案（2026-08-05）：采用本地词法检索——段落分块 + 字符 bigram 打分 + 来源位置标注，纯本地、无网络、中文无需分词；不引入向量数据库/嵌入依赖，向量索引留待后续按需扩展。
 
 ## 路线图
 
@@ -159,6 +167,12 @@
 
 ## 近期记录
 
+- **2026-08-05（本次修改）**：Phase 3 Task 3.2/3.3 完成——本地 RAG 检索（`src/main/rag/retrieval.ts`：段落分块 + 字符 bigram 打分 + 每来源 Top3/全局 Top12 + 位置标注；`writing:retrieve` 通道）；初稿生成（`src/main/writing/generate.ts`：任务范围解析 → 检索 → 提示词（含范本体例）→ `llm/chat.ts`（net.fetch 对话 + LLM 错误码）→ JSON 解析校验 + 失败重试一次 → 落库 draft/segments/segment_sources）；新增 `db/tasks.ts`、`db/drafts.ts` 仓储、`version:list` handler；preload 新增 createTask/listTasks/retrieveChunks/generateDraft/getDraft/listVersions；撰写页 UI（任务列表 / 新建表单[资料或标签范围+范本] / 工作台[检索预览+生成初稿+片段来源展开]）。验证通过：typecheck 零错误、26 项单测（新增 retrieval 4 项、tasks 3 项、drafts 2 项、generate 解析 4 项）、生产构建成功。下一步 Phase 4（版本迭代与管控）。
+
+- **2026-08-05（本次修改）**：Phase 3 Task 3.1 LLM Provider 配置完成——`llm:listProviders/saveProvider/deleteProvider/testConnection` 与 `settings:get/update` 六个 IPC handler；Migration 003 新增 `llm_providers` 表；`src/main/llm/secret.ts`（safeStorage 加密 `safe-storage:v1:` 前缀）、`provider-store.ts`（CRUD + 密钥不回传）、`test.ts`（net.fetch 连通性测试，LLM 错误码映射）、`db/settings.ts`（data_dir / current_llm_provider_id）；preload 新增 6 个 API；设置页 Settings 组件（新建/编辑/删除/测试/设为当前，密钥 password 输入、已设置徽标）；范本管理从设置页迁移为独立导航项（修复原误挂载）。验证通过：typecheck 零错误、13 项单测（含 provider-store 5 项、settings 3 项）、生产构建成功。下一步 Task 3.2（本地 RAG 检索）。
+
+- **2026-08-04（本次修改）**：Phase 2.1 Task 2.1.2 标签系统重构完成——标签管理界面四模块（新建/添加/删除/检索），相似标签搜索（bigram Jaccard Top5）、批量打标（批量预勾选已带标签资料）、删除标签二次确认（级联重建标题）、按标签多选交集检索（AND 语义）；新增 `tags:search`/`tags:batchAdd`/`tags:sourcesByTag` IPC。验证通过：typecheck 零错误、生产构建成功。下一步 Phase 3（撰写闭环）。
+- **2026-08-04**：Phase 2.1 Task 2.1.1 资料删除功能完成——右键菜单删除单资料、中栏"全部资料"标题右侧功能菜单 → "资料管理"批量勾选删除。新增 `sources:delete`/`sources:deleteMany` IPC handler、仓库 `deleteSources`（事务）、preload `deleteSource/deleteSources`；SourceList 增加自定义右键菜单与批量选择模式；App 增加功能菜单按钮与批量模式状态管理。验证通过：typecheck 零错误、生产构建成功。下一步 Task 2.1.2（标签系统重构）。
 - **2026-08-03（本次修改）**：Task 2.4 范本完成。Phase 2 全部通过验收：4 个 Task 完成（文件导入/信源抓取/标签体系/范本解析），typecheck 零错误、5 项单测、0 依赖漏洞。下一步 Phase 3。（5 个 IPC handler、TagManager UI 组件、SourceList 标签筛选）。验证通过。下一步 Task 2.4（范本）。（Electron net.fetch + HTML清洗、URL白名单校验、timeout/大小限制、错误码分类）。UI 资料列表新增 URL 输入栏。验证通过。下一步 Task 2.3。（better-sqlite3 原生驱动、嵌入式迁移框架 Migration 001 含全部 10 张表 + FTS5 + 触发器、sources/tags repository、`sources:list` 与 `tags:list` IPC handler）。Phase 1 全部通过验收。下一步进入 Phase 2。
 - **2026-08-03**：Task 1.1 脚手架完成。
 - **2026-08-03**：产出三份设计文档——`docs/data-model.md`、`docs/shared-contracts.md`、`docs/ui-architecture.md`，作为 Phase 1 任务落地依据；`PLAN.md` 相应补充任务说明，`docs/` 纳入版本管理。
@@ -170,6 +184,6 @@
 
 - **大模型幻觉风险**：无依据编造史实是本工具必须重点抑制的风险，需通过"信源白名单 + RAG 检索 + 逐片段来源标注"在架构层面约束。
 - **单人开发进度压力**：任务量大，需严格按 `PLAN.md` 分阶段推进并保证每个任务的验收标准完成后再进入下一任务。
-- **FTS5 中文全词检索受限**：当前 unicode61 tokenizer 对中文按单字分词，"全文检索" 不会整体匹配。Phase 3 需评估 jieba/hanlp 分词或改用 LIKE 回退。英文分词正常可用。
+- **FTS5 中文全词检索受限**：unicode61 tokenizer 对中文按单字分词，"全文检索"不会整体匹配。已落地方案（2026-08-05）：RAG 检索改用字符 bigram 打分（不受分词限制）；FTS5 仍用于资料列表关键词过滤，英文分词正常可用。
 - **better-sqlite3 原生模块分发**：首次 `npm install` 需要本地编译工具（node-gyp / VS Build Tools）。electron-builder 打包时需配置 `nativeRebuilder` 确保跨机器可运行。当前开发机已编译通过。
-- **30 个 IPC 通道仅有类型无实现**：目前只注册了 `sources:list`、`tags:list`、`app:getInfo` 三个 handler，其余 29 个需在对应 Phase 中逐一实现。接口契约均已定义，无阻塞风险。
+- **部分 IPC 通道仅有类型无实现**：已实现资料/标签/范本/设置/LLM Provider/撰写任务/初稿/版本列表相关的主要 handler；撰写审核与版本对比回滚通道（`draft:confirm`、`segment:*`、`version:compare`、`version:rollback`）需在 Phase 4 中实现。接口契约均已定义，无阻塞风险。

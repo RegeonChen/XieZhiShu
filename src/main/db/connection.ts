@@ -5,7 +5,7 @@
 import Database from 'better-sqlite3'
 import { app } from 'electron'
 import { join } from 'node:path'
-import { runMigrations } from './migrate'
+import { runMigrations, MIGRATIONS } from './migrate'
 
 let _db: Database.Database | null = null
 
@@ -65,7 +65,7 @@ if (import.meta.vitest) {
     it('migration is idempotent', () => {
       runMigrations(db)
       const { count } = db.prepare('SELECT COUNT(*) as count FROM schema_migrations').get() as { count: number }
-      expect(count).toBe(1)
+      expect(count).toBe(MIGRATIONS.length)
     })
 
     it('sources CRUD works', () => {

@@ -5,12 +5,16 @@ node_modules/
 dist/
 out/
 release/
+*.tsbuildinfo
 
 # Local data (user materials / database / logs)
 data/
 *.db
 *.sqlite
 logs/
+
+# Local test samples
+test-file.pdf
 
 # Env & credentials
 .env

@@ -1,14 +1,15 @@
-export type PageKey = 'sources' | 'writing' | 'versions' | 'settings'
+export type PageKey = 'sources' | 'writing' | 'versions' | 'templates' | 'settings'
 
 interface SideNavProps {
   current: PageKey
   items: { key: PageKey; label: string }[]
   onSelect: (key: PageKey) => void
+  style?: React.CSSProperties
 }
 
-export default function SideNav({ current, items, onSelect }: SideNavProps) {
+export default function SideNav({ current, items, onSelect, style }: SideNavProps) {
   return (
-    <nav className="side-nav">
+    <nav className="side-nav" style={style}>
       {items.map((item) => (
         <button
           key={item.key}

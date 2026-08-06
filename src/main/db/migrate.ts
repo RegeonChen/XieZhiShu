@@ -9,7 +9,7 @@ interface Migration {
   sql: string
 }
 
-const MIGRATIONS: Migration[] = [
+export const MIGRATIONS: Migration[] = [
   {
     version: 1,
     sql: `
@@ -131,6 +131,28 @@ CREATE TRIGGER sources_fts_au AFTER UPDATE ON sources BEGIN
     INSERT INTO sources_fts(rowid, title, cleaned_text)
     VALUES (new.rowid, new.title, new.cleaned_text);
 END;
+`
+  },
+  {
+    // 移除标签颜色功能（2026-08-05）：标签统一显示，不再支持自定义颜色
+    version: 2,
+    sql: `
+ALTER TABLE tags DROP COLUMN color;
+`
+  },
+  {
+    // LLM Provider 配置（Phase 3 Task 3.1）：api_key 存 safeStorage 加密串（safe-storage:v1:...）
+    version: 3,
+    sql: `
+CREATE TABLE IF NOT EXISTS llm_providers (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    api_base TEXT NOT NULL,
+    model TEXT NOT NULL,
+    api_key TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `
   }
 ]

@@ -1,17 +1,101 @@
 import { join } from 'node:path'
+import { createServer } from 'node:http'
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
-import { IPC, type AppInfoRes } from '../shared/ipc'
-import type { ApiResult, Source, Tag } from '../shared/types'
+import {
+  IPC,
+  type AppInfoRes,
+  type LlmSaveProviderReq,
+  type WritingCreateTaskReq,
+  type WritingRetrieveReq,
+  type WritingGenerateDraftReq,
+  type DraftGetReq,
+  type VersionListReq,
+  type VersionListRes
+} from '../shared/ipc'
+import type { ApiResult, Source, Tag, LlmProviderConfig, AppSettings, WritingTask, Draft, RetrievedChunk } from '../shared/types'
 import { getDb } from './db/connection'
-import { listSources } from './db/sources'
-import { listTags, createTag, updateTag, deleteTag, addTagToSource, removeTagFromSource } from './db/tags'
+import { listSources, getSourceById, deleteSource, deleteSources } from './db/sources'
+import { listTags, createTag, updateTag, deleteTag, addTagToSource, removeTagFromSource, getTagsBySource, batchAddTags, searchTags, getSourceIdsByTag } from './db/tags'
 import { importFiles, importUrl } from './import'
 import { parseTemplate as parseTemplateFile } from './import/template-parser'
 import { basename } from 'node:path'
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { insertTemplate, listTemplates, getTemplateById, deleteTemplate } from './db/templates'
+import { safeStorageCodec } from './llm/secret'
+import { listProviders, saveProvider, deleteProvider } from './llm/provider-store'
+import { testProviderConnection } from './llm/test'
+import { getSettings, updateSettings } from './db/settings'
+import { createTask as createWritingTask, listTasks as listWritingTasks, getTaskById } from './db/tasks'
+import { getDraftById, listVersions } from './db/drafts'
+import { generateDraft, retrieveForTask } from './writing/generate'
 
 const APP_PROTOCOL_WHITELIST = /^https?:\/\//i
+
+// 内嵌 HTTP 文件服务：仅监听 127.0.0.1 随机端口，只提供 imports 目录下的文件
+let fileServerUrl: string | null = null
+let fileServer: ReturnType<typeof createServer> | null = null
+
+function startFileServer(): void {
+  if (fileServer) return
+  const importsDir = join(app.getPath('userData'), 'imports')
+
+  fileServer = createServer((req, res) => {
+    // CORS：渲染进程（dev 的 http://localhost:5173 或生产 file://）跨源访问本地文件服务
+    res.setHeader('Access-Control-Allow-Origin', '*')
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
+    res.setHeader('Access-Control-Allow-Headers', 'Range')
+
+    // pdf.js 使用 Range 请求头，会触发 CORS 预检
+    if (req.method === 'OPTIONS') {
+      res.statusCode = 204
+      res.end()
+      return
+    }
+
+    try {
+      const pathname = decodeURIComponent(new URL(req.url ?? '/', 'http://127.0.0.1').pathname).replace(/^\//, '')
+      const filePath = join(importsDir, pathname)
+
+      // 路径穿越防护：确保仍在 imports 目录内
+      if (!filePath.startsWith(importsDir)) {
+        res.statusCode = 403
+        res.end()
+        return
+      }
+      if (!existsSync(filePath)) {
+        res.statusCode = 404
+        res.end()
+        return
+      }
+
+      const data = readFileSync(filePath)
+      const ext = pathname.split('.').pop()?.toLowerCase()
+      const mimeMap: Record<string, string> = {
+        pdf: 'application/pdf',
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        bmp: 'image/bmp',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        txt: 'text/plain; charset=utf-8',
+        md: 'text/markdown; charset=utf-8'
+      }
+      res.setHeader('content-type', mimeMap[ext ?? ''] ?? 'application/octet-stream')
+      res.setHeader('cache-control', 'no-store')
+      res.end(data)
+    } catch {
+      res.statusCode = 500
+      res.end()
+    }
+  })
+
+  fileServer.listen(0, '127.0.0.1', () => {
+    const addr = fileServer?.address()
+    if (addr && typeof addr === 'object') {
+      fileServerUrl = `http://127.0.0.1:${addr.port}`
+    }
+  })
+}
 
 function createWindow(): void {
   const win = new BrowserWindow({
@@ -39,6 +123,11 @@ function createWindow(): void {
       shell.openExternal(url)
     }
     return { action: 'deny' }
+  })
+
+  // 渲染进程 console 消息转发到主进程终端（便于调试）
+  win.webContents.on('console-message', (event) => {
+    console.log(`[renderer] ${event.message}`)
   })
 
   if (process.env['ELECTRON_RENDERER_URL']) {
@@ -87,18 +176,18 @@ ipcMain.handle(IPC.SOURCES_ADD_URL, async (_event, params: { url: string }): Pro
 })
 
 // Task 2.3 标签 CRUD
-ipcMain.handle(IPC.TAGS_CREATE, (_event, params: { name: string; color?: string }): ApiResult<{ tag: Tag }> => {
+ipcMain.handle(IPC.TAGS_CREATE, (_event, params: { name: string }): ApiResult<{ tag: Tag }> => {
   try {
-    const tag = createTag(params.name, params.color)
+    const tag = createTag(params.name)
     return { ok: true, data: { tag } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
 })
 
-ipcMain.handle(IPC.TAGS_UPDATE, (_event, params: { id: string; name?: string; color?: string }): ApiResult<Tag> => {
+ipcMain.handle(IPC.TAGS_UPDATE, (_event, params: { id: string; name?: string }): ApiResult<Tag> => {
   try {
-    const tag = updateTag(params.id, params.name, params.color)
+    const tag = updateTag(params.id, params.name)
     if (!tag) return { ok: false, error: { code: 'INVALID_PARAM', message: '标签不存在' } }
     return { ok: true, data: tag }
   } catch (err) {
@@ -204,10 +293,232 @@ ipcMain.handle(IPC.SOURCES_LIST, (_event, params?: { tagIds?: string[]; search?:
   }
 })
 
+// Phase 2.1: 获取资料详情（含标签）
+ipcMain.handle(IPC.SOURCES_GET, (_event, params: { id: string }): ApiResult<{ source: Source; tags: Tag[] }> => {
+  try {
+    const source = getSourceById(params.id)
+    if (!source) return { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '资料不存在' } }
+    const tags = getTagsBySource(params.id)
+    return { ok: true, data: { source, tags } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// Phase 2.x: 将 .docx 资料实时转换为 HTML 供前端渲染
+ipcMain.handle(IPC.SOURCES_RENDER_HTML, async (_event, params: { id: string }): Promise<ApiResult<{ html: string }>> => {
+  try {
+    const source = getSourceById(params.id)
+    if (!source) return { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '资料不存在' } }
+    if (source.kind !== 'file' || !source.filePath) {
+      return { ok: false, error: { code: 'INVALID_PARAM', message: '仅支持文件类型资料' } }
+    }
+    const ext = source.filePath.toLowerCase()
+    if (!ext.endsWith('.docx')) {
+      return { ok: false, error: { code: 'PARSE_UNSUPPORTED', message: '仅支持 .docx 格式渲染' } }
+    }
+
+    const importDir = join(app.getPath('userData'), 'imports')
+    const filePath = join(importDir, source.filePath)
+    if (!existsSync(filePath)) {
+      return { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '原始文件不存在，可能已被移动或删除' } }
+    }
+
+    const buffer = readFileSync(filePath)
+    const mammoth = await import('mammoth')
+    const result = await mammoth.convertToHtml({ buffer })
+    return { ok: true, data: { html: result.value } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 获取资料文件的本地访问 URL（通过内嵌 HTTP 文件服务提供，PDF 查看器不支持 data: URL）
+ipcMain.handle(IPC.SOURCES_GET_FILE_URL, (_event, params: { id: string }): ApiResult<{ url: string }> => {
+  try {
+    const source = getSourceById(params.id)
+    if (!source) return { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '资料不存在' } }
+    if (source.kind !== 'file' || !source.filePath) {
+      return { ok: false, error: { code: 'INVALID_PARAM', message: '仅支持文件类型资料' } }
+    }
+    if (!fileServerUrl) return { ok: false, error: { code: 'INTERNAL_ERROR', message: '文件服务未就绪' } }
+    const url = `${fileServerUrl}/${encodeURIComponent(source.filePath)}`
+    return { ok: true, data: { url } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 删除单个资料（级联清理标签关联与 FTS 索引）
+ipcMain.handle(IPC.SOURCES_DELETE, (_event, params: { id: string }): ApiResult<void> => {
+  try {
+    deleteSource(params.id)
+    return { ok: true, data: undefined }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 批量删除资料（事务包裹）
+ipcMain.handle(IPC.SOURCES_DELETE_MANY, (_event, params: { ids: string[] }): ApiResult<void> => {
+  try {
+    if (!Array.isArray(params.ids) || params.ids.length === 0) {
+      return { ok: false, error: { code: 'INVALID_PARAM', message: '未指定要删除的资料' } }
+    }
+    deleteSources(params.ids)
+    return { ok: true, data: undefined }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
 ipcMain.handle(IPC.TAGS_LIST, (): ApiResult<{ items: Tag[] }> => {
   try {
     const items = listTags()
     return { ok: true, data: { items } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// Phase 2.1.2: 相似标签搜索（新建标签时的 Top5 建议）
+ipcMain.handle(IPC.TAGS_SEARCH, (_event, params: { query: string; limit?: number }): ApiResult<{ items: Tag[] }> => {
+  try {
+    const items = searchTags(params.query ?? '', params.limit ?? 5)
+    return { ok: true, data: { items } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// Phase 2.1.2: 批量打标（多标签 → 多资料）
+ipcMain.handle(IPC.TAGS_BATCH_ADD, (_event, params: { tagIds: string[]; sourceIds: string[] }): ApiResult<void> => {
+  try {
+    if (!Array.isArray(params.tagIds) || !Array.isArray(params.sourceIds) || params.sourceIds.length === 0 || params.tagIds.length === 0) {
+      return { ok: false, error: { code: 'INVALID_PARAM', message: '缺少标签或资料' } }
+    }
+    batchAddTags(params.sourceIds, params.tagIds)
+    return { ok: true, data: undefined }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// Phase 2.1.2: 获取带有指定标签的所有资料 ID
+ipcMain.handle(IPC.TAGS_SOURCES_BY_TAG, (_event, params: { tagId: string }): ApiResult<{ sourceIds: string[] }> => {
+  try {
+    const sourceIds = getSourceIdsByTag(params.tagId)
+    return { ok: true, data: { sourceIds } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// ===== Phase 3 Task 3.1: LLM Provider 配置 =====
+
+ipcMain.handle(IPC.LLM_LIST_PROVIDERS, (): ApiResult<{ items: LlmProviderConfig[] }> => {
+  try {
+    return { ok: true, data: { items: listProviders() } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+ipcMain.handle(IPC.LLM_SAVE_PROVIDER, (_event, params: LlmSaveProviderReq): ApiResult<{ provider: LlmProviderConfig }> => {
+  try {
+    const provider = saveProvider(params, safeStorageCodec)
+    return { ok: true, data: { provider } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INVALID_PARAM', message: String(err) } }
+  }
+})
+
+ipcMain.handle(IPC.LLM_DELETE_PROVIDER, (_event, params: { id: string }): ApiResult<void> => {
+  try {
+    deleteProvider(params.id)
+    // 若删除的是当前 Provider，同步清除设置
+    if (getSettings().currentLlmProviderId === params.id) {
+      updateSettings({ currentLlmProviderId: undefined })
+    }
+    return { ok: true, data: undefined }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+ipcMain.handle(IPC.LLM_TEST_CONNECTION, async (_event, params: { id: string }): Promise<ApiResult<void>> => {
+  const result = await testProviderConnection(params.id, safeStorageCodec)
+  if (result.ok) return { ok: true, data: undefined }
+  return { ok: false, error: result.error! }
+})
+
+// ===== Phase 3 Task 3.1: 本地设置 =====
+
+ipcMain.handle(IPC.SETTINGS_GET, (): ApiResult<AppSettings> => {
+  try {
+    return { ok: true, data: getSettings() }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+ipcMain.handle(IPC.SETTINGS_UPDATE, (_event, params: { patch: Partial<AppSettings> }): ApiResult<AppSettings> => {
+  try {
+    return { ok: true, data: updateSettings(params.patch) }
+  } catch (err) {
+    return { ok: false, error: { code: 'INVALID_PARAM', message: String(err) } }
+  }
+})
+
+// ===== Phase 3 Task 3.2/3.3: 撰写任务与初稿 =====
+
+ipcMain.handle(IPC.WRITING_CREATE_TASK, (_event, params: WritingCreateTaskReq): ApiResult<{ task: WritingTask }> => {
+  try {
+    const task = createWritingTask(params)
+    return { ok: true, data: { task } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INVALID_PARAM', message: String(err) } }
+  }
+})
+
+ipcMain.handle(IPC.WRITING_LIST_TASKS, (): ApiResult<{ items: WritingTask[] }> => {
+  try {
+    return { ok: true, data: { items: listWritingTasks() } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+ipcMain.handle(IPC.WRITING_RETRIEVE, (_event, params: WritingRetrieveReq): ApiResult<{ chunks: RetrievedChunk[] }> => {
+  try {
+    if (!getTaskById(params.taskId)) {
+      return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '撰写任务不存在' } }
+    }
+    return { ok: true, data: { chunks: retrieveForTask(params.taskId) ?? [] } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+ipcMain.handle(IPC.WRITING_GENERATE_DRAFT, async (_event, params: WritingGenerateDraftReq): Promise<ApiResult<{ draft: Draft }>> => {
+  const result = await generateDraft(params.taskId)
+  if (result.ok) return { ok: true, data: { draft: result.draft } }
+  return { ok: false, error: result.error }
+})
+
+ipcMain.handle(IPC.DRAFT_GET, (_event, params: DraftGetReq): ApiResult<Draft> => {
+  try {
+    const draft = getDraftById(params.draftId)
+    if (!draft) return { ok: false, error: { code: 'DRAFT_NOT_FOUND', message: '志稿不存在' } }
+    return { ok: true, data: draft }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+ipcMain.handle(IPC.VERSION_LIST, (_event, params: VersionListReq): ApiResult<VersionListRes> => {
+  try {
+    return { ok: true, data: { versions: listVersions(params.taskId) } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
@@ -218,6 +529,9 @@ ipcMain.handle(IPC.TAGS_LIST, (): ApiResult<{ items: Tag[] }> => {
 app.whenReady().then(() => {
   // 初始化数据库（触发迁移）
   getDb()
+
+  // 启动内嵌文件服务（提供 PDF/图片等本地文件）
+  startFileServer()
 
   createWindow()
 
@@ -230,4 +544,9 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
   }
+})
+
+app.on('will-quit', () => {
+  fileServer?.close()
+  fileServer = null
 })
