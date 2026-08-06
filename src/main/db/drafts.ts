@@ -99,6 +99,52 @@ function mapSegmentSource(row: SegmentSourceRow): SegmentSource {
   }
 }
 
+/** 读取单个片段（含来源标注） */
+export function getSegmentById(segmentId: string): Segment | null {
+  const db = getDb()
+  const sr = db.prepare('SELECT * FROM segments WHERE id = ?').get(segmentId) as SegmentRow | undefined
+  if (!sr) return null
+  const sourceRows = db
+    .prepare(
+      `SELECT ss.segment_id, ss.source_id, ss.position, ss.quote, so.title AS source_title
+       FROM segment_sources ss
+       LEFT JOIN sources so ON so.id = ss.source_id
+       WHERE ss.segment_id = ?`
+    )
+    .all(sr.id) as SegmentSourceRow[]
+  return {
+    id: sr.id,
+    draftId: sr.draft_id,
+    ordering: sr.ordering,
+    heading: sr.heading ?? undefined,
+    content: sr.content,
+    aiGenerated: sr.ai_generated === 1,
+    createdAt: sr.created_at,
+    updatedAt: sr.updated_at,
+    sources: sourceRows.map(mapSegmentSource)
+  }
+}
+
+/** 修改片段内容（内容以 Markdown 存储；记录 review_records 留痕） */
+export function updateSegmentContent(segmentId: string, content: string): Segment | null {
+  const db = getDb()
+  const row = db.prepare('SELECT * FROM segments WHERE id = ?').get(segmentId) as SegmentRow | undefined
+  if (!row) return null
+
+  const trimmed = content.trim()
+  const now = new Date().toISOString()
+  db.prepare('UPDATE segments SET content = ?, updated_at = ? WHERE id = ?').run(trimmed, now, segmentId)
+
+  if (row.content !== trimmed) {
+    db.prepare(
+      `INSERT INTO review_records (id, draft_id, segment_id, action, before_content, after_content, created_at)
+       VALUES (?, ?, ?, 'edit', ?, ?, ?)`
+    ).run(crypto.randomUUID(), row.draft_id, segmentId, row.content, trimmed, now)
+  }
+
+  return getSegmentById(segmentId)
+}
+
 /** 读取整稿（含片段与来源标注，来源带标题） */
 export function getDraftById(id: string): Draft | null {
   const db = getDb()

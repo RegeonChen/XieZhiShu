@@ -161,11 +161,12 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 |---|---|---|
 | `writing:createTask` | `{ title, scope: { sourceIds } \| { tagIds }, templateBookId? }` → `{ task: WritingTask }` | 校验范围非空 |
 | `writing:listTasks` | `{}` → `{ items: WritingTask[] }` | |
+| `writing:deleteTask` | `{ id }` → `{ ok: true }` | 删除任务（级联清理 drafts/segments/sources） |
 | `writing:retrieve` | `{ taskId }` → `{ chunks: RetrievedChunk[] }` | 任务范围内 RAG 检索预览（片段 + 来源 + 位置） |
 | `writing:generateDraft` | `{ taskId }` → `{ draft: Draft }` | AI 生成第 0 稿（结构化片段 + 来源） |
 | `draft:get` | `{ draftId }` → `{ draft: Draft }` | 读取某稿（含片段与来源） |
 | `draft:confirm` | `{ draftId }` → `{ nextDraft: Draft }` | 确认当前稿 → 生成第 n+1 稿 |
-| `segment:update` | `{ segmentId, content }` → `{ segment: Segment }` | 修改文段（记 review_records） |
+| `segment:update` | `{ segmentId, content }` → `{ segment: Segment }` | 修改文段（内容为 Markdown，记 review_records） |
 | `segment:resolveConflict` | `{ segmentId, chosenSourceId, note? }` → `{ segment: Segment }` | 矛盾裁定：采纳某来源的记述 |
 | `segment:addManual` | `{ draftId, heading?, content, insertAfter? }` → `{ segment: Segment }` | 事件缺失手动补写 |
 | `segment:insertGenerated` | `{ draftId, heading?, scope, insertAfter? }` → `{ segment: Segment }` | 导入新资料后 AI 生成并插入 |

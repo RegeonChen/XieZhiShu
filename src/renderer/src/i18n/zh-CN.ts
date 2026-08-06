@@ -153,7 +153,10 @@ export const zhCN = {
     newBtn: '新建任务',
     version: '第 {version} 稿',
     loadFailed: '加载失败：{message}',
-    loading: '加载中...'
+    loading: '加载中...',
+    deleteBtn: '删除该任务',
+    deleteConfirm: '确定要删除撰写任务「{title}」吗？该任务下的全部志稿与片段将一并删除，且无法恢复。',
+    deleteFailed: '删除失败：{message}'
   },
   writingPage: {
     createTitle: '新建撰写任务',
@@ -199,6 +202,28 @@ export const zhCN = {
     segmentQuote: '原文摘句：{quote}',
     loading: '加载中...',
     loadFailed: '加载失败：{message}'
+  },
+  draftEditor: {
+    saving: '保存中...',
+    saved: '已保存',
+    saveFailed: '保存失败',
+    toolbar: {
+      bold: '粗体',
+      italic: '斜体',
+      underline: '下划线',
+      heading: '标题',
+      paragraph: '正文',
+      bulletList: '无序列表',
+      orderedList: '有序列表',
+      insertTable: '插入表格',
+      addRow: '下方插入行',
+      deleteRow: '删除行',
+      addColumn: '右侧插入列',
+      deleteColumn: '删除列',
+      deleteTable: '删除表格',
+      undo: '撤销',
+      redo: '重做'
+    }
   }
 } as const
 

@@ -35,9 +35,11 @@ export interface AppApi {
   updateSettings(patch: { currentLlmProviderId?: string; dataDir?: string }): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   createTask(input: { title: string; scope: { sourceIds: string[] } | { tagIds: string[] }; templateBookId?: string }): Promise<{ ok: boolean; data?: { task: unknown }; error?: { code: string; message: string } }>
   listTasks(): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
+  deleteTask(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   retrieveChunks(taskId: string): Promise<{ ok: boolean; data?: { chunks: unknown[] }; error?: { code: string; message: string } }>
   generateDraft(taskId: string): Promise<{ ok: boolean; data?: { draft: unknown }; error?: { code: string; message: string } }>
   getDraft(draftId: string): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
+  updateSegment(segmentId: string, content: string): Promise<{ ok: boolean; data?: { segment: unknown }; error?: { code: string; message: string } }>
   listVersions(taskId: string): Promise<{ ok: boolean; data?: { versions: unknown[] }; error?: { code: string; message: string } }>
 }
 

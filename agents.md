@@ -125,8 +125,9 @@
 
 ## 当前状态
 
-截至 2026-08-05：
+截至 2026-08-06：
 
+- **Phase 3.1 已完成**（撰写闭环增强）：撰写任务删除（右键 + 二次确认）与初稿文档编辑器（TipTap 所见即所得，Markdown 存储、自动保存、来源标注保留）全部通过验收。验证通过：typecheck 零错误、30 项单测、生产构建成功。下一步 Phase 4（版本迭代与管控）。
 - **Phase 3 Task 3.2/3.3 已完成**（撰写闭环）：本地 RAG 检索（bigram 词法打分 + 来源位置标注，`writing:retrieve` 预览）→ 初稿生成（提示词工程 + JSON 解析校验 + 失败重试 + 片段来源落库）→ 撰写页 UI（任务列表 / 新建 / 工作台）。验证通过：typecheck 零错误、26 项单测、生产构建成功。下一步 Phase 4（版本迭代与管控）。
 - **Phase 3 Task 3.1 已完成**（LLM Provider 配置）：`llm:*` 四通道（list/save/delete/test）与 `settings:*` 两通道全部落地——Provider 增删改查、safeStorage（Windows DPAPI）加密存密钥、连通性测试（net.fetch 调 /chat/completions，错误映射 LLM 错误码）、"设为当前"默认 Provider；设置页 UI 接入，范本管理独立为导航项。验证通过：typecheck 零错误、13 项单测、生产构建成功。下一步 Task 3.2（本地 RAG 检索）。
 - **Phase 2.1 全部完成**：资料删除（Task 2.1.1）与标签系统重构（Task 2.1.2）均通过验收。标签与资料为独立关联（`source_tags` 表），**不再嵌入资料标题**；2026-08-05 移除标签颜色（Migration 002 删除 `tags.color`）并移除"标签嵌入标题"机制（Migration 004 清理历史 `[tag:...]` 前缀）。下一步 Phase 3（撰写闭环）。
@@ -154,6 +155,7 @@
 - 版本管控：以"第 n 稿"为版本单元，人工确认即产生新版本，支持查看、对比、回滚。
 - 技术选型：采用 Electron + React + TypeScript（2026-08-03 确认）。
 - RAG 检索方案（2026-08-05）：采用本地词法检索——段落分块 + 字符 bigram 打分 + 来源位置标注，纯本地、无网络、中文无需分词；不引入向量数据库/嵌入依赖，向量索引留待后续按需扩展。
+- 文档编辑器选型（2026-08-05）：**TipTap**（ProseMirror 所见即所得 + Markdown 序列化）；片段内容以 Markdown 文本存储（AI 生成 Markdown 片段、编辑器编辑/保存 Markdown），支持粗体/斜体/标题/下划线/表格/列表，保留逐片段来源标注。
 
 ## 路线图
 
@@ -166,6 +168,8 @@
 详细任务和验收标准位于 `PLAN.md`，本文件不重复记录任务级进度。
 
 ## 近期记录
+
+- **2026-08-06（本次修改）**：Phase 3.1 全部完成——Task 3.1.1 撰写任务删除（右键菜单 + 二次确认、`writing:deleteTask` 通道、任务仓储级联清理、删除当前任务后右栏清空）；Task 3.1.2 初稿文档编辑器（TipTap 2.27 + `tiptap-markdown`）：`DraftEditor.tsx` 共享工具栏（粗体/斜体/下划线/标题下拉/列表/表格增删行列/撤销重做）+ 逐片段 `useEditor`（Markdown 初始化、800ms 防抖自动保存到 `segment:update`、来源折叠展示、保存状态徽标）；`updateSegmentContent` 主进程仓储（内容以 Markdown 存储，变更写入 `review_records` 留痕）；生成提示词补充 Markdown 书写指令；文档编辑器替换撰写工作台只读渲染；契约文档 `docs/shared-contracts.md` 同步 `writing:deleteTask`/`segment:update`。验证通过：typecheck 零错误、30 项单测、生产构建成功。
 
 - **2026-08-05（本次修改）**：输入框聚焦问题排查——用户反馈所有文本框点击后无光标、无法输入。经运行时调试（插桩 document mousedown/focusin/keydown + 主进程窗口焦点事件）验证：窗口焦点、elementFromPoint、defaultPrevented、输入框属性/样式全部正常，当前代码无缺陷；原因为一次性运行时状态（窗口"可见但未激活"）。预防性硬化：`ready-to-show` 中 `win.show()` 后调用 `win.focus()`。验证通过：typecheck 零错误、29 项单测、生产构建成功。
 

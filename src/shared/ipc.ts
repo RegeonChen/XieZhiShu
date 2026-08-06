@@ -54,6 +54,7 @@ export const IPC = {
   /* 撰写与初稿 */
   WRITING_CREATE_TASK: 'writing:createTask',
   WRITING_LIST_TASKS: 'writing:listTasks',
+  WRITING_DELETE_TASK: 'writing:deleteTask',
   WRITING_RETRIEVE: 'writing:retrieve',
   WRITING_GENERATE_DRAFT: 'writing:generateDraft',
   DRAFT_GET: 'draft:get',
@@ -171,6 +172,10 @@ export type WritingCreateTaskRes = { task: WritingTask }
 
 export type WritingListTasksRes = { items: WritingTask[] }
 
+export interface WritingDeleteTaskReq {
+  id: string
+}
+
 export interface WritingRetrieveReq {
   taskId: string
 }
@@ -287,6 +292,7 @@ export interface IpcMapping {
   // 撰写
   [IPC.WRITING_CREATE_TASK]: { _req: WritingCreateTaskReq; _res: ApiResult<WritingCreateTaskRes> }
   [IPC.WRITING_LIST_TASKS]: { _req: void; _res: ApiResult<WritingListTasksRes> }
+  [IPC.WRITING_DELETE_TASK]: { _req: WritingDeleteTaskReq; _res: ApiResult<void> }
   [IPC.WRITING_RETRIEVE]: { _req: WritingRetrieveReq; _res: ApiResult<WritingRetrieveRes> }
   [IPC.WRITING_GENERATE_DRAFT]: { _req: WritingGenerateDraftReq; _res: ApiResult<WritingGenerateDraftRes> }
   [IPC.DRAFT_GET]: { _req: DraftGetReq; _res: ApiResult<Draft> }

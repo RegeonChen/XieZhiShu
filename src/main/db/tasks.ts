@@ -78,6 +78,12 @@ export function getTaskById(id: string): WritingTask | null {
   return row ? rowToTask(row) : null
 }
 
+/** 删除撰写任务（drafts/segments/segment_sources 由外键级联清理） */
+export function deleteTask(id: string): void {
+  const db = getDb()
+  db.prepare('DELETE FROM writing_tasks WHERE id = ?').run(id)
+}
+
 /** 解析任务范围到具体资料 ID（标签范围展开为关联资料） */
 export function resolveScopeSourceIds(task: WritingTask, getSourceIdsByTag: (tagId: string) => string[]): string[] {
   const scope = task.scope
@@ -117,6 +123,29 @@ if (import.meta.vitest) {
       const tagIds = ['t1']
       const resolved = resolveScopeSourceIds({ id: 'x', title: 't', scope: { tagIds }, currentVersion: 0, createdAt: '', updatedAt: '' }, (id) => (id === 't1' ? ['a', 'b', 'a'] : []))
       expect(resolved).toEqual(['a', 'b'])
+    })
+
+    it('deletes task and cascades drafts/segments', () => {
+      db.prepare(
+        `INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('s1', 'file', '资料', '', 'ready')`
+      ).run()
+      const t = createTask({ title: '待删除任务', scope: { sourceIds: ['s1'] } })
+      db.prepare(
+        `INSERT INTO drafts (id, task_id, version_number, status) VALUES ('d1', ?, 0, 'editing')`
+      ).run(t.id)
+      db.prepare(
+        `INSERT INTO segments (id, draft_id, ordering, content, ai_generated) VALUES ('seg1', 'd1', 0, '内容', 1)`
+      ).run()
+      db.prepare(
+        `INSERT INTO segment_sources (segment_id, source_id, position) VALUES ('seg1', 's1', '第1段')`
+      ).run()
+
+      deleteTask(t.id)
+
+      expect(getTaskById(t.id)).toBeNull()
+      expect(db.prepare("SELECT COUNT(*) AS c FROM drafts WHERE task_id = ?").get(t.id) as { c: number }).toEqual({ c: 0 })
+      expect(db.prepare('SELECT COUNT(*) AS c FROM segments WHERE id = ?').get('seg1') as { c: number }).toEqual({ c: 0 })
+      expect(db.prepare('SELECT COUNT(*) AS c FROM segment_sources WHERE segment_id = ?').get('seg1') as { c: number }).toEqual({ c: 0 })
     })
   })
 }

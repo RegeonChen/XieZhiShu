@@ -9,6 +9,8 @@ import {
   type WritingRetrieveReq,
   type WritingGenerateDraftReq,
   type DraftGetReq,
+  type SegmentUpdateReq,
+  type SegmentUpdateRes,
   type VersionListReq,
   type VersionListRes
 } from '../shared/ipc'
@@ -25,8 +27,8 @@ import { safeStorageCodec } from './llm/secret'
 import { listProviders, saveProvider, deleteProvider } from './llm/provider-store'
 import { testProviderConnection } from './llm/test'
 import { getSettings, updateSettings } from './db/settings'
-import { createTask as createWritingTask, listTasks as listWritingTasks, getTaskById } from './db/tasks'
-import { getDraftById, listVersions } from './db/drafts'
+import { createTask as createWritingTask, listTasks as listWritingTasks, getTaskById, deleteTask as deleteWritingTask } from './db/tasks'
+import { getDraftById, listVersions, updateSegmentContent } from './db/drafts'
 import { generateDraft, retrieveForTask } from './writing/generate'
 
 const APP_PROTOCOL_WHITELIST = /^https?:\/\//i
@@ -491,6 +493,15 @@ ipcMain.handle(IPC.WRITING_LIST_TASKS, (): ApiResult<{ items: WritingTask[] }> =
   }
 })
 
+ipcMain.handle(IPC.WRITING_DELETE_TASK, (_event, params: { id: string }): ApiResult<void> => {
+  try {
+    deleteWritingTask(params.id)
+    return { ok: true, data: undefined }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
 ipcMain.handle(IPC.WRITING_RETRIEVE, (_event, params: WritingRetrieveReq): ApiResult<{ chunks: RetrievedChunk[] }> => {
   try {
     if (!getTaskById(params.taskId)) {
@@ -513,6 +524,18 @@ ipcMain.handle(IPC.DRAFT_GET, (_event, params: DraftGetReq): ApiResult<Draft> =>
     const draft = getDraftById(params.draftId)
     if (!draft) return { ok: false, error: { code: 'DRAFT_NOT_FOUND', message: '志稿不存在' } }
     return { ok: true, data: draft }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+ipcMain.handle(IPC.SEGMENT_UPDATE, (_event, params: SegmentUpdateReq): ApiResult<SegmentUpdateRes> => {
+  try {
+    const content = params.content?.trim()
+    if (!content) return { ok: false, error: { code: 'INVALID_PARAM', message: '片段内容不能为空' } }
+    const segment = updateSegmentContent(params.segmentId, content)
+    if (!segment) return { ok: false, error: { code: 'INVALID_PARAM', message: '片段不存在' } }
+    return { ok: true, data: { segment } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
