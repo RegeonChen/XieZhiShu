@@ -169,6 +169,8 @@
 
 ## 近期记录
 
+- **2026-08-06（本次修改）**：输入框失焦 bug 修复——根因：原生 `confirm()` 对话框（Electron 同步原生对话框）打开/关闭后窗口进入"可见但未激活"状态（Windows foreground lock），`document.hasFocus()=false`，点击输入框无 `focusin` 无法输入；打开/关闭原生文件对话框可强制恢复激活。修复：5 处 `confirm()` 全部替换为自定义 `ConfirmDialog` 模态组件（撰写任务删除/资料单删/批量删除/标签删除/Provider 删除），从根源消除失焦源；新增 `window:focus` IPC（`win.show()+focus()+moveTop()` 突破 foreground lock）+ 渲染层 mousedown 兜底检测（`!document.hasFocus()` 时请求恢复并补聚焦点）。调试证据：插桩日志确认 pre-fix 删除后点击输入框 `docHasFocus=false` 无 focusin，post-fix 全程无 blur、focusin 正常。验证通过：typecheck 零错误、30 项单测、生产构建成功。
+
 - **2026-08-06（本次修改）**：Phase 3.1 全部完成——Task 3.1.1 撰写任务删除（右键菜单 + 二次确认、`writing:deleteTask` 通道、任务仓储级联清理、删除当前任务后右栏清空）；Task 3.1.2 初稿文档编辑器（TipTap 2.27 + `tiptap-markdown`）：`DraftEditor.tsx` 共享工具栏（粗体/斜体/下划线/标题下拉/列表/表格增删行列/撤销重做）+ 逐片段 `useEditor`（Markdown 初始化、800ms 防抖自动保存到 `segment:update`、来源折叠展示、保存状态徽标）；`updateSegmentContent` 主进程仓储（内容以 Markdown 存储，变更写入 `review_records` 留痕）；生成提示词补充 Markdown 书写指令；文档编辑器替换撰写工作台只读渲染；契约文档 `docs/shared-contracts.md` 同步 `writing:deleteTask`/`segment:update`。验证通过：typecheck 零错误、30 项单测、生产构建成功。
 
 - **2026-08-05（本次修改）**：输入框聚焦问题排查——用户反馈所有文本框点击后无光标、无法输入。经运行时调试（插桩 document mousedown/focusin/keydown + 主进程窗口焦点事件）验证：窗口焦点、elementFromPoint、defaultPrevented、输入框属性/样式全部正常，当前代码无缺陷；原因为一次性运行时状态（窗口"可见但未激活"）。预防性硬化：`ready-to-show` 中 `win.show()` 后调用 `win.focus()`。验证通过：typecheck 零错误、29 项单测、生产构建成功。

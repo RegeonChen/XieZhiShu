@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { zhCN } from '../i18n/zh-CN'
+import ConfirmDialog from './ConfirmDialog'
 
 interface ProviderItem {
   id: string
@@ -36,6 +37,8 @@ function Settings() {
   const [testingId, setTestingId] = useState<string | null>(null)
   const [testMsg, setTestMsg] = useState<{ id: string; ok: boolean; text: string } | null>(null)
   const [actionErr, setActionErr] = useState<string | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<ProviderItem | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -103,15 +106,19 @@ function Settings() {
     }
   }
 
-  const handleDelete = async (p: ProviderItem) => {
-    if (!confirm(zhCN.settingsPage.provider.deleteConfirm.replace('{name}', p.name))) return
+  const handleDelete = async () => {
+    if (!pendingDelete) return
+    const p = pendingDelete
+    setDeleting(true)
     const res = await window.api.deleteProvider(p.id)
     if (res.ok) {
+      setPendingDelete(null)
       if (currentId === p.id) setCurrentId(null)
       await load()
     } else {
       setActionErr(zhCN.settingsPage.provider.deleteFailed.replace('{message}', res.error?.message ?? ''))
     }
+    setDeleting(false)
   }
 
   const handleTest = async (p: ProviderItem) => {
@@ -247,7 +254,7 @@ function Settings() {
                   <button type="button" className="source-list__btn" onClick={() => startEdit(p)}>
                     {zhCN.settingsPage.provider.editBtn}
                   </button>
-                  <button type="button" className="source-list__btn source-list__btn--danger" onClick={() => handleDelete(p)}>
+                  <button type="button" className="source-list__btn source-list__btn--danger" onClick={() => setPendingDelete(p)}>
                     {zhCN.settingsPage.provider.deleteBtn}
                   </button>
                 </div>
@@ -261,6 +268,18 @@ function Settings() {
 
         {actionErr ? <p className="settings__error">{actionErr}</p> : null}
       </section>
+
+      {pendingDelete ? (
+        <ConfirmDialog
+          title={zhCN.settingsPage.provider.deleteTitle}
+          message={zhCN.settingsPage.provider.deleteConfirm.replace('{name}', pendingDelete.name)}
+          confirmText={zhCN.settingsPage.provider.deleteBtn}
+          danger
+          busy={deleting}
+          onConfirm={handleDelete}
+          onCancel={() => setPendingDelete(null)}
+        />
+      ) : null}
     </div>
   )
 }

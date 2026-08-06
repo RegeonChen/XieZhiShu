@@ -1551,3 +1551,38 @@ body {
   background: var(--accent);
   pointer-events: none;
 }
+
+/* ---------- 确认对话框（ConfirmDialog） ---------- */
+.confirm-dialog__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.confirm-dialog {
+  min-width: 320px;
+  max-width: 420px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 18px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+}
+.confirm-dialog__title {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+.confirm-dialog__message {
+  margin: 0 0 16px;
+  color: var(--fg-soft);
+  line-height: 1.6;
+  font-size: 13px;
+}
+.confirm-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

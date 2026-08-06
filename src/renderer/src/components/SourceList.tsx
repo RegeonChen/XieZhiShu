@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { zhCN } from '../i18n/zh-CN'
+import ConfirmDialog from './ConfirmDialog'
 
 interface SourceItem { id: string; title: string; kind: string; status: string; createdAt: string }
 
@@ -33,6 +34,7 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
   const [activeTagId, setActiveTagId] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<{ kind: 'one'; id: string; title: string } | { kind: 'bulk'; ids: string[] } | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteErr, setDeleteErr] = useState<string | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
@@ -99,12 +101,14 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
   }
 
   // 删除单个资料（右键菜单）
-  const handleDeleteOne = async (id: string, title: string) => {
-    if (!confirm(zhCN.sourceContext.confirmDelete.replace('{title}', title))) return
+  const handleDeleteOne = async () => {
+    if (!pendingDelete || pendingDelete.kind !== 'one') return
+    const { id } = pendingDelete
     setDeleting(true); setDeleteErr(null)
     try {
       const res = await window.api.deleteSource(id)
       if (res.ok) {
+        setPendingDelete(null)
         setContextMenu(null)
         await loadSources(activeTagId)
         onSourcesChanged?.([id])
@@ -116,13 +120,13 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
 
   // 批量删除选中资料
   const handleBulkDelete = async () => {
-    const ids = Array.from(selectedIds)
-    if (ids.length === 0) return
-    if (!confirm(zhCN.sourceBulk.confirmDelete.replace('{count}', String(ids.length)))) return
+    if (!pendingDelete || pendingDelete.kind !== 'bulk') return
+    const ids = pendingDelete.ids
     setDeleting(true); setDeleteErr(null)
     try {
       const res = await window.api.deleteSources(ids)
       if (res.ok) {
+        setPendingDelete(null)
         setSelectedIds(new Set())
         await loadSources(activeTagId)
         onSourcesChanged?.(ids)
@@ -175,7 +179,7 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
             {allSelected ? zhCN.sourceBulk.deselectAll : zhCN.sourceBulk.selectAll}
           </button>
           <span className="source-list__bulk-count">{zhCN.sourceBulk.selectedCount.replace('{count}', String(selectedIds.size))}</span>
-          <button type="button" className="source-list__btn source-list__btn--danger" onClick={handleBulkDelete} disabled={selectedIds.size === 0 || deleting}>
+          <button type="button" className="source-list__btn source-list__btn--danger" onClick={() => { const ids = Array.from(selectedIds); if (ids.length > 0) setPendingDelete({ kind: 'bulk', ids }) }} disabled={selectedIds.size === 0}>
             {zhCN.sourceBulk.deleteSelected}
           </button>
           <button type="button" className="source-list__btn" onClick={() => { setSelectedIds(new Set()); onExitBulk() }}>{zhCN.sourceBulk.exit}</button>
@@ -223,12 +227,27 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
           <button
             type="button"
             className="source-list__context-item source-list__context-item--danger"
-            onClick={() => handleDeleteOne(contextMenu.sourceId, contextMenu.title)}
-            disabled={deleting}
+            onClick={() => setPendingDelete({ kind: 'one', id: contextMenu.sourceId, title: contextMenu.title })}
           >
             {zhCN.sourceContext.delete}
           </button>
         </div>
+      ) : null}
+
+      {pendingDelete ? (
+        <ConfirmDialog
+          title={pendingDelete.kind === 'one' ? zhCN.sourceContext.deleteTitle : zhCN.sourceBulk.deleteTitle}
+          message={
+            pendingDelete.kind === 'one'
+              ? zhCN.sourceContext.confirmDelete.replace('{title}', pendingDelete.title)
+              : zhCN.sourceBulk.confirmDelete.replace('{count}', String(pendingDelete.ids.length))
+          }
+          confirmText={pendingDelete.kind === 'one' ? zhCN.sourceContext.delete : zhCN.sourceBulk.deleteSelected}
+          danger
+          busy={deleting}
+          onConfirm={pendingDelete.kind === 'one' ? handleDeleteOne : handleBulkDelete}
+          onCancel={() => setPendingDelete(null)}
+        />
       ) : null}
     </div>
   )

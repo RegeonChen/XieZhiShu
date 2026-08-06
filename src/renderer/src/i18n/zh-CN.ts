@@ -1,6 +1,10 @@
 // 界面文案集中管理（后续本地化以本文件为基线）
 export const zhCN = {
   appTitle: '志书撰写工具',
+  common: {
+    cancel: '取消',
+    deleting: '删除中...'
+  },
   nav: {
     sources: '资料库',
     writing: '撰写',
@@ -56,10 +60,12 @@ export const zhCN = {
     exit: '取消',
     selectedCount: '已选 {count} 项',
     empty: '暂无资料',
+    deleteTitle: '删除选中资料',
     confirmDelete: '确定要删除选中的 {count} 项资料吗？删除后无法恢复。'
   },
   sourceContext: {
     delete: '删除该资料',
+    deleteTitle: '删除资料',
     confirmDelete: '确定要删除「{title}」吗？删除后无法恢复。'
   },
   sourceDelete: {
@@ -94,6 +100,7 @@ export const zhCN = {
     remove: {
       selectTagTitle: '选择一个要删除的标签：',
       deleteBtn: '删除该标签',
+      deleteTitle: '删除标签',
       confirmDelete: '确定要删除标签「{name}」吗？所有资料上的该标签关联将一并清除。',
       deleted: '标签已删除',
       noTags: '暂无标签',
@@ -122,6 +129,7 @@ export const zhCN = {
       testBtn: '测试连接',
       editBtn: '编辑',
       deleteBtn: '删除',
+      deleteTitle: '删除 Provider',
       deleteConfirm: '确定要删除 Provider「{name}」吗？',
       testing: '测试中...',
       testSuccess: '连接成功',
@@ -155,6 +163,7 @@ export const zhCN = {
     loadFailed: '加载失败：{message}',
     loading: '加载中...',
     deleteBtn: '删除该任务',
+    deleteTitle: '删除撰写任务',
     deleteConfirm: '确定要删除撰写任务「{title}」吗？该任务下的全部志稿与片段将一并删除，且无法恢复。',
     deleteFailed: '删除失败：{message}'
   },

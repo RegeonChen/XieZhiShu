@@ -80,7 +80,10 @@ export const IPC = {
   SETTINGS_UPDATE: 'settings:update',
 
   /* 应用元数据（Task 1.1 已实现） */
-  APP_GET_INFO: 'app:getInfo'
+  APP_GET_INFO: 'app:getInfo',
+
+  /* 窗口 */
+  WINDOW_FOCUS: 'window:focus'
 } as const
 
 // ============================================================
@@ -263,6 +266,9 @@ export type AppInfoRes = { version: string; platform: string }
 // ============================================================
 export interface IpcMapping {
   [IPC.APP_GET_INFO]: { _req: void; _res: ApiResult<AppInfoRes> }
+
+  // 窗口
+  [IPC.WINDOW_FOCUS]: { _req: void; _res: ApiResult<void> }
   // 资料
   [IPC.SOURCES_LIST]: { _req: SourceListReq; _res: ApiResult<SourceListRes> }
   [IPC.SOURCES_IMPORT_FILES]: { _req: SourceImportFilesReq; _res: ApiResult<SourceImportFilesRes> }
