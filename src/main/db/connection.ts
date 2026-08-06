@@ -113,5 +113,43 @@ if (import.meta.vitest) {
       const after = db.prepare('SELECT title FROM sources_fts WHERE rowid = ?').get(source.rowid)
       expect(after).toBeUndefined()
     })
+
+    it('migration 004 strips legacy [tag:] title prefixes', () => {
+      // 模拟升级前状态：仅应用迁移 1-3，并写入带旧前缀的历史标题
+      const old = new Database(':memory:')
+      old.exec(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `)
+      const insertMigration = old.prepare('INSERT INTO schema_migrations (version) VALUES (?)')
+      const applyAll = old.transaction(() => {
+        for (const m of MIGRATIONS.filter((x) => x.version < 4)) {
+          if (m.sql) old.exec(m.sql)
+          insertMigration.run(m.version)
+        }
+      })
+      applyAll()
+      old.prepare(
+        `INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('legacy1', 'file', '[tag:小学教育] 资料标题A', '', 'ready')`
+      ).run()
+      old.prepare(
+        `INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('legacy2', 'file', '[tag:小学教育] [tag:新区经济] 资料标题B', '', 'ready')`
+      ).run()
+      old.prepare(
+        `INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('legacy3', 'file', '无前缀的标题', '', 'ready')`
+      ).run()
+
+      // 升级：应用迁移 4
+      runMigrations(old)
+
+      const getTitle = (id: string): string =>
+        (old.prepare('SELECT title FROM sources WHERE id = ?').get(id) as { title: string }).title
+      expect(getTitle('legacy1')).toBe('资料标题A')
+      expect(getTitle('legacy2')).toBe('资料标题B')
+      expect(getTitle('legacy3')).toBe('无前缀的标题')
+      old.close()
+    })
   })
 }

@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback } from 'react'
-import { parseSourceTitleTags } from '../../../utils/source-title-tags'
 import PdfViewer from './PdfViewer'
 
 interface SourceDetail {
@@ -88,7 +87,6 @@ function SourceViewer({ sourceId, onBack }: { sourceId: string; onBack: () => vo
   if (!data) return <div className="source-viewer__status">未找到资料</div>
 
   const { source, tags } = data
-  const parsed = parseSourceTitleTags(source.title)
   const ext = (source.filePath ?? '').toLowerCase()
 
   // 判断文件类型
@@ -103,7 +101,7 @@ function SourceViewer({ sourceId, onBack }: { sourceId: string; onBack: () => vo
         <button type="button" className="source-viewer__back" onClick={onBack} title="返回列表">
           &larr; 返回
         </button>
-        <h3 className="source-viewer__title">{parsed.cleanTitle}</h3>
+        <h3 className="source-viewer__title">{source.title}</h3>
         {tags.length > 0 && (
           <div className="source-viewer__tags">
             {tags.map((tag) => (
@@ -132,7 +130,7 @@ function SourceViewer({ sourceId, onBack }: { sourceId: string; onBack: () => vo
         ) : isPdf && fileUrl ? (
           <PdfViewer url={fileUrl} />
         ) : isImage && fileUrl ? (
-          <img className="source-viewer__image" src={fileUrl} alt={parsed.cleanTitle} />
+          <img className="source-viewer__image" src={fileUrl} alt={source.title} />
         ) : isNativeView ? (
           <div className="source-viewer__status">正在加载文件...</div>
         ) : (

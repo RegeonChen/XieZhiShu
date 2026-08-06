@@ -1,13 +1,14 @@
 /**
- * tags repository —— 事务安全的标签 CRUD + 级联标题重建。
- * 参照海地小纵队 Phase 4.1.3 方案：
+ * tags repository —— 事务安全的标签 CRUD。
+ * 标签与资料为独立关联（source_tags 表），不再嵌入资料标题。
  *   - 所有写操作在事务内执行
- *   - 标签改名/删改时自动重建受影响 sources 的标题前缀
+ *   - 删除标签时级联解除全部资料的该标签关联
  *   - 创建标签幂等（同名返回已有）
  */
+import Database from 'better-sqlite3'
 import type { Tag } from '../../shared/types'
-import { getDb } from './connection'
-import { buildTaggedSourceTitle } from '../../utils/source-title-tags'
+import { getDb, setDb } from './connection'
+import { runMigrations } from './migrate'
 
 interface TagRow {
   id: string
@@ -30,29 +31,6 @@ function transaction<T>(db: ReturnType<typeof getDb>, fn: () => T): T {
     db.exec('ROLLBACK')
     throw e
   }
-}
-
-/** 为指定 tagId 下的所有资料重建标题前缀 */
-function rebuildSourceTitlesForTag(tagId: string): void {
-  const db = getDb()
-  const rows = db.prepare('SELECT source_id FROM source_tags WHERE tag_id = ?').all(tagId) as { source_id: string }[]
-  for (const row of rows) {
-    rebuildSourceTitle(row.source_id)
-  }
-}
-
-/** 为单个资料重建标题前缀 */
-function rebuildSourceTitle(sourceId: string): void {
-  const db = getDb()
-  const s = db.prepare('SELECT title FROM sources WHERE id = ?').get(sourceId) as { title: string } | undefined
-  if (!s) return
-  const tagRows = db.prepare(
-    `SELECT t.* FROM tags t INNER JOIN source_tags st ON t.id = st.tag_id WHERE st.source_id = ? ORDER BY t.name`
-  ).all(sourceId) as TagRow[]
-  const tags: Tag[] = tagRows.map(rowToTag)
-  const newTitle = buildTaggedSourceTitle(s.title, tags)
-  db.prepare('UPDATE sources SET title = ?, updated_at = ? WHERE id = ?')
-    .run(newTitle, new Date().toISOString(), sourceId)
 }
 
 export function listTags(): Tag[] {
@@ -92,12 +70,8 @@ export function updateTag(id: string, name?: string): Tag | null {
   if (!existing) return null
 
   const newName = name ?? existing.name
-
-  transaction(db, () => {
-    db.prepare('UPDATE tags SET name = ? WHERE id = ?')
-      .run(newName, id)
-    rebuildSourceTitlesForTag(id)
-  })
+  db.prepare('UPDATE tags SET name = ? WHERE id = ?')
+    .run(newName, id)
 
   return getTagById(id)
 }
@@ -105,8 +79,7 @@ export function updateTag(id: string, name?: string): Tag | null {
 export function deleteTag(id: string): void {
   const db = getDb()
   transaction(db, () => {
-    // 先重建受影响资料的标题（移除已删除标签的标记），再删除关联和标签本身
-    rebuildSourceTitlesForTag(id)
+    // 级联解除所有资料的该标签关联，再删除标签本身（同一事务，实时生效）
     db.prepare('DELETE FROM source_tags WHERE tag_id = ?').run(id)
     db.prepare('DELETE FROM tags WHERE id = ?').run(id)
   })
@@ -116,7 +89,6 @@ export function addTagToSource(sourceId: string, tagId: string): void {
   const db = getDb()
   transaction(db, () => {
     db.prepare('INSERT OR IGNORE INTO source_tags (source_id, tag_id) VALUES (?, ?)').run(sourceId, tagId)
-    rebuildSourceTitle(sourceId)
   })
 }
 
@@ -124,7 +96,6 @@ export function removeTagFromSource(sourceId: string, tagId: string): void {
   const db = getDb()
   transaction(db, () => {
     db.prepare('DELETE FROM source_tags WHERE source_id = ? AND tag_id = ?').run(sourceId, tagId)
-    rebuildSourceTitle(sourceId)
   })
 }
 
@@ -146,9 +117,6 @@ export function batchAddTags(sourceIds: string[], tagIds: string[]): void {
       for (const tid of tagIds) {
         stmt.run(sid, tid)
       }
-    }
-    for (const sid of sourceIds) {
-      rebuildSourceTitle(sid)
     }
   })
 }
@@ -193,4 +161,56 @@ export function searchTags(query: string, limit = 5): Tag[] {
     .sort((a, b) => b.score - a.score || a.tag.name.localeCompare(b.tag.name))
     .slice(0, limit)
     .map((x) => x.tag)
+}
+
+// ---- vitest inline test ----
+if (import.meta.vitest) {
+  const { describe, expect, it, beforeAll, afterAll } = import.meta.vitest
+
+  let db: Database.Database
+  beforeAll(() => {
+    db = new Database(':memory:')
+    setDb(db)
+    runMigrations(db)
+  })
+  afterAll(() => db.close())
+
+  function insertSource(id: string): void {
+    db.prepare(
+      `INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES (?, 'file', ?, '', 'ready')`
+    ).run(id, `资料-${id}`)
+  }
+
+  describe('tag delete cascade (标签删除级联解除关联)', () => {
+    it('deleteTag removes the tag from all sources immediately', () => {
+      insertSource('s1')
+      insertSource('s2')
+      const tag = createTag('小学教育')
+      addTagToSource('s1', tag.id)
+      addTagToSource('s2', tag.id)
+      expect(getSourceIdsByTag(tag.id)).toHaveLength(2)
+      expect(getTagsBySource('s1').some((t) => t.id === tag.id)).toBe(true)
+
+      deleteTag(tag.id)
+
+      // source_tags 无残留、资料不再持有该标签、标签本身已删除
+      const count = db.prepare('SELECT COUNT(*) AS c FROM source_tags WHERE tag_id = ?').get(tag.id) as { c: number }
+      expect(count.c).toBe(0)
+      expect(getTagsBySource('s1').some((t) => t.id === tag.id)).toBe(false)
+      expect(getTagsBySource('s2')).toHaveLength(0)
+      expect(getTagById(tag.id)).toBeNull()
+      // 其他标签不受影响
+      const other = createTag('其他标签')
+      expect(listTags().map((t) => t.id)).toContain(other.id)
+    })
+
+    it('tag CRUD does not touch source titles', () => {
+      const tag = createTag('标题不动')
+      addTagToSource('s1', tag.id)
+      const row = db.prepare('SELECT title FROM sources WHERE id = ?').get('s1') as { title: string }
+      expect(row.title).toBe('资料-s1')
+      removeTagFromSource('s1', tag.id)
+      expect(row.title).toBe('资料-s1')
+    })
+  })
 }
