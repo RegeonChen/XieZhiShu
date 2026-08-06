@@ -41,6 +41,7 @@ export interface AppApi {
   getDraft(draftId: string): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   updateSegment(segmentId: string, content: string): Promise<{ ok: boolean; data?: { segment: unknown }; error?: { code: string; message: string } }>
   listVersions(taskId: string): Promise<{ ok: boolean; data?: { versions: unknown[] }; error?: { code: string; message: string } }>
+  focusWindow(): Promise<{ ok: boolean; error?: { code: string; message: string } }>
 }
 
 declare global {

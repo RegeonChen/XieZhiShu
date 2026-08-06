@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { zhCN } from '../i18n/zh-CN'
+import ConfirmDialog from './ConfirmDialog'
 
 interface TagItem { id: string; name: string }
 interface SourceItem { id: string; title: string; kind: string; status: string; createdAt: string }
@@ -226,16 +227,17 @@ function AddTagModule({ tags, onChanged }: { tags: TagItem[] | null; onChanged: 
 /* ---------- 模块 3：删除标签 ---------- */
 function RemoveTagModule({ tags, onDeleted }: { tags: TagItem[] | null; onDeleted: () => Promise<void> }) {
   const [selectedTagId, setSelectedTagId] = useState<string | null>(null)
+  const [confirmOpen, setConfirmOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const selected = (tags ?? []).find((t) => t.id === selectedTagId) ?? null
 
   const handleDelete = async () => {
     if (!selected || busy) return
-    if (!confirm(zhCN.tagManager.remove.confirmDelete.replace('{name}', selected.name))) return
     setBusy(true)
     try {
       const res = await window.api.deleteTag(selected.id)
       if (res.ok) {
+        setConfirmOpen(false)
         setSelectedTagId(null)
         await onDeleted()
       }
@@ -256,10 +258,21 @@ function RemoveTagModule({ tags, onDeleted }: { tags: TagItem[] | null; onDelete
       )}
       {selected ? (
         <div className="tag-manager__toolbar">
-          <button type="button" className="source-list__btn source-list__btn--danger" onClick={handleDelete} disabled={busy}>
+          <button type="button" className="source-list__btn source-list__btn--danger" onClick={() => setConfirmOpen(true)} disabled={busy}>
             {zhCN.tagManager.remove.deleteBtn}
           </button>
         </div>
+      ) : null}
+      {confirmOpen && selected ? (
+        <ConfirmDialog
+          title={zhCN.tagManager.remove.deleteTitle}
+          message={zhCN.tagManager.remove.confirmDelete.replace('{name}', selected.name)}
+          confirmText={zhCN.tagManager.remove.deleteBtn}
+          danger
+          busy={busy}
+          onConfirm={handleDelete}
+          onCancel={() => setConfirmOpen(false)}
+        />
       ) : null}
     </div>
   )

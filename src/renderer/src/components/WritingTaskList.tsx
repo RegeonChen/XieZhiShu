@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { zhCN } from '../i18n/zh-CN'
+import ConfirmDialog from './ConfirmDialog'
 
 export interface WritingTaskItem {
   id: string
@@ -24,6 +25,7 @@ function WritingTaskList({ selectedId, onSelect, reloadKey }: {
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<{ taskId: string; title: string } | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteErr, setDeleteErr] = useState<string | null>(null)
 
@@ -54,13 +56,15 @@ function WritingTaskList({ selectedId, onSelect, reloadKey }: {
     }
   }, [contextMenu])
 
-  const handleDelete = async (taskId: string, title: string) => {
-    if (!confirm(zhCN.writingTasks.deleteConfirm.replace('{title}', title))) return
+  const handleDelete = async () => {
+    if (!pendingDelete) return
+    const { taskId } = pendingDelete
     setDeleting(true)
     setDeleteErr(null)
     try {
       const res = await window.api.deleteTask(taskId)
       if (res.ok) {
+        setPendingDelete(null)
         setContextMenu(null)
         setTasks((prev) => (prev ? prev.filter((t) => t.id !== taskId) : prev))
         if (selectedId === taskId) onSelect(null)
@@ -111,12 +115,23 @@ function WritingTaskList({ selectedId, onSelect, reloadKey }: {
           <button
             type="button"
             className="source-list__context-item source-list__context-item--danger"
-            onClick={() => handleDelete(contextMenu.taskId, contextMenu.title)}
-            disabled={deleting}
+            onClick={() => setPendingDelete({ taskId: contextMenu.taskId, title: contextMenu.title })}
           >
             {zhCN.writingTasks.deleteBtn}
           </button>
         </div>
+      ) : null}
+
+      {pendingDelete ? (
+        <ConfirmDialog
+          title={zhCN.writingTasks.deleteTitle}
+          message={zhCN.writingTasks.deleteConfirm.replace('{title}', pendingDelete.title)}
+          confirmText={zhCN.writingTasks.deleteBtn}
+          danger
+          busy={deleting}
+          onConfirm={handleDelete}
+          onCancel={() => setPendingDelete(null)}
+        />
       ) : null}
     </div>
   )

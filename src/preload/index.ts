@@ -149,6 +149,10 @@ const api = {
   /** 任务版本列表 */
   listVersions(taskId: string): Promise<ApiResult<{ versions: unknown[] }>> {
     return ipcRenderer.invoke(IPC.VERSION_LIST, { taskId })
+  },
+  /** 请求主进程恢复窗口激活（窗口"可见但未激活"时输入无法聚焦） */
+  focusWindow(): Promise<ApiResult<void>> {
+    return ipcRenderer.invoke(IPC.WINDOW_FOCUS)
   }
 }
 

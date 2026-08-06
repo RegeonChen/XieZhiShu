@@ -147,6 +147,18 @@ ipcMain.handle(IPC.APP_GET_INFO, (): ApiResult<AppInfoRes> => {
   return { ok: true, data: { version: app.getVersion(), platform: process.platform } }
 })
 
+// 窗口恢复激活：渲染层检测到"窗口可见但未激活"（用户点击本窗口但无法聚焦输入）时请求恢复。
+// 仅用 win.focus() 在 Windows foreground lock 下可能无效，组合 show()+moveTop() 突破。
+ipcMain.handle(IPC.WINDOW_FOCUS, (event): ApiResult<void> => {
+  const win = BrowserWindow.fromWebContents(event.sender)
+  if (win && !win.isDestroyed() && win.isVisible() && !win.isFocused()) {
+    win.show()
+    win.focus()
+    win.moveTop()
+  }
+  return { ok: true, data: undefined }
+})
+
 // Task 2.1 文件导入
 ipcMain.handle(IPC.SOURCES_IMPORT_FILES, async (_event, params: { paths: string[] }): Promise<ApiResult<{ results: { path: string; source?: Source; error?: string }[] }>> => {
   try {
