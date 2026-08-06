@@ -23,7 +23,7 @@ interface Source {
   updatedAt: string;
 }
 
-interface Tag { id: string; name: string; color?: string; createdAt: string; }
+interface Tag { id: string; name: string; createdAt: string; }
 
 interface TemplateBook {
   id: string;
@@ -75,6 +75,16 @@ interface SegmentSource {
   sourceId: string;
   position: string;       // 文件：页码/段落序号；URL：段落序号
   quote?: string;         // 原文摘句
+  sourceTitle?: string;   // 来源标题（服务端 JOIN 填充，供界面展示）
+}
+
+/** RAG 检索返回的相关资料片段（writing:retrieve） */
+interface RetrievedChunk {
+  sourceId: string;
+  sourceTitle: string;
+  position: string;
+  text: string;
+  score: number;
 }
 
 /** 审核动作记录 */
@@ -130,8 +140,8 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | 通道 | 请求 → 响应 data | 说明 |
 |---|---|---|
 | `tags:list` | `{}` → `{ items: Tag[] }` | |
-| `tags:create` | `{ name, color? }` → `{ tag: Tag }` | |
-| `tags:update` | `{ id, name?, color? }` → `{ tag: Tag }` | |
+| `tags:create` | `{ name }` → `{ tag: Tag }` | |
+| `tags:update` | `{ id, name? }` → `{ tag: Tag }` | |
 | `tags:delete` | `{ id }` → `{ ok: true }` | |
 | `tags:addToSource` | `{ sourceId, tagId }` → `{ ok: true }` | 打标 |
 | `tags:removeFromSource` | `{ sourceId, tagId }` → `{ ok: true }` | 取消打标 |
@@ -151,6 +161,7 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 |---|---|---|
 | `writing:createTask` | `{ title, scope: { sourceIds } \| { tagIds }, templateBookId? }` → `{ task: WritingTask }` | 校验范围非空 |
 | `writing:listTasks` | `{}` → `{ items: WritingTask[] }` | |
+| `writing:retrieve` | `{ taskId }` → `{ chunks: RetrievedChunk[] }` | 任务范围内 RAG 检索预览（片段 + 来源 + 位置） |
 | `writing:generateDraft` | `{ taskId }` → `{ draft: Draft }` | AI 生成第 0 稿（结构化片段 + 来源） |
 | `draft:get` | `{ draftId }` → `{ draft: Draft }` | 读取某稿（含片段与来源） |
 | `draft:confirm` | `{ draftId }` → `{ nextDraft: Draft }` | 确认当前稿 → 生成第 n+1 稿 |

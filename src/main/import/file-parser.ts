@@ -49,7 +49,7 @@ async function parsePdf(buffer: Buffer, _path: string): Promise<ParseResult> {
     // pdf-parse v11 ESM: PDFParse is a class; call load() then getText()
     const { PDFParse } = await import('pdf-parse')
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    const instance = new (PDFParse as any)(buffer) as { load(): Promise<unknown>; getText(): Promise<{ text: string; numpages: number }> }
+    const instance = new (PDFParse as any)(new Uint8Array(buffer)) as { load(): Promise<unknown>; getText(): Promise<{ text: string; numpages: number }> }
     await instance.load()
     const data = await instance.getText()
     return { text: data.text, format: 'pdf', pageCount: data.numpages }

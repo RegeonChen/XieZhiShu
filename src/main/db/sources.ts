@@ -53,12 +53,15 @@ export function listSources(params?: { tagIds?: string[]; search?: string }): So
   }
 
   if (params?.tagIds && params.tagIds.length > 0) {
+    // AND 语义：同时具有所有所选标签
     const placeholders = params.tagIds.map(() => '?').join(',')
     const rows = db
       .prepare(
-        `SELECT DISTINCT s.* FROM sources s
+        `SELECT s.* FROM sources s
          INNER JOIN source_tags st ON st.source_id = s.id
          WHERE st.tag_id IN (${placeholders})
+         GROUP BY s.id
+         HAVING COUNT(DISTINCT st.tag_id) = ${params.tagIds.length}
          ORDER BY s.created_at DESC`
       )
       .all(...params.tagIds) as SourceRow[]
@@ -73,6 +76,17 @@ export function getSourceById(id: string): Source | null {
   const db = getDb()
   const row = db.prepare('SELECT * FROM sources WHERE id = ?').get(id) as SourceRow | undefined
   return row ? rowToSource(row) : null
+}
+
+/** 批量按 ID 获取资料（保持传入顺序去重；用于 RAG 检索范围） */
+export function getSourcesByIds(ids: string[]): Source[] {
+  const unique = Array.from(new Set(ids))
+  if (unique.length === 0) return []
+  const db = getDb()
+  const placeholders = unique.map(() => '?').join(',')
+  const rows = db.prepare(`SELECT * FROM sources WHERE id IN (${placeholders})`).all(...unique) as SourceRow[]
+  const byId = new Map(rows.map((r) => [r.id, rowToSource(r)]))
+  return unique.map((id) => byId.get(id)).filter((s): s is Source => s != null)
 }
 
 export function insertSource(source: Omit<Source, 'createdAt' | 'updatedAt'>): Source {
@@ -107,4 +121,14 @@ export function updateSourceTitle(id: string, title: string): Source | null {
 export function deleteSource(id: string): void {
   const db = getDb()
   db.prepare('DELETE FROM sources WHERE id = ?').run(id)
+}
+
+/** 批量删除资料（事务包裹，级联清理标签关联与 FTS 索引） */
+export function deleteSources(ids: string[]): void {
+  const db = getDb()
+  const del = db.prepare('DELETE FROM sources WHERE id = ?')
+  const tx = db.transaction((list: string[]) => {
+    for (const id of list) del.run(id)
+  })
+  tx(ids)
 }

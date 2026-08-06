@@ -41,8 +41,9 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 |---|---|---|
 | id | TEXT | PK |
 | name | TEXT | NOT NULL UNIQUE |
-| color | TEXT | NULL |
 | created_at | TEXT | NOT NULL |
+
+> 注：`color` 列（标签颜色）已通过 Migration 002 移除（2026-08-05，标签统一显示）。
 
 ### 2.3 source_tags（资料-标签 关联）
 
@@ -121,10 +122,22 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 ### 2.10 settings（本地设置，key-value）
 
 - `key` TEXT PK
-- `value` TEXT NOT NULL（LLM 凭证以 `safe-storage:v1:...` 加密格式存储）
+- `value` TEXT NOT NULL
 - `updated_at` TEXT NOT NULL
+- 现有键：`data_dir`、`current_llm_provider_id`
 
-### 2.11 FTS5 索引（全文检索）
+### 2.11 llm_providers（LLM Provider 配置，Phase 3 Task 3.1）
+
+| 字段 | 类型 | 约束 | 说明 |
+|---|---|---|---|
+| id | TEXT | PK | uuid |
+| name | TEXT | NOT NULL UNIQUE | 显示名称 |
+| api_base | TEXT | NOT NULL | OpenAI-compatible API 地址（如 `https://api.deepseek.com/v1`） |
+| model | TEXT | NOT NULL | 模型名 |
+| api_key | TEXT | NULL | 密钥，以 `safe-storage:v1:<base64>`（Electron safeStorage/Windows DPAPI）加密存储 |
+| created_at / updated_at | TEXT | NOT NULL | |
+
+### 2.12 FTS5 索引（全文检索）
 
 - 对 `sources.cleaned_text` 建 FTS5 虚拟表（`sources_fts`），外部内容表模式，写入时同步维护。
 - 向量检索表在 Phase 3 追加（对应 AGENTS.md 决策点"进行中"）。
@@ -141,4 +154,4 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 ## 4. 待定项
 
 - 向量检索表结构（Phase 3 确定后追加）。
-- LLM 凭证加密实现细节：Electron `safeStorage`（Windows DPAPI）→ `settings` 表（Phase 3 落地）。
+- LLM 凭证加密已落地（2026-08-05）：Electron `safeStorage`（Windows DPAPI）加密后存入 `llm_providers.api_key`。

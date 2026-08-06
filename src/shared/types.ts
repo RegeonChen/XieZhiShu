@@ -25,7 +25,6 @@ export type SourceStatus = Source['status']
 export interface Tag {
   id: string
   name: string
-  color?: string
   createdAt: string
 }
 
@@ -87,6 +86,16 @@ export interface SegmentSource {
   sourceId: string
   position: string // 文件：页码/段落序号；URL：段落序号
   quote?: string // 原文摘句
+  sourceTitle?: string // 来源标题（服务端 JOIN 填充，供界面直接展示）
+}
+
+/** RAG 检索返回的相关资料片段 */
+export interface RetrievedChunk {
+  sourceId: string
+  sourceTitle: string
+  position: string
+  text: string
+  score: number
 }
 
 // ============================================================

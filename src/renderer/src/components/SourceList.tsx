@@ -1,59 +1,76 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { stripSourceTitleTags } from '../../../utils/source-title-tags'
+import { zhCN } from '../i18n/zh-CN'
 
-interface SourceItem {
-  id: string
+interface SourceItem { id: string; title: string; kind: string; status: string; createdAt: string }
+
+interface SourceListProps {
+  onSelect: (id: string | null) => void
+  onTagManage: () => void
+  /** 批量管理模式（资料管理） */
+  bulkMode: boolean
+  onExitBulk: () => void
+  /** 资料被删除后通知上层（用于清理当前选中） */
+  onSourcesChanged?: (deletedIds: string[]) => void
+  /** 外部数据变化（如标签变更）时递增，触发列表重新加载 */
+  reloadKey?: number
+}
+
+interface ContextMenuState {
+  x: number
+  y: number
+  sourceId: string
   title: string
-  kind: string
-  status: string
-  createdAt: string
 }
 
-interface TagItem {
-  id: string
-  name: string
-  color?: string
-}
-
-function SourceList({ onSelect }: { onSelect: (id: string | null) => void }) {
+function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChanged, reloadKey }: SourceListProps) {
   const [sources, setSources] = useState<SourceItem[]>([])
   const [loading, setLoading] = useState(false)
   const [importing, setImporting] = useState(false)
   const [importErr, setImportErr] = useState<string | null>(null)
   const [urlInput, setUrlInput] = useState('')
   const [urlAdding, setUrlAdding] = useState(false)
-  const [tags, setTags] = useState<TagItem[]>([])
+  const [tagFilters, setTagFilters] = useState<{ id: string; name: string }[]>([])
   const [activeTagId, setActiveTagId] = useState<string | null>(null)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteErr, setDeleteErr] = useState<string | null>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
 
   const loadSources = useCallback(async (tagId?: string | null) => {
     setLoading(true)
     try {
       const params = tagId ? { tagIds: [tagId] } : undefined
       const res = await window.api.listSources(params)
-      if (res.ok && res.data) {
-        setSources(res.data.items as SourceItem[])
-      }
-    } finally {
-      setLoading(false)
-    }
+      if (res.ok && res.data) setSources(res.data.items as SourceItem[])
+    } finally { setLoading(false) }
   }, [])
 
   const loadTags = async () => {
     const res = await window.api.listTags()
-    if (res.ok && res.data) {
-      setTags(res.data.items as TagItem[])
-    }
+    if (res.ok && res.data) setTagFilters(res.data.items as { id: string; name: string }[])
   }
 
+  useEffect(() => { loadSources(activeTagId); loadTags() }, [activeTagId, loadSources, reloadKey])
+
+  // 右键菜单：点击外部 / Esc 关闭
   useEffect(() => {
-    loadSources(activeTagId)
-    loadTags()
-  }, [activeTagId, loadSources])
+    if (!contextMenu) return
+    const close = () => setContextMenu(null)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close() }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [contextMenu])
 
   const handleImport = async () => {
     const result = await window.api.openFileDialog()
     if (!result.ok || !result.data?.paths.length) return
-    setImporting(true)
-    setImportErr(null)
+    setImporting(true); setImportErr(null)
     try {
       const res = await window.api.importFiles(result.data.paths)
       if (res.ok && res.data) {
@@ -62,105 +79,158 @@ function SourceList({ onSelect }: { onSelect: (id: string | null) => void }) {
           if (r.source) imported.push(r.source as SourceItem)
           else if (r.error) setImportErr((p) => (p ? `${p}; ${r.path}: ${r.error}` : `${r.path}: ${r.error}`))
         }
-        if (imported.length > 0) {
-          setSources((prev) => [...imported, ...prev])
-        }
+        if (imported.length > 0) setSources((prev) => [...imported, ...prev])
       }
-    } finally {
-      setImporting(false)
-    }
+    } finally { setImporting(false) }
   }
 
   const handleAddUrl = async () => {
     const trimmed = urlInput.trim()
     if (!trimmed) return
-    setUrlAdding(true)
-    setImportErr(null)
+    setUrlAdding(true); setImportErr(null)
     try {
       const res = await window.api.addUrl(trimmed)
       if (res.ok && res.data) {
         const src = res.data.source as SourceItem
         setSources((prev) => [{ id: src.id, title: src.title, kind: 'url', status: 'ready', createdAt: new Date().toISOString() }, ...prev])
         setUrlInput('')
+      } else setImportErr(res.error?.message ?? '添加失败')
+    } catch { setImportErr('网络请求异常') }
+    finally { setUrlAdding(false) }
+  }
+
+  // 删除单个资料（右键菜单）
+  const handleDeleteOne = async (id: string, title: string) => {
+    if (!confirm(zhCN.sourceContext.confirmDelete.replace('{title}', title))) return
+    setDeleting(true); setDeleteErr(null)
+    try {
+      const res = await window.api.deleteSource(id)
+      if (res.ok) {
+        setContextMenu(null)
+        await loadSources(activeTagId)
+        onSourcesChanged?.([id])
       } else {
-        setImportErr(res.error?.message ?? '添加失败')
+        setDeleteErr(res.error?.message ?? zhCN.sourceDelete.failed.replace('{message}', ''))
       }
-    } catch {
-      setImportErr('网络请求异常')
-    } finally {
-      setUrlAdding(false)
-    }
+    } finally { setDeleting(false) }
+  }
+
+  // 批量删除选中资料
+  const handleBulkDelete = async () => {
+    const ids = Array.from(selectedIds)
+    if (ids.length === 0) return
+    if (!confirm(zhCN.sourceBulk.confirmDelete.replace('{count}', String(ids.length)))) return
+    setDeleting(true); setDeleteErr(null)
+    try {
+      const res = await window.api.deleteSources(ids)
+      if (res.ok) {
+        setSelectedIds(new Set())
+        await loadSources(activeTagId)
+        onSourcesChanged?.(ids)
+      } else {
+        setDeleteErr(res.error?.message ?? zhCN.sourceDelete.failed.replace('{message}', ''))
+      }
+    } finally { setDeleting(false) }
+  }
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const allSelected = sources.length > 0 && sources.every((s) => selectedIds.has(s.id))
+  const handleToggleAll = () => {
+    setSelectedIds(allSelected ? new Set() : new Set(sources.map((s) => s.id)))
   }
 
   return (
-    <div className="source-list">
+    <div className="source-list" ref={rootRef}>
       <div className="source-list__toolbar">
-        <button type="button" className="source-list__btn source-list__btn--primary" onClick={handleImport} disabled={importing}>
-          {importing ? '导入中...' : '导入文件'}
-        </button>
-        <button type="button" className="source-list__btn" onClick={() => loadSources(activeTagId)} disabled={loading}>
-          刷新
-        </button>
+        <button type="button" className="source-list__btn source-list__btn--primary" onClick={handleImport} disabled={importing}>{importing ? '导入中...' : '导入文件'}</button>
+        <button type="button" className="source-list__btn" onClick={() => loadSources(activeTagId)} disabled={loading}>刷新</button>
+        <button type="button" className="source-list__btn" onClick={onTagManage}>标签管理</button>
       </div>
-
       <div className="source-list__url-bar">
-        <input
-          type="url"
-          className="source-list__url-input"
-          placeholder="输入网页网址按回车添加..."
-          value={urlInput}
-          onChange={(e) => setUrlInput(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') handleAddUrl() }}
-        />
-        <button type="button" className="source-list__btn source-list__btn--primary" onClick={handleAddUrl} disabled={urlAdding || !urlInput.trim()}>
-          {urlAdding ? '抓取中...' : '添加'}
-        </button>
+        <input type="url" className="source-list__url-input" placeholder="输入网页网址按回车添加..." value={urlInput} onChange={(e) => setUrlInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleAddUrl() }} />
+        <button type="button" className="source-list__btn source-list__btn--primary" onClick={handleAddUrl} disabled={urlAdding || !urlInput.trim()}>{urlAdding ? '抓取中...' : '添加'}</button>
       </div>
-
       {importErr ? <p className="source-list__error">{importErr}</p> : null}
-
-      {tags.length > 0 ? (
+      {deleteErr ? <p className="source-list__error">{deleteErr}</p> : null}
+      {tagFilters.length > 0 ? (
         <div className="source-list__tag-bar">
-          <button
-            type="button"
-            className={`source-list__tag-chip ${!activeTagId ? 'source-list__tag-chip--active' : ''}`}
-            onClick={() => setActiveTagId(null)}
-          >
-            全部
-          </button>
-          {tags.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              className={`source-list__tag-chip ${activeTagId === t.id ? 'source-list__tag-chip--active' : ''}`}
-              style={activeTagId === t.id ? { background: t.color ?? '#888', color: '#fff', borderColor: t.color ?? '#888' } : { borderColor: t.color ?? '#888', color: t.color ?? '#888' }}
-              onClick={() => setActiveTagId(activeTagId === t.id ? null : t.id)}
-            >
-              {t.name}
-            </button>
+          <button type="button" className={`source-list__tag-chip ${!activeTagId ? 'source-list__tag-chip--active' : ''}`} onClick={() => setActiveTagId(null)}>全部</button>
+          {tagFilters.map((t) => (
+            <button key={t.id} type="button" className={`source-list__tag-chip ${activeTagId === t.id ? 'source-list__tag-chip--active' : ''}`}
+              onClick={() => setActiveTagId(activeTagId === t.id ? null : t.id)}>{t.name}</button>
           ))}
         </div>
       ) : null}
 
-      {loading ? (
-        <p className="source-list__status">加载中...</p>
-      ) : sources.length === 0 ? (
-        <div className="empty-state">
-          <p className="empty-state__hint">暂无资料。导入文件或输入网址添加信源。</p>
+      {bulkMode ? (
+        <div className="source-list__bulk-bar">
+          <button type="button" className="source-list__btn" onClick={handleToggleAll} disabled={sources.length === 0}>
+            {allSelected ? zhCN.sourceBulk.deselectAll : zhCN.sourceBulk.selectAll}
+          </button>
+          <span className="source-list__bulk-count">{zhCN.sourceBulk.selectedCount.replace('{count}', String(selectedIds.size))}</span>
+          <button type="button" className="source-list__btn source-list__btn--danger" onClick={handleBulkDelete} disabled={selectedIds.size === 0 || deleting}>
+            {zhCN.sourceBulk.deleteSelected}
+          </button>
+          <button type="button" className="source-list__btn" onClick={() => { setSelectedIds(new Set()); onExitBulk() }}>{zhCN.sourceBulk.exit}</button>
         </div>
+      ) : null}
+
+      {loading ? <p className="source-list__status">加载中...</p> : sources.length === 0 ? (
+        <div className="empty-state"><p className="empty-state__hint">{bulkMode ? zhCN.sourceBulk.empty : '暂无资料。导入文件或输入网址添加信源。'}</p></div>
       ) : (
         <ul className="source-list__items">
-          {sources.map((s) => (
-            <li key={s.id} className="source-list__item" onClick={() => onSelect(s.id)}>
-              <span className="source-list__item-title">{s.title}</span>
-              <span className={`source-list__item-badge source-list__item-badge--${s.status}`}>
-                {s.status === 'ready' ? '已就绪' : s.status === 'pending' ? '排队中' : s.status === 'failed' ? '失败' : '处理中'}
-              </span>
-              <span className="source-list__item-kind">{s.kind === 'file' ? '文件' : '网址'}</span>
-            </li>
-          ))}
+          {sources.map((s) => {
+            const cleanTitle = stripSourceTitleTags(s.title)
+            const isSelected = selectedIds.has(s.id)
+            return (
+              <li
+                key={s.id}
+                className={`source-list__item${bulkMode ? ' source-list__item--bulk' : ''}`}
+                onClick={() => (bulkMode ? toggleSelect(s.id) : onSelect(s.id))}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  if (!bulkMode) setContextMenu({ x: e.clientX, y: e.clientY, sourceId: s.id, title: cleanTitle })
+                }}
+              >
+                {bulkMode ? (
+                  <span className={`source-list__checkbox${isSelected ? ' source-list__checkbox--checked' : ''}`} aria-hidden="true" />
+                ) : null}
+                <span className="source-list__item-title">{cleanTitle}</span>
+                <span className={`source-list__item-badge source-list__item-badge--${s.status}`}>
+                  {s.status === 'ready' ? '已就绪' : s.status === 'failed' ? '失败' : s.status === 'pending' ? '排队中' : '处理中'}
+                </span>
+                <span className="source-list__item-kind">{s.kind === 'file' ? '文件' : '网址'}</span>
+              </li>
+            )
+          })}
         </ul>
       )}
+
+      {contextMenu ? (
+        <div
+          className="source-list__context-menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="source-list__context-item source-list__context-item--danger"
+            onClick={() => handleDeleteOne(contextMenu.sourceId, contextMenu.title)}
+            disabled={deleting}
+          >
+            {zhCN.sourceContext.delete}
+          </button>
+        </div>
+      ) : null}
     </div>
   )
 }
