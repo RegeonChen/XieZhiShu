@@ -37,6 +37,8 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
   const [pendingDelete, setPendingDelete] = useState<{ kind: 'one'; id: string; title: string } | { kind: 'bulk'; ids: string[] } | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteErr, setDeleteErr] = useState<string | null>(null)
+  const [summarizing, setSummarizing] = useState(false)
+  const [summarizeMsg, setSummarizeMsg] = useState<string | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
 
   const loadSources = useCallback(async (tagId?: string | null) => {
@@ -100,6 +102,28 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
     finally { setUrlAdding(false) }
   }
 
+  // 整理资料库：对尚无摘要的资料逐篇调用 LLM 生成摘要
+  const handleSummarize = async () => {
+    setSummarizing(true)
+    setSummarizeMsg(null)
+    try {
+      const res = await window.api.summarizeAll()
+      if (res.ok && res.data) {
+        setSummarizeMsg(
+          res.data.processed === 0
+            ? zhCN.sourceList.summarizeEmpty
+            : zhCN.sourceList.summarizeDone.replace('{ok}', String(res.data.ok)).replace('{failed}', String(res.data.failed))
+        )
+      } else {
+        setSummarizeMsg(zhCN.sourceList.summarizeFailed.replace('{message}', res.error?.message ?? ''))
+      }
+    } catch {
+      setSummarizeMsg(zhCN.sourceList.summarizeFailed.replace('{message}', ''))
+    } finally {
+      setSummarizing(false)
+    }
+  }
+
   // 删除单个资料（右键菜单）
   const handleDeleteOne = async () => {
     if (!pendingDelete || pendingDelete.kind !== 'one') return
@@ -156,7 +180,11 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
         <button type="button" className="source-list__btn source-list__btn--primary" onClick={handleImport} disabled={importing}>{importing ? '导入中...' : '导入文件'}</button>
         <button type="button" className="source-list__btn" onClick={() => loadSources(activeTagId)} disabled={loading}>刷新</button>
         <button type="button" className="source-list__btn" onClick={onTagManage}>标签管理</button>
+        <button type="button" className="source-list__btn" onClick={handleSummarize} disabled={summarizing}>
+          {summarizing ? zhCN.sourceList.summarizing : zhCN.sourceList.summarizeBtn}
+        </button>
       </div>
+      {summarizeMsg ? <p className="source-list__msg">{summarizeMsg}</p> : null}
       <div className="source-list__url-bar">
         <input type="url" className="source-list__url-input" placeholder="输入网页网址按回车添加..." value={urlInput} onChange={(e) => setUrlInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleAddUrl() }} />
         <button type="button" className="source-list__btn source-list__btn--primary" onClick={handleAddUrl} disabled={urlAdding || !urlInput.trim()}>{urlAdding ? '抓取中...' : '添加'}</button>

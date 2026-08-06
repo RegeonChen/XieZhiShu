@@ -143,6 +143,31 @@
 - **Affected Areas:** 文档编辑器组件（TipTap + 工具栏 + 每片段实例）、`segment:update` 实现、提示词工程（Markdown 输出）、撰写工作台 UI。
 - **Verification:** 生成初稿后右栏显示编辑器并载入初稿；粗体/斜体/标题/下划线/表格/列表可编辑并实时渲染；编辑内容保存为 Markdown 后重启仍在；片段来源标注保持可用。
 
+## Phase 3.2: 资料预处理与混合检索（补充开发计划）
+
+> 在 Phase 3 本地词法 RAG（Task 3.2/3.3 已实现）基础上，实现"资料更新后自动预处理 + 任务下达时本地粗筛"的完整索引链路：**本地向量嵌入（BGE-small-zh，onnxruntime-node，纯本地无网络）** + **词法/向量混合检索（RRF 融合）** + **可选的 LLM 摘要索引（"整理资料库"手动触发，可开关）**。检索结果结构与现有 `RetrievedChunk` 契约保持一致，下游初稿生成逻辑无感。
+
+### Task 3.2.1 - 向量索引基础设施（预处理管道）
+
+- **Task Detail:** 资料导入/更新成功后自动触发**增量索引**：复用 `chunkText` 分块 → 本地 embedding 模型（BGE-small-zh-v1.5，ONNX 格式，CPU 推理）将每个分块向量化 → 存入向量表。仅处理新增/变更的资料（`sources.indexed_at` 标记），支持后台渐进索引与"索引中"状态。
+- **Affected Areas:** Migration 005（`chunk_embeddings` 表 + `sources.indexed_at` 列 + `source_summaries` 表）、`src/main/rag/embed.ts`（ONNX 推理封装）、`src/main/rag/indexer.ts`（索引流水线）、`importFiles`/`addUrl` 成功后的触发点、模型文件分发。
+- **Verification:** 导入资料后自动生成向量索引且可查询到；重复导入不产生重复索引（增量幂等）；向量维度与模型输出一致；无网络依赖。
+- **Status: 已完成（2026-08-06）**
+
+### Task 3.2.2 - 混合检索（词法 + 向量 RRF 融合）
+
+- **Task Detail:** 检索阶段双路召回：词法路（现有 bigram/子串打分 + FTS5）+ 向量路（查询向量余弦相似度），经 **RRF（Reciprocal Rank Fusion）** 融合取 TopK；保留每来源 Top3 / 全局 Top12 的多样性约束与来源标注；`writing:retrieve` 与初稿生成的检索调用保持接口兼容。
+- **Affected Areas:** `src/main/rag/retrieval.ts`（增加向量召回路径与 RRF 融合）、向量存储与余弦检索封装。
+- **Verification:** 语义相关但无字面重叠的查询能召回（如"教育事业发展"→"适龄儿童入学率"）；与纯词法相比召回质量提升；检索范围仍严格限定在用户资料内。
+- **Status: 已完成（2026-08-06）**
+
+### Task 3.2.3 - LLM 摘要索引（整理资料库）
+
+- **Task Detail:** 提供"整理资料库"功能（用户手动触发，可开关）：对资料库内未整理的资料调用 LLM 生成摘要、主题关键词、关键实体，存入 `source_summaries`；检索时可用摘要相关性辅助粗筛与排序；整理进度与状态在资料库 UI 展示。
+- **Affected Areas:** `src/main/rag/summarizer.ts`（LLM 摘要生成 + JSON 解析）、`source_summaries` 仓储、设置项（开关）、资料库 UI（整理按钮 + 进度/状态）。
+- **Verification:** 整理后可查看每篇资料的摘要/关键词；检索能借助摘要提升召回；可关闭该功能；LLM 调用失败有稳定错误提示且不阻塞其他功能。
+- **Status: 已完成（2026-08-06）**
+
 ## Phase 4: Version Iteration & Control
 
 **Overall Goal:** 完成"第 n 稿 → 人工审核（矛盾 / 缺失 / 修改）→ 确认 → 第 n+1 稿 → 版本查看 / 对比 / 回滚"的闭环。

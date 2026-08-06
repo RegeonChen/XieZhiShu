@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import PdfViewer from './PdfViewer'
+import { zhCN } from '../i18n/zh-CN'
 
 interface SourceDetail {
   source: {
@@ -15,6 +16,12 @@ interface SourceDetail {
   tags: { id: string; name: string }[]
 }
 
+interface SummaryShape {
+  summary: string
+  keywords: string[]
+  entities: string[]
+}
+
 function SourceViewer({ sourceId, onBack }: { sourceId: string; onBack: () => void }) {
   const [data, setData] = useState<SourceDetail | null>(null)
   const [loading, setLoading] = useState(true)
@@ -22,6 +29,7 @@ function SourceViewer({ sourceId, onBack }: { sourceId: string; onBack: () => vo
   const [htmlContent, setHtmlContent] = useState<string | null>(null)
   const [htmlLoading, setHtmlLoading] = useState(false)
   const [fileUrl, setFileUrl] = useState<string | null>(null)
+  const [summary, setSummary] = useState<SummaryShape | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -41,6 +49,19 @@ function SourceViewer({ sourceId, onBack }: { sourceId: string; onBack: () => vo
   }, [sourceId])
 
   useEffect(() => { load() }, [load])
+
+  // 加载 LLM 摘要（整理资料库后生成）
+  useEffect(() => {
+    let cancelled = false
+    window.api.getSourceSummary(sourceId).then((res) => {
+      if (cancelled) return
+      if (res.ok && res.data && res.data.summary) {
+        const s = res.data.summary as SummaryShape
+        if (s.summary) setSummary(s)
+      }
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [sourceId])
 
   // 根据文件类型加载对应渲染内容
   useEffect(() => {
@@ -122,6 +143,32 @@ function SourceViewer({ sourceId, onBack }: { sourceId: string; onBack: () => vo
           <span className="source-viewer__date">{new Date(source.createdAt).toLocaleString('zh-CN')}</span>
         </div>
       </div>
+      {summary ? (
+        <div className="source-viewer__summary">
+          <h4 className="source-viewer__summary-title">{zhCN.sourceViewer.summaryTitle}</h4>
+          <p className="source-viewer__summary-text">{summary.summary}</p>
+          {summary.keywords.length > 0 ? (
+            <div className="source-viewer__summary-row">
+              <span className="source-viewer__summary-label">{zhCN.sourceViewer.keywords}</span>
+              <span className="source-viewer__summary-chips">
+                {summary.keywords.map((k, i) => (
+                  <span key={i} className="source-viewer__summary-chip">{k}</span>
+                ))}
+              </span>
+            </div>
+          ) : null}
+          {summary.entities.length > 0 ? (
+            <div className="source-viewer__summary-row">
+              <span className="source-viewer__summary-label">{zhCN.sourceViewer.entities}</span>
+              <span className="source-viewer__summary-chips">
+                {summary.entities.map((e, i) => (
+                  <span key={i} className="source-viewer__summary-chip">{e}</span>
+                ))}
+              </span>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       <div className="source-viewer__body">
         {isDocx && htmlLoading ? (
           <div className="source-viewer__status">正在渲染文档排版...</div>

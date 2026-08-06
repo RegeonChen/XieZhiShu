@@ -68,6 +68,18 @@ export const zhCN = {
     deleteTitle: '删除资料',
     confirmDelete: '确定要删除「{title}」吗？删除后无法恢复。'
   },
+  sourceList: {
+    summarizeBtn: '整理资料库',
+    summarizing: '整理中...',
+    summarizeDone: '整理完成：成功 {ok} 篇，失败 {failed} 篇',
+    summarizeEmpty: '没有需要整理的资料',
+    summarizeFailed: '整理失败：{message}'
+  },
+  sourceViewer: {
+    summaryTitle: '资料摘要',
+    keywords: '主题词',
+    entities: '关键实体'
+  },
   sourceDelete: {
     success: '删除成功',
     failed: '删除失败：{message}'

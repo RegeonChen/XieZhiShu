@@ -127,6 +127,7 @@
 
 截至 2026-08-06：
 
+- **Phase 3.2 已完成**（资料预处理与混合检索）：本地向量嵌入（BGE-small-zh + onnxruntime-node + @huggingface/transformers，纯本地）+ 词法/向量 RRF 混合检索 + LLM 摘要索引（"整理资料库"手动触发）。资料导入/更新后自动增量向量化；检索接口与下游生成保持兼容。验证通过：typecheck 零错误、39 项单测、生产构建成功。下一步 Phase 4（版本迭代与管控）。
 - **Phase 3.1 已完成**（撰写闭环增强）：撰写任务删除（右键 + 二次确认）与初稿文档编辑器（TipTap 所见即所得，Markdown 存储、自动保存、来源标注保留）全部通过验收。验证通过：typecheck 零错误、30 项单测、生产构建成功。下一步 Phase 4（版本迭代与管控）。
 - **Phase 3 Task 3.2/3.3 已完成**（撰写闭环）：本地 RAG 检索（bigram 词法打分 + 来源位置标注，`writing:retrieve` 预览）→ 初稿生成（提示词工程 + JSON 解析校验 + 失败重试 + 片段来源落库）→ 撰写页 UI（任务列表 / 新建 / 工作台）。验证通过：typecheck 零错误、26 项单测、生产构建成功。下一步 Phase 4（版本迭代与管控）。
 - **Phase 3 Task 3.1 已完成**（LLM Provider 配置）：`llm:*` 四通道（list/save/delete/test）与 `settings:*` 两通道全部落地——Provider 增删改查、safeStorage（Windows DPAPI）加密存密钥、连通性测试（net.fetch 调 /chat/completions，错误映射 LLM 错误码）、"设为当前"默认 Provider；设置页 UI 接入，范本管理独立为导航项。验证通过：typecheck 零错误、13 项单测、生产构建成功。下一步 Task 3.2（本地 RAG 检索）。
@@ -155,6 +156,8 @@
 - 版本管控：以"第 n 稿"为版本单元，人工确认即产生新版本，支持查看、对比、回滚。
 - 技术选型：采用 Electron + React + TypeScript（2026-08-03 确认）。
 - RAG 检索方案（2026-08-05）：采用本地词法检索——段落分块 + 字符 bigram 打分 + 来源位置标注，纯本地、无网络、中文无需分词；不引入向量数据库/嵌入依赖，向量索引留待后续按需扩展。
+- 向量检索落地（2026-08-06，Phase 3.2）：资料预处理与混合检索上线——本地 embedding 模型 **BGE-small-zh-v1.5**（`@huggingface/transformers` + `onnxruntime-node`，纯本地 ONNX 推理）+ 词法/向量 **RRF 混合检索** + 可选 **LLM 摘要索引**（"整理资料库"手动触发）。模型文件放 `<appPath>/resources/models/bge-small-zh-v1.5/`（transformers.js 兼容格式，local_files_only）；**模型/引擎不可用时自动降级为纯词法检索**，不阻塞其它功能。onnxruntime-node 原生绑定与过新的 Node 版本（≥24）不兼容，故 embed 采用动态 import 延迟加载（Electron 内置 Node 20 正常）。
+- 检索范围约束（Phase 3.2 沿用）：向量/摘要索引与检索均严格限定在用户导入的资料（sourceIds 白名单）内，不引入外部信息。
 - 文档编辑器选型（2026-08-05）：**TipTap**（ProseMirror 所见即所得 + Markdown 序列化）；片段内容以 Markdown 文本存储（AI 生成 Markdown 片段、编辑器编辑/保存 Markdown），支持粗体/斜体/标题/下划线/表格/列表，保留逐片段来源标注。
 
 ## 路线图
@@ -168,6 +171,8 @@
 详细任务和验收标准位于 `PLAN.md`，本文件不重复记录任务级进度。
 
 ## 近期记录
+
+- **2026-08-06（本次修改）**：Phase 3.2 资料预处理与混合检索完成——Task 3.2.1 向量索引基础设施（Migration 005：`chunk_embeddings` + `source_summaries` + `sources.indexed_at/index_state`；`rag/embed.ts` 本地 embedding（@huggingface/transformers + onnxruntime-node，动态 import 延迟加载、模型缺失/引擎不可用优雅降级）；`rag/indexer.ts` 增量索引流水线，importFiles/addUrl 成功后自动触发）；Task 3.2.2 混合检索（`rag/vector-store.ts` 余弦检索 + `retrieveChunks` 词法/向量 RRF 融合，`queryVector` 可选参数向后兼容，generateDraft/retrieveForTask 接入）；Task 3.2.3 LLM 摘要索引（`rag/summarizer.ts` 摘要/主题词/关键实体生成入库，`sources:summarizeAll`/`sources:getSummary` IPC，资料库"整理资料库"按钮 + SourceViewer 摘要展示）。契约/数据模型文档同步更新。验证通过：typecheck 零错误、39 项单测、生产构建成功。下一步 Phase 4（版本迭代与管控）。
 
 - **2026-08-06（本次修改）**：输入框失焦 bug 修复——根因：原生 `confirm()` 对话框（Electron 同步原生对话框）打开/关闭后窗口进入"可见但未激活"状态（Windows foreground lock），`document.hasFocus()=false`，点击输入框无 `focusin` 无法输入；打开/关闭原生文件对话框可强制恢复激活。修复：5 处 `confirm()` 全部替换为自定义 `ConfirmDialog` 模态组件（撰写任务删除/资料单删/批量删除/标签删除/Provider 删除），从根源消除失焦源；新增 `window:focus` IPC（`win.show()+focus()+moveTop()` 突破 foreground lock）+ 渲染层 mousedown 兜底检测（`!document.hasFocus()` 时请求恢复并补聚焦点）。调试证据：插桩日志确认 pre-fix 删除后点击输入框 `docHasFocus=false` 无 focusin，post-fix 全程无 blur、focusin 正常。验证通过：typecheck 零错误、30 项单测、生产构建成功。
 

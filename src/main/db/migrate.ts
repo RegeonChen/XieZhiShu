@@ -173,6 +173,35 @@ CREATE TABLE IF NOT EXISTS llm_providers (
         if (clean !== row.title) stmt.run(clean, new Date().toISOString(), row.id)
       }
     }
+  },
+  {
+    // 向量索引与摘要索引（Phase 3.2 Task 3.2.1）：chunk_embeddings 存分块向量，
+    // source_summaries 存 LLM 摘要；sources 增加向量索引状态标记
+    version: 5,
+    sql: `
+CREATE TABLE IF NOT EXISTS chunk_embeddings (
+    id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    chunk_text TEXT NOT NULL,
+    position TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    model_id TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_source ON chunk_embeddings(source_id);
+
+CREATE TABLE IF NOT EXISTS source_summaries (
+    source_id TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+    summary TEXT NOT NULL,
+    keywords TEXT NOT NULL DEFAULT '[]',
+    entities TEXT NOT NULL DEFAULT '[]',
+    llm_model TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+ALTER TABLE sources ADD COLUMN indexed_at TEXT;
+ALTER TABLE sources ADD COLUMN index_state TEXT NOT NULL DEFAULT 'pending' CHECK (index_state IN ('pending', 'indexing', 'ready', 'failed'));
+`
   }
 ]
 

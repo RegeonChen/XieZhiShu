@@ -13,6 +13,7 @@ import { getProviderSecret } from '../llm/provider-store'
 import { safeStorageCodec } from '../llm/secret'
 import { chatCompletion, type ChatMessage } from '../llm/chat'
 import { retrieveChunks } from '../rag/retrieval'
+import { embedTexts } from '../rag/embed'
 
 export type GenerateResult = { ok: true; draft: Draft } | { ok: false; error: { code: string; message: string } }
 
@@ -157,7 +158,7 @@ export async function generateDraft(taskId: string): Promise<GenerateResult> {
   const scopeIds = resolveScopeSourceIds(task, getSourceIdsByTag)
   if (scopeIds.length === 0) return fail(ErrorCodes.TASK_NO_SCOPE, '任务的文件范围内没有可用资料')
 
-  const chunks = retrieveChunks({ sourceIds: scopeIds, query: task.title, limit: 12 })
+  const chunks = await retrieveChunksHybrid(scopeIds, task.title, 12)
   if (chunks.length === 0) return fail(ErrorCodes.LLM_NO_CANDIDATES, '未检索到与标题相关的资料，请调整标题或文件范围')
 
   // 幂等：第 0 稿已存在则直接返回
@@ -206,12 +207,19 @@ export async function generateDraft(taskId: string): Promise<GenerateResult> {
 }
 
 /** 任务范围内的检索预览（writing:retrieve，供界面展示与验收） */
-export function retrieveForTask(taskId: string): RetrievedChunk[] | null {
+export async function retrieveForTask(taskId: string): Promise<RetrievedChunk[] | null> {
   const task = getTaskById(taskId)
   if (!task) return null
   const scopeIds = resolveScopeSourceIds(task, getSourceIdsByTag)
   if (scopeIds.length === 0) return []
-  return retrieveChunks({ sourceIds: scopeIds, query: task.title, limit: 12 })
+  return retrieveChunksHybrid(scopeIds, task.title, 12)
+}
+
+/** 混合检索：本地嵌入生成查询向量（引擎不可用时回退纯词法），再进行词法+向量 RRF 融合 */
+async function retrieveChunksHybrid(scopeIds: string[], query: string, limit: number): Promise<RetrievedChunk[]> {
+  const vectors = await embedTexts([query]).catch(() => null)
+  const queryVector = vectors ? vectors[0] : undefined
+  return retrieveChunks({ sourceIds: scopeIds, query, limit, queryVector })
 }
 
 // ---- vitest inline test ----

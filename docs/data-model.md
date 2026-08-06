@@ -140,7 +140,31 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 ### 2.12 FTS5 索引（全文检索）
 
 - 对 `sources.cleaned_text` 建 FTS5 虚拟表（`sources_fts`），外部内容表模式，写入时同步维护。
-- 向量检索表在 Phase 3 追加（对应 AGENTS.md 决策点"进行中"）。
+
+### 2.13 chunk_embeddings（分块向量索引，Phase 3.2 Task 3.2.1）
+
+| 字段 | 类型 | 约束 | 说明 |
+|---|---|---|---|
+| id | TEXT | PK | uuid |
+| source_id | TEXT | NOT NULL REFERENCES sources(id) ON DELETE CASCADE | 所属资料 |
+| chunk_text | TEXT | NOT NULL | 分块文本 |
+| position | TEXT | NOT NULL | 来源位置（如"第N段"） |
+| embedding | BLOB | NOT NULL | float32 向量（本地 embedding 模型生成） |
+| model_id | TEXT | NOT NULL | 生成向量的模型标识 |
+| created_at | TEXT | NOT NULL | |
+
+### 2.14 source_summaries（LLM 摘要索引，Phase 3.2 Task 3.2.3）
+
+| 字段 | 类型 | 约束 | 说明 |
+|---|---|---|---|
+| source_id | TEXT | PK REFERENCES sources(id) ON DELETE CASCADE | 所属资料 |
+| summary | TEXT | NOT NULL | LLM 生成的内容摘要 |
+| keywords | TEXT | NOT NULL DEFAULT '[]' | 主题关键词（JSON 数组） |
+| entities | TEXT | NOT NULL DEFAULT '[]' | 关键实体（JSON 数组） |
+| llm_model | TEXT | NULL | 生成摘要的模型名 |
+| updated_at | TEXT | NOT NULL | |
+
+`sources` 表新增列：`indexed_at`（向量索引完成时间）、`index_state`（'pending'/'indexing'/'ready'/'failed'，向量索引状态）。
 
 ## 3. 关键设计决策
 

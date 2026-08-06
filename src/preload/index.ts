@@ -82,6 +82,14 @@ const api = {
   deleteSources(ids: string[]): Promise<ApiResult<void>> {
     return ipcRenderer.invoke(IPC.SOURCES_DELETE_MANY, { ids })
   },
+  /** 整理资料库：对尚无摘要的资料逐篇生成 LLM 摘要 */
+  summarizeAll(): Promise<ApiResult<{ processed: number; ok: number; failed: number }>> {
+    return ipcRenderer.invoke(IPC.SOURCES_SUMMARIZE_ALL)
+  },
+  /** 读取单篇资料摘要 */
+  getSourceSummary(id: string): Promise<ApiResult<{ summary?: unknown }>> {
+    return ipcRenderer.invoke(IPC.SOURCES_GET_SUMMARY, { id })
+  },
   /** 范本列表 */
   listTemplates(): Promise<ApiResult<{ items: unknown[] }>> {
     return ipcRenderer.invoke(IPC.TEMPLATES_LIST)

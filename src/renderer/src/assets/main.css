@@ -1586,3 +1586,51 @@ body {
   justify-content: flex-end;
   gap: 8px;
 }
+
+/* ---------- 资料摘要（整理资料库，Task 3.2.3） ---------- */
+.source-list__msg {
+  margin: 6px 12px;
+  font-size: 12px;
+  color: var(--fg-soft);
+}
+.source-viewer__summary {
+  margin: 0 16px 12px;
+  padding: 10px 12px;
+  background: var(--accent-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.source-viewer__summary-title {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.source-viewer__summary-text {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--fg);
+}
+.source-viewer__summary-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 4px;
+}
+.source-viewer__summary-label {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--fg-soft);
+}
+.source-viewer__summary-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.source-viewer__summary-chip {
+  padding: 1px 8px;
+  font-size: 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--fg);
+}
