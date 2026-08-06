@@ -1,0 +1,8 @@
+{
+  "name": "onnxruntime-node",
+  "version": "1.24.3",
+  "description": "Stub for onnxruntime-node: forwards to onnxruntime-web (wasm) to avoid the System32 onnxruntime.dll conflict on Windows",
+  "main": "index.cjs",
+  "types": "index.d.ts",
+  "license": "MIT"
+}

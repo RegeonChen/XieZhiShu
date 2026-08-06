@@ -16,6 +16,9 @@ logs/
 # Local test samples
 test-file.pdf
 
+# AI models (downloaded on demand, see AGENTS.md for source)
+resources/models/
+
 # Env & credentials
 .env
 .env.local
