@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { stripSourceTitleTags } from '../../../utils/source-title-tags'
 import { zhCN } from '../i18n/zh-CN'
 
 interface SourceItem { id: string; title: string; kind: string; status: string; createdAt: string }
@@ -188,7 +187,7 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
       ) : (
         <ul className="source-list__items">
           {sources.map((s) => {
-            const cleanTitle = stripSourceTitleTags(s.title)
+            const cleanTitle = s.title
             const isSelected = selectedIds.has(s.id)
             return (
               <li

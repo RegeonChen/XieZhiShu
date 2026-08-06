@@ -6,7 +6,10 @@ import type Database from 'better-sqlite3'
 
 interface Migration {
   version: number
-  sql: string
+  /** SQL 迁移（与 run 二选一） */
+  sql?: string
+  /** JS 迁移（需要逐行处理数据时使用） */
+  run?: (db: Database.Database) => void
 }
 
 export const MIGRATIONS: Migration[] = [
@@ -154,6 +157,22 @@ CREATE TABLE IF NOT EXISTS llm_providers (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 `
+  },
+  {
+    // 移除"标签嵌入标题"机制（2026-08-05）：清理历史数据中残留的 [tag:...] 标题前缀
+    version: 4,
+    run: (db) => {
+      const rows = db.prepare("SELECT id, title FROM sources WHERE title LIKE '[tag:%'").all() as {
+        id: string
+        title: string
+      }[]
+      const strip = (title: string): string => title.replace(/^(?:\[tag:[^\]\r\n]+\]\s*)+/, '').trim()
+      const stmt = db.prepare('UPDATE sources SET title = ?, updated_at = ? WHERE id = ?')
+      for (const row of rows) {
+        const clean = strip(row.title)
+        if (clean !== row.title) stmt.run(clean, new Date().toISOString(), row.id)
+      }
+    }
   }
 ]
 
@@ -178,7 +197,11 @@ export function runMigrations(db: Database.Database): void {
 
   const runOne = db.transaction(() => {
     for (const m of pending) {
-      db.exec(m.sql)
+      if (m.run) {
+        m.run(db)
+      } else if (m.sql) {
+        db.exec(m.sql)
+      }
       insert.run(m.version)
     }
   })

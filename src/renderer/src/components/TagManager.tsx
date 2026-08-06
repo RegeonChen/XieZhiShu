@@ -1,18 +1,16 @@
 import { useState, useEffect, useCallback } from 'react'
-import { parseSourceTitleTags } from '../../../utils/source-title-tags'
 import { zhCN } from '../i18n/zh-CN'
 
 interface TagItem { id: string; name: string }
 interface SourceItem { id: string; title: string; kind: string; status: string; createdAt: string }
 
-/** 解析资料标题并渲染干净标题 + 元信息 */
+/** 渲染资料标题 + 元信息 */
 function SourceRow({ source, checkbox, checked, onToggle }: {
   source: SourceItem
   checkbox?: boolean
   checked?: boolean
   onToggle?: () => void
 }) {
-  const parsed = parseSourceTitleTags(source.title)
   return (
     <li
       className={`tag-manager__source-item${checked ? ' is-checked' : ''}`}
@@ -21,7 +19,7 @@ function SourceRow({ source, checkbox, checked, onToggle }: {
       {checkbox ? (
         <span className={`tag-manager__checkbox${checked ? ' is-checked' : ''}`} aria-hidden="true" />
       ) : null}
-      <span className="tag-manager__source-title">{parsed.cleanTitle}</span>
+      <span className="tag-manager__source-title">{source.title}</span>
       <span className="tag-manager__source-kind">{source.kind === 'file' ? '文件' : '网址'}</span>
       <span className="tag-manager__source-date">
         {new Date(source.createdAt).toLocaleDateString('zh-CN')}
