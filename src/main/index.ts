@@ -116,6 +116,8 @@ function createWindow(): void {
 
   win.on('ready-to-show', () => {
     win.show()
+    // 确保窗口获得 OS 输入焦点，避免"可见但未激活"导致点击输入框无光标/无法输入
+    win.focus()
   })
 
   win.webContents.setWindowOpenHandler(({ url }) => {
