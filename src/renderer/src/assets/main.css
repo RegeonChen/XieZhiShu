@@ -1396,3 +1396,158 @@ body {
 .writing-workspace__source-quote {
   color: var(--fg-soft);
 }
+
+/* ---------- 初稿文档编辑器（TipTap） ---------- */
+.draft-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 860px;
+}
+
+.draft-editor__toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 8px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+}
+
+.draft-editor__btn {
+  min-width: 28px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.draft-editor__btn:hover { background: var(--accent-soft); }
+.draft-editor__btn.is-active {
+  background: var(--accent);
+  color: #fff;
+}
+.draft-editor__btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.draft-editor__sep {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+.draft-editor__heading {
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.draft-editor__segments {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.draft-editor__segment {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+
+.draft-editor__segment-heading {
+  margin: 0;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--border);
+}
+
+.draft-editor__segment-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 14px;
+  border-top: 1px dashed var(--border);
+}
+
+.draft-editor__status {
+  font-size: 12px;
+  color: var(--fg-soft);
+}
+.draft-editor__status.is-saved { color: #166534; }
+.draft-editor__status.is-error { color: #dc2626; }
+
+/* TipTap 编辑区 */
+.draft-editor .ProseMirror {
+  min-height: 120px;
+  padding: 12px 14px;
+  font-size: 14px;
+  line-height: 1.9;
+  outline: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.draft-editor .ProseMirror p { margin: 0 0 8px; }
+.draft-editor .ProseMirror h1 { font-size: 22px; margin: 12px 0 8px; }
+.draft-editor .ProseMirror h2 { font-size: 18px; margin: 10px 0 6px; }
+.draft-editor .ProseMirror h3 { font-size: 16px; margin: 8px 0 6px; }
+.draft-editor .ProseMirror ul,
+.draft-editor .ProseMirror ol { margin: 4px 0 8px; padding-left: 24px; }
+.draft-editor .ProseMirror blockquote {
+  margin: 8px 0;
+  padding: 2px 12px;
+  border-left: 3px solid var(--border);
+  color: var(--fg-soft);
+}
+.draft-editor .ProseMirror u { text-decoration: underline; }
+
+.draft-editor .ProseMirror table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  width: 100%;
+}
+.draft-editor .ProseMirror th,
+.draft-editor .ProseMirror td {
+  border: 1px solid var(--border);
+  padding: 4px 10px;
+  min-width: 60px;
+  vertical-align: top;
+}
+.draft-editor .ProseMirror th {
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+.draft-editor .ProseMirror .selectedCell::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(47, 111, 237, 0.12);
+  pointer-events: none;
+}
+.draft-editor .ProseMirror .column-resize-handle {
+  position: absolute;
+  right: -2px;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: var(--accent);
+  pointer-events: none;
+}

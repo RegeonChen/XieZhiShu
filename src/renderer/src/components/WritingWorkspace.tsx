@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { zhCN } from '../i18n/zh-CN'
+import DraftEditor from './DraftEditor'
 
 interface TaskItem {
   id: string
@@ -42,7 +43,6 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
   const [retrieving, setRetrieving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -107,15 +107,6 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
     }
   }
 
-  const toggleExpand = (id: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
-
   if (loading) return <p className="source-list__status">{zhCN.writingWorkspace.loading}</p>
   if (err) return <p className="source-list__error">{err}</p>
   if (!task) return <p className="source-list__error">{zhCN.writingWorkspace.loadFailed.replace('{message}', '任务不存在')}</p>
@@ -172,46 +163,7 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
           <h4 className="writing-workspace__section-title">
             {zhCN.writingWorkspace.draftTitle.replace('{version}', String(draft.versionNumber))}
           </h4>
-          {draft.segments.length === 0 ? (
-            <p className="writing-workspace__hint">{zhCN.writingWorkspace.noDraft}</p>
-          ) : (
-            <ul className="writing-workspace__segment-list">
-              {draft.segments.map((seg) => (
-                <li key={seg.id} className="writing-workspace__segment">
-                  {seg.heading ? <h5 className="writing-workspace__segment-heading">{seg.heading}</h5> : null}
-                  <p className="writing-workspace__segment-content">{seg.content}</p>
-                  <div className="writing-workspace__segment-sources">
-                    <button
-                      type="button"
-                      className="writing-workspace__sources-toggle"
-                      onClick={() => toggleExpand(seg.id)}
-                    >
-                      {zhCN.writingWorkspace.segmentSources.replace('{count}', String(seg.sources.length))}
-                      <span className="writing-workspace__sources-arrow">{expanded.has(seg.id) ? '▾' : '▸'}</span>
-                    </button>
-                    {expanded.has(seg.id) ? (
-                      <ul className="writing-workspace__source-list">
-                        {seg.sources.map((src, i) => (
-                          <li key={i} className="writing-workspace__source">
-                            <span className="writing-workspace__source-line">
-                              {zhCN.writingWorkspace.segmentSourceLine
-                                .replace('{title}', src.sourceTitle ?? src.sourceId)
-                                .replace('{position}', src.position || '未知位置')}
-                            </span>
-                            {src.quote ? (
-                              <span className="writing-workspace__source-quote">
-                                {zhCN.writingWorkspace.segmentQuote.replace('{quote}', src.quote)}
-                              </span>
-                            ) : null}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : null}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
+          <DraftEditor draft={draft} />
         </section>
       ) : (
         <p className="writing-workspace__hint">{zhCN.writingWorkspace.noDraft}</p>

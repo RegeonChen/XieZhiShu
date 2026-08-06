@@ -126,6 +126,10 @@ const api = {
   listTasks(): Promise<ApiResult<{ items: unknown[] }>> {
     return ipcRenderer.invoke(IPC.WRITING_LIST_TASKS)
   },
+  /** 删除撰写任务 */
+  deleteTask(id: string): Promise<ApiResult<void>> {
+    return ipcRenderer.invoke(IPC.WRITING_DELETE_TASK, { id })
+  },
   /** 任务范围内的资料检索（RAG 预览） */
   retrieveChunks(taskId: string): Promise<ApiResult<{ chunks: unknown[] }>> {
     return ipcRenderer.invoke(IPC.WRITING_RETRIEVE, { taskId })
@@ -137,6 +141,10 @@ const api = {
   /** 读取志稿（含片段与来源） */
   getDraft(draftId: string): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.DRAFT_GET, { draftId })
+  },
+  /** 更新片段内容（Markdown；自动记录审核留痕） */
+  updateSegment(segmentId: string, content: string): Promise<ApiResult<{ segment: unknown }>> {
+    return ipcRenderer.invoke(IPC.SEGMENT_UPDATE, { segmentId, content })
   },
   /** 任务版本列表 */
   listVersions(taskId: string): Promise<ApiResult<{ versions: unknown[] }>> {
