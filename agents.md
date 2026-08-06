@@ -129,7 +129,7 @@
 
 - **Phase 3 Task 3.2/3.3 已完成**（撰写闭环）：本地 RAG 检索（bigram 词法打分 + 来源位置标注，`writing:retrieve` 预览）→ 初稿生成（提示词工程 + JSON 解析校验 + 失败重试 + 片段来源落库）→ 撰写页 UI（任务列表 / 新建 / 工作台）。验证通过：typecheck 零错误、26 项单测、生产构建成功。下一步 Phase 4（版本迭代与管控）。
 - **Phase 3 Task 3.1 已完成**（LLM Provider 配置）：`llm:*` 四通道（list/save/delete/test）与 `settings:*` 两通道全部落地——Provider 增删改查、safeStorage（Windows DPAPI）加密存密钥、连通性测试（net.fetch 调 /chat/completions，错误映射 LLM 错误码）、"设为当前"默认 Provider；设置页 UI 接入，范本管理独立为导航项。验证通过：typecheck 零错误、13 项单测、生产构建成功。下一步 Task 3.2（本地 RAG 检索）。
-- **Phase 2.1 全部完成**：资料删除（Task 2.1.1）与标签系统重构（Task 2.1.2）均通过验收。**2026-08-05 移除标签颜色功能**：标签统一显示，标题前缀格式为 `[tag:name]`，Migration 002 删除 `tags.color` 列。下一步 Phase 3（撰写闭环）。
+- **Phase 2.1 全部完成**：资料删除（Task 2.1.1）与标签系统重构（Task 2.1.2）均通过验收。标签与资料为独立关联（`source_tags` 表），**不再嵌入资料标题**；2026-08-05 移除标签颜色（Migration 002 删除 `tags.color`）并移除"标签嵌入标题"机制（Migration 004 清理历史 `[tag:...]` 前缀）。下一步 Phase 3（撰写闭环）。
 
 - 项目处于**需求与规划阶段**：已完成两篇 AI 赋能修志行业文章研读，产出公务员访谈提纲（见 `init.md`）。
 - 技术架构选型**已确认**：Electron + React + TypeScript；`PLAN.md` 已按该方案调整。
@@ -166,6 +166,10 @@
 详细任务和验收标准位于 `PLAN.md`，本文件不重复记录任务级进度。
 
 ## 近期记录
+
+- **2026-08-05（本次修改）**：输入框聚焦问题排查——用户反馈所有文本框点击后无光标、无法输入。经运行时调试（插桩 document mousedown/focusin/keydown + 主进程窗口焦点事件）验证：窗口焦点、elementFromPoint、defaultPrevented、输入框属性/样式全部正常，当前代码无缺陷；原因为一次性运行时状态（窗口"可见但未激活"）。预防性硬化：`ready-to-show` 中 `win.show()` 后调用 `win.focus()`。验证通过：typecheck 零错误、29 项单测、生产构建成功。
+
+- **2026-08-05（本次修改）**：移除"标签嵌入标题"机制——标签改为纯独立关联（`source_tags` 表），不再写入资料标题：删除 `src/utils/source-title-tags.ts`、移除 `db/tags.ts` 中标题重建逻辑（update/delete/add/remove/batch 均不再触碰 `sources.title`）、前端 SourceList/TagManager/SourceViewer 直接使用 `source.title`；Migration 004（JS 迁移，迁移框架扩展支持 `run`）清理历史数据残留的 `[tag:...]` 标题前缀。删除标签级联验证：`deleteTag` 事务内 `DELETE FROM source_tags WHERE tag_id=?` 实时解除全部资料关联。验证通过：typecheck 零错误、29 项单测（新增迁移 004 清理、deleteTag 级联 2 项）、生产构建成功。
 
 - **2026-08-05（本次修改）**：Phase 3 Task 3.2/3.3 完成——本地 RAG 检索（`src/main/rag/retrieval.ts`：段落分块 + 字符 bigram 打分 + 每来源 Top3/全局 Top12 + 位置标注；`writing:retrieve` 通道）；初稿生成（`src/main/writing/generate.ts`：任务范围解析 → 检索 → 提示词（含范本体例）→ `llm/chat.ts`（net.fetch 对话 + LLM 错误码）→ JSON 解析校验 + 失败重试一次 → 落库 draft/segments/segment_sources）；新增 `db/tasks.ts`、`db/drafts.ts` 仓储、`version:list` handler；preload 新增 createTask/listTasks/retrieveChunks/generateDraft/getDraft/listVersions；撰写页 UI（任务列表 / 新建表单[资料或标签范围+范本] / 工作台[检索预览+生成初稿+片段来源展开]）。验证通过：typecheck 零错误、26 项单测（新增 retrieval 4 项、tasks 3 项、drafts 2 项、generate 解析 4 项）、生产构建成功。下一步 Phase 4（版本迭代与管控）。
 
