@@ -30,6 +30,9 @@ import { getSettings, updateSettings } from './db/settings'
 import { createTask as createWritingTask, listTasks as listWritingTasks, getTaskById, deleteTask as deleteWritingTask } from './db/tasks'
 import { getDraftById, listVersions, updateSegmentContent } from './db/drafts'
 import { generateDraft, retrieveForTask } from './writing/generate'
+import { configureEmbedModel } from './rag/embed'
+import { indexSource } from './rag/indexer'
+import { summarizeAllPending, getSourceSummary } from './rag/summarizer'
 
 const APP_PROTOCOL_WHITELIST = /^https?:\/\//i
 
@@ -163,6 +166,10 @@ ipcMain.handle(IPC.WINDOW_FOCUS, (event): ApiResult<void> => {
 ipcMain.handle(IPC.SOURCES_IMPORT_FILES, async (_event, params: { paths: string[] }): Promise<ApiResult<{ results: { path: string; source?: Source; error?: string }[] }>> => {
   try {
     const results = await importFiles(params.paths)
+    // 导入成功后异步触发向量索引（不阻塞导入返回；模型缺失时内部标记 failed）
+    for (const r of results) {
+      if (r.source) void indexSource(r.source.id).catch(() => {})
+    }
     return {
       ok: true,
       data: {
@@ -183,6 +190,8 @@ ipcMain.handle(IPC.SOURCES_ADD_URL, async (_event, params: { url: string }): Pro
   try {
     const result = await importUrl(params.url)
     if (result.source) {
+      // 抓取成功后异步触发向量索引
+      void indexSource(result.source.id).catch(() => {})
       return { ok: true, data: { source: result.source } }
     }
     return { ok: false, error: { code: result.errorCode ?? 'FETCH_FAILED', message: result.error ?? '未知错误' } }
@@ -388,6 +397,26 @@ ipcMain.handle(IPC.SOURCES_DELETE_MANY, (_event, params: { ids: string[] }): Api
   }
 })
 
+// 整理资料库：对尚无摘要的资料逐篇调用 LLM 生成摘要（Task 3.2.3）
+ipcMain.handle(IPC.SOURCES_SUMMARIZE_ALL, async (): Promise<ApiResult<{ processed: number; ok: number; failed: number }>> => {
+  try {
+    const res = await summarizeAllPending()
+    return { ok: true, data: res }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 读取单篇资料摘要
+ipcMain.handle(IPC.SOURCES_GET_SUMMARY, (_event, params: { id: string }): ApiResult<{ summary?: unknown }> => {
+  try {
+    const summary = getSourceSummary(params.id)
+    return { ok: true, data: { summary: summary ?? undefined } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
 ipcMain.handle(IPC.TAGS_LIST, (): ApiResult<{ items: Tag[] }> => {
   try {
     const items = listTags()
@@ -514,12 +543,12 @@ ipcMain.handle(IPC.WRITING_DELETE_TASK, (_event, params: { id: string }): ApiRes
   }
 })
 
-ipcMain.handle(IPC.WRITING_RETRIEVE, (_event, params: WritingRetrieveReq): ApiResult<{ chunks: RetrievedChunk[] }> => {
+ipcMain.handle(IPC.WRITING_RETRIEVE, async (_event, params: WritingRetrieveReq): Promise<ApiResult<{ chunks: RetrievedChunk[] }>> => {
   try {
     if (!getTaskById(params.taskId)) {
       return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '撰写任务不存在' } }
     }
-    return { ok: true, data: { chunks: retrieveForTask(params.taskId) ?? [] } }
+    return { ok: true, data: { chunks: (await retrieveForTask(params.taskId)) ?? [] } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
@@ -566,6 +595,9 @@ ipcMain.handle(IPC.VERSION_LIST, (_event, params: VersionListReq): ApiResult<Ver
 app.whenReady().then(() => {
   // 初始化数据库（触发迁移）
   getDb()
+
+  // 配置本地向量嵌入模型目录（<appPath>/resources/models/<modelId>/）
+  configureEmbedModel({ modelPath: join(app.getAppPath(), 'resources', 'models') })
 
   // 启动内嵌文件服务（提供 PDF/图片等本地文件）
   startFileServer()

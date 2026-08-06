@@ -134,6 +134,8 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `sources:get` | `{ id: string }` → `{ source: Source }` | 详情（含原文） |
 | `sources:delete` | `{ id: string }` → `{ ok: true }` | 级联删除关联标签与片段来源 |
 | `sources:updateTitle` | `{ id, title }` → `{ source: Source }` | 修改标题 |
+| `sources:summarizeAll` | `void` → `{ processed, ok, failed }` | 整理资料库：对尚无摘要的资料逐篇调用 LLM 生成摘要（Task 3.2.3） |
+| `sources:getSummary` | `{ id: string }` → `{ summary?: {...} }` | 读取单篇资料的 LLM 摘要（摘要/主题词/关键实体） |
 
 ### 2.2 标签（tags）
 

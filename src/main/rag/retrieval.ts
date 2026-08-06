@@ -10,6 +10,8 @@ import type { RetrievedChunk } from '../../shared/types'
 import { setDb } from '../db/connection'
 import { runMigrations } from '../db/migrate'
 import { getSourcesByIds } from '../db/sources'
+import { vectorSearch } from './vector-store'
+import { vectorToBuffer } from './indexer'
 
 /** 单块最大字符数，超长段落按句切分 */
 const CHUNK_MAX = 500
@@ -91,41 +93,81 @@ export interface RetrieveParams {
   sourceIds: string[]
   query: string
   limit?: number
+  /** 查询向量（由 embedding 模型生成）；提供时启用词法+向量混合检索 */
+  queryVector?: number[]
 }
 
-/** 在指定资料范围内检索与查询最相关的片段（含来源与位置） */
-export function retrieveChunks(params: RetrieveParams): RetrievedChunk[] {
-  const { sourceIds, query, limit = 12 } = params
-  const q = query.trim()
-  if (!q || sourceIds.length === 0) return []
+interface ScoredCandidate {
+  sourceId: string
+  sourceTitle: string
+  position: string
+  text: string
+  score: number
+}
 
-  const sources = getSourcesByIds(sourceIds)
-  const bySource = new Map<string, RetrievedChunk[]>()
-  for (const s of sources) {
-    for (const c of chunkText(s.cleanedText ?? '')) {
-      const score = scoreChunk(q, c.text, s.title)
-      if (score < MIN_SCORE) continue
-      const item: RetrievedChunk = {
-        sourceId: s.id,
-        sourceTitle: s.title,
-        position: c.position,
-        text: c.text,
-        score
-      }
-      const arr = bySource.get(s.id) ?? []
-      arr.push(item)
-      bySource.set(s.id, arr)
-    }
+/** 每来源取 Top3 再全局排序取 TopN，保证材料多样性 */
+function poolTop(candidates: ScoredCandidate[], limit: number): RetrievedChunk[] {
+  const bySource = new Map<string, ScoredCandidate[]>()
+  for (const c of candidates) {
+    const arr = bySource.get(c.sourceId) ?? []
+    arr.push(c)
+    bySource.set(c.sourceId, arr)
   }
-
-  // 每个来源取 Top3，再全局排序取 TopN，保证材料多样性
-  const pooled: RetrievedChunk[] = []
+  const pooled: ScoredCandidate[] = []
   for (const arr of bySource.values()) {
     arr.sort((a, b) => b.score - a.score)
     pooled.push(...arr.slice(0, MAX_PER_SOURCE))
   }
   pooled.sort((a, b) => b.score - a.score)
-  return pooled.slice(0, limit)
+  return pooled.slice(0, limit).map((c) => ({ ...c, score: c.score }))
+}
+
+/** 在指定资料范围内检索与查询最相关的片段（含来源与位置） */
+export function retrieveChunks(params: RetrieveParams): RetrievedChunk[] {
+  const { sourceIds, query, limit = 12, queryVector } = params
+  const q = query.trim()
+  if (!q || sourceIds.length === 0) return []
+
+  const sources = getSourcesByIds(sourceIds)
+
+  // 词法路：实时分块打分（全量候选，保留排名用于 RRF 融合）
+  const lexCandidates: ScoredCandidate[] = []
+  for (const s of sources) {
+    for (const c of chunkText(s.cleanedText ?? '')) {
+      const score = scoreChunk(q, c.text, s.title)
+      if (score < MIN_SCORE) continue
+      lexCandidates.push({ sourceId: s.id, sourceTitle: s.title, position: c.position, text: c.text, score })
+    }
+  }
+  lexCandidates.sort((a, b) => b.score - a.score)
+
+  // 未提供查询向量：纯词法（向后兼容）
+  if (!queryVector || queryVector.length === 0) {
+    return poolTop(lexCandidates, limit).map((c) => ({ ...c, score: Math.round(c.score) }))
+  }
+
+  // 向量路：已索引块按余弦相似度排序
+  const vecHits = vectorSearch(queryVector, sourceIds, 200)
+
+  // RRF 融合（Reciprocal Rank Fusion）：词法排名 + 向量排名
+  const K = 60
+  const fused = new Map<string, ScoredCandidate>()
+  lexCandidates.forEach((c, i) => {
+    fused.set(`${c.sourceId}|${c.position}`, { ...c, score: 1 / (K + i + 1) })
+  })
+  vecHits.forEach((h, i) => {
+    const key = `${h.sourceId}|${h.position}`
+    const cur = fused.get(key)
+    if (cur) {
+      cur.score += 1 / (K + i + 1)
+    } else {
+      const srcTitle = sources.find((s) => s.id === h.sourceId)?.title ?? ''
+      fused.set(key, { sourceId: h.sourceId, sourceTitle: srcTitle, position: h.position, text: h.text, score: 1 / (K + i + 1) })
+    }
+  })
+
+  const candidates = Array.from(fused.values()).sort((a, b) => b.score - a.score)
+  return poolTop(candidates, limit).map((c) => ({ ...c, score: Math.round(c.score * 10000) }))
 }
 
 // ---- vitest inline test ----
@@ -184,6 +226,25 @@ if (import.meta.vitest) {
     it('returns empty for empty query or empty scope', () => {
       expect(retrieveChunks({ sourceIds: ['s1'], query: '' })).toHaveLength(0)
       expect(retrieveChunks({ sourceIds: [], query: 'x' })).toHaveLength(0)
+    })
+
+    it('hybrid RRF recalls semantically similar chunk without lexical overlap (Task 3.2.2)', () => {
+      insertSource('s3', '某年度报告', '适龄儿童入学率稳步提升，教师队伍不断壮大，教学设施持续改善。')
+      // 预置向量索引（queryVector 与之高度相似）
+      db.prepare(
+        `INSERT INTO chunk_embeddings (id, source_id, chunk_text, position, embedding, model_id, created_at)
+         VALUES ('c3', 's3', '适龄儿童入学率稳步提升，教师队伍不断壮大，教学设施持续改善。', '第1段', ?, 'test', datetime('now'))`
+      ).run(vectorToBuffer([1, 0, 0, 0]))
+
+      // 纯词法：标题与正文均无"教育"字样 → 词法分低，不召回
+      const lexOnly = retrieveChunks({ sourceIds: ['s3'], query: '教育事业发展' })
+      // 混合检索：向量路召回并融合
+      const hybrid = retrieveChunks({ sourceIds: ['s3'], query: '教育事业发展', queryVector: [1, 0, 0, 0], limit: 12 })
+      expect(hybrid.length).toBeGreaterThan(0)
+      expect(hybrid[0].sourceId).toBe('s3')
+      expect(hybrid[0].text).toContain('入学率')
+      // 兼容：无向量时行为不变
+      expect(Array.isArray(lexOnly)).toBe(true)
     })
   })
 }

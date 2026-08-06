@@ -33,6 +33,8 @@ export const IPC = {
   SOURCES_DELETE: 'sources:delete',
   SOURCES_DELETE_MANY: 'sources:deleteMany',
   SOURCES_UPDATE_TITLE: 'sources:updateTitle',
+  SOURCES_SUMMARIZE_ALL: 'sources:summarizeAll',
+  SOURCES_GET_SUMMARY: 'sources:getSummary',
 
   /* 标签 */
   TAGS_LIST: 'tags:list',
@@ -121,6 +123,20 @@ export type SourceGetFileUrlRes = { url: string }
 export interface SourceUpdateTitleReq {
   id: string
   title: string
+}
+export type SourceSummarizeAllRes = { processed: number; ok: number; failed: number }
+export interface SourceGetSummaryReq {
+  id: string
+}
+export type SourceGetSummaryRes = {
+  summary?: {
+    sourceId: string
+    summary: string
+    keywords: string[]
+    entities: string[]
+    llmModel?: string
+    updatedAt: string
+  }
 }
 
 // -- 标签 --
@@ -280,6 +296,8 @@ export interface IpcMapping {
   [IPC.SOURCES_DELETE]: { _req: SourceDeleteReq; _res: ApiResult<void> }
   [IPC.SOURCES_DELETE_MANY]: { _req: SourceDeleteManyReq; _res: ApiResult<void> }
   [IPC.SOURCES_UPDATE_TITLE]: { _req: SourceUpdateTitleReq; _res: ApiResult<Source> }
+  [IPC.SOURCES_SUMMARIZE_ALL]: { _req: void; _res: ApiResult<SourceSummarizeAllRes> }
+  [IPC.SOURCES_GET_SUMMARY]: { _req: SourceGetSummaryReq; _res: ApiResult<SourceGetSummaryRes> }
   // 标签
   [IPC.TAGS_LIST]: { _req: void; _res: ApiResult<TagListRes> }
   [IPC.TAGS_CREATE]: { _req: TagCreateReq; _res: ApiResult<TagCreateRes> }

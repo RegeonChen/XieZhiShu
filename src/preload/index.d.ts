@@ -27,6 +27,8 @@ export interface AppApi {
   getSourceFileUrl(id: string): Promise<{ ok: boolean; data?: { url: string }; error?: { code: string; message: string } }>
   deleteSource(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   deleteSources(ids: string[]): Promise<{ ok: boolean; error?: { code: string; message: string } }>
+  summarizeAll(): Promise<{ ok: boolean; data?: { processed: number; ok: number; failed: number }; error?: { code: string; message: string } }>
+  getSourceSummary(id: string): Promise<{ ok: boolean; data?: { summary?: unknown }; error?: { code: string; message: string } }>
   listProviders(): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   saveProvider(input: { id?: string; name: string; apiBase: string; model: string; apiKey?: string }): Promise<{ ok: boolean; data?: { provider: unknown }; error?: { code: string; message: string } }>
   deleteProvider(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
