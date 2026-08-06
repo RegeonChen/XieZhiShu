@@ -127,7 +127,7 @@
 
 截至 2026-08-06：
 
-- **Phase 3.2 已完成**（资料预处理与混合检索）：本地向量嵌入（BGE-small-zh + onnxruntime-node + @huggingface/transformers，纯本地）+ 词法/向量 RRF 混合检索 + LLM 摘要索引（"整理资料库"手动触发）。资料导入/更新后自动增量向量化；检索接口与下游生成保持兼容。验证通过：typecheck 零错误、39 项单测、生产构建成功。下一步 Phase 4（版本迭代与管控）。
+- **Phase 3.2 已完成**（资料预处理与混合检索）：本地向量嵌入（BGE-small-zh-v1.5 + @huggingface/transformers，onnxruntime WASM 后端，纯本地）+ 词法/向量 RRF 混合检索 + LLM 摘要索引（"整理资料库"手动触发）。资料导入/更新后自动增量向量化；检索接口与下游生成保持兼容。验证通过：typecheck 零错误、39 项单测、生产构建成功。下一步 Phase 4（版本迭代与管控）。**BGE 模型已下载至 `resources/models/bge-small-zh-v1.5/`，WASM 推理验证通过（512 维向量，Node 与 CJS 双路径）。**
 - **Phase 3.1 已完成**（撰写闭环增强）：撰写任务删除（右键 + 二次确认）与初稿文档编辑器（TipTap 所见即所得，Markdown 存储、自动保存、来源标注保留）全部通过验收。验证通过：typecheck 零错误、30 项单测、生产构建成功。下一步 Phase 4（版本迭代与管控）。
 - **Phase 3 Task 3.2/3.3 已完成**（撰写闭环）：本地 RAG 检索（bigram 词法打分 + 来源位置标注，`writing:retrieve` 预览）→ 初稿生成（提示词工程 + JSON 解析校验 + 失败重试 + 片段来源落库）→ 撰写页 UI（任务列表 / 新建 / 工作台）。验证通过：typecheck 零错误、26 项单测、生产构建成功。下一步 Phase 4（版本迭代与管控）。
 - **Phase 3 Task 3.1 已完成**（LLM Provider 配置）：`llm:*` 四通道（list/save/delete/test）与 `settings:*` 两通道全部落地——Provider 增删改查、safeStorage（Windows DPAPI）加密存密钥、连通性测试（net.fetch 调 /chat/completions，错误映射 LLM 错误码）、"设为当前"默认 Provider；设置页 UI 接入，范本管理独立为导航项。验证通过：typecheck 零错误、13 项单测、生产构建成功。下一步 Task 3.2（本地 RAG 检索）。
@@ -156,7 +156,7 @@
 - 版本管控：以"第 n 稿"为版本单元，人工确认即产生新版本，支持查看、对比、回滚。
 - 技术选型：采用 Electron + React + TypeScript（2026-08-03 确认）。
 - RAG 检索方案（2026-08-05）：采用本地词法检索——段落分块 + 字符 bigram 打分 + 来源位置标注，纯本地、无网络、中文无需分词；不引入向量数据库/嵌入依赖，向量索引留待后续按需扩展。
-- 向量检索落地（2026-08-06，Phase 3.2）：资料预处理与混合检索上线——本地 embedding 模型 **BGE-small-zh-v1.5**（`@huggingface/transformers` + `onnxruntime-node`，纯本地 ONNX 推理）+ 词法/向量 **RRF 混合检索** + 可选 **LLM 摘要索引**（"整理资料库"手动触发）。模型文件放 `<appPath>/resources/models/bge-small-zh-v1.5/`（transformers.js 兼容格式，local_files_only）；**模型/引擎不可用时自动降级为纯词法检索**，不阻塞其它功能。onnxruntime-node 原生绑定与过新的 Node 版本（≥24）不兼容，故 embed 采用动态 import 延迟加载（Electron 内置 Node 20 正常）。
+- 向量检索落地（2026-08-06，Phase 3.2）：资料预处理与混合检索上线——本地 embedding 模型 **BGE-small-zh-v1.5**（`@huggingface/transformers`，纯本地 ONNX 推理）+ 词法/向量 **RRF 混合检索** + 可选 **LLM 摘要索引**（"整理资料库"手动触发）。模型文件放 `<appPath>/resources/models/bge-small-zh-v1.5/`（transformers.js 兼容格式，local_files_only）；**模型/引擎不可用时自动降级为纯词法检索**，不阻塞其它功能。推理后端：本机 Windows System32 存在系统组件 `onnxruntime.dll`（Microsoft ONNX Runtime 1.17.1），其加载优先级高于应用目录，导致 onnxruntime-node 原生绑定无法完成 DLL 初始化；故以 `vendor/onnxruntime-node-stub`（`file:` 依赖，`module.exports = require('onnxruntime-web')`）替换 onnxruntime-node，统一走 **onnxruntime-web WASM 后端**。embed 采用动态 import 延迟加载，仅在首次推理时初始化。
 - 检索范围约束（Phase 3.2 沿用）：向量/摘要索引与检索均严格限定在用户导入的资料（sourceIds 白名单）内，不引入外部信息。
 - 文档编辑器选型（2026-08-05）：**TipTap**（ProseMirror 所见即所得 + Markdown 序列化）；片段内容以 Markdown 文本存储（AI 生成 Markdown 片段、编辑器编辑/保存 Markdown），支持粗体/斜体/标题/下划线/表格/列表，保留逐片段来源标注。
 
@@ -171,6 +171,8 @@
 详细任务和验收标准位于 `PLAN.md`，本文件不重复记录任务级进度。
 
 ## 近期记录
+
+- **2026-08-06（本次修改）**：BGE-small-zh-v1.5 模型落地 + 推理后端切换 WASM——从 hf-mirror（Xenova/bge-small-zh-v1.5）下载模型到 `resources/models/bge-small-zh-v1.5/`（config.json / tokenizer.json / tokenizer_config.json + `onnx/model.onnx` 94.8MB，transformers.js 兼容格式）。推理后端：本机 `C:\Windows\System32\onnxruntime.dll`（Windows 系统组件 ORT 1.17.1）加载优先级高于应用目录，onnxruntime-node 任何版本均 DLL 初始化失败（`API 29 not available, current ORT 1.17.1`）→ 新建 `vendor/onnxruntime-node-stub`（file: 依赖转发 `onnxruntime-web`）+ 安装 `onnxruntime-common`/`onnxruntime-web`。WASM 加载排障要点（Node/Electron 主进程）：① transformers.js 模块初始化会把 ORT 原生 env 的 `wasmPaths` 默认设为 CDN URL，而 `env.backends.onnx` 只是其浅拷贝，必须直接改 `onnxruntime-web` 的 `env.wasm`（用 `createRequire(__filename)` 保证与 stub 同一实例）；② `env.useWasmCache=false` 跳过 transformers.js 预加载（该路径把 mjs 转成 blob: URL，Node `import()` 不支持）；③ factory（`ort-wasm-simd-threaded.mjs`）须用 `file:` URL、wasm 二进制用纯文件系统路径（Emscripten `fs.readFile`）。`rag/embed.ts` 已固化上述配置；indexer 的"模型缺失"测试改为指向不存在的模型目录（确定性）。验证通过：Node ESM 与 CJS（模拟主进程 require）双路径推理输出 512 维向量、typecheck 零错误、39 项单测、生产构建成功。
 
 - **2026-08-06（本次修改）**：Phase 3.2 资料预处理与混合检索完成——Task 3.2.1 向量索引基础设施（Migration 005：`chunk_embeddings` + `source_summaries` + `sources.indexed_at/index_state`；`rag/embed.ts` 本地 embedding（@huggingface/transformers + onnxruntime-node，动态 import 延迟加载、模型缺失/引擎不可用优雅降级）；`rag/indexer.ts` 增量索引流水线，importFiles/addUrl 成功后自动触发）；Task 3.2.2 混合检索（`rag/vector-store.ts` 余弦检索 + `retrieveChunks` 词法/向量 RRF 融合，`queryVector` 可选参数向后兼容，generateDraft/retrieveForTask 接入）；Task 3.2.3 LLM 摘要索引（`rag/summarizer.ts` 摘要/主题词/关键实体生成入库，`sources:summarizeAll`/`sources:getSummary` IPC，资料库"整理资料库"按钮 + SourceViewer 摘要展示）。契约/数据模型文档同步更新。验证通过：typecheck 零错误、39 项单测、生产构建成功。下一步 Phase 4（版本迭代与管控）。
 

@@ -4,11 +4,12 @@
  * 幂等：先删除该资料旧分块再插入；sources.index_state 标记进度。
  */
 import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
 import Database from 'better-sqlite3'
 import { getDb, setDb } from '../db/connection'
 import { runMigrations } from '../db/migrate'
 import { chunkText } from './retrieval'
-import { embedTexts, getEmbedModelId } from './embed'
+import { configureEmbedModel, embedTexts, getEmbedModelId } from './embed'
 
 /** float32 数组 ↔ SQLite BLOB 互转 */
 export function vectorToBuffer(v: number[]): Buffer {
@@ -125,12 +126,14 @@ if (import.meta.vitest) {
     })
 
     it('fails clearly when embed model is missing (keeps index_state failed)', async () => {
+      // 将模型目录指向不存在的路径，确定性模拟"模型缺失"（本机已下载真实模型）
+      configureEmbedModel({ modelPath: join(process.cwd(), 'resources', 'models-not-exist') })
       db.prepare(
         `INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('s-model', 'file', '有内容', '这里是一段需要向量化的正文内容。', 'ready')`
       ).run()
       const res = await indexSource('s-model')
       expect(res.ok).toBe(false)
-      // 引擎绑定不可用或模型文件缺失均应给出明确错误
+      // 引擎后端不可用或模型文件缺失均应给出明确错误
       expect(res.error).toContain('嵌入')
       const row = db.prepare("SELECT index_state FROM sources WHERE id = 's-model'").get() as { index_state: string }
       expect(row.index_state).toBe('failed')
