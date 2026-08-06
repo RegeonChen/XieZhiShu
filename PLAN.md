@@ -145,7 +145,9 @@
 
 ## Phase 3.2: 资料预处理与混合检索（补充开发计划）
 
-> 在 Phase 3 本地词法 RAG（Task 3.2/3.3 已实现）基础上，实现"资料更新后自动预处理 + 任务下达时本地粗筛"的完整索引链路：**本地向量嵌入（BGE-small-zh，onnxruntime-node，纯本地无网络）** + **词法/向量混合检索（RRF 融合）** + **可选的 LLM 摘要索引（"整理资料库"手动触发，可开关）**。检索结果结构与现有 `RetrievedChunk` 契约保持一致，下游初稿生成逻辑无感。
+> 在 Phase 3 本地词法 RAG（Task 3.2/3.3 已实现）基础上，实现"资料更新后自动预处理 + 任务下达时本地粗筛"的完整索引链路：**本地向量嵌入（BGE-small-zh-v1.5，@huggingface/transformers + onnxruntime-web WASM 后端，纯本地无网络）** + **词法/向量混合检索（RRF 融合）** + **可选的 LLM 摘要索引（"整理资料库"手动触发，可开关）**。检索结果结构与现有 `RetrievedChunk` 契约保持一致，下游初稿生成逻辑无感。
+>
+> **推理后端说明（落地现状 2026-08-06）**：本机 Windows System32 存在系统组件 `onnxruntime.dll`（ORT 1.17.1），加载优先级高于应用目录，导致 onnxruntime-node 原生绑定无法完成 DLL 初始化。故通过 `vendor/onnxruntime-node-stub`（`file:` 依赖，转发到 `onnxruntime-web`）统一走 **onnxruntime-web WASM 后端**；`rag/embed.ts` 已固化 WASM 加载配置（`useWasmCache=false` + 直接配置 `ort.env.wasm` 本地文件路径）。
 
 ### Task 3.2.1 - 向量索引基础设施（预处理管道）
 
