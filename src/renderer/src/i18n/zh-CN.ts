@@ -73,7 +73,13 @@ export const zhCN = {
     summarizing: '整理中...',
     summarizeDone: '整理完成：成功 {ok} 篇，失败 {failed} 篇',
     summarizeEmpty: '没有需要整理的资料',
-    summarizeFailed: '整理失败：{message}'
+    summarizeFailed: '整理失败：{message}',
+    workspaceStatus: '工作区：{dir}',
+    workspaceUnset: '未设置工作区（可在设置页指定本地文件夹作为资料库）',
+    reconcileBtn: '同步工作区',
+    reconciling: '同步中...',
+    reconcileDone: '同步完成：新增 {added}、变更 {changed}、移除 {removed}、移动 {moved}、失败 {errors}',
+    reconcileFailed: '同步失败：{message}'
   },
   sourceViewer: {
     summaryTitle: '资料摘要',
@@ -166,6 +172,22 @@ export const zhCN = {
         apiKeyPlaceholder: '请输入 API 密钥',
         apiKeyHint: '已设置密钥，留空保持不变'
       }
+    },
+    workspace: {
+      title: '工作区资料库',
+      hint: '指定一个本地文件夹作为资料库：文件夹内（含多级子目录）的支持文件会被自动读取、解析与理解并同步到软件；软件内对资料的删除/改名也会同步回该文件夹。',
+      current: '当前工作区',
+      notSet: '尚未设置工作区',
+      chooseBtn: '选择文件夹',
+      clearBtn: '清除工作区',
+      migrateBtn: '迁移旧资料到工作区',
+      migrating: '迁移中...',
+      migrateHint: '将此前通过「导入文件」存入的旧资料一次性移动到工作区。',
+      migrateDone: '迁移完成：成功 {migrated} 项，失败 {failed} 项，跳过 {skipped} 项',
+      migrateFailed: '迁移失败：{message}',
+      saving: '保存中...',
+      saved: '工作区已更新',
+      failed: '操作失败：{message}'
     }
   },
   writingTasks: {

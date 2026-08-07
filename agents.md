@@ -127,6 +127,7 @@
 
 截至 2026-08-06：
 
+- **Phase 2.2 已完成**（工作区资料库，全面重构）：用户指定本地文件夹即资料库——递归扫描（含多级子目录）→ sha256 指纹对账（`sources.content_hash/file_mtime/file_size/workspace`，Migration 006）→ chokidar 实时监听（500ms 防抖 + 5 分钟兜底对账）自动解析/向量化/失效摘要；反向同步：软件内删除 → `shell.trashItem` 回收站、改标题 → 重命名工作区原文件（重名加后缀）；存量导入资料可经设置页一次性迁移到工作区；内嵌文件服务改按资料 id 提供（白名单化）。验证通过：typecheck 零错误、50 项单测、生产构建成功。**注意：importFiles 转存逻辑退役，以工作区为准。**
 - **Phase 3.2 已完成**（资料预处理与混合检索）：本地向量嵌入（BGE-small-zh-v1.5 + @huggingface/transformers，onnxruntime WASM 后端，纯本地）+ 词法/向量 RRF 混合检索 + LLM 摘要索引（"整理资料库"手动触发）。资料导入/更新后自动增量向量化；检索接口与下游生成保持兼容。验证通过：typecheck 零错误、39 项单测、生产构建成功。下一步 Phase 4（版本迭代与管控）。**BGE 模型已下载至 `resources/models/bge-small-zh-v1.5/`，WASM 推理验证通过（512 维向量，Node 与 CJS 双路径）。**
 - **Phase 3.1 已完成**（撰写闭环增强）：撰写任务删除（右键 + 二次确认）与初稿文档编辑器（TipTap 所见即所得，Markdown 存储、自动保存、来源标注保留）全部通过验收。验证通过：typecheck 零错误、30 项单测、生产构建成功。下一步 Phase 4（版本迭代与管控）。
 - **Phase 3 Task 3.2/3.3 已完成**（撰写闭环）：本地 RAG 检索（bigram 词法打分 + 来源位置标注，`writing:retrieve` 预览）→ 初稿生成（提示词工程 + JSON 解析校验 + 失败重试 + 片段来源落库）→ 撰写页 UI（任务列表 / 新建 / 工作台）。验证通过：typecheck 零错误、26 项单测、生产构建成功。下一步 Phase 4（版本迭代与管控）。
@@ -158,6 +159,7 @@
 - RAG 检索方案（2026-08-05）：采用本地词法检索——段落分块 + 字符 bigram 打分 + 来源位置标注，纯本地、无网络、中文无需分词；不引入向量数据库/嵌入依赖，向量索引留待后续按需扩展。
 - 向量检索落地（2026-08-06，Phase 3.2）：资料预处理与混合检索上线——本地 embedding 模型 **BGE-small-zh-v1.5**（`@huggingface/transformers`，纯本地 ONNX 推理）+ 词法/向量 **RRF 混合检索** + 可选 **LLM 摘要索引**（"整理资料库"手动触发）。模型文件放 `<appPath>/resources/models/bge-small-zh-v1.5/`（transformers.js 兼容格式，local_files_only）；**模型/引擎不可用时自动降级为纯词法检索**，不阻塞其它功能。推理后端：本机 Windows System32 存在系统组件 `onnxruntime.dll`（Microsoft ONNX Runtime 1.17.1），其加载优先级高于应用目录，导致 onnxruntime-node 原生绑定无法完成 DLL 初始化；故以 `vendor/onnxruntime-node-stub`（`file:` 依赖，`module.exports = require('onnxruntime-web')`）替换 onnxruntime-node，统一走 **onnxruntime-web WASM 后端**。embed 采用动态 import 延迟加载，仅在首次推理时初始化。
 - 检索范围约束（Phase 3.2 沿用）：向量/摘要索引与检索均严格限定在用户导入的资料（sourceIds 白名单）内，不引入外部信息。
+- 工作区资料库（2026-08-06，Phase 2.2）：用户指定本地文件夹即资料库、双向实时同步（决策：全面替换导入转存机制）。文件系统 ↔ 数据库以 `content_hash`（sha256）+ `file_mtime/size` 为映射锚点（移动/重命名不丢 id/标签/摘要）；监听用 chokidar（Windows 原生 fs.watch 递归不可靠）+ 500ms 防抖 + 5 分钟兜底对账；反向同步：删除 → 系统回收站（`shell.trashItem`，可反悔）、改标题 → 重命名原文件（重名加后缀）；标签/摘要等元数据仅存应用数据库，工作区文件夹保持纯净；对账只做"文件系统 → 数据库"方向、不写文件系统，天然无自触发环路。内嵌文件服务改按资料 id 白名单化提供。
 - 文档编辑器选型（2026-08-05）：**TipTap**（ProseMirror 所见即所得 + Markdown 序列化）；片段内容以 Markdown 文本存储（AI 生成 Markdown 片段、编辑器编辑/保存 Markdown），支持粗体/斜体/标题/下划线/表格/列表，保留逐片段来源标注。
 
 ## 路线图
@@ -171,6 +173,8 @@
 详细任务和验收标准位于 `PLAN.md`，本文件不重复记录任务级进度。
 
 ## 近期记录
+
+- **2026-08-06（本次修改）**：Phase 2.2 工作区资料库完成（全面重构）——Migration 006（`sources` 增 `content_hash`/`file_mtime`/`file_size`/`workspace`，settings 增 `workspace_dir`）；`src/main/workspace/` 新模块：`fingerprint.ts`（sha256 指纹）、`scanner.ts`（递归扫描 + 新增/变更/消失差异，路径正斜杠归一化）、`reconcile.ts`（对账：新增解析入库 + 内容哈希识别移动保留 id、变更重解析重索引、消失仅统计）、`watcher.ts`（chokidar 监听 + 500ms 防抖 + 5 分钟兜底对账）、`sync.ts`（回收站删除 / 改名同步）、`migrate.ts`（存量导入迁移到工作区）；settings `workspaceDir` + 设置页工作区区块（选择/清除/迁移）+ 资料库页工作区状态与"同步工作区"按钮；删除/改名 handler 同步回文件系统；内嵌文件服务改按资料 id 提供（白名单化防路径穿越）；`sources:updateTitle` 通道补齐实现。验证通过：typecheck 零错误、50 项单测（新增 reconcile 6、watcher 1、sync 4）、生产构建成功。
 
 - **2026-08-06（本次修改）**：BGE-small-zh-v1.5 模型落地 + 推理后端切换 WASM——从 hf-mirror（Xenova/bge-small-zh-v1.5）下载模型到 `resources/models/bge-small-zh-v1.5/`（config.json / tokenizer.json / tokenizer_config.json + `onnx/model.onnx` 94.8MB，transformers.js 兼容格式）。推理后端：本机 `C:\Windows\System32\onnxruntime.dll`（Windows 系统组件 ORT 1.17.1）加载优先级高于应用目录，onnxruntime-node 任何版本均 DLL 初始化失败（`API 29 not available, current ORT 1.17.1`）→ 新建 `vendor/onnxruntime-node-stub`（file: 依赖转发 `onnxruntime-web`）+ 安装 `onnxruntime-common`/`onnxruntime-web`。WASM 加载排障要点（Node/Electron 主进程）：① transformers.js 模块初始化会把 ORT 原生 env 的 `wasmPaths` 默认设为 CDN URL，而 `env.backends.onnx` 只是其浅拷贝，必须直接改 `onnxruntime-web` 的 `env.wasm`（用 `createRequire(__filename)` 保证与 stub 同一实例）；② `env.useWasmCache=false` 跳过 transformers.js 预加载（该路径把 mjs 转成 blob: URL，Node `import()` 不支持）；③ factory（`ort-wasm-simd-threaded.mjs`）须用 `file:` URL、wasm 二进制用纯文件系统路径（Emscripten `fs.readFile`）。`rag/embed.ts` 已固化上述配置；indexer 的"模型缺失"测试改为指向不存在的模型目录（确定性）。验证通过：Node ESM 与 CJS（模拟主进程 require）双路径推理输出 512 维向量、typecheck 零错误、39 项单测、生产构建成功。
 

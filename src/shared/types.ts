@@ -7,12 +7,17 @@ export interface Source {
   id: string
   kind: 'file' | 'url'
   title: string
-  filePath?: string // kind=file，dataDir 相对路径
+  filePath?: string // kind=file，dataDir 相对路径（workspace 资料为工作区相对路径）
   url?: string // kind=url
   urlSnapshotAt?: string // 抓取时间 ISO
   cleanedText: string // 清洗后正文
   status: 'pending' | 'processing' | 'ready' | 'failed'
   errorCode?: string
+  // Phase 2.2 工作区指纹（文件系统 ↔ 数据库映射锚点）
+  contentHash?: string // 文件内容 sha256
+  fileMtime?: string // 文件修改时间（ISO）
+  fileSize?: number // 文件字节数
+  workspace?: boolean // true=直接引用用户工作区文件（不转存副本）
   createdAt: string
   updatedAt: string
 }
@@ -149,6 +154,8 @@ export interface LlmProviderConfig {
 export interface AppSettings {
   dataDir?: string
   currentLlmProviderId?: string
+  /** Phase 2.2 工作区根目录（用户指定；资料直接引用该文件夹内文件） */
+  workspaceDir?: string
 }
 
 // ============================================================

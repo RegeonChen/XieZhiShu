@@ -81,6 +81,11 @@ export const IPC = {
   SETTINGS_GET: 'settings:get',
   SETTINGS_UPDATE: 'settings:update',
 
+  /* 工作区（Phase 2.2） */
+  WORKSPACE_STATUS: 'workspace:status',
+  WORKSPACE_RECONCILE: 'workspace:reconcile',
+  WORKSPACE_MIGRATE: 'workspace:migrate',
+
   /* 应用元数据（Task 1.1 已实现） */
   APP_GET_INFO: 'app:getInfo',
 
@@ -274,6 +279,28 @@ export type LlmSaveProviderRes = { provider: LlmProviderConfig }
 // -- 设置 --
 export type SettingsUpdateReq = { patch: Partial<AppSettings> }
 
+// -- 工作区（Phase 2.2）--
+export interface WorkspaceStatusRes {
+  workspaceDir?: string // 未配置工作区时为 undefined
+  workspaceSources: number // 工作区来源的资料数
+  legacySources: number // 传统导入（尚未迁移到工作区）的文件资料数
+  totalSources: number // 资料总数
+}
+export type WorkspaceReconcileRes = {
+  workspaceDir: string | null
+  added: number
+  changed: number
+  removed: number
+  moved: number
+  errors: number
+  total: number
+}
+export type WorkspaceMigrateRes = {
+  migrated: number
+  failed: number
+  skipped: number
+}
+
 // -- 应用元数据 --
 export type AppInfoRes = { version: string; platform: string }
 
@@ -337,4 +364,8 @@ export interface IpcMapping {
   // 设置
   [IPC.SETTINGS_GET]: { _req: void; _res: ApiResult<AppSettings> }
   [IPC.SETTINGS_UPDATE]: { _req: SettingsUpdateReq; _res: ApiResult<AppSettings> }
+  // 工作区
+  [IPC.WORKSPACE_STATUS]: { _req: void; _res: ApiResult<WorkspaceStatusRes> }
+  [IPC.WORKSPACE_RECONCILE]: { _req: void; _res: ApiResult<WorkspaceReconcileRes> }
+  [IPC.WORKSPACE_MIGRATE]: { _req: void; _res: ApiResult<WorkspaceMigrateRes> }
 }

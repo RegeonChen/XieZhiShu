@@ -12,6 +12,7 @@ interface ProviderItem {
 
 interface AppSettingsShape {
   currentLlmProviderId?: string
+  workspaceDir?: string
 }
 
 interface ProviderForm {
@@ -40,11 +41,22 @@ function Settings() {
   const [pendingDelete, setPendingDelete] = useState<ProviderItem | null>(null)
   const [deleting, setDeleting] = useState(false)
 
+  // Phase 2.2 工作区
+  const [workspaceDir, setWorkspaceDir] = useState<string | null>(null)
+  const [workspaceSaving, setWorkspaceSaving] = useState(false)
+  const [workspaceMsg, setWorkspaceMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const [legacySources, setLegacySources] = useState(0)
+  const [migrating, setMigrating] = useState(false)
+
   const load = useCallback(async () => {
     setLoading(true)
     setLoadErr(null)
     try {
-      const [pRes, sRes] = await Promise.all([window.api.listProviders(), window.api.getSettings()])
+      const [pRes, sRes, wsRes] = await Promise.all([
+        window.api.listProviders(),
+        window.api.getSettings(),
+        window.api.getWorkspaceStatus()
+      ])
       if (pRes.ok && pRes.data) {
         setProviders(pRes.data.items as ProviderItem[])
       } else {
@@ -52,6 +64,10 @@ function Settings() {
       }
       if (sRes.ok && sRes.data) {
         setCurrentId((sRes.data as AppSettingsShape).currentLlmProviderId ?? null)
+        setWorkspaceDir((sRes.data as AppSettingsShape).workspaceDir ?? null)
+      }
+      if (wsRes.ok && wsRes.data) {
+        setLegacySources((wsRes.data as { legacySources?: number }).legacySources ?? 0)
       }
     } catch {
       setLoadErr(zhCN.settingsPage.provider.loadFailed.replace('{message}', ''))
@@ -151,11 +167,105 @@ function Settings() {
     setForm((prev) => ({ ...prev, [field]: value }))
   }
 
+  // ---- Phase 2.2 工作区操作 ----
+  const applyWorkspace = async (dir: string | null) => {
+    setWorkspaceSaving(true)
+    setWorkspaceMsg(null)
+    try {
+      const res = await window.api.updateSettings({ workspaceDir: dir ?? undefined })
+      if (res.ok && res.data) {
+        setWorkspaceDir((res.data as AppSettingsShape).workspaceDir ?? null)
+        setWorkspaceMsg({ ok: true, text: zhCN.settingsPage.workspace.saved })
+      } else {
+        setWorkspaceMsg({ ok: false, text: zhCN.settingsPage.workspace.failed.replace('{message}', res.error?.message ?? '') })
+      }
+    } catch {
+      setWorkspaceMsg({ ok: false, text: zhCN.settingsPage.workspace.failed.replace('{message}', '') })
+    } finally {
+      setWorkspaceSaving(false)
+    }
+  }
+
+  const handleChooseWorkspace = async () => {
+    const res = await window.api.openDirectoryDialog()
+    if (res.ok && res.data?.path) {
+      await applyWorkspace(res.data.path)
+    }
+  }
+
+  const handleClearWorkspace = () => {
+    void applyWorkspace(null)
+  }
+
+  // 一次性迁移存量导入资料到工作区
+  const handleMigrate = async () => {
+    setMigrating(true)
+    setWorkspaceMsg(null)
+    try {
+      const res = await window.api.migrateLegacyWorkspace()
+      if (res.ok && res.data) {
+        const r = res.data as { migrated: number; failed: number; skipped: number }
+        setWorkspaceMsg({
+          ok: true,
+          text: zhCN.settingsPage.workspace.migrateDone
+            .replace('{migrated}', String(r.migrated))
+            .replace('{failed}', String(r.failed))
+            .replace('{skipped}', String(r.skipped))
+        })
+        setLegacySources(0)
+      } else {
+        setWorkspaceMsg({ ok: false, text: zhCN.settingsPage.workspace.migrateFailed.replace('{message}', res.error?.message ?? '') })
+      }
+    } catch {
+      setWorkspaceMsg({ ok: false, text: zhCN.settingsPage.workspace.migrateFailed.replace('{message}', '') })
+    } finally {
+      setMigrating(false)
+    }
+  }
+
   const isEditingExisting = editing !== null && editing !== 'new'
 
   return (
     <div className="settings">
       <h3 className="settings__title">{zhCN.settingsPage.title}</h3>
+
+      {/* Phase 2.2 工作区资料库 */}
+      <section className="settings__section">
+        <div className="settings__section-header">
+          <h4 className="settings__section-title">{zhCN.settingsPage.workspace.title}</h4>
+          {!workspaceSaving ? (
+            <div className="settings__workspace-actions">
+              {workspaceDir ? (
+                <>
+                  <button type="button" className="source-list__btn" onClick={handleClearWorkspace}>
+                    {zhCN.settingsPage.workspace.clearBtn}
+                  </button>
+                  {legacySources > 0 ? (
+                    <button type="button" className="source-list__btn" onClick={handleMigrate} disabled={migrating}>
+                      {migrating ? zhCN.settingsPage.workspace.migrating : zhCN.settingsPage.workspace.migrateBtn}
+                    </button>
+                  ) : null}
+                </>
+              ) : null}
+              <button type="button" className="source-list__btn source-list__btn--primary" onClick={handleChooseWorkspace}>
+                {zhCN.settingsPage.workspace.chooseBtn}
+              </button>
+            </div>
+          ) : (
+            <span className="settings__hint">{zhCN.settingsPage.workspace.saving}</span>
+          )}
+        </div>
+        <p className="settings__hint">{zhCN.settingsPage.workspace.hint}</p>
+        {legacySources > 0 ? <p className="settings__hint">{zhCN.settingsPage.workspace.migrateHint}</p> : null}
+        <p className="settings__workspace-path">
+          <span className="settings__field-label">{zhCN.settingsPage.workspace.current}：</span>
+          <code>{workspaceDir ?? zhCN.settingsPage.workspace.notSet}</code>
+        </p>
+        {workspaceMsg ? (
+          <p className={`settings__hint ${workspaceMsg.ok ? 'settings__hint--ok' : 'settings__hint--err'}`}>{workspaceMsg.text}</p>
+        ) : null}
+      </section>
+
       <section className="settings__section">
         <div className="settings__section-header">
           <h4 className="settings__section-title">{zhCN.settingsPage.provider.title}</h4>

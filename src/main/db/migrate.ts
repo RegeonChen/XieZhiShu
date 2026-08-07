@@ -202,6 +202,18 @@ CREATE TABLE IF NOT EXISTS source_summaries (
 ALTER TABLE sources ADD COLUMN indexed_at TEXT;
 ALTER TABLE sources ADD COLUMN index_state TEXT NOT NULL DEFAULT 'pending' CHECK (index_state IN ('pending', 'indexing', 'ready', 'failed'));
 `
+  },
+  {
+    // 工作区资料库（Phase 2.2 Task 2.2.1）：文件指纹映射 + 工作区标记。
+    // content_hash(file sha256) / file_mtime / file_size 作为"文件系统 ↔ 数据库"映射锚点，
+    // workspace=1 表示该资料直接引用用户工作区文件（不再转存副本）。
+    version: 6,
+    sql: `
+ALTER TABLE sources ADD COLUMN content_hash TEXT;
+ALTER TABLE sources ADD COLUMN file_mtime TEXT;
+ALTER TABLE sources ADD COLUMN file_size INTEGER;
+ALTER TABLE sources ADD COLUMN workspace INTEGER NOT NULL DEFAULT 0;
+`
   }
 ]
 

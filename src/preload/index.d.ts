@@ -10,6 +10,7 @@ export interface AppApi {
   listSources(params?: { tagIds?: string[]; search?: string }): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   importFiles(paths: string[]): Promise<{ ok: boolean; data?: { results: ImportResult[] }; error?: { code: string; message: string } }>
   openFileDialog(): Promise<{ ok: boolean; data?: { paths: string[] }; error?: { code: string; message: string } }>
+  openDirectoryDialog(): Promise<{ ok: boolean; data?: { path: string | null }; error?: { code: string; message: string } }>
   listTags(): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   createTag(name: string): Promise<{ ok: boolean; data?: { tag: unknown }; error?: { code: string; message: string } }>
   updateTag(id: string, name?: string): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
@@ -27,6 +28,7 @@ export interface AppApi {
   getSourceFileUrl(id: string): Promise<{ ok: boolean; data?: { url: string }; error?: { code: string; message: string } }>
   deleteSource(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   deleteSources(ids: string[]): Promise<{ ok: boolean; error?: { code: string; message: string } }>
+  updateSourceTitle(id: string, title: string): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   summarizeAll(): Promise<{ ok: boolean; data?: { processed: number; ok: number; failed: number }; error?: { code: string; message: string } }>
   getSourceSummary(id: string): Promise<{ ok: boolean; data?: { summary?: unknown }; error?: { code: string; message: string } }>
   listProviders(): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
@@ -34,7 +36,10 @@ export interface AppApi {
   deleteProvider(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   testProvider(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   getSettings(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
-  updateSettings(patch: { currentLlmProviderId?: string; dataDir?: string }): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
+  updateSettings(patch: { currentLlmProviderId?: string; dataDir?: string; workspaceDir?: string }): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
+  getWorkspaceStatus(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
+  reconcileWorkspace(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
+  migrateLegacyWorkspace(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   createTask(input: { title: string; scope: { sourceIds: string[] } | { tagIds: string[] }; templateBookId?: string }): Promise<{ ok: boolean; data?: { task: unknown }; error?: { code: string; message: string } }>
   listTasks(): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   deleteTask(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>

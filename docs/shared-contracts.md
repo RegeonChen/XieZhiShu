@@ -13,12 +13,16 @@ interface Source {
   id: string;
   kind: 'file' | 'url';
   title: string;
-  filePath?: string;        // kind=file，dataDir 相对路径
+  filePath?: string;        // kind=file，dataDir 相对路径（workspace 资料为工作区相对路径）
   url?: string;             // kind=url
   urlSnapshotAt?: string;   // 抓取时间 ISO
   cleanedText: string;      // 清洗后正文
   status: 'pending' | 'processing' | 'ready' | 'failed';
   errorCode?: string;
+  contentHash?: string;     // 文件内容 sha256（Phase 2.2 指纹锚点）
+  fileMtime?: string;       // 文件修改时间 ISO
+  fileSize?: number;        // 文件字节数
+  workspace?: boolean;      // true=直接引用用户工作区文件（不转存副本）
   createdAt: string;
   updatedAt: string;
 }
@@ -111,6 +115,7 @@ interface LlmProviderConfig {
 interface AppSettings {
   dataDir?: string;
   currentLlmProviderId?: string;
+  workspaceDir?: string;    // Phase 2.2 工作区根目录（用户指定，资料直接引用该文件夹内文件）
   // 后续可按需扩展
 }
 
@@ -191,6 +196,17 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `llm:testConnection` | `{ id }` → `{ ok: true }` | 连通性测试 |
 | `settings:get` | `{}` → `{ settings: AppSettings }` | |
 | `settings:update` | `{ patch: Partial<AppSettings> }` → `{ settings: AppSettings }` | |
+
+### 2.7 工作区（workspace，Phase 2.2）
+
+| 通道 | 请求 → 响应 data | 说明 |
+|---|---|---|
+| `app:openDirectoryDialog` | `{}` → `{ path: string \| null }` | 系统目录选择对话框 |
+| `workspace:status` | `{}` → `{ workspaceDir?, workspaceSources, legacySources, totalSources }` | 工作区状态与资料统计 |
+| `workspace:reconcile` | `{}` → `{ workspaceDir, added, changed, removed, moved, errors, total }` | 全量对账（扫描 + 解析 + 索引） |
+| `workspace:migrate` | `{}` → `{ migrated, failed, skipped }` | 一次性迁移存量导入资料到工作区 |
+| `sources:updateTitle` | `{ id, title }` → `{ source: Source }` | 修改标题（工作区文件同步重命名） |
+| `sources:delete` / `sources:deleteMany` | 见 2.1 | 工作区文件先移入系统回收站，再删库 |
 
 ## 3. 错误返回格式
 

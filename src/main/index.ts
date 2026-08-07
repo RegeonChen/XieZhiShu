@@ -16,7 +16,7 @@ import {
 } from '../shared/ipc'
 import type { ApiResult, Source, Tag, LlmProviderConfig, AppSettings, WritingTask, Draft, RetrievedChunk } from '../shared/types'
 import { getDb } from './db/connection'
-import { listSources, getSourceById, deleteSource, deleteSources } from './db/sources'
+import { listSources, getSourceById, deleteSource, deleteSources, updateSourceTitle, updateSourceFingerprint } from './db/sources'
 import { listTags, createTag, updateTag, deleteTag, addTagToSource, removeTagFromSource, getTagsBySource, batchAddTags, searchTags, getSourceIdsByTag } from './db/tags'
 import { importFiles, importUrl } from './import'
 import { parseTemplate as parseTemplateFile } from './import/template-parser'
@@ -33,16 +33,20 @@ import { generateDraft, retrieveForTask } from './writing/generate'
 import { configureEmbedModel } from './rag/embed'
 import { indexSource } from './rag/indexer'
 import { summarizeAllPending, getSourceSummary } from './rag/summarizer'
+import { getWorkspaceDir, reconcileWorkspace } from './workspace/reconcile'
+import { startWorkspaceWatcher, restartWorkspaceWatcher, stopWorkspaceWatcher } from './workspace/watcher'
+import { trashSourceFile, renameSourceFile, resolveSourceFilePath } from './workspace/sync'
+import { migrateLegacyToWorkspace } from './workspace/migrate'
+import type { WorkspaceReconcileRes, WorkspaceStatusRes, WorkspaceMigrateRes } from '../shared/ipc'
 
 const APP_PROTOCOL_WHITELIST = /^https?:\/\//i
 
-// 内嵌 HTTP 文件服务：仅监听 127.0.0.1 随机端口，只提供 imports 目录下的文件
+// 内嵌 HTTP 文件服务：仅监听 127.0.0.1 随机端口，按资料 id 提供本地原文件
 let fileServerUrl: string | null = null
 let fileServer: ReturnType<typeof createServer> | null = null
 
 function startFileServer(): void {
   if (fileServer) return
-  const importsDir = join(app.getPath('userData'), 'imports')
 
   fileServer = createServer((req, res) => {
     // CORS：渲染进程（dev 的 http://localhost:5173 或生产 file://）跨源访问本地文件服务
@@ -59,22 +63,23 @@ function startFileServer(): void {
 
     try {
       const pathname = decodeURIComponent(new URL(req.url ?? '/', 'http://127.0.0.1').pathname).replace(/^\//, '')
-      const filePath = join(importsDir, pathname)
-
-      // 路径穿越防护：确保仍在 imports 目录内
-      if (!filePath.startsWith(importsDir)) {
-        res.statusCode = 403
+      // 仅允许按资料 id 取文件（Phase 2.2 起统一服务工作区与旧 imports 文件，白名单化防路径穿越）
+      const match = pathname.match(/^source\/([^/]+)$/)
+      if (!match) {
+        res.statusCode = 404
         res.end()
         return
       }
-      if (!existsSync(filePath)) {
+      const source = getSourceById(match[1])
+      const filePath = source ? resolveSourceFilePath(source) : null
+      if (!filePath || !existsSync(filePath)) {
         res.statusCode = 404
         res.end()
         return
       }
 
       const data = readFileSync(filePath)
-      const ext = pathname.split('.').pop()?.toLowerCase()
+      const ext = filePath.split('.').pop()?.toLowerCase()
       const mimeMap: Record<string, string> = {
         pdf: 'application/pdf',
         png: 'image/png',
@@ -308,6 +313,18 @@ ipcMain.handle('app:openFileDialog', async (): Promise<ApiResult<{ paths: string
   return { ok: true, data: { paths: result.filePaths } }
 })
 
+// 目录选择对话框（Phase 2.2：选择工作区文件夹）
+ipcMain.handle('app:openDirectoryDialog', async (): Promise<ApiResult<{ path: string | null }>> => {
+  const win = BrowserWindow.getFocusedWindow()
+  if (!win) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'No focused window' } }
+  }
+  const result = await dialog.showOpenDialog(win, {
+    properties: ['openDirectory', 'createDirectory']
+  })
+  return { ok: true, data: { path: result.filePaths[0] ?? null } }
+})
+
 // Task 1.3 端到端验证：sources:list 与 tags:list
 ipcMain.handle(IPC.SOURCES_LIST, (_event, params?: { tagIds?: string[]; search?: string }): ApiResult<{ items: Source[] }> => {
   try {
@@ -343,9 +360,8 @@ ipcMain.handle(IPC.SOURCES_RENDER_HTML, async (_event, params: { id: string }): 
       return { ok: false, error: { code: 'PARSE_UNSUPPORTED', message: '仅支持 .docx 格式渲染' } }
     }
 
-    const importDir = join(app.getPath('userData'), 'imports')
-    const filePath = join(importDir, source.filePath)
-    if (!existsSync(filePath)) {
+    const filePath = resolveSourceFilePath(source)
+    if (!filePath || !existsSync(filePath)) {
       return { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '原始文件不存在，可能已被移动或删除' } }
     }
 
@@ -367,16 +383,21 @@ ipcMain.handle(IPC.SOURCES_GET_FILE_URL, (_event, params: { id: string }): ApiRe
       return { ok: false, error: { code: 'INVALID_PARAM', message: '仅支持文件类型资料' } }
     }
     if (!fileServerUrl) return { ok: false, error: { code: 'INTERNAL_ERROR', message: '文件服务未就绪' } }
-    const url = `${fileServerUrl}/${encodeURIComponent(source.filePath)}`
+    const url = `${fileServerUrl}/source/${encodeURIComponent(source.id)}`
     return { ok: true, data: { url } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
 })
 
-// 删除单个资料（级联清理标签关联与 FTS 索引）
-ipcMain.handle(IPC.SOURCES_DELETE, (_event, params: { id: string }): ApiResult<void> => {
+// 删除单个资料（Phase 2.2：工作区文件先移入回收站，再删库）
+ipcMain.handle(IPC.SOURCES_DELETE, async (_event, params: { id: string }): Promise<ApiResult<void>> => {
   try {
+    const source = getSourceById(params.id)
+    if (!source) return { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '资料不存在' } }
+    if (source.workspace) {
+      await trashSourceFile(source) // 移入系统回收站；失败会抛错中止，保持库/文件一致
+    }
     deleteSource(params.id)
     return { ok: true, data: undefined }
   } catch (err) {
@@ -384,14 +405,41 @@ ipcMain.handle(IPC.SOURCES_DELETE, (_event, params: { id: string }): ApiResult<v
   }
 })
 
-// 批量删除资料（事务包裹）
-ipcMain.handle(IPC.SOURCES_DELETE_MANY, (_event, params: { ids: string[] }): ApiResult<void> => {
+// 批量删除资料（Phase 2.2：逐个先移入回收站，再统一删库）
+ipcMain.handle(IPC.SOURCES_DELETE_MANY, async (_event, params: { ids: string[] }): Promise<ApiResult<void>> => {
   try {
     if (!Array.isArray(params.ids) || params.ids.length === 0) {
       return { ok: false, error: { code: 'INVALID_PARAM', message: '未指定要删除的资料' } }
     }
+    for (const id of params.ids) {
+      const source = getSourceById(id)
+      if (source?.workspace) await trashSourceFile(source)
+    }
     deleteSources(params.ids)
     return { ok: true, data: undefined }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 修改资料标题（Phase 2.2：工作区文件同步重命名，保留扩展名；重名自动加后缀）
+ipcMain.handle(IPC.SOURCES_UPDATE_TITLE, (_event, params: { id: string; title: string }): ApiResult<Source> => {
+  try {
+    const source = getSourceById(params.id)
+    if (!source) return { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '资料不存在' } }
+    const title = (params.title ?? '').trim()
+    if (!title) return { ok: false, error: { code: 'INVALID_PARAM', message: '标题不能为空' } }
+
+    if (source.workspace && source.kind === 'file' && source.filePath) {
+      const newRel = renameSourceFile(source, title)
+      if (newRel) {
+        // 重命名文件成功后更新 DB（file_path 同步）
+        const updated = updateSourceFingerprint(source.id, { title, filePath: newRel })
+        return updated ? { ok: true, data: updated } : { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '资料不存在' } }
+      }
+    }
+    const updated = updateSourceTitle(source.id, title)
+    return updated ? { ok: true, data: updated } : { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '资料不存在' } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
@@ -509,9 +557,56 @@ ipcMain.handle(IPC.SETTINGS_GET, (): ApiResult<AppSettings> => {
 
 ipcMain.handle(IPC.SETTINGS_UPDATE, (_event, params: { patch: Partial<AppSettings> }): ApiResult<AppSettings> => {
   try {
-    return { ok: true, data: updateSettings(params.patch) }
+    const settings = updateSettings(params.patch)
+    // 工作区路径变化时重启监听（并触发一次对账）
+    if ('workspaceDir' in params.patch) {
+      restartWorkspaceWatcher()
+      if (getWorkspaceDir()) {
+        void reconcileWorkspace().catch((err) => {
+          console.error('workspace reconcile failed after settings change:', err)
+        })
+      }
+    }
+    return { ok: true, data: settings }
   } catch (err) {
     return { ok: false, error: { code: 'INVALID_PARAM', message: String(err) } }
+  }
+})
+
+// ===== Phase 2.2: 工作区 =====
+
+ipcMain.handle(IPC.WORKSPACE_STATUS, (): ApiResult<WorkspaceStatusRes> => {
+  try {
+    const workspaceDir = getWorkspaceDir()
+    const all = listSources()
+    const workspaceSources = all.filter((s) => s.workspace).length
+    const legacySources = all.filter((s) => s.kind === 'file' && !s.workspace).length
+    return {
+      ok: true,
+      data: { workspaceDir: workspaceDir ?? undefined, workspaceSources, legacySources, totalSources: all.length }
+    }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 手动触发工作区全量对账（扫描 + 解析 + 索引）
+ipcMain.handle(IPC.WORKSPACE_RECONCILE, async (): Promise<ApiResult<WorkspaceReconcileRes>> => {
+  try {
+    const result = await reconcileWorkspace()
+    return { ok: true, data: result }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 一次性迁移存量导入资料到工作区（Task 2.2.3）
+ipcMain.handle(IPC.WORKSPACE_MIGRATE, async (): Promise<ApiResult<WorkspaceMigrateRes>> => {
+  try {
+    const result = await migrateLegacyToWorkspace()
+    return { ok: true, data: result }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
 })
 
@@ -602,6 +697,14 @@ app.whenReady().then(() => {
   // 启动内嵌文件服务（提供 PDF/图片等本地文件）
   startFileServer()
 
+  // 已配置工作区时，启动即触发一次全量对账（扫描 + 解析 + 索引）并启动实时监听
+  if (getWorkspaceDir()) {
+    void reconcileWorkspace().catch((err) => {
+      console.error('workspace reconcile failed on startup:', err)
+    })
+    startWorkspaceWatcher()
+  }
+
   createWindow()
 
   app.on('activate', () => {
@@ -616,6 +719,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('will-quit', () => {
+  stopWorkspaceWatcher()
   fileServer?.close()
   fileServer = null
 })

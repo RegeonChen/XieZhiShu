@@ -22,6 +22,10 @@ const api = {
   openFileDialog(): Promise<ApiResult<{ paths: string[] }>> {
     return ipcRenderer.invoke('app:openFileDialog')
   },
+  /** 打开系统目录选择对话框（工作区选择） */
+  openDirectoryDialog(): Promise<ApiResult<{ path: string | null }>> {
+    return ipcRenderer.invoke('app:openDirectoryDialog')
+  },
   /** 标签列表 */
   listTags(): Promise<ApiResult<{ items: unknown[] }>> {
     return ipcRenderer.invoke(IPC.TAGS_LIST)
@@ -82,6 +86,10 @@ const api = {
   deleteSources(ids: string[]): Promise<ApiResult<void>> {
     return ipcRenderer.invoke(IPC.SOURCES_DELETE_MANY, { ids })
   },
+  /** 修改资料标题（工作区文件同步重命名） */
+  updateSourceTitle(id: string, title: string): Promise<ApiResult<unknown>> {
+    return ipcRenderer.invoke(IPC.SOURCES_UPDATE_TITLE, { id, title })
+  },
   /** 整理资料库：对尚无摘要的资料逐篇生成 LLM 摘要 */
   summarizeAll(): Promise<ApiResult<{ processed: number; ok: number; failed: number }>> {
     return ipcRenderer.invoke(IPC.SOURCES_SUMMARIZE_ALL)
@@ -123,8 +131,20 @@ const api = {
     return ipcRenderer.invoke(IPC.SETTINGS_GET)
   },
   /** 更新本地设置 */
-  updateSettings(patch: { currentLlmProviderId?: string; dataDir?: string }): Promise<ApiResult<unknown>> {
+  updateSettings(patch: { currentLlmProviderId?: string; dataDir?: string; workspaceDir?: string }): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.SETTINGS_UPDATE, { patch })
+  },
+  /** 工作区状态（目录 + 资料统计） */
+  getWorkspaceStatus(): Promise<ApiResult<unknown>> {
+    return ipcRenderer.invoke(IPC.WORKSPACE_STATUS)
+  },
+  /** 手动触发工作区全量对账（扫描 + 解析 + 索引） */
+  reconcileWorkspace(): Promise<ApiResult<unknown>> {
+    return ipcRenderer.invoke(IPC.WORKSPACE_RECONCILE)
+  },
+  /** 一次性迁移存量导入资料到工作区 */
+  migrateLegacyWorkspace(): Promise<ApiResult<unknown>> {
+    return ipcRenderer.invoke(IPC.WORKSPACE_MIGRATE)
   },
   /** 新建撰写任务 */
   createTask(input: { title: string; scope: { sourceIds: string[] } | { tagIds: string[] }; templateBookId?: string }): Promise<ApiResult<{ task: unknown }>> {
