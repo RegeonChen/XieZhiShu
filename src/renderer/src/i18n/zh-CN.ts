@@ -78,6 +78,7 @@ export const zhCN = {
     workspaceUnset: '未设置工作区（可在设置页指定本地文件夹作为资料库）',
     reconcileBtn: '同步工作区',
     reconciling: '同步中...',
+    syncingProgress: '正在同步 {done}/{total} ...',
     reconcileDone: '同步完成：新增 {added}、变更 {changed}、移除 {removed}、移动 {moved}、失败 {errors}',
     reconcileFailed: '同步失败：{message}'
   },

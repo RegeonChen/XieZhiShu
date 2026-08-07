@@ -1029,6 +1029,30 @@ body {
   color: var(--fg-faint, #999);
   font-style: italic;
 }
+/* 工作区同步进度条 */
+.source-list__sync-progress {
+  margin: 4px 12px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.source-list__sync-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+.source-list__sync-bar-fill {
+  height: 100%;
+  background: var(--accent, #2563eb);
+  transition: width 0.15s ease;
+}
+.source-list__sync-text {
+  font-size: 12px;
+  color: var(--fg-soft);
+  white-space: nowrap;
+}
 
 .settings__error {
   font-size: 13px;
