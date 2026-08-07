@@ -590,10 +590,14 @@ ipcMain.handle(IPC.WORKSPACE_STATUS, (): ApiResult<WorkspaceStatusRes> => {
   }
 })
 
-// 手动触发工作区全量对账（扫描 + 解析 + 索引）
+// 手动触发工作区全量对账（扫描 + 解析 + 索引），实时推送进度到渲染进程
 ipcMain.handle(IPC.WORKSPACE_RECONCILE, async (): Promise<ApiResult<WorkspaceReconcileRes>> => {
   try {
-    const result = await reconcileWorkspace()
+    const result = await reconcileWorkspace((p) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        win.webContents.send('workspace:progress', p)
+      }
+    })
     return { ok: true, data: result }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }

@@ -3,7 +3,7 @@
  * 支持 PDF / Word(.docx) / TXT / Markdown / 图片 OCR。
  * 每种解析器返回 string，异常时抛出带稳定错误码的 Error。
  */
-import { readFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { extname } from 'node:path'
 
 export interface ParseResult {
@@ -24,7 +24,7 @@ export function isSupported(path: string): boolean {
 
 export async function parseFile(filePath: string): Promise<ParseResult> {
   const ext = extname(filePath).toLowerCase()
-  const raw = readFileSync(filePath)
+  const raw = await readFile(filePath) // 异步读取，避免批量导入阻塞主进程
 
   switch (ext) {
     case '.pdf':

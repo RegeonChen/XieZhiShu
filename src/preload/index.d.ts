@@ -40,6 +40,7 @@ export interface AppApi {
   getWorkspaceStatus(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   reconcileWorkspace(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   migrateLegacyWorkspace(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
+  onWorkspaceProgress(cb: (p: { done: number; total: number }) => void): () => void
   createTask(input: { title: string; scope: { sourceIds: string[] } | { tagIds: string[] }; templateBookId?: string }): Promise<{ ok: boolean; data?: { task: unknown }; error?: { code: string; message: string } }>
   listTasks(): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   deleteTask(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>

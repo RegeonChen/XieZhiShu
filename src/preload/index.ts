@@ -146,6 +146,12 @@ const api = {
   migrateLegacyWorkspace(): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.WORKSPACE_MIGRATE)
   },
+  /** 订阅工作区同步进度（返回取消订阅函数） */
+  onWorkspaceProgress(cb: (p: { done: number; total: number }) => void): () => void {
+    const listener = (_event: Electron.IpcRendererEvent, p: { done: number; total: number }): void => cb(p)
+    ipcRenderer.on('workspace:progress', listener)
+    return () => ipcRenderer.removeListener('workspace:progress', listener)
+  },
   /** 新建撰写任务 */
   createTask(input: { title: string; scope: { sourceIds: string[] } | { tagIds: string[] }; templateBookId?: string }): Promise<ApiResult<{ task: unknown }>> {
     return ipcRenderer.invoke(IPC.WRITING_CREATE_TASK, input)

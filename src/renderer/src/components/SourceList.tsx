@@ -44,6 +44,7 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
   const [workspaceDir, setWorkspaceDir] = useState<string | null>(null)
   const [reconciling, setReconciling] = useState(false)
   const [reconcileMsg, setReconcileMsg] = useState<string | null>(null)
+  const [syncProgress, setSyncProgress] = useState<{ done: number; total: number } | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
 
   const loadSources = useCallback(async (tagId?: string | null) => {
@@ -69,6 +70,18 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
   }
 
   useEffect(() => { loadSources(activeTagId); loadTags(); loadWorkspaceStatus() }, [activeTagId, loadSources, reloadKey, loadWorkspaceStatus])
+
+  // 订阅工作区同步进度（主进程推送）
+  useEffect(() => {
+    const unsubscribe = window.api.onWorkspaceProgress?.((p) => {
+      setSyncProgress(p)
+      if (p.total > 0 && p.done >= p.total) {
+        // 完成后稍作停留再清除，避免进度条闪断
+        setTimeout(() => setSyncProgress(null), 800)
+      }
+    })
+    return () => unsubscribe?.()
+  }, [])
 
   // 右键菜单：点击外部 / Esc 关闭
   useEffect(() => {
@@ -141,6 +154,7 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
   const handleReconcile = async () => {
     setReconciling(true)
     setReconcileMsg(null)
+    setSyncProgress(null)
     try {
       const res = await window.api.reconcileWorkspace()
       if (res.ok && res.data) {
@@ -234,6 +248,16 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
       ) : (
         <p className="source-list__workspace source-list__workspace--empty">{zhCN.sourceList.workspaceUnset}</p>
       )}
+      {syncProgress && syncProgress.total > 0 ? (
+        <div className="source-list__sync-progress">
+          <div className="source-list__sync-bar">
+            <div className="source-list__sync-bar-fill" style={{ width: `${Math.round((syncProgress.done / syncProgress.total) * 100)}%` }} />
+          </div>
+          <span className="source-list__sync-text">
+            {zhCN.sourceList.syncingProgress.replace('{done}', String(syncProgress.done)).replace('{total}', String(syncProgress.total))}
+          </span>
+        </div>
+      ) : null}
       {reconcileMsg ? <p className="source-list__msg">{reconcileMsg}</p> : null}
       {summarizeMsg ? <p className="source-list__msg">{summarizeMsg}</p> : null}
       <div className="source-list__url-bar">

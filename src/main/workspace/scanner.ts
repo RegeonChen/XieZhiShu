@@ -1,15 +1,20 @@
 /**
- * scanner.ts —— 工作区递归扫描与差异比对（Phase 2.2 Task 2.2.1）。
+ * scanner.ts —— 工作区递归扫描与差异比对（Phase 2.2 Task 2.2.1，性能优化版）。
  * 递归遍历工作区（含多级子目录），仅识别支持格式，与数据库中的工作区资料
  * 按"相对路径 + 内容哈希"比对，产出三类差异：新增 / 变更 / 消失。
- * 注意：路径比较做归一化（Windows 大小写不敏感、分隔符统一为 '/'），
- * 但"移动/重命名"由 reconcile 用内容哈希二次识别，不在此处处理。
+ *
+ * 性能要点（2026-08-06 优化）：
+ * 1. 全部使用 fs/promises 异步 IO，并按批（BATCH）主动让出事件循环，
+ *    避免大文件量下同步扫描阻塞主进程导致 UI 卡死。
+ * 2. 变更判定先用 mtime/size 快筛（不读内容），仅对 mtime/size 变化的文件
+ *    才计算内容哈希，兜底对账不重复读全库。
+ * 路径比较做归一化（Windows 大小写不敏感、分隔符统一为 '/'）。
  */
-import { readdirSync } from 'node:fs'
-import { join, relative, sep } from 'node:path'
+import { readdir } from 'node:fs/promises'
+import { join, relative } from 'node:path'
 import { getDb } from '../db/connection'
 import { isSupported } from '../import/file-parser'
-import { fingerprintFile } from './fingerprint'
+import { fingerprintFileAsync, statFingerprintAsync } from './fingerprint'
 
 export interface ScanDiff {
   /** 文件系统存在、库中无该路径记录（可能是真新增，也可能是移动/重命名） */
@@ -24,6 +29,9 @@ export interface ScanDiff {
 const SKIP_DIRS = new Set(['.git', '.idea', '.vscode', '.vs', 'node_modules', '__pycache__', '.DS_Store'])
 const SKIP_SUFFIXES = ['~', '.tmp', '.bak', '.swp']
 
+/** 每处理多少项主动让出一次事件循环 */
+const BATCH = 50
+
 function shouldSkip(name: string): boolean {
   return name.startsWith('.') || SKIP_SUFFIXES.some((s) => name.endsWith(s))
 }
@@ -34,55 +42,75 @@ export function isIgnoredPath(absPath: string): boolean {
   return shouldSkip(name) || SKIP_DIRS.has(name)
 }
 
-function collectFiles(root: string, dir: string, out: string[]): void {
+/** 让出事件循环（配合分片，避免长时间阻塞主进程） */
+const yieldLoop = (): Promise<void> => new Promise((r) => setImmediate(() => r()))
+
+async function collectFilesAsync(root: string, dir: string, out: string[]): Promise<void> {
   let entries
   try {
-    entries = readdirSync(dir, { withFileTypes: true })
+    entries = await readdir(dir, { withFileTypes: true })
   } catch {
     return // 目录不可读（权限/占用）时静默跳过
   }
   for (const e of entries) {
     if (e.isDirectory()) {
       if (SKIP_DIRS.has(e.name) || shouldSkip(e.name)) continue
-      collectFiles(root, join(dir, e.name), out)
+      await collectFilesAsync(root, join(dir, e.name), out)
     } else if (e.isFile() && isSupported(e.name) && !shouldSkip(e.name)) {
       // 统一用正斜杠相对路径存储（跨平台一致）
-      out.push(relative(root, join(dir, e.name)).split(sep).join('/'))
+      out.push(relative(root, join(dir, e.name)).split('\\').join('/'))
     }
   }
 }
 
-// 路径归一化：分隔符统一为 '/' 且忽略大小写（Windows）
 const norm = (p: string): string => p.split(/[\\/]/).join('/').toLowerCase()
 
-export function scanWorkspace(rootDir: string): ScanDiff {
+interface DbRow {
+  id: string
+  file_path: string
+  content_hash: string | null
+  file_mtime: string | null
+  file_size: number | null
+}
+
+/** 异步扫描工作区并产出差异（分片让出事件循环） */
+export async function scanWorkspaceAsync(rootDir: string): Promise<ScanDiff> {
   const files: string[] = []
-  collectFiles(rootDir, rootDir, files)
+  await collectFilesAsync(rootDir, rootDir, files)
 
   const db = getDb()
   const rows = db
-    .prepare("SELECT id, file_path FROM sources WHERE workspace = 1 AND kind = 'file' AND file_path IS NOT NULL")
-    .all() as { id: string; file_path: string }[]
+    .prepare(
+      "SELECT id, file_path, content_hash, file_mtime, file_size FROM sources WHERE workspace = 1 AND kind = 'file' AND file_path IS NOT NULL"
+    )
+    .all() as DbRow[]
 
-  const dbByNorm = new Map<string, string>() // normPath -> id
-  for (const r of rows) dbByNorm.set(norm(r.file_path), r.id)
+  const dbByNorm = new Map<string, DbRow>() // normPath -> row
+  for (const r of rows) dbByNorm.set(norm(r.file_path), r)
   const fsSet = new Set(files.map(norm))
 
   const added: string[] = []
   const changed: string[] = []
   const removed: string[] = []
 
-  for (const f of files) {
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i]
+    // 分片让出事件循环，保持主进程响应
+    if (i % BATCH === 0) await yieldLoop()
+
     const key = norm(f)
-    const id = dbByNorm.get(key)
-    if (!id) {
+    const row = dbByNorm.get(key)
+    if (!row) {
       added.push(f)
       continue
     }
-    const fp = fingerprintFile(join(rootDir, f))
-    if (!fp) continue
-    const row = db.prepare('SELECT content_hash FROM sources WHERE id = ?').get(id) as { content_hash: string | null } | undefined
-    if (row && fp.contentHash !== row.content_hash) changed.push(f)
+    // mtime/size 快筛：无变化则跳过内容哈希计算
+    const st = await statFingerprintAsync(join(rootDir, f))
+    if (!st) continue
+    if (st.fileMtime === row.file_mtime && st.fileSize === row.file_size) continue
+    // mtime/size 变化 → 计算内容哈希确认是否真的变更
+    const fp = await fingerprintFileAsync(join(rootDir, f))
+    if (fp && fp.contentHash !== row.content_hash) changed.push(f)
   }
 
   for (const r of rows) {
