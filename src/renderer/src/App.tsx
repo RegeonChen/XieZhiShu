@@ -29,6 +29,19 @@ const MIN_CENTER = 200
 const DEFAULT_SIDEBAR = 180
 const DEFAULT_CENTER = 300
 
+// 三栏宽度持久化键（localStorage，重启后保持一致）
+const LS_SIDEBAR_W = 'ui.sidebarWidth'
+const LS_CENTER_W = 'ui.centerWidth'
+
+function readLayout(key: string, fallback: number): number {
+  try {
+    const v = Number(localStorage.getItem(key))
+    return Number.isFinite(v) && v > 0 ? v : fallback
+  } catch {
+    return fallback
+  }
+}
+
 export default function App() {
   const [page, setPage] = useState<PageKey>('sources')
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
@@ -40,8 +53,16 @@ export default function App() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const [showWritingCreate, setShowWritingCreate] = useState(false)
   const [writingReload, setWritingReload] = useState(0)
-  const [sidebarW, setSidebarW] = useState(DEFAULT_SIDEBAR)
-  const [centerW, setCenterW] = useState(DEFAULT_CENTER)
+  const [sidebarW, setSidebarW] = useState(() => readLayout(LS_SIDEBAR_W, DEFAULT_SIDEBAR))
+  const [centerW, setCenterW] = useState(() => readLayout(LS_CENTER_W, DEFAULT_CENTER))
+
+  // 三栏宽度变化时持久化（下次启动恢复）
+  useEffect(() => {
+    try { localStorage.setItem(LS_SIDEBAR_W, String(sidebarW)) } catch { /* 忽略 */ }
+  }, [sidebarW])
+  useEffect(() => {
+    try { localStorage.setItem(LS_CENTER_W, String(centerW)) } catch { /* 忽略 */ }
+  }, [centerW])
 
   useEffect(() => {
     let cancelled = false

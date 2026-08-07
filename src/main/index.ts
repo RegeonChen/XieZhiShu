@@ -37,6 +37,7 @@ import { getWorkspaceDir, reconcileWorkspace } from './workspace/reconcile'
 import { startWorkspaceWatcher, restartWorkspaceWatcher, stopWorkspaceWatcher } from './workspace/watcher'
 import { trashSourceFile, renameSourceFile, resolveSourceFilePath } from './workspace/sync'
 import { migrateLegacyToWorkspace } from './workspace/migrate'
+import { loadWindowState, trackWindowState } from './window-state'
 import type { WorkspaceReconcileRes, WorkspaceStatusRes, WorkspaceMigrateRes } from '../shared/ipc'
 
 const APP_PROTOCOL_WHITELIST = /^https?:\/\//i
@@ -108,9 +109,10 @@ function startFileServer(): void {
 }
 
 function createWindow(): void {
+  // 恢复上次关闭时的窗口尺寸/位置/最大化/全屏状态
+  const saved = loadWindowState()
   const win = new BrowserWindow({
-    width: 1280,
-    height: 800,
+    ...(saved ? { x: saved.bounds.x, y: saved.bounds.y, width: saved.bounds.width, height: saved.bounds.height } : { width: 1280, height: 800 }),
     minWidth: 960,
     minHeight: 600,
     show: false,
@@ -125,7 +127,10 @@ function createWindow(): void {
   })
 
   win.on('ready-to-show', () => {
+    if (saved?.isFullScreen) win.setFullScreen(true)
     win.show()
+    // 恢复最大化（先 show 再 maximize，避免恢复时位置/尺寸异常）
+    if (saved?.isMaximized && !saved.isFullScreen) win.maximize()
     // 确保窗口获得 OS 输入焦点，避免"可见但未激活"导致点击输入框无光标/无法输入
     win.focus()
   })
@@ -147,6 +152,9 @@ function createWindow(): void {
   } else {
     win.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  // 跟踪窗口状态（尺寸/位置/最大化/全屏），关闭时保存、下次启动恢复
+  trackWindowState(win)
 }
 
 // ===== IPC handlers =====
