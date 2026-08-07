@@ -8,6 +8,7 @@ import Database from 'better-sqlite3'
 import type { AppSettings } from '../../shared/types'
 import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
+import { existsSync, statSync } from 'node:fs'
 
 interface SettingRow {
   key: string
@@ -38,6 +39,8 @@ export function getSettings(): AppSettings {
   if (dataDir) settings.dataDir = dataDir
   const currentLlmProviderId = getSetting('current_llm_provider_id')
   if (currentLlmProviderId) settings.currentLlmProviderId = currentLlmProviderId
+  const workspaceDir = getSetting('workspace_dir')
+  if (workspaceDir) settings.workspaceDir = workspaceDir
   return settings
 }
 
@@ -59,6 +62,19 @@ export function updateSettings(patch: Partial<AppSettings>): AppSettings {
       setSetting('current_llm_provider_id', v)
     } else {
       deleteSetting('current_llm_provider_id')
+    }
+  }
+
+  if ('workspaceDir' in patch) {
+    const v = patch.workspaceDir?.trim()
+    if (v) {
+      // 校验目录存在且为文件夹
+      if (!existsSync(v) || !statSync(v).isDirectory()) {
+        throw new Error('指定的工作区目录不存在或不是文件夹')
+      }
+      setSetting('workspace_dir', v)
+    } else {
+      deleteSetting('workspace_dir')
     }
   }
 

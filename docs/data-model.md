@@ -33,7 +33,13 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 | cleaned_text | TEXT | NOT NULL | 清洗后正文，供 FTS5 检索与 AI 输入 |
 | status | TEXT | NOT NULL DEFAULT 'pending', CHECK('pending','processing','ready','failed') | 解析/抓取状态 |
 | error_code | TEXT | NULL | 失败时的稳定错误码 |
+| content_hash | TEXT | NULL | 文件内容 sha256（Phase 2.2 指纹锚点） |
+| file_mtime | TEXT | NULL | 文件修改时间 ISO |
+| file_size | INTEGER | NULL | 文件字节数 |
+| workspace | INTEGER | NOT NULL DEFAULT 0 | 1=直接引用用户工作区文件（不转存副本） |
 | created_at / updated_at | TEXT | NOT NULL | |
+
+> 注：Phase 2.2（Migration 006，2026-08-06）新增 `content_hash`/`file_mtime`/`file_size`/`workspace` 四列，作为"文件系统 ↔ 数据库"映射锚点；工作区资料 `file_path` 存工作区相对路径（正斜杠分隔）。
 
 ### 2.2 tags（标签）
 
@@ -124,7 +130,7 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 - `key` TEXT PK
 - `value` TEXT NOT NULL
 - `updated_at` TEXT NOT NULL
-- 现有键：`data_dir`、`current_llm_provider_id`
+- 现有键：`data_dir`、`current_llm_provider_id`、`workspace_dir`（Phase 2.2 工作区根目录）
 
 ### 2.11 llm_providers（LLM Provider 配置，Phase 3 Task 3.1）
 

@@ -16,6 +16,10 @@ export interface SourceRow {
   cleaned_text: string
   status: SourceStatus
   error_code: string | null
+  content_hash: string | null
+  file_mtime: string | null
+  file_size: number | null
+  workspace: number
   created_at: string
   updated_at: string
 }
@@ -31,6 +35,10 @@ function rowToSource(row: SourceRow): Source {
     cleanedText: row.cleaned_text,
     status: row.status,
     errorCode: row.error_code ?? undefined,
+    contentHash: row.content_hash ?? undefined,
+    fileMtime: row.file_mtime ?? undefined,
+    fileSize: row.file_size ?? undefined,
+    workspace: row.workspace === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   }
@@ -93,8 +101,9 @@ export function insertSource(source: Omit<Source, 'createdAt' | 'updatedAt'>): S
   const db = getDb()
   const now = new Date().toISOString()
   db.prepare(
-    `INSERT INTO sources (id, kind, title, file_path, url, url_snapshot_at, cleaned_text, status, error_code, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO sources (id, kind, title, file_path, url, url_snapshot_at, cleaned_text, status, error_code,
+       content_hash, file_mtime, file_size, workspace, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     source.id,
     source.kind,
@@ -105,6 +114,10 @@ export function insertSource(source: Omit<Source, 'createdAt' | 'updatedAt'>): S
     source.cleanedText,
     source.status,
     source.errorCode ?? null,
+    source.contentHash ?? null,
+    source.fileMtime ?? null,
+    source.fileSize ?? null,
+    source.workspace ? 1 : 0,
     now,
     now
   )
@@ -131,4 +144,53 @@ export function deleteSources(ids: string[]): void {
     for (const id of list) del.run(id)
   })
   tx(ids)
+}
+
+// ============================================================
+// Phase 2.2 工作区支持：指纹更新 / 按内容哈希定位
+// ============================================================
+
+export interface SourceFingerprintPatch {
+  cleanedText?: string
+  contentHash?: string
+  fileMtime?: string
+  fileSize?: number
+  filePath?: string
+  status?: SourceStatus
+  errorCode?: string | null
+  workspace?: boolean
+  title?: string
+}
+
+/** 更新资料的正文与文件指纹（工作区扫描/对账时调用） */
+export function updateSourceFingerprint(id: string, patch: SourceFingerprintPatch): Source | null {
+  const db = getDb()
+  const now = new Date().toISOString()
+  const fields: string[] = []
+  const values: (string | number | null)[] = []
+  const push = (col: string, v: string | number | null | undefined): void => {
+    fields.push(`${col} = ?`)
+    values.push(v ?? null)
+  }
+  if (patch.cleanedText !== undefined) push('cleaned_text', patch.cleanedText)
+  if (patch.contentHash !== undefined) push('content_hash', patch.contentHash)
+  if (patch.fileMtime !== undefined) push('file_mtime', patch.fileMtime)
+  if (patch.fileSize !== undefined) push('file_size', patch.fileSize)
+  if (patch.filePath !== undefined) push('file_path', patch.filePath)
+  if (patch.status !== undefined) push('status', patch.status)
+  if (patch.errorCode !== undefined) push('error_code', patch.errorCode)
+  if (patch.workspace !== undefined) push('workspace', patch.workspace ? 1 : 0)
+  if (patch.title !== undefined) push('title', patch.title)
+  if (fields.length === 0) return getSourceById(id)
+  db.prepare(`UPDATE sources SET ${fields.join(', ')}, updated_at = ? WHERE id = ?`).run(...values, now, id)
+  return getSourceById(id)
+}
+
+/** 按内容 sha256 查找工作区资料（用于文件移动/重命名时保持 id/标签/摘要） */
+export function findSourceByContentHash(contentHash: string): Source | null {
+  const db = getDb()
+  const row = db.prepare('SELECT * FROM sources WHERE workspace = 1 AND content_hash = ? LIMIT 1').get(contentHash) as
+    | SourceRow
+    | undefined
+  return row ? rowToSource(row) : null
 }

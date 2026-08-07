@@ -39,6 +39,11 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
   const [deleteErr, setDeleteErr] = useState<string | null>(null)
   const [summarizing, setSummarizing] = useState(false)
   const [summarizeMsg, setSummarizeMsg] = useState<string | null>(null)
+
+  // Phase 2.2 工作区状态
+  const [workspaceDir, setWorkspaceDir] = useState<string | null>(null)
+  const [reconciling, setReconciling] = useState(false)
+  const [reconcileMsg, setReconcileMsg] = useState<string | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
 
   const loadSources = useCallback(async (tagId?: string | null) => {
@@ -50,12 +55,20 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
     } finally { setLoading(false) }
   }, [])
 
+  const loadWorkspaceStatus = useCallback(async () => {
+    const res = await window.api.getWorkspaceStatus()
+    if (res.ok && res.data) {
+      const data = res.data as { workspaceDir?: string }
+      setWorkspaceDir(data.workspaceDir ?? null)
+    }
+  }, [])
+
   const loadTags = async () => {
     const res = await window.api.listTags()
     if (res.ok && res.data) setTagFilters(res.data.items as { id: string; name: string }[])
   }
 
-  useEffect(() => { loadSources(activeTagId); loadTags() }, [activeTagId, loadSources, reloadKey])
+  useEffect(() => { loadSources(activeTagId); loadTags(); loadWorkspaceStatus() }, [activeTagId, loadSources, reloadKey, loadWorkspaceStatus])
 
   // 右键菜单：点击外部 / Esc 关闭
   useEffect(() => {
@@ -124,6 +137,33 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
     }
   }
 
+  // Phase 2.2：手动触发工作区全量对账（扫描 + 解析 + 索引）
+  const handleReconcile = async () => {
+    setReconciling(true)
+    setReconcileMsg(null)
+    try {
+      const res = await window.api.reconcileWorkspace()
+      if (res.ok && res.data) {
+        const r = res.data as { added: number; changed: number; removed: number; moved: number; errors: number }
+        setReconcileMsg(
+          zhCN.sourceList.reconcileDone
+            .replace('{added}', String(r.added))
+            .replace('{changed}', String(r.changed))
+            .replace('{removed}', String(r.removed))
+            .replace('{moved}', String(r.moved))
+            .replace('{errors}', String(r.errors))
+        )
+        await loadSources(activeTagId)
+      } else {
+        setReconcileMsg(zhCN.sourceList.reconcileFailed.replace('{message}', res.error?.message ?? ''))
+      }
+    } catch {
+      setReconcileMsg(zhCN.sourceList.reconcileFailed.replace('{message}', ''))
+    } finally {
+      setReconciling(false)
+    }
+  }
+
   // 删除单个资料（右键菜单）
   const handleDeleteOne = async () => {
     if (!pendingDelete || pendingDelete.kind !== 'one') return
@@ -183,7 +223,18 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
         <button type="button" className="source-list__btn" onClick={handleSummarize} disabled={summarizing}>
           {summarizing ? zhCN.sourceList.summarizing : zhCN.sourceList.summarizeBtn}
         </button>
+        {workspaceDir ? (
+          <button type="button" className="source-list__btn" onClick={handleReconcile} disabled={reconciling}>
+            {reconciling ? zhCN.sourceList.reconciling : zhCN.sourceList.reconcileBtn}
+          </button>
+        ) : null}
       </div>
+      {workspaceDir ? (
+        <p className="source-list__workspace" title={workspaceDir}>{zhCN.sourceList.workspaceStatus.replace('{dir}', workspaceDir)}</p>
+      ) : (
+        <p className="source-list__workspace source-list__workspace--empty">{zhCN.sourceList.workspaceUnset}</p>
+      )}
+      {reconcileMsg ? <p className="source-list__msg">{reconcileMsg}</p> : null}
       {summarizeMsg ? <p className="source-list__msg">{summarizeMsg}</p> : null}
       <div className="source-list__url-bar">
         <input type="url" className="source-list__url-input" placeholder="输入网页网址按回车添加..." value={urlInput} onChange={(e) => setUrlInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleAddUrl() }} />
