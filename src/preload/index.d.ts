@@ -57,6 +57,7 @@ export interface AppApi {
   deleteTask(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   renameTask(taskId: string, title: string): Promise<{ ok: boolean; data?: { task: unknown }; error?: { code: string; message: string } }>
   updateTaskSkills(taskId: string, skillIds: string[] | null): Promise<{ ok: boolean; data?: { task: unknown }; error?: { code: string; message: string } }>
+  suggestSkills(taskId: string, need: string): Promise<{ ok: boolean; data?: { skillIds: string[] }; error?: { code: string; message: string } }>
   updateTaskProvider(taskId: string, llmProviderId: string | null): Promise<{ ok: boolean; data?: { task: unknown }; error?: { code: string; message: string } }>
   chatWithTask(taskId: string, message: string, history?: { role: 'user' | 'assistant'; content: string }[]): Promise<{ ok: boolean; data?: { reply: string }; error?: { code: string; message: string } }>
   listTaskMessages(taskId: string): Promise<{ ok: boolean; data?: { items: { id: string; taskId: string; role: 'user' | 'assistant'; kind: 'chat' | 'instruction' | 'notice'; content: string; createdAt: string }[] }; error?: { code: string; message: string } }>

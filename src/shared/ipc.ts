@@ -59,6 +59,7 @@ export const IPC = {
   WRITING_DELETE_TASK: 'writing:deleteTask',
   WRITING_RENAME_TASK: 'writing:renameTask',
   WRITING_UPDATE_SKILLS: 'writing:updateSkills',
+  WRITING_SUGGEST_SKILLS: 'writing:suggestSkills',
   WRITING_UPDATE_PROVIDER: 'writing:updateProvider',
   WRITING_CHAT: 'writing:chat',
   WRITING_RETRIEVE: 'writing:retrieve',
@@ -266,6 +267,14 @@ export interface WritingUpdateSkillsReq {
   skillIds: string[] | null // null = 未手动选定（生成时按标题自动匹配）
 }
 export type WritingUpdateSkillsRes = { task: WritingTask }
+
+/** 智能匹配写作规范（2026-08-14）：单独请求大模型，依据用户需求从部类细则中挑选匹配的 skills */
+export interface WritingSuggestSkillsReq {
+  taskId: string
+  /** 用户需求文本（撰写要求 / 文章标题） */
+  need: string
+}
+export type WritingSuggestSkillsRes = { skillIds: string[] }
 
 export interface WritingUpdateProviderReq {
   taskId: string
@@ -505,6 +514,7 @@ export interface IpcMapping {
   [IPC.WRITING_DELETE_TASK]: { _req: WritingDeleteTaskReq; _res: ApiResult<void> }
   [IPC.WRITING_RENAME_TASK]: { _req: WritingRenameTaskReq; _res: ApiResult<WritingRenameTaskRes> }
   [IPC.WRITING_UPDATE_SKILLS]: { _req: WritingUpdateSkillsReq; _res: ApiResult<WritingUpdateSkillsRes> }
+  [IPC.WRITING_SUGGEST_SKILLS]: { _req: WritingSuggestSkillsReq; _res: ApiResult<WritingSuggestSkillsRes> }
   [IPC.WRITING_UPDATE_PROVIDER]: { _req: WritingUpdateProviderReq; _res: ApiResult<WritingUpdateProviderRes> }
   [IPC.WRITING_CHAT]: { _req: WritingChatReq; _res: ApiResult<WritingChatRes> }
   [IPC.TASK_MESSAGES_LIST]: { _req: TaskMessagesListReq; _res: ApiResult<TaskMessagesListRes> }

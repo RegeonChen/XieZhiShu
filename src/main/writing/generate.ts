@@ -14,14 +14,14 @@ import { getDb } from '../db/connection'
 import { addTaskMessage } from '../db/task-messages'
 import { getSettings } from '../db/settings'
 import { getSourceIdsByTag } from '../db/tags'
-import { listGeneralSkills, matchSectionSkills, getSkillById } from '../db/writing-skills'
+import { listGeneralSkills, matchSectionSkills, getSkillById, listSectionSkills } from '../db/writing-skills'
 import { getProviderSecret } from '../llm/provider-store'
 import { safeStorageCodec } from '../llm/secret'
 import { chatCompletion, type ChatMessage } from '../llm/chat'
 import { retrieveChunks, bigrams, dice } from '../rag/retrieval'
 import { embedTexts } from '../rag/embed'
 import { getSourceSummariesByIds, summarizePendingForSourceIds, type SourceSummary } from '../rag/summarizer'
-import { fetchRelatedSiteSources, extractTopicTerms } from '../web-source/site-crawler'
+import { fetchRelatedSiteSources, extractTopicTerms, expandDomainHints } from '../web-source/site-crawler'
 
 /**
  * 初稿生成 LLM 调用超时（Task 3.4.8）：Task 3.4.7 取消材料供给限制后，提交的材料体量可能很大，
@@ -37,6 +37,9 @@ const CONTRADICTION_SCAN_TIMEOUT_MS = 600000
 
 /** 矛盾定位审查超时（Phase 3.7 Task 3.7.2：携带材料 + 初稿 + 矛盾清单） */
 const CONTRADICTION_LOCATE_TIMEOUT_MS = 600000
+
+/** 智能匹配写作规范超时（2026-08-14：提交 skills 清单 + 用户需求，量级较小但需解析 JSON） */
+const SUGGEST_SKILLS_TIMEOUT_MS = 120000
 
 /**
  * 矛盾扫描/定位的确定性采样温度阶梯（2026-08-11）：大模型默认采样温度下，
@@ -347,8 +350,11 @@ export function sliceChunkWindows(chunks: RetrievedChunk[], maxChars: number): R
  * 按"共同字符对重叠"把资料聚成主题簇（2026-08-11 防漏改进②）：
  * 矛盾只可能出现在"涉及同一对象/同一事件"的资料之间；主题完全不同的资料（字符对重叠 < minDice）跳过配对，
  * 从而把分治扫描的调用量控制在有意义的范围内。同一地区/同一年度的资料通常共享大量字符对，会落入同一簇。
+ * 2026-08-14：minDice 由 0.05 提高到 0.12——0.05 会把大量"泛教育/政治学习"网页新闻与真正学前教育资料聚成超大簇，
+ * 导致相关矛盾被拆散稀释（test2 漏检 test1 矛盾的主因之一）；提高后簇更聚焦、窗口更少（扫描更快），
+ * 仅字符对重叠很低的弱相关文章不再聚入，属于可接受的降噪取舍。
  */
-export function clusterSourcesByTopics(chunkGroups: Map<string, RetrievedChunk[]>, minDice = 0.05): string[][] {
+export function clusterSourcesByTopics(chunkGroups: Map<string, RetrievedChunk[]>, minDice = 0.12): string[][] {
   const keys = [...chunkGroups.keys()]
   if (keys.length === 0) return []
   // 每份资料取"分块文本的字符对集合"（前 200 块足够代表主题，避免超大资料全量建集）
@@ -431,9 +437,11 @@ export function mergeScanGroups(groups: ScanGroupOutput[]): ScanGroupOutput[] {
 }
 
 /**
- * 单个窗口的矛盾扫描调用（2026-08-11，提速）：
+ * 单个窗口的矛盾扫描调用（2026-08-11，提速；2026-08-14 增强确认）：
  * 低温度 + 温度阶梯重试——解析失败（JSON 格式问题）值得全档重试；
- * 空结果（窗口内确无矛盾）仅在首档后跳最高档再确认一次，仍空即接受，避免"无矛盾窗口"反复空跑拖慢总时长。
+ * 有发现立即返回；空结果则走完整温度阶梯（0 → 0.3 → 0.7）多确认，减少"该发现却没发现"的随机漏检
+ * （test3 中"青少年心理援助中心/2021 幼儿园总数/鹤上云路小天使"来源都在却漏检的根因之一）。
+ * 代价：确实无矛盾的窗口会多 1 次 LLM 调用，可接受。
  */
 async function scanWindow(
   provider: ProviderInfo,
@@ -442,8 +450,7 @@ async function scanWindow(
   taskId: string
 ): Promise<ScanGroupOutput[]> {
   let lastGroups: ScanGroupOutput[] | null = null
-  const temps = CONTRADICTION_TEMPERATURES
-  for (let i = 0; i < temps.length; i++) {
+  for (let i = 0; i < CONTRADICTION_TEMPERATURES.length; i++) {
     const messages: ChatMessage[] = [
       { role: 'system', content: buildScanSystemPrompt() },
       { role: 'user', content: buildScanUserPrompt(windowChunks, refList) }
@@ -453,14 +460,14 @@ async function scanWindow(
       messages,
       CONTRADICTION_SCAN_TIMEOUT_MS,
       { kind: 'contradiction-scan', taskId },
-      { temperature: temps[i] }
+      { temperature: CONTRADICTION_TEMPERATURES[i] }
     )
     if (!result.ok) continue
     const groups = parseScanOutput(result.text)
     if (groups === null) continue // 解析失败，重试下一档温度
     lastGroups = groups
     if (groups.length > 0) return groups // 有发现立即返回
-    if (i === 0 && temps.length > 1) i = temps.length - 2 // 空结果：跳到最后档再确认一次
+    // 空结果：继续下一档温度确认（完整阶梯）
   }
   return lastGroups ?? []
 }
@@ -779,6 +786,15 @@ export async function generateDraft(
   let scopeIds = resolveScopeSourceIds(task, { getSourceIdsByTag, getAllSourceIds })
   if (scopeIds.length === 0) return fail(ErrorCodes.TASK_NO_SCOPE, '资料库中没有可用资料')
 
+  // 稳定主题查询（2026-08-14 解耦重构）：矛盾扫描与网页资料检索统一用"标题词 + 领域下位词"（如
+  // "学前教育 学前 幼儿园 幼儿 保育 托育 入园 幼教"），而非只取第一个标题词。
+  // 1) 多词查询让"幼儿园/保育"等与标题词无字面重叠的相关正文也能被词法命中（避免"会堂路校区"这类
+  //    纯数据句段落因只含"幼儿园"不含"学前教育"而被检索漏掉，test3 漏检矛盾根因之一）；
+  // 2) 主题词稳定，避免随用户完整指令（含子标题、标点）波动导致两次生成材料集合不一致；
+  // 3) 生成正文仍使用完整指令 inst，保证按用户具体要求组织内容。
+  const scanTerms = extractTopicTerms(inst)
+  const scanQuery = [...new Set([...scanTerms, ...expandDomainHints(scanTerms)])].filter(Boolean).join(' ') || inst
+
   // 各 LLM 阶段剩余时间预估（秒）：优先历史平均耗时，缺省回退默认值
   const summaryEta = estimateLlmSeconds('summarize', 30)
   const scanWindowEta = estimateLlmSeconds('contradiction-scan', 40)
@@ -794,14 +810,19 @@ export async function generateDraft(
   onProgress?.('正在整理资料摘要…', GENERATE_PROGRESS.summary, Math.round(summaryEta + scanWindowEta * 2 + afterScanEta))
   await summarizePendingForSourceIds(scopeIds).catch(() => undefined)
 
-  // 网页资料库（2026-08-11）：全局绑定站点——发现文章清单 → 撰写要求标题粗筛 → 增量抓取正文落库为任务绑定缓存，并入 scope
+  // 网页资料库（2026-08-11）：全局绑定站点——发现文章清单 → 标题粗筛 → 增量抓取正文落库为任务绑定缓存，并入 scope。
+  // 2026-08-14：改用稳定主题词 scanQuery 检索，避免完整指令波动导致两次网页召回不一致。
   onProgress?.('正在检索网页资料库…', GENERATE_PROGRESS.webSync, Math.round(scanWindowEta * 2 + afterScanEta))
-  const siteSourceIds = await fetchRelatedSiteSources(inst, taskId).catch(() => [] as string[])
+  const siteSourceIds = await fetchRelatedSiteSources(scanQuery, taskId).catch(() => [] as string[])
   if (siteSourceIds.length > 0) scopeIds = Array.from(new Set([...scopeIds, ...siteSourceIds]))
 
   onProgress?.('正在检索资料…', GENERATE_PROGRESS.retrieve, Math.round(scanWindowEta * 2 + afterScanEta))
   const chunks = await retrieveChunksHybrid(scopeIds, inst)
   if (chunks.length === 0) return fail(ErrorCodes.LLM_NO_CANDIDATES, '未检索到与本次撰写要求相关的资料，请调整要求或先补充资料')
+
+  // 矛盾扫描材料（2026-08-14 解耦重构）：用稳定主题词检索，与生成正文 chunks 解耦，
+  // 使矛盾扫描输入在"同一主题、不同措辞"的两次任务间保持一致；scanQuery 与 inst 相同时复用 chunks，不额外检索。
+  const scanChunks = scanQuery === inst ? chunks : await retrieveChunksHybrid(scopeIds, scanQuery)
 
   // 幂等：第 0 稿已存在则直接返回（含既有矛盾清单）
   const existing = getDraftRowByVersion(taskId, 0)
@@ -813,13 +834,12 @@ export async function generateDraft(
   const { general: generalSkills, section: sectionSkills } = resolveTaskSkills(task)
 
   // ---- 矛盾预扫描（Phase 3.7 Task 3.7.2）：失败不阻断生成，仅提示 ----
-  // 2026-08-11 决策演进：扫描视野收敛为"粗筛/检索后、撰写初稿实际用到的文段"（chunks），
-  // 替代早期"任务范围内全部资料分块"方案——全量扫描材料多、耗时长且产生大量与正文无关的"警告"条目；
-  // 只扫描正文涉及文段，兼顾速度与聚焦（代价：被检索剔除的段落中的矛盾可能不被发现，用户已确认此取舍）。
-  // 2026-08-11 提速：整组窗口 + 并发 + 窗口级进度推送
+  // 2026-08-11 决策演进：扫描视野收敛为"粗筛/检索后、撰写初稿实际用到的文段"，替代早期"任务范围内全部资料分块"方案。
+  // 2026-08-14 解耦：扫描输入改为 scanChunks（稳定主题词检索结果），不再直接复用生成正文的 chunks，
+  // 使同一主题的两次任务扫描材料保持一致，减少"该发现的矛盾没发现"；仍只扫检索命中的聚焦文段，速度可控。
   onProgress?.('正在扫描资料矛盾…', GENERATE_PROGRESS.scanFrom, Math.round(scanWindowEta * 2 + afterScanEta))
-  const refList = buildSourceRefList(chunks)
-  const scanned = await scanContradictions(prov.provider, chunks, taskId, onProgress).catch(() => null)
+  const refList = buildSourceRefList(scanChunks)
+  const scanned = await scanContradictions(prov.provider, scanChunks, taskId, onProgress).catch(() => null)
   const contradictions: ContradictionInput[] = scanned ?? []
   if (scanned === null) {
     addTaskMessage(taskId, 'assistant', '矛盾扫描失败，本次初稿未附带矛盾清单；可重新生成初稿重试。', 'notice')
@@ -964,6 +984,103 @@ export async function chatWithTask(
   }
   addTaskMessage(taskId, 'assistant', result.text.trim(), 'chat')
   return { ok: true, reply: result.text.trim() }
+}
+
+/**
+ * 智能匹配写作规范（2026-08-14）：单独请求大模型，依据用户需求从全部部类细则中挑选匹配的 skills。
+ * 找不到匹配时返回空数组（调用方按"未手动选定、生成时自动匹配"处理）。失败同样返回空数组 + 错误提示，
+ * 由调用方决定是否降级为自动匹配。
+ */
+export async function suggestSkillsForTask(
+  taskId: string,
+  need: string
+): Promise<{ ok: true; skillIds: string[] } | { ok: false; error: { code: string; message: string } }> {
+  const task = getTaskById(taskId)
+  if (!task) return { ok: false, error: { code: ErrorCodes.TASK_NOT_FOUND, message: '撰写任务不存在' } }
+  if (!need.trim()) return { ok: false, error: { code: ErrorCodes.INVALID_PARAM, message: '缺少用于匹配的用户需求' } }
+
+  const sections = listSectionSkills()
+  if (sections.length === 0) return { ok: true, skillIds: [] }
+
+  const prov = resolveTaskProvider(task)
+  if (!prov.ok) return prov
+
+  const catalog = sections
+    .map(
+      (s, i) =>
+        `${i + 1}. id="${s.id}" 名称="${s.name}" 关键词="${s.tags.join('、')}"\n内容摘要：${s.content.slice(0, 160)}`
+    )
+    .join('\n')
+
+  const messages: ChatMessage[] = [
+    {
+      role: 'system',
+      content: [
+        '你是一名地方志书撰稿规范匹配助手。',
+        '下面会给出一个「规范目录」（每项含 id、名称、关键词、内容摘要）和用户的「撰写需求」。',
+        '请从目录中选出与用户需求最匹配的部类细则规范（可以多项，也可以为 0 项）。',
+        '只根据名称/关键词/内容摘要与撰写需求的语义相关性判断，宁缺毋滥：不相关就不要选。',
+        '',
+        '输出要求：只输出一个 JSON 对象，不得输出 JSON 之外的任何文字、解释或代码块围栏。',
+        '输出格式：{"skillIds": ["匹配项的 id", "另一匹配项的 id"]}',
+        '无匹配输出：{"skillIds": []}'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: ['【规范目录】', catalog, '', '【撰写需求】', need.trim()].join('\n')
+    }
+  ]
+
+  const result = await chatCompletion(prov.provider, messages, SUGGEST_SKILLS_TIMEOUT_MS, { kind: 'suggest-skills', taskId }, { temperature: 0 })
+  if (!result.ok) return { ok: false, error: result.error }
+
+  const parsed = parseSuggestSkillsOutput(result.text)
+  if (!parsed) {
+    return { ok: false, error: { code: ErrorCodes.LLM_FORMAT_INVALID, message: '智能匹配结果无法解析，请重试' } }
+  }
+
+  const validIds = new Set(sections.map((s) => s.id))
+  const skillIds = [...new Set(parsed.filter((id) => validIds.has(id)))]
+  return { ok: true, skillIds }
+}
+
+/** 解析智能匹配输出：`{ skillIds: [...] }` 或直接数组；无法解析返回 null */
+function parseSuggestSkillsOutput(text: string): string[] | null {
+  const trimmed = text.trim()
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/)
+  const candidate = fenced ? fenced[1].trim() : trimmed
+  let raw: unknown = null
+  try {
+    raw = JSON.parse(candidate)
+  } catch {
+    const start = candidate.indexOf('{')
+    const end = candidate.lastIndexOf('}')
+    if (start >= 0 && end > start) {
+      try {
+        raw = JSON.parse(candidate.slice(start, end + 1))
+      } catch {
+        // 再尝试解析为纯数组
+        const s = candidate.indexOf('[')
+        const e = candidate.lastIndexOf(']')
+        if (s >= 0 && e > s) {
+          try {
+            raw = JSON.parse(candidate.slice(s, e + 1))
+          } catch {
+            raw = null
+          }
+        }
+      }
+    }
+  }
+  if (Array.isArray(raw)) {
+    return raw.filter((x): x is string => typeof x === 'string')
+  }
+  if (raw && typeof raw === 'object') {
+    const ids = (raw as { skillIds?: unknown }).skillIds
+    if (Array.isArray(ids)) return ids.filter((x): x is string => typeof x === 'string')
+  }
+  return null
 }
 
 /** 任务范围内的检索预览（writing:retrieve，供界面展示与验收） */

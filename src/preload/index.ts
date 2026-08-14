@@ -202,6 +202,10 @@ const api = {
   updateTaskSkills(taskId: string, skillIds: string[] | null): Promise<ApiResult<{ task: unknown }>> {
     return ipcRenderer.invoke(IPC.WRITING_UPDATE_SKILLS, { taskId, skillIds })
   },
+  /** 智能匹配写作规范（2026-08-14；单独请求大模型，返回匹配的部类细则 skill id 列表） */
+  suggestSkills(taskId: string, need: string): Promise<ApiResult<{ skillIds: string[] }>> {
+    return ipcRenderer.invoke(IPC.WRITING_SUGGEST_SKILLS, { taskId, need })
+  },
   /** 更新任务固定使用的大模型（Phase 3.5；llmProviderId 传 null 表示回退全局当前 Provider） */
   updateTaskProvider(taskId: string, llmProviderId: string | null): Promise<ApiResult<{ task: unknown }>> {
     return ipcRenderer.invoke(IPC.WRITING_UPDATE_PROVIDER, { taskId, llmProviderId })

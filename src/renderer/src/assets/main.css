@@ -2030,6 +2030,30 @@ body {
   font-size: 12px;
 }
 
+/* 写作规范选择区（2026-08-14：智能匹配 + 手动选择） */
+.chat-panel__skill-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.chat-panel__skill-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.chat-panel__skill-chip {
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.chat-panel__skill-actions {
+  display: flex;
+  gap: 6px;
+}
+
 .chat-panel__input-row {
   display: flex;
   gap: 8px;
@@ -2870,4 +2894,97 @@ body {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* 手动选择写作规范弹窗（2026-08-14） */
+.skill-picker__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.skill-picker {
+  width: 480px;
+  max-width: 92vw;
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+}
+.skill-picker__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.skill-picker__title {
+  margin: 0;
+  font-size: 15px;
+}
+.skill-picker__close {
+  border: none;
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--fg-soft);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.skill-picker__close:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.skill-picker__search {
+  width: 100%;
+}
+.skill-picker__list {
+  max-height: 48vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.skill-picker__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.skill-picker__item:hover { background: var(--bg-primary); }
+.skill-picker__item--checked { background: var(--accent-soft); }
+.skill-picker__name {
+  flex-shrink: 0;
+  font-weight: 500;
+}
+.skill-picker__tags {
+  color: var(--fg-soft);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skill-picker__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.skill-picker__count {
+  color: var(--fg-soft);
+  font-size: 12px;
+  margin-right: auto;
 }

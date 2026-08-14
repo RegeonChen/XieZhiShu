@@ -29,8 +29,6 @@ function SourceList({ onSelect, bulkMode, onExitBulk, onSourcesChanged, reloadKe
   const [loading, setLoading] = useState(false)
   const [importing, setImporting] = useState(false)
   const [importErr, setImportErr] = useState<string | null>(null)
-  const [urlInput, setUrlInput] = useState('')
-  const [urlAdding, setUrlAdding] = useState(false)
   const [tagFilters, setTagFilters] = useState<{ id: string; name: string }[]>([])
   const [activeTagId, setActiveTagId] = useState<string | null>(null)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
@@ -151,21 +149,6 @@ function SourceList({ onSelect, bulkMode, onExitBulk, onSourcesChanged, reloadKe
         if (imported.length > 0) setSources((prev) => [...imported, ...prev])
       }
     } finally { setImporting(false) }
-  }
-
-  const handleAddUrl = async () => {
-    const trimmed = urlInput.trim()
-    if (!trimmed) return
-    setUrlAdding(true); setImportErr(null)
-    try {
-      const res = await window.api.addUrl(trimmed)
-      if (res.ok && res.data) {
-        const src = res.data.source as SourceItem
-        setSources((prev) => [{ id: src.id, title: src.title, kind: 'url', status: 'ready', createdAt: new Date().toISOString() }, ...prev])
-        setUrlInput('')
-      } else setImportErr(res.error?.message ?? '添加失败')
-    } catch { setImportErr('网络请求异常') }
-    finally { setUrlAdding(false) }
   }
 
   // 整理资料库：对尚无摘要的资料逐篇调用 LLM 生成摘要
@@ -352,10 +335,6 @@ function SourceList({ onSelect, bulkMode, onExitBulk, onSourcesChanged, reloadKe
       ) : null}
       {reconcileMsg ? <p className="source-list__msg">{reconcileMsg}</p> : null}
       {summarizeMsg ? <p className="source-list__msg">{summarizeMsg}</p> : null}
-      <div className="source-list__url-bar">
-        <input type="url" className="source-list__url-input" placeholder="输入网页网址按回车添加..." value={urlInput} onChange={(e) => setUrlInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleAddUrl() }} />
-        <button type="button" className="source-list__btn source-list__btn--primary" onClick={handleAddUrl} disabled={urlAdding || !urlInput.trim()}>{urlAdding ? '抓取中...' : '添加'}</button>
-      </div>
       {/* 网页资料库（2026-08-11）：注册站点后生成初稿时自动检索相关文章 */}
       <WebSourcePanel />
       {importErr ? <p className="source-list__error">{importErr}</p> : null}
@@ -384,7 +363,7 @@ function SourceList({ onSelect, bulkMode, onExitBulk, onSourcesChanged, reloadKe
       ) : null}
 
       {loading ? <p className="source-list__status">加载中...</p> : sources.length === 0 ? (
-        <div className="empty-state"><p className="empty-state__hint">{bulkMode ? zhCN.sourceBulk.empty : '暂无资料。导入文件或输入网址添加信源。'}</p></div>
+        <div className="empty-state"><p className="empty-state__hint">{bulkMode ? zhCN.sourceBulk.empty : '暂无资料。导入文件，或在下方「网页资料库」注册网站。'}</p></div>
       ) : (
         <ul className="source-list__items">
           {sources.map((s) => {

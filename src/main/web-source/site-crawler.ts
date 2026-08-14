@@ -80,18 +80,22 @@ export function isArticleUrl(url: string): boolean {
  * 与撰写章节标题"学前教育"几乎没有字面/字符对重叠，纯标题 bigram 永远对不上。
  * 当撰写关键词命中某领域的 key（如"教育"）时，把该领域的高区分度下位词一并纳入候选与精过滤。
  *
- * 收窄原则（2026-08-13 实测修正）：
+ * 收窄原则（2026-08-13 实测修正；2026-08-14 再次收窄）：
  * 1. 不含宽泛的 key 本身（"教育"），避免"政绩观学习教育""警示教育"政治学习文章误召回。
  * 2. 剔除"入学"——它作为子串会命中"深**入学**习贯彻"（"深入"+"学习"跨词拼接），
  *    导致大量"学习教育"类政治新闻被误判为教育相关（test1 实测 5 篇误召回的直接根因）。
- * 3. 剔除"教学/幼儿/小学/中学/大学/义务/教师/学生/课程/普惠"等泛教育词——
+ * 3. 剔除"教学/小学/中学/大学/义务/教师/学生/课程/普惠"等泛教育词——
  *    它们会召回"重庆中新大学""兰州教育信息化""厦门大学"等外地/高等教育新闻，与本地学前教育志书无关。
- * 只保留学前教育核心 + 中等区分度的教育词（招生/校历/学位/入园），后续可按需扩展其他门类。
+ * 4. 2026-08-14 再剔除"招生/校历/学位"：这三词过宽，会命中"中招计划""普高自主招生""义务教育招生"
+ *    "小学剩余学位抽签"等大量中小学/高中新闻，正文精过滤仅因含"招生/学位"就落库，
+ *    使网页召回的无关文章膨胀到 300+ 篇，矛盾扫描被噪音淹没（test2 漏检 test1 矛盾的主因之一）。
+ *    学前教育真正的招生/学位类新闻，其正文必含"幼儿园/学前/幼儿/保育/入园"等核心词，仍会被保留。
+ * 只保留学前教育高区分度核心词（学前/幼儿园/幼儿/保育/托育/入园/幼教），后续可按需扩展其他门类。
  */
 const DOMAIN_HINTS: { key: string; words: string[] }[] = [
   {
     key: '教育',
-    words: ['学前', '幼儿园', '保育', '托育', '入园', '招生', '校历', '学位']
+    words: ['学前', '幼儿园', '幼儿', '保育', '托育', '入园', '幼教']
   }
 ]
 
@@ -106,8 +110,11 @@ export function extractTopicTerms(query: string): string[] {
   for (const m of query.matchAll(/[「『“"']([^」』”"']{2,20})[」』”"']/g)) {
     add(m[1])
   }
-  // 2) "标题为/标题是/标题：…" 后的短词（无引号时的兜底）
-  const titled = query.match(/(?:标题|题目)[为是]?\s*[:：]?\s*([^\s，。；、,.「『』」“”"']+)/)
+  // 2) "标题为/标题是/标题：…" 后的短词（无引号时的兜底）。
+  //    2026-08-14 容错：捕获组前允许一个可选的引号字符，兼容"标题为“学前教育“"这类
+  //    引号不配对（结尾误用左引号）的输入——否则会因紧跟引号而提取失败、回退整句，
+  //    导致矛盾扫描/网页检索的主题词不稳定（test3 漏检矛盾的直接根因）。
+  const titled = query.match(/(?:标题|题目)[为是]?\s*[:：]?\s*[「『“"'」』”]?([^\s，。；、,.「『』」“”"']+)/)
   if (titled) add(titled[1])
   // 3) 提取不到任何短词时回退整句（兼容"无标题、纯要求"的指令）
   if (out.length === 0) {
@@ -364,12 +371,18 @@ if (import.meta.vitest) {
       expect(extractTopicTerms('2021年全区教育')).toEqual(['2021年全区教育'])
     })
 
+    it('tolerates unpaired quotes when extracting title (test3 regression, 2026-08-14)', () => {
+      // 结尾误用左引号“而非右引号”，仍应提取出标题短词，而非回退整句
+      expect(extractTopicTerms('这次撰写任务的标题为“学前教育“')).toEqual(['学前教育'])
+      expect(extractTopicTerms('这次撰写任务的标题为“学前教育”')).toEqual(['学前教育'])
+    })
+
     it('expands education domain hints from topic term', () => {
       const terms = extractTopicTerms('标题为“学前教育”')
       const hints = expandDomainHints(terms)
       expect(hints).toContain('幼儿园')
       expect(hints).toContain('保育')
-      expect(hints).toContain('招生')
+      expect(hints).toContain('幼儿')
       // 宽泛的 key 本身（"教育"）不进兜底表，避免误召回"政绩观学习教育"
       expect(hints).not.toContain('教育')
       // 收窄后剔除跨词误匹配与泛教育词（2026-08-13 test1 误召回回归）
@@ -377,6 +390,10 @@ if (import.meta.vitest) {
       expect(hints).not.toContain('大学') // 避免召回"重庆中新大学"等外地新闻
       expect(hints).not.toContain('教学')
       expect(hints).not.toContain('学生')
+      // 2026-08-14 再收窄：剔除招生/校历/学位，避免召回中小学/高中招生新闻（test2 漏检矛盾主因）
+      expect(hints).not.toContain('招生')
+      expect(hints).not.toContain('校历')
+      expect(hints).not.toContain('学位')
     })
 
     it('does not mis-match "入学" inside "深入学习" (test1 误召回回归)', () => {
