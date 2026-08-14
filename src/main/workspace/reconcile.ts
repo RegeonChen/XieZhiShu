@@ -3,7 +3,8 @@
  * 对账 = 把工作区文件系统的当前状态同步到数据库：
  *   - 新增：解析入库（内容哈希已在库中则视为"移动/重命名"，只更新路径，保留 id/标签/摘要）
  *   - 变更：重新解析并更新指纹，重跑向量索引（增量幂等）
- *   - 消失：仅统计，不删库（删除语义由 sync.ts / 用户操作处理）
+ *   - 消失：**直接从资料库删除**（含标签绑定 / 向量 / 摘要等所有关联信息一并清除；
+ *     同内容哈希仍被其它路径记录占用时视为重命名，不删——Task 2.2.4 修改原"仅统计"语义）
  *
  * 性能要点（2026-08-06 优化）：
  * 1. 扫描/指纹/解析全部异步（fs/promises），每处理一个文件让出事件循环，
@@ -15,10 +16,10 @@
 import { basename, join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { getDb } from '../db/connection'
-import { insertSource, findSourceByContentHash, updateSourceFingerprint } from '../db/sources'
+import { insertSource, findSourceByContentHash, updateSourceFingerprint, deleteSources } from '../db/sources'
 import { getSettings, updateSettings } from '../db/settings'
 import { parseFile } from '../import/file-parser'
-import { indexSource } from '../rag/indexer'
+import { enqueueIndex } from '../rag/indexer'
 import { scanWorkspaceAsync } from './scanner'
 import { fingerprintFileAsync, statFingerprintAsync } from './fingerprint'
 import { mkdtempSync, writeFileSync, rmSync, renameSync, mkdirSync } from 'node:fs'
@@ -40,6 +41,16 @@ export interface ReconcileResult {
 export interface ReconcileProgress {
   done: number
   total: number
+  /** 本轮已发现并开始处理的新文件数（>0 时前端提示"正在预处理新添加的文件"，Task 2.2.5） */
+  newFiles?: number
+  /** 已完成/处理到的计数（随每次 tick 累进；完成事件中为最终值，供前端刷新列表与提示） */
+  added?: number
+  changed?: number
+  removed?: number
+  moved?: number
+  errors?: number
+  /** 对账完成标记：为 true 表示本轮对账已结束（含全量对账"只有删除/无变化"时 total=0 的边界），前端据此刷新列表 */
+  finished?: boolean
 }
 
 /** 让出事件循环（配合分片，避免长时间阻塞主进程） */
@@ -53,6 +64,21 @@ export function getWorkspaceDir(): string | null {
 
 function emptyResult(workspaceDir: string | null): ReconcileResult {
   return { workspaceDir, added: 0, changed: 0, removed: 0, moved: 0, errors: 0, total: 0 }
+}
+
+/** 对账完成事件：携带最终计数与 finished 标记（供前端刷新列表并提示"已同步"） */
+function emitFinished(onProgress: ((p: ReconcileProgress) => void) | undefined, result: ReconcileResult, total: number): void {
+  onProgress?.({
+    done: total,
+    total,
+    newFiles: result.added,
+    added: result.added,
+    changed: result.changed,
+    removed: result.removed,
+    moved: result.moved,
+    errors: result.errors,
+    finished: true
+  })
 }
 
 /** 按工作区相对路径查找资料（含指纹，供增量对账判断变更） */
@@ -83,11 +109,8 @@ async function ingestFile(workspaceDir: string, rel: string, result: ReconcileRe
           status: 'ready'
         })
         result.changed += 1
-        try {
-          await indexSource(row.id)
-        } catch {
-          result.errors += 1
-        }
+        // 向量索引异步后台执行（推理在 Worker 线程），不阻塞对账与主进程
+        enqueueIndex(row.id)
       } catch (err) {
         const e = err as Error & { code?: string }
         result.errors += 1
@@ -110,11 +133,7 @@ async function ingestFile(workspaceDir: string, rel: string, result: ReconcileRe
       status: 'ready'
     })
     result.moved += 1
-    try {
-      await indexSource(existing.id)
-    } catch {
-      result.errors += 1
-    }
+    enqueueIndex(existing.id)
     return
   }
 
@@ -134,11 +153,7 @@ async function ingestFile(workspaceDir: string, rel: string, result: ReconcileRe
       workspace: true
     })
     result.added += 1
-    try {
-      await indexSource(source.id)
-    } catch {
-      result.errors += 1
-    }
+    enqueueIndex(source.id)
   } catch (err) {
     const e = err as Error & { code?: string }
     result.errors += 1
@@ -169,7 +184,7 @@ export async function reconcileWorkspace(onProgress?: (p: ReconcileProgress) => 
   let done = 0
   const tick = (): void => {
     done += 1
-    onProgress?.({ done, total })
+    onProgress?.({ done, total, newFiles: result.added })
   }
 
   for (const rel of diff.added) {
@@ -183,8 +198,17 @@ export async function reconcileWorkspace(onProgress?: (p: ReconcileProgress) => 
     await yieldLoop()
   }
 
-  result.removed = diff.removed.length
+  // 消失文件：直接从资料库删除（含标签绑定等所有关联信息；moved 的记录已在上方更新路径，此处查不到即跳过，不会误删）
+  for (const rel of diff.removed) {
+    const row = findWorkspaceSourceByPath(rel)
+    if (!row) continue
+    deleteSources([row.id])
+    result.removed += 1
+    await yieldLoop()
+  }
+
   result.total = result.added + result.changed + result.moved + result.removed
+  emitFinished(onProgress, result, total)
   return result
 }
 
@@ -201,28 +225,41 @@ export async function reconcilePaths(
   let done = 0
   const tick = (): void => {
     done += 1
-    onProgress?.({ done, total })
+    onProgress?.({ done, total, newFiles: result.added })
   }
 
+  // 阶段一：处理仍存在的文件（新增 / 变更 / 移动识别）
   for (const rel of relPaths) {
     const abs = join(workspaceDir, rel)
     const st = await statFingerprintAsync(abs)
-    const row = findWorkspaceSourceByPath(rel)
-
-    if (!st) {
-      // 文件不存在（或为目录）：库中若仍有记录且文件系统确实消失 → 统计
-      if (row && !existsSync(abs)) result.removed += 1
-      tick()
-      await yieldLoop()
-      continue
-    }
-
-    await ingestFile(workspaceDir, rel, result)
+    if (st) await ingestFile(workspaceDir, rel, result)
     tick()
     await yieldLoop()
   }
 
+  // 阶段二：处理已消失的文件（Task 2.2.4：工作区删除文件 → 资料库直接删除，
+  // 连同标签等所有绑定信息一并清除；同内容哈希仍被其它路径记录占用则视为重命名，不删）
+  for (const rel of relPaths) {
+    const abs = join(workspaceDir, rel)
+    if (existsSync(abs)) continue
+    const row = findWorkspaceSourceByPath(rel)
+    if (!row) continue
+    if (row.content_hash) {
+      const dup = getDb()
+        .prepare('SELECT COUNT(*) AS c FROM sources WHERE content_hash = ? AND id != ?')
+        .get(row.content_hash, row.id) as { c: number }
+      if (dup.c > 0) {
+        result.moved += 1
+        continue
+      }
+    }
+    deleteSources([row.id])
+    result.removed += 1
+    await yieldLoop()
+  }
+
   result.total = result.added + result.changed + result.moved + result.removed
+  emitFinished(onProgress, result, total)
   return result
 }
 
@@ -318,22 +355,37 @@ if (import.meta.vitest) {
       renameSync(join(tmp, 'old', 'doc.md'), join(tmp, 'new', 'doc.md'))
       const res = await reconcileWorkspace()
       expect(res.moved).toBe(1)
+      expect(res.removed).toBe(0) // 移动不视为删除（Task 2.2.4）
       const after = db.prepare("SELECT id, file_path FROM sources WHERE id = ?").get(before.id) as { id: string; file_path: string }
       expect(after.id).toBe(before.id) // id 保持不变（保留标签/摘要）
       expect(after.file_path).toBe('new/doc.md')
     })
 
-    it('counts removed files but does not delete records yet', async () => {
+    it('deletes record (and all bound info) when the workspace file is removed (Task 2.2.4)', async () => {
       writeFileSync(join(tmp, 'gone.txt'), '将被删除。')
       updateSettings({ workspaceDir: tmp })
       await reconcileWorkspace()
 
+      // 给该资料打标签、建摘要/向量，验证级联清理
+      const row = db.prepare("SELECT id FROM sources WHERE file_path = 'gone.txt'").get() as { id: string }
+      db.prepare("INSERT INTO tags (id, name) VALUES ('tag1', '测试标签')").run()
+      db.prepare("INSERT INTO source_tags (source_id, tag_id) VALUES (?, 'tag1')").run(row.id)
+      db.prepare(
+        `INSERT INTO source_summaries (source_id, summary, keywords, entities) VALUES (?, '摘要', '[]', '[]')`
+      ).run(row.id)
+      db.prepare(
+        `INSERT INTO chunk_embeddings (id, source_id, chunk_text, position, embedding, model_id, created_at)
+         VALUES ('e1', ?, '内容', '第1段', ?, 'test', datetime('now'))`
+      ).run(row.id, Buffer.alloc(8))
+
       rmSync(join(tmp, 'gone.txt'))
       const res = await reconcileWorkspace()
       expect(res.removed).toBe(1)
-      // 库记录仍保留（删除语义由 Task 2.2.3 处理）
-      const row = db.prepare("SELECT COUNT(*) AS c FROM sources WHERE file_path = 'gone.txt'").get() as { c: number }
-      expect(row.c).toBe(1)
+      // 资料记录及其标签/摘要/向量全部级联清除
+      expect(db.prepare("SELECT COUNT(*) AS c FROM sources WHERE file_path = 'gone.txt'").get() as { c: number }).toEqual({ c: 0 })
+      expect(db.prepare('SELECT COUNT(*) AS c FROM source_tags WHERE source_id = ?').get(row.id) as { c: number }).toEqual({ c: 0 })
+      expect(db.prepare('SELECT COUNT(*) AS c FROM source_summaries WHERE source_id = ?').get(row.id) as { c: number }).toEqual({ c: 0 })
+      expect(db.prepare('SELECT COUNT(*) AS c FROM chunk_embeddings WHERE source_id = ?').get(row.id) as { c: number }).toEqual({ c: 0 })
     })
 
     it('marks unsupported/parse-failed files without breaking others', async () => {
@@ -364,6 +416,55 @@ if (import.meta.vitest) {
       writeFileSync(join(tmp, 'a.txt'), 'A 内容已修改。')
       const res3 = await reconcilePaths(['a.txt'])
       expect(res3.changed).toBe(1)
+    })
+
+    it('emits a finished progress event with final counts (UI 实时刷新依赖)', async () => {
+      writeFileSync(join(tmp, 'a.txt'), 'A 内容。')
+      updateSettings({ workspaceDir: tmp })
+
+      const events: ReconcileProgress[] = []
+      await reconcileWorkspace((p) => events.push(p))
+
+      const done = events[events.length - 1]
+      expect(done?.finished).toBe(true)
+      expect(done?.added).toBe(1)
+      expect(done?.changed).toBe(0)
+      expect(done?.removed).toBe(0)
+
+      // 增量对账同样发送完成事件
+      writeFileSync(join(tmp, 'a.txt'), 'A 内容已修改。')
+      const incr: ReconcileProgress[] = []
+      await reconcilePaths(['a.txt'], (p) => incr.push(p))
+      const done2 = incr[incr.length - 1]
+      expect(done2?.finished).toBe(true)
+      expect(done2?.changed).toBe(1)
+    })
+
+    it('reconcilePaths deletes the record when a file is removed (Task 2.2.4)', async () => {
+      writeFileSync(join(tmp, 'del.txt'), '将被删除。')
+      updateSettings({ workspaceDir: tmp })
+      await reconcileWorkspace()
+
+      rmSync(join(tmp, 'del.txt'))
+      const res = await reconcilePaths(['del.txt'])
+      expect(res.removed).toBe(1)
+      expect(db.prepare("SELECT COUNT(*) AS c FROM sources WHERE file_path = 'del.txt'").get() as { c: number }).toEqual({ c: 0 })
+    })
+
+    it('reconcilePaths treats rename as move, not delete (Task 2.2.4)', async () => {
+      writeFileSync(join(tmp, '旧名.txt'), '重命名内容。')
+      updateSettings({ workspaceDir: tmp })
+      await reconcileWorkspace()
+      const before = db.prepare("SELECT id FROM sources WHERE file_path = '旧名.txt'").get() as { id: string }
+
+      // 重命名会同时触发 unlink(旧) + add(新)，聚合到同一次增量对账
+      renameSync(join(tmp, '旧名.txt'), join(tmp, '新名.txt'))
+      const res = await reconcilePaths(['新名.txt', '旧名.txt'])
+      expect(res.moved).toBe(1)
+      expect(res.removed).toBe(0) // 不误删
+      const after = db.prepare("SELECT id, file_path FROM sources WHERE id = ?").get(before.id) as { id: string; file_path: string }
+      expect(after.id).toBe(before.id)
+      expect(after.file_path).toBe('新名.txt')
     })
   })
 }

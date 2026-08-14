@@ -20,6 +20,8 @@ import type { FeatureExtractionPipeline } from '@huggingface/transformers'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { existsSync } from 'node:fs'
+import { Worker } from 'node:worker_threads'
 
 export const DEFAULT_EMBED_MODEL_ID = 'bge-small-zh-v1.5'
 const DEFAULT_MODEL_PATH = 'resources/models'
@@ -98,6 +100,21 @@ async function getExtractor(): Promise<FeatureExtractionPipeline> {
 
 /** 文本 → 向量列表（mean pooling + L2 归一化） */
 export async function embedTexts(texts: string[]): Promise<number[][]> {
+  if (texts.length === 0) return []
+  // 优先走 Worker 线程推理（不阻塞主进程事件循环）；Worker 不可用/出错时回退主进程内直接推理
+  const w = getEmbedWorker()
+  if (w) {
+    try {
+      return await requestEmbedWorker(w, texts)
+    } catch {
+      // Worker 超时/报错：降级为直接推理（directEmbed 内部同样会抛出明确的模型错误）
+    }
+  }
+  return directEmbed(texts)
+}
+
+/** 主进程内直接推理（原 embedTexts 实现；Worker 不可用时的回退路径，测试亦走此路径） */
+async function directEmbed(texts: string[]): Promise<number[][]> {
   const extractor = await getExtractor()
   const output = await extractor(texts, { pooling: 'mean', normalize: true })
   const data = output.data as Float32Array
@@ -107,4 +124,107 @@ export async function embedTexts(texts: string[]): Promise<number[][]> {
     out.push(Array.from(data.subarray(i * dim, (i + 1) * dim)))
   }
   return out
+}
+
+// ================= Worker 线程推理客户端 =================
+// 目标：把 WASM 推理移出主线程。Worker 文件由 electron-vite 单独打包为 out/main/embed.worker.js
+//（见 electron.vite.config.ts main.rollupOptions.input）。文件缺失（如 vitest 环境）时永久回退直接推理。
+
+let embedWorker: Worker | null = null
+let embedWorkerBroken = false
+let embedWorkerSeq = 0
+const embedWorkerPending = new Map<
+  number,
+  { resolve: (v: number[][]) => void; reject: (e: unknown) => void; timer: ReturnType<typeof setTimeout> }
+>()
+
+/** 定位打包产物 embed.worker.js（与主 bundle 同目录）；不存在则视为不可用 */
+function embedWorkerFile(): string | null {
+  const p = join(__dirname, 'embed.worker.js')
+  return existsSync(p) ? p : null
+}
+
+function rejectAllPending(err: unknown): void {
+  for (const [, p] of embedWorkerPending) {
+    clearTimeout(p.timer)
+    p.reject(err)
+  }
+  embedWorkerPending.clear()
+}
+
+function onWorkerMessage(msg: { type?: string; id?: number; vectors?: number[][]; message?: string }): void {
+  if (msg.type === 'result' && typeof msg.id === 'number') {
+    const p = embedWorkerPending.get(msg.id)
+    if (p) {
+      clearTimeout(p.timer)
+      embedWorkerPending.delete(msg.id)
+      p.resolve(msg.vectors ?? [])
+    }
+    return
+  }
+  if (msg.type === 'error' && typeof msg.id === 'number') {
+    const p = embedWorkerPending.get(msg.id)
+    if (p) {
+      clearTimeout(p.timer)
+      embedWorkerPending.delete(msg.id)
+      p.reject(new Error(msg.message ?? '嵌入 Worker 错误'))
+    }
+  }
+}
+
+function onWorkerFatal(err: unknown): void {
+  // Worker 崩溃/退出：标记永久不可用（本会话回退直接推理），并拒绝所有在途请求
+  embedWorkerBroken = true
+  if (embedWorker) {
+    try { void embedWorker.terminate() } catch { /* 忽略 */ }
+    embedWorker = null
+  }
+  rejectAllPending(err instanceof Error ? err : new Error(String(err)))
+}
+
+function getEmbedWorker(): Worker | null {
+  if (embedWorkerBroken) return null
+  if (embedWorker) return embedWorker
+  const file = embedWorkerFile()
+  if (!file) {
+    embedWorkerBroken = true
+    return null
+  }
+  try {
+    const w = new Worker(file)
+    w.on('message', onWorkerMessage)
+    w.on('error', (err) => onWorkerFatal(err))
+    w.on('exit', (code) => {
+      if (code !== 0) onWorkerFatal(new Error(`嵌入 Worker 退出（code=${code}）`))
+    })
+    w.postMessage({ type: 'init', modelId, modelPath })
+    embedWorker = w
+    return w
+  } catch (err) {
+    embedWorkerBroken = true
+    return null
+  }
+}
+
+/** 单次嵌入请求：发送给 Worker，带超时（Worker 卡死时降级，避免索引挂起） */
+function requestEmbedWorker(worker: Worker, texts: string[]): Promise<number[][]> {
+  return new Promise((resolve, reject) => {
+    const id = ++embedWorkerSeq
+    const timer = setTimeout(() => {
+      embedWorkerPending.delete(id)
+      reject(new Error('嵌入 Worker 响应超时'))
+    }, 120000)
+    embedWorkerPending.set(id, { resolve, reject, timer })
+    worker.postMessage({ type: 'embed', id, texts })
+  })
+}
+
+/** 关闭 Worker（应用退出时调用；未启动则空操作） */
+export function stopEmbedWorker(): void {
+  if (embedWorker) {
+    void embedWorker.terminate()
+    embedWorker = null
+  }
+  embedWorkerBroken = false
+  embedWorkerPending.clear()
 }

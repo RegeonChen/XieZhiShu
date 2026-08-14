@@ -15,10 +15,24 @@ import { vectorToBuffer } from './indexer'
 
 /** 单块最大字符数，超长段落按句切分 */
 const CHUNK_MAX = 500
-/** 每个资料最多贡献的块数 */
-const MAX_PER_SOURCE = 3
-/** 低于该分值视为不相关 */
-const MIN_SCORE = 5
+
+/**
+ * 判定"标题行"（Task 3.4.4）：志书/年鉴正文中章节标题常独立成段（如"教育""学前教育""义务教育"），
+ * 特征：短（≤12 字）、不以句末/句中标点结尾、不含数字。
+ * 这类块只有标题、没有史实。检索查询词命中标题行会拿到极高词法分（短文本 bigram 重叠率满分），
+ * 从而把实质正文段落全部挤出 TopN 配额，导致大模型拿到一堆标题、无米下锅（初稿只有寥寥几行）。
+ * 分块与检索融合时均跳过，保证材料是真正有内容的正文。
+ */
+export function isTitleLikeLine(text: string): boolean {
+  const t = text.trim()
+  if (!t) return false
+  if (/[。！？；：，,；]$/.test(t)) return false // 以标点结尾视为正文短句
+  if (/[0-9０-９]/.test(t)) return false // 含数字可能是有效数据段
+  // 纯标题/词组行：≤12 字的短语，或 ≤20 字且用空格分隔的标题词组（如"开放教育 成人教育 特殊教育"）
+  if (t.length <= 12) return true
+  if (t.length <= 20 && t.includes(' ')) return true
+  return false
+}
 
 interface Chunk {
   text: string
@@ -34,6 +48,8 @@ export function chunkText(text: string): Chunk[] {
   const chunks: Chunk[] = []
   paras.forEach((p, i) => {
     const pos = `第${i + 1}段`
+    // 跳过标题行：志书/年鉴中章节标题独立成段，无实质内容（Task 3.4.4）
+    if (isTitleLikeLine(p)) return
     if (p.length <= CHUNK_MAX) {
       chunks.push({ text: p, position: pos })
       return
@@ -59,14 +75,14 @@ export function chunkText(text: string): Chunk[] {
 }
 
 /** 字符 bigram（中文无需分词，用相邻字符对近似文本相似度） */
-function bigrams(s: string): string[] {
+export function bigrams(s: string): string[] {
   const chars = Array.from(s.replace(/\s+/g, ''))
   const out: string[] = []
   for (let i = 0; i < chars.length - 1; i++) out.push(chars[i] + chars[i + 1])
   return out
 }
 
-function dice(a: string[], b: string[]): number {
+export function dice(a: string[], b: string[]): number {
   if (a.length === 0 || b.length === 0) return 0
   const common = a.filter((x) => b.includes(x)).length
   return (2 * common) / (a.length + b.length)
@@ -92,82 +108,60 @@ export function scoreChunk(query: string, chunk: string, sourceTitle: string): n
 export interface RetrieveParams {
   sourceIds: string[]
   query: string
-  limit?: number
-  /** 查询向量（由 embedding 模型生成）；提供时启用词法+向量混合检索 */
+  /** 查询向量（由 embedding 模型生成）；提供时启用语义补充检索 */
   queryVector?: number[]
+  /** 向量余弦保留阈值（Task 3.4.7）：低于视为"非常确定无关"；词法 score>0 的块不受此限制 */
+  vecMinScore?: number
 }
 
-interface ScoredCandidate {
-  sourceId: string
-  sourceTitle: string
-  position: string
-  text: string
-  score: number
-}
-
-/** 每来源取 Top3 再全局排序取 TopN，保证材料多样性 */
-function poolTop(candidates: ScoredCandidate[], limit: number): RetrievedChunk[] {
-  const bySource = new Map<string, ScoredCandidate[]>()
-  for (const c of candidates) {
-    const arr = bySource.get(c.sourceId) ?? []
-    arr.push(c)
-    bySource.set(c.sourceId, arr)
-  }
-  const pooled: ScoredCandidate[] = []
-  for (const arr of bySource.values()) {
-    arr.sort((a, b) => b.score - a.score)
-    pooled.push(...arr.slice(0, MAX_PER_SOURCE))
-  }
-  pooled.sort((a, b) => b.score - a.score)
-  return pooled.slice(0, limit).map((c) => ({ ...c, score: c.score }))
-}
-
-/** 在指定资料范围内检索与查询最相关的片段（含来源与位置） */
+/**
+ * 过滤式检索（Task 3.4.7）：不做 TopN 截断、不做每资料配额，只剔除"非常确定无关"的段落。
+ * 保留规则：词法相关（scoreChunk > 0，即与标题有任何字面/字符对关联）或 向量相关（余弦 ≥ vecMinScore）的段落全部保留，
+ * 标题行一律剔除。输出按来源、原文顺序组织（向量补充块追加在后）。
+ * 目的：把粗筛后资料中尽可能多的有效内容完整供给大模型，篇幅由材料内容自然决定。
+ */
 export function retrieveChunks(params: RetrieveParams): RetrievedChunk[] {
-  const { sourceIds, query, limit = 12, queryVector } = params
+  const { sourceIds, query, queryVector, vecMinScore = 0.3 } = params
   const q = query.trim()
   if (!q || sourceIds.length === 0) return []
 
   const sources = getSourcesByIds(sourceIds)
+  const out: RetrievedChunk[] = []
+  const seen = new Set<string>()
 
-  // 词法路：实时分块打分（全量候选，保留排名用于 RRF 融合）
-  const lexCandidates: ScoredCandidate[] = []
+  // 词法路：score > 0 保留（score === 0 = 与标题完全无字面/字符对关联 → 非常确定无关，剔除）
   for (const s of sources) {
     for (const c of chunkText(s.cleanedText ?? '')) {
       const score = scoreChunk(q, c.text, s.title)
-      if (score < MIN_SCORE) continue
-      lexCandidates.push({ sourceId: s.id, sourceTitle: s.title, position: c.position, text: c.text, score })
+      if (score <= 0) continue
+      const key = `${s.id}|${c.position}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({ sourceId: s.id, sourceTitle: s.title, position: c.position, text: c.text, score })
     }
   }
-  lexCandidates.sort((a, b) => b.score - a.score)
 
-  // 未提供查询向量：纯词法（向后兼容）
-  if (!queryVector || queryVector.length === 0) {
-    return poolTop(lexCandidates, limit).map((c) => ({ ...c, score: Math.round(c.score) }))
-  }
-
-  // 向量路：已索引块按余弦相似度排序
-  const vecHits = vectorSearch(queryVector, sourceIds, 200)
-
-  // RRF 融合（Reciprocal Rank Fusion）：词法排名 + 向量排名
-  const K = 60
-  const fused = new Map<string, ScoredCandidate>()
-  lexCandidates.forEach((c, i) => {
-    fused.set(`${c.sourceId}|${c.position}`, { ...c, score: 1 / (K + i + 1) })
-  })
-  vecHits.forEach((h, i) => {
-    const key = `${h.sourceId}|${h.position}`
-    const cur = fused.get(key)
-    if (cur) {
-      cur.score += 1 / (K + i + 1)
-    } else {
+  // 向量路：全量余弦，≥ vecMinScore 的块并入（补充"字面无关但语义相关"的段落）
+  if (queryVector && queryVector.length > 0) {
+    const hits = vectorSearch(queryVector, sourceIds, 0)
+    for (const h of hits) {
+      if (h.score < vecMinScore) continue
+      if (isTitleLikeLine(h.text)) continue
+      const key = `${h.sourceId}|${h.position}`
+      if (seen.has(key)) continue
+      seen.add(key)
       const srcTitle = sources.find((s) => s.id === h.sourceId)?.title ?? ''
-      fused.set(key, { sourceId: h.sourceId, sourceTitle: srcTitle, position: h.position, text: h.text, score: 1 / (K + i + 1) })
+      out.push({
+        sourceId: h.sourceId,
+        sourceTitle: srcTitle,
+        position: h.position,
+        text: h.text,
+        score: Math.round(h.score * 100) // 向量补入块的展示分（0-100 量纲）
+      })
     }
-  })
+  }
 
-  const candidates = Array.from(fused.values()).sort((a, b) => b.score - a.score)
-  return poolTop(candidates, limit).map((c) => ({ ...c, score: Math.round(c.score * 10000) }))
+  return out
 }
 
 // ---- vitest inline test ----
@@ -196,7 +190,7 @@ if (import.meta.vitest) {
       expect(chunks.length).toBeGreaterThanOrEqual(2)
     })
 
-    it('retrieves relevant chunks with source and position', () => {
+    it('keeps all lexically related paragraphs and drops definitely-unrelated ones (Task 3.4.7)', () => {
       insertSource(
         's1',
         '新区经济发展概况',
@@ -209,17 +203,16 @@ if (import.meta.vitest) {
       )
 
       const chunks = retrieveChunks({ sourceIds: ['s1', 's2'], query: '新区经济发展' })
-      expect(chunks.length).toBeGreaterThan(0)
-      const top = chunks[0]
-      expect(top.sourceId).toBe('s1')
-      expect(top.position).toBe('第1段')
-      expect(top.sourceTitle).toBe('新区经济发展概况')
+      // s2 与"新区经济发展"无任何字面/字符对关联 → 非常确定无关，整份剔除
+      expect(chunks.every((c) => c.sourceId === 's1')).toBe(true)
+      // s1 的两段全部保留（score > 0），按原文顺序，不受 TopN 截断
+      expect(chunks.map((c) => c.position)).toEqual(['第1段', '第2段'])
+      expect(chunks[0].sourceTitle).toBe('新区经济发展概况')
     })
 
-    it('strictly limits to given sourceIds (no external info)', () => {
+    it('returns nothing when no paragraph is related (no external info)', () => {
       const chunks = retrieveChunks({ sourceIds: ['s2'], query: '新区经济发展' })
-      expect(chunks.every((c) => c.sourceId === 's2')).toBe(true)
-      // 无关材料应得分过低而不返回
+      // 无关材料的所有段落都被过滤 → 无候选
       expect(chunks).toHaveLength(0)
     })
 
@@ -228,7 +221,7 @@ if (import.meta.vitest) {
       expect(retrieveChunks({ sourceIds: [], query: 'x' })).toHaveLength(0)
     })
 
-    it('hybrid RRF recalls semantically similar chunk without lexical overlap (Task 3.2.2)', () => {
+    it('vector path supplements semantically related paragraphs missed lexically (Task 3.4.7)', () => {
       insertSource('s3', '某年度报告', '适龄儿童入学率稳步提升，教师队伍不断壮大，教学设施持续改善。')
       // 预置向量索引（queryVector 与之高度相似）
       db.prepare(
@@ -236,15 +229,61 @@ if (import.meta.vitest) {
          VALUES ('c3', 's3', '适龄儿童入学率稳步提升，教师队伍不断壮大，教学设施持续改善。', '第1段', ?, 'test', datetime('now'))`
       ).run(vectorToBuffer([1, 0, 0, 0]))
 
-      // 纯词法：标题与正文均无"教育"字样 → 词法分低，不召回
+      // 纯词法：标题与正文均无"教育"字样 → 词法分 0，无候选
       const lexOnly = retrieveChunks({ sourceIds: ['s3'], query: '教育事业发展' })
-      // 混合检索：向量路召回并融合
-      const hybrid = retrieveChunks({ sourceIds: ['s3'], query: '教育事业发展', queryVector: [1, 0, 0, 0], limit: 12 })
-      expect(hybrid.length).toBeGreaterThan(0)
+      expect(lexOnly).toHaveLength(0)
+      // 向量路：余弦 1 ≥ vecMinScore → 语义相关的段落被补充保留
+      const hybrid = retrieveChunks({ sourceIds: ['s3'], query: '教育事业发展', queryVector: [1, 0, 0, 0] })
+      expect(hybrid).toHaveLength(1)
       expect(hybrid[0].sourceId).toBe('s3')
       expect(hybrid[0].text).toContain('入学率')
-      // 兼容：无向量时行为不变
-      expect(Array.isArray(lexOnly)).toBe(true)
+    })
+
+    it('skips title-like lines in chunking so headings never fill material quota (Task 3.4.4)', () => {
+      const chunks = chunkText('教育\n\n学前教育。\n\n义务教育\n\n开放教育 成人教育 特殊教育\n\n2021年，全区共有各级各类学校212所，在校生117679人。')
+      const texts = chunks.map((c) => c.text)
+      // 无句末标点的短标题行与空格分隔的标题词组行被过滤
+      expect(texts).not.toContain('教育')
+      expect(texts).not.toContain('义务教育')
+      expect(texts).not.toContain('开放教育 成人教育 特殊教育')
+      // 带句号的短句与有内容的正文保留
+      expect(texts).toContain('学前教育。')
+      expect(texts).toContain('2021年，全区共有各级各类学校212所，在校生117679人。')
+    })
+
+    it('excludes vector-only title-like hits in retrieval (Task 3.4.4)', () => {
+      // 历史向量库中残留标题行块"教育"（词法路已无该块）
+      insertSource('s4', '某教育报告', '2021年，全区共有各级各类学校212所。')
+      db.prepare(
+        `INSERT INTO chunk_embeddings (id, source_id, chunk_text, position, embedding, model_id, created_at)
+         VALUES ('c4', 's4', '教育', '第1段', ?, 'test', datetime('now'))`
+      ).run(vectorToBuffer([1, 0, 0, 0]))
+      const hits = retrieveChunks({ sourceIds: ['s4'], query: '教育事业发展', queryVector: [1, 0, 0, 0] })
+      expect(hits.some((c) => c.text === '教育')).toBe(false)
+      expect(hits.every((c) => !isTitleLikeLine(c.text))).toBe(true)
+    })
+
+    it('keeps all related paragraphs without TopN cap (Task 3.4.7)', () => {
+      // 一个资料内多个段落均与标题相关 → 全部保留，不设数量上限
+      insertSource(
+        's5',
+        '教育事业发展综述',
+        '第一段涉及教育工作概况。\n第二段继续安排教育工作。\n第三段落实教育经费。\n第四段推进教师队伍建设。\n第五段部署秋季开学工作。'
+      )
+      const chunks = retrieveChunks({ sourceIds: ['s5'], query: '教育' })
+      expect(chunks).toHaveLength(5)
+      expect(chunks.map((c) => c.position)).toEqual(['第1段', '第2段', '第3段', '第4段', '第5段'])
+    })
+
+    it('drops vector hits below vecMinScore (definitely unrelated, Task 3.4.7)', () => {
+      insertSource('s6', '无关文档', '与主题完全无关的内容，讲的是天气变化。')
+      db.prepare(
+        `INSERT INTO chunk_embeddings (id, source_id, chunk_text, position, embedding, model_id, created_at)
+         VALUES ('c6', 's6', '与主题完全无关的内容，讲的是天气变化。', '第1段', ?, 'test', datetime('now'))`
+      ).run(vectorToBuffer([0, 1, 0, 0]))
+      // 词法分 0（无"教育"字样），向量余弦 0 < 0.3 → 非常确定无关，剔除
+      const hits = retrieveChunks({ sourceIds: ['s6'], query: '教育', queryVector: [1, 0, 0, 0] })
+      expect(hits).toHaveLength(0)
     })
   })
 }

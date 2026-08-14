@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import { zhCN } from '../i18n/zh-CN'
 import ConfirmDialog from './ConfirmDialog'
+import PresetGuideDialog from './PresetGuideDialog'
+import { LLM_PRESETS } from '../../../shared/llm-presets'
+import type { LlmPreset } from '../../../shared/llm-presets'
 
 interface ProviderItem {
   id: string
@@ -40,6 +43,9 @@ function Settings() {
   const [actionErr, setActionErr] = useState<string | null>(null)
   const [pendingDelete, setPendingDelete] = useState<ProviderItem | null>(null)
   const [deleting, setDeleting] = useState(false)
+
+  // Phase 3.6 预设大模型
+  const [guidePreset, setGuidePreset] = useState<LlmPreset | null>(null)
 
   // Phase 2.2 工作区
   const [workspaceDir, setWorkspaceDir] = useState<string | null>(null)
@@ -268,6 +274,48 @@ function Settings() {
 
       <section className="settings__section">
         <div className="settings__section-header">
+          <h4 className="settings__section-title">{zhCN.settingsPage.preset.title}</h4>
+        </div>
+        <p className="settings__hint">{zhCN.settingsPage.preset.hint}</p>
+        <ul className="settings__preset-list">
+          {LLM_PRESETS.map((preset) => {
+            const isFree = preset.pricing.includes('免费')
+            return (
+              <li key={preset.id} className="settings__preset-item">
+                <div className="settings__preset-info">
+                  <span className="settings__preset-name">
+                    {preset.name}
+                    <span className={`settings__badge${isFree ? ' settings__badge--free' : ''}`}>{preset.pricing}</span>
+                  </span>
+                  <span className="settings__preset-meta">
+                    {preset.model} · {preset.apiBase}
+                  </span>
+                </div>
+                <div className="settings__preset-actions">
+                  <button
+                    type="button"
+                    className="source-list__btn source-list__btn--primary"
+                    onClick={() => {
+                      setEditing('new')
+                      setForm({ name: preset.name, apiBase: preset.apiBase, model: preset.model, apiKey: '' })
+                      setFormErr(null)
+                      setTestMsg(null)
+                    }}
+                  >
+                    {zhCN.settingsPage.preset.useBtn}
+                  </button>
+                  <button type="button" className="source-list__btn" onClick={() => setGuidePreset(preset)}>
+                    {zhCN.settingsPage.preset.getKeyBtn}
+                  </button>
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+      </section>
+
+      <section className="settings__section">
+        <div className="settings__section-header">
           <h4 className="settings__section-title">{zhCN.settingsPage.provider.title}</h4>
           <button type="button" className="source-list__btn source-list__btn--primary" onClick={startCreate}>
             {zhCN.settingsPage.provider.addBtn}
@@ -390,6 +438,8 @@ function Settings() {
           onCancel={() => setPendingDelete(null)}
         />
       ) : null}
+
+      {guidePreset ? <PresetGuideDialog preset={guidePreset} onClose={() => setGuidePreset(null)} /> : null}
     </div>
   )
 }

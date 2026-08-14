@@ -1,14 +1,14 @@
 # 数据模型与 Schema 设计（docs/data-model.md）
 
 > 状态：规划产物（2026-08-03），对应 `PLAN.md` Task 1.3，是本地数据库的建库依据。
-> 设计原则：本地优先；逐片段溯源；以"第 n 稿"为版本单元；所有 Schema 变更必须通过迁移完成。
+> 设计原则：本地优先；逐片段溯源；每任务一稿（初稿，2026-08-11 起删去版本管理）；所有 Schema 变更必须通过迁移完成。
 
 ## 1. 实体总览与关系
 
 - **Source（资料）**是"用户导入的文件"与"信源网址"的统一抽象，用 `kind` 字段区分。
 - 一份资料可打多个 **Tag**（多对多）。
 - **TemplateBook（范本）**独立于普通资料存储。
-- 一个 **WritingTask（撰写任务）**对应多个 **Draft（志稿版本）**，第 n 稿即 `version_number = n`，每稿是完整快照。
+- 一个 **WritingTask（撰写任务）**对应一个 **Draft（志稿/初稿）**（2026-08-11 删去版本管理后仅保留初稿，`version_number` 恒为 0），每稿是完整快照。
 - 一个 Draft 由多个 **Segment（片段）**组成；每个片段可关联多个 Source 并记录原文位置（溯源核心）。
 
 ```
@@ -64,9 +64,38 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 | id | TEXT PK | |
 | name | TEXT NOT NULL | 范本名称 |
 | file_path | TEXT NOT NULL | 本地相对路径 |
-| outline_json | TEXT NOT NULL | 解析出的篇目层级结构 |
-| style_profile_json | TEXT NULL | 体例特征（文体标记、行文特征摘要） |
+| outline_json | TEXT NOT NULL | 已弃用（撰写只针对一个小节正文，不再提取篇目结构；写入空数组占位） |
+| style_profile_json | TEXT NULL | 体例特征（本地统计 + 大模型行文范例增强，结构见下表） |
 | created_at | TEXT NOT NULL | |
+
+> 注：`style_profile_json`（Phase 3.3 Task 3.3.1，2026-08-07，方案多次升级）为**本地统计兜底 + 大模型提取"三个正常小节"行文范例**结果，供撰写任务生成初稿时作为体例参考注入提示词。**不再提取篇目结构**（撰写只针对一个小节正文）。本地统计始终存在、不依赖 LLM；行文范例由大模型提取（`llm=true`），未配置 Provider 或调用失败时自动降级。结构：
+>
+> ```json
+> {
+>   "totalChars": 32450,          // 全文字符数（去除空白，本地）
+>   "paragraphCount": 180,        // 正文段落数（本地）
+>   "avgParagraphChars": 180,     // 平均段长（字/段，本地）
+>   "maxLevel": 3,                // 标题最大层级（本地）
+>   "sectionCounts": { "1": 3, "2": 5, "3": 12 },  // 各级标题数量（本地）
+>   "headingStyle": "第X篇/章/节 编号",             // 标题样式（本地）
+>   "exampleSections": {          // LLM：三个正常小节行文范例（排除概要/大事记/人物传记/附录/索引等特殊模块）
+>     "summary": "三个小节共有的行文逻辑与风格标准总体总结",
+>     "sections": [
+>       {
+>         "title": "科技项目与成果",
+>         "structureSummary": "该小节的行文逻辑与结构总结（如何开头收尾、先总述后分述、段落衔接）",
+>         "styleGuidelines": "每一段、每一句话的行文风格标准（客观平实、述而不作、句式与数据表述规范）",
+>         "example": "该小节的原文正文示例（直接摘录原文不改写）"
+>       }
+>     ]
+>   },
+>   "samples": ["…"],             // 兼容字段（本地截断 200 字）
+>   "llm": true,                  // true = 行文范例经大模型增强提取
+>   "llmModel": "deepseek-chat"    // LLM 增强时使用的模型名
+> }
+> ```
+>
+> 存量范本该列为 NULL 或旧结构时自动降级（生成初稿兼容旧字段），可通过范本页"重新提取"更新。`outline_json` 列已弃用（写入空数组占位）。
 
 ### 2.5 writing_tasks（撰写任务）
 
@@ -76,16 +105,16 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 | title | TEXT NOT NULL | 需要撰写部分的标题 |
 | scope_json | TEXT NOT NULL | 文件范围：`{ sourceIds: [] }` 或 `{ tagIds: [] }`，二者取一 |
 | template_book_id | TEXT NULL REFERENCES template_books(id) ON DELETE SET NULL | 参照范本 |
-| current_version | INTEGER NOT NULL DEFAULT 0 | 当前所在稿号 |
+| current_version | INTEGER NOT NULL DEFAULT 0 | 当前稿号（恒为 0 = 初稿；版本管理已删除，列保留兼容） |
 | created_at / updated_at | TEXT NOT NULL | |
 
-### 2.6 drafts（志稿版本）
+### 2.6 drafts（志稿/初稿）
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | id | TEXT PK | |
 | task_id | TEXT NOT NULL REFERENCES writing_tasks(id) ON DELETE CASCADE | |
-| version_number | INTEGER NOT NULL | 0 为初稿 |
+| version_number | INTEGER NOT NULL | 恒为 0（初稿；版本管理已删除，列保留兼容） |
 | status | TEXT NOT NULL DEFAULT 'editing' CHECK('editing','confirmed') | |
 | confirmed_at | TEXT NULL | |
 | created_at | TEXT NOT NULL | |
@@ -172,11 +201,57 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 
 `sources` 表新增列：`indexed_at`（向量索引完成时间）、`index_state`（'pending'/'indexing'/'ready'/'failed'，向量索引状态）。
 
+### 2.15 draft_contradictions（初稿矛盾分组，Phase 3.7 Task 3.7.1）
+
+| 字段 | 类型 | 约束 | 说明 |
+|---|---|---|---|
+| id | TEXT | PK | uuid |
+| draft_id | TEXT | NOT NULL REFERENCES drafts(id) ON DELETE CASCADE | 所属初稿（矛盾只在生成初稿阶段产生） |
+| seq | INTEGER | NOT NULL, UNIQUE(draft_id, seq) | 生成提示词中的序号 #N，与正文标记 `【矛盾#N】` 对应 |
+| topic | TEXT | NOT NULL | 事实主题一句话（同一主题一个分组，不逐对罗列） |
+| kind | TEXT | NOT NULL DEFAULT 'other', CHECK('data','time','place','fact','other') | 矛盾类型：数据/时间/地点/事实经过/其他 |
+| status | TEXT | NOT NULL DEFAULT 'pending', CHECK('pending','adopted','ignored') | 人工取舍状态：待处理/已采纳某说法/已忽略 |
+| merged | INTEGER | NOT NULL DEFAULT 0 | 生成后定位审查发现"正文自然合并矛盾说法"的兜底标记 |
+| draft_quote | TEXT | NULL | 正文中涉及该矛盾的原文原句（定位审查回填；即采纳修订时待替换语句的起止定位 from） |
+| in_draft | INTEGER | NULL | 定位审查是否在正文中发现该矛盾：1=在正文（矛盾）/ 0=不在正文（警告）/ NULL=定位审查未执行（未知） |
+| adopted_variant_id | TEXT | NULL | 用户采纳的说法 variant id（status=adopted 时） |
+| created_at | TEXT | NOT NULL | |
+
+### 2.16 contradiction_variants（矛盾说法，Phase 3.7 Task 3.7.1）
+
+| 字段 | 类型 | 约束 | 说明 |
+|---|---|---|---|
+| id | TEXT | PK | uuid |
+| contradiction_id | TEXT | NOT NULL REFERENCES draft_contradictions(id) ON DELETE CASCADE | 所属矛盾分组 |
+| variant_text | TEXT | NOT NULL | 该说法原文摘录（≤200 字） |
+| source_ids | TEXT | NOT NULL DEFAULT '[]' | 该说法关联的来源文件 id（JSON 数组，≥1；同主题可有 3+ 来源） |
+| position | TEXT | NULL | 原文位置（可选） |
+| replacement | TEXT | NULL | 定位审查预生成的"采纳该说法后正文应替换成的文句"（用户采纳时本地直接替换 from=draft_quote → to=replacement，不再调用大模型） |
+| created_at | TEXT | NOT NULL | |
+
+> 注：`source_ids` 存 JSON 数组而非外键关联，因为"同主题多个来源支持同一说法"是一对多且数量不定的集合；来源删除后 `sourceTitles` 读取时回退为 sourceId（界面再提示文件缺失，见 Phase 3.7 Task 3.7.6）。
+
+### 2.17 draft_generation_sources（初稿生成上下文，Migration 010，2026-08-11）
+
+记录初稿生成时**实际使用**的检索材料块，供"文段来源询问"按生成时的上下文让大模型溯源（正文经大模型改写后逐字匹配失效，需结合生成时材料判断同源文件）；采纳矛盾修订正文等场景亦可复用。
+
+| 字段 | 类型 | 约束 | 说明 |
+|---|---|---|---|
+| id | TEXT | PK | uuid |
+| draft_id | TEXT | NOT NULL REFERENCES drafts(id) ON DELETE CASCADE | 所属初稿 |
+| source_id | TEXT | NOT NULL | 来源资料 id |
+| position | TEXT | NOT NULL | 原文位置（如"第N段"） |
+| chunk_text | TEXT | NOT NULL | 材料块原文（≤500 字） |
+| created_at | TEXT | NOT NULL | |
+| | | UNIQUE(draft_id, source_id, position) | 同一稿内同一来源同一位置唯一 |
+
+> 重新生成初稿时按 draft 覆盖写入；初稿删除后随外键级联清理。
+
 ## 3. 关键设计决策
 
 - **资料统一抽象**：文件与信源网址合并为 `sources.kind`，撰写范围、来源标注不区分类型。
 - **片段独立建表 + 多对多来源**：满足"每个小片段可显示原文来源"，一个片段可由多个来源佐证（矛盾场景天然支持）。
-- **版本 = 整稿快照**：确认后复制整稿生成新 `drafts` 行（version_number+1）；查看/对比/回滚在版本间进行。初版不做 diff 存储，简单可靠，后续可优化为增量。
+- **每任务一稿（整稿快照）**：每个撰写任务只保存一稿（初稿，`version_number = 0`）；重新生成初稿时覆盖写入。2026-08-11 起删去版本迭代（第 n 稿 → 确认 → 第 n+1 稿、版本查看/对比/回滚）。
 - **正文入库 + 原始文件落盘**：`cleaned_text` 存 DB 供检索与 AI 输入；图片/原始文件存本地 dataDir，DB 只存相对路径。
 - **审核留痕**：`review_records` 记录矛盾裁定、缺失补写、文段修改，保证人工审核过程可追溯（符合"人工主导"原则）。
 - **迁移策略**：`schema_migrations` 表记录已执行迁移号；迁移文件按 `001_xxx.sql` 递增编号；禁止直接改表。

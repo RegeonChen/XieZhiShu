@@ -214,6 +214,164 @@ ALTER TABLE sources ADD COLUMN file_mtime TEXT;
 ALTER TABLE sources ADD COLUMN file_size INTEGER;
 ALTER TABLE sources ADD COLUMN workspace INTEGER NOT NULL DEFAULT 0;
 `
+  },
+  {
+    // 撰写工作台聊天式重构（Phase 3.5 Task 3.5.1）：
+    // llm_provider_id 任务固定大模型；article_title 大模型从用户要求中抓取的文章标题；
+    // user_instruction 生成初稿时用户的最新要求（重新生成复用）。
+    version: 7,
+    sql: `
+ALTER TABLE writing_tasks ADD COLUMN llm_provider_id TEXT;
+ALTER TABLE writing_tasks ADD COLUMN article_title TEXT;
+ALTER TABLE writing_tasks ADD COLUMN user_instruction TEXT;
+`
+  },
+  {
+    // 对话与痕迹持久化（Phase 3.5 后续）：task_messages 存任务对话框消息
+    // （user/assistant，kind: chat 对话 / instruction 生成初稿的用户要求 / notice 系统提示）；
+    // llm_call_logs 存每次大模型调用的元数据痕迹（kind: generate/chat/summarize/test，
+    // 记模型/输入输出字符数/耗时/状态/错误，不记密钥与正文，用于诊断"生成慢/超时"类问题）。
+    version: 8,
+    sql: `
+CREATE TABLE IF NOT EXISTS task_messages (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES writing_tasks(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    kind TEXT NOT NULL DEFAULT 'chat' CHECK (kind IN ('chat', 'instruction', 'notice')),
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_task_messages_task ON task_messages(task_id, created_at);
+
+CREATE TABLE IF NOT EXISTS llm_call_logs (
+    id TEXT PRIMARY KEY,
+    task_id TEXT,
+    kind TEXT NOT NULL,
+    model TEXT,
+    input_chars INTEGER NOT NULL DEFAULT 0,
+    output_chars INTEGER NOT NULL DEFAULT 0,
+    elapsed_ms INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL CHECK (status IN ('ok', 'error')),
+    error_code TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_llm_call_logs_task ON llm_call_logs(task_id, created_at);
+`
+  },
+  {
+    // 矛盾检测数据模型（Phase 3.7 Task 3.7.1）：
+    // draft_contradictions 为"矛盾分组"——同一事实主题一个分组（seq 与生成提示词序号 #N 对应，
+    // 正文标记【矛盾#N】按序号映射）；status 记录人工取舍（pending/adopted/ignored），
+    // adopted_variant_id 记录被采纳的说法；merged/draft_quote 由生成后"定位审查"回填
+    // （draft_quote 为正文中涉及该矛盾的原文原句，用于正文定位）。
+    // contradiction_variants 为组内每条相左"说法"，source_ids 存 JSON 数组（≥1 个来源，支持同主题 3+ 来源）。
+    version: 9,
+    sql: `
+CREATE TABLE IF NOT EXISTS draft_contradictions (
+    id TEXT PRIMARY KEY,
+    draft_id TEXT NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    topic TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'other' CHECK (kind IN ('data', 'time', 'place', 'fact', 'other')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'adopted', 'ignored')),
+    merged INTEGER NOT NULL DEFAULT 0,
+    draft_quote TEXT,
+    adopted_variant_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (draft_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_draft_contradictions_draft ON draft_contradictions(draft_id);
+
+CREATE TABLE IF NOT EXISTS contradiction_variants (
+    id TEXT PRIMARY KEY,
+    contradiction_id TEXT NOT NULL REFERENCES draft_contradictions(id) ON DELETE CASCADE,
+    variant_text TEXT NOT NULL,
+    source_ids TEXT NOT NULL DEFAULT '[]',
+    position TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_contradiction_variants_contradiction ON contradiction_variants(contradiction_id);
+`
+  },
+  {
+    // 生成上下文落库（2026-08-11）：记录初稿生成时实际使用的检索材料块（来源 + 位置 + 原文），
+    // 供"文段来源询问"按生成时的上下文让大模型溯源（仅凭文件标题判断太弱，需结合材料原文）。
+    version: 10,
+    sql: `
+CREATE TABLE IF NOT EXISTS draft_generation_sources (
+    id TEXT PRIMARY KEY,
+    draft_id TEXT NOT NULL REFERENCES drafts(id) ON DELETE CASCADE,
+    source_id TEXT NOT NULL,
+    position TEXT NOT NULL,
+    chunk_text TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (draft_id, source_id, position)
+);
+CREATE INDEX IF NOT EXISTS idx_draft_gen_sources_draft ON draft_generation_sources(draft_id);
+`
+  },
+  {
+    // 矛盾采纳本地修订 + 警告分类（2026-08-11）：
+    // - draft_contradictions.in_draft：定位审查是否在正文中发现该矛盾（1=在正文/矛盾，0=不在正文/警告，NULL=定位未执行）。
+    // - contradiction_variants.replacement：定位审查预生成的"采纳该说法后正文应替换成的文句"，
+    //   用户采纳时本地直接替换（from=draft_quote → to=replacement），无需再次调用大模型。
+    version: 11,
+    sql: `
+ALTER TABLE draft_contradictions ADD COLUMN in_draft INTEGER;
+ALTER TABLE contradiction_variants ADD COLUMN replacement TEXT;
+`
+  },
+  {
+    // 网页资料库（2026-08-11）：
+    // - web_sites：用户注册的"网页资料库"站点（root_url 唯一；last_synced_at 记录上次同步时间）。
+    // - web_site_articles：站点文章 URL 清单缓存（site_id + url 唯一；生成初稿时先发现/更新清单，
+    //   再用撰写要求标题粗筛，命中文章增量抓取正文落库为 kind='url' 的 sources）。
+    version: 12,
+    sql: `
+CREATE TABLE IF NOT EXISTS web_sites (
+  id TEXT PRIMARY KEY,
+  root_url TEXT NOT NULL UNIQUE,
+  title TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_synced_at TEXT
+);
+CREATE TABLE IF NOT EXISTS web_site_articles (
+  site_id TEXT NOT NULL REFERENCES web_sites(id) ON DELETE CASCADE,
+  url TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  discovered_at TEXT NOT NULL,
+  PRIMARY KEY (site_id, url)
+);
+`
+  },
+  {
+    // 网页资料库文章作为任务绑定缓存（2026-08-13）：
+    // sources.task_id 标记"任务绑定的网页缓存文章"——非空 = 某任务生成初稿时抓取的网站文章（暂存、不属于长期资料库）；
+    // NULL = 工作区文件 / 手动添加的网址信源（长期资料）。删除撰写任务时级联清理其 task_id 对应的 sources；
+    // 资料库列表只显示 task_id IS NULL 的长期资料，网页缓存文章不进入资料库。
+    version: 13,
+    sql: `ALTER TABLE sources ADD COLUMN task_id TEXT;`
+  },
+  {
+    // 写作规范 skills（2026-08-13）：将"范本"功能重构为"规范"。
+    // writing_skills 存志书写作规范（通用规范 category='general' + 部类细则 category='section'）；
+    // writing_tasks.skill_ids 存该任务选定的部类细则 skill id 列表（JSON 数组；NULL = 未手动选定，生成时自动匹配）。
+    version: 14,
+    sql: `
+CREATE TABLE IF NOT EXISTS writing_skills (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  category TEXT NOT NULL CHECK (category IN ('general', 'section')),
+  tags TEXT NOT NULL DEFAULT '[]',
+  content TEXT NOT NULL,
+  is_preset INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+ALTER TABLE writing_tasks ADD COLUMN skill_ids TEXT;
+`
   }
 ]
 

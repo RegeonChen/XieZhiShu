@@ -36,7 +36,9 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tesseract.js": "^5.1.1",
-    "tiptap-markdown": "^0.8.10"
+    "tiptap-markdown": "^0.8.10",
+    "word-extractor": "^1.0.4",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
@@ -44,6 +46,7 @@
     "@types/pdf-parse": "^1.1.5",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
+    "@types/word-extractor": "^1.0.6",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^43.2.0",
     "electron-vite": "^3.0.0",

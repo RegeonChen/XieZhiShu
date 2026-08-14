@@ -49,7 +49,16 @@ export async function indexSource(sourceId: string): Promise<{ ok: boolean; erro
   setState(sourceId, 'indexing')
   try {
     const chunks = chunkText(row.cleaned_text)
-    const vectors = await embedTexts(chunks.map((c) => c.text))
+    // 分批嵌入：推理已在 Worker 线程执行（不阻塞主进程事件循环），仍保持小批次，
+    // 避免单批过大占用内存/单次响应过久；批间让出事件循环，保持界面响应。
+    const EMBED_BATCH = 5
+    const vectors: number[][] = []
+    for (let i = 0; i < chunks.length; i += EMBED_BATCH) {
+      const slice = chunks.slice(i, i + EMBED_BATCH)
+      const vecs = await embedTexts(slice.map((c) => c.text))
+      vectors.push(...vecs)
+      await new Promise<void>((r) => setImmediate(() => r()))
+    }
     const modelId = getEmbedModelId()
     const now = new Date().toISOString()
 
@@ -91,6 +100,28 @@ export async function indexAllPending(): Promise<{ indexed: number; failed: numb
     else failed += 1
   }
   return { indexed, failed }
+}
+
+// ---- 后台串行索引队列 ----
+// 工作区对账（reconcile）只负责"解析入库"，向量化改为异步提交到此队列后台执行：
+// 新文件立刻出现在列表，向量索引在后台推进（推理在 Worker 线程），不阻塞主进程与 UI。
+
+let indexQueue: Promise<void> = Promise.resolve()
+const queuedIndexIds = new Set<string>()
+
+/** 异步提交一个资料的向量索引任务（串行执行；同一资料同时仅允许一个在队/在跑任务） */
+export function enqueueIndex(sourceId: string): void {
+  if (queuedIndexIds.has(sourceId)) return
+  queuedIndexIds.add(sourceId)
+  indexQueue = indexQueue.then(async () => {
+    try {
+      await indexSource(sourceId)
+    } catch (err) {
+      console.error(`后台索引失败（${sourceId}）:`, err)
+    } finally {
+      queuedIndexIds.delete(sourceId)
+    }
+  })
 }
 
 // ---- vitest inline test ----
