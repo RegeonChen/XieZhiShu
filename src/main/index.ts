@@ -3,42 +3,63 @@ import { createServer } from 'node:http'
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import {
   IPC,
+  IPC_EVENTS,
   type AppInfoRes,
   type LlmSaveProviderReq,
   type WritingCreateTaskReq,
+  type WritingRenameTaskReq,
+  type WritingRenameTaskRes,
+  type WritingUpdateSkillsReq,
+  type WritingUpdateSkillsRes,
+  type WritingUpdateProviderReq,
+  type WritingUpdateProviderRes,
+  type WritingChatReq,
+  type WritingChatRes,
+  type TaskMessagesListReq,
+  type TaskMessagesListRes,
+  type TaskMessagesAddReq,
+  type TaskMessagesAddRes,
   type WritingRetrieveReq,
   type WritingGenerateDraftReq,
+  type WritingGenerateDraftRes,
   type DraftGetReq,
+  type DraftUpdateContentReq,
+  type DraftUpdateContentRes,
+  type DraftRegenerateReq,
+  type DraftRegenerateRes,
   type SegmentUpdateReq,
-  type SegmentUpdateRes,
-  type VersionListReq,
-  type VersionListRes
+  type SegmentUpdateRes
 } from '../shared/ipc'
 import type { ApiResult, Source, Tag, LlmProviderConfig, AppSettings, WritingTask, Draft, RetrievedChunk } from '../shared/types'
 import { getDb } from './db/connection'
 import { listSources, getSourceById, deleteSource, deleteSources, updateSourceTitle, updateSourceFingerprint } from './db/sources'
 import { listTags, createTag, updateTag, deleteTag, addTagToSource, removeTagFromSource, getTagsBySource, batchAddTags, searchTags, getSourceIdsByTag } from './db/tags'
 import { importFiles, importUrl } from './import'
-import { parseTemplate as parseTemplateFile } from './import/template-parser'
-import { basename } from 'node:path'
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { insertTemplate, listTemplates, getTemplateById, deleteTemplate } from './db/templates'
+import { addWebSite, listWebSites, removeWebSite } from './db/web-sites'
+import { syncSite } from './web-source/site-crawler'
+import { existsSync, readFileSync } from 'node:fs'
+import { listSkills, createSkill, updateSkill, deleteSkill, seedPresetSkills } from './db/writing-skills'
 import { safeStorageCodec } from './llm/secret'
 import { listProviders, saveProvider, deleteProvider } from './llm/provider-store'
 import { testProviderConnection } from './llm/test'
 import { getSettings, updateSettings } from './db/settings'
-import { createTask as createWritingTask, listTasks as listWritingTasks, getTaskById, deleteTask as deleteWritingTask } from './db/tasks'
-import { getDraftById, listVersions, updateSegmentContent } from './db/drafts'
-import { generateDraft, retrieveForTask } from './writing/generate'
-import { configureEmbedModel } from './rag/embed'
-import { indexSource } from './rag/indexer'
+import { createTask as createWritingTask, listTasks as listWritingTasks, getTaskById, deleteTask as deleteWritingTask, updateTaskSkillIds, renameTask, updateTaskProvider } from './db/tasks'
+import { getDraftById, getLatestDraftByTask, updateSegmentContent, replaceDraftSegments } from './db/drafts'
+import { getContradictionsByDraft, updateContradictionStatus } from './db/contradictions'
+import { listTaskMessages, addTaskMessage } from './db/task-messages'
+import { generateDraft, regenerateDraft, retrieveForTask, chatWithTask } from './writing/generate'
+import { applyContradictionEdit } from './writing/contradiction-apply'
+import { askSourceForTask } from './writing/source-query'
+import { configureEmbedModel, stopEmbedWorker } from './rag/embed'
+import { enqueueIndex } from './rag/indexer'
 import { summarizeAllPending, getSourceSummary } from './rag/summarizer'
-import { getWorkspaceDir, reconcileWorkspace } from './workspace/reconcile'
+import { getWorkspaceDir, reconcileWorkspace, type ReconcileProgress } from './workspace/reconcile'
 import { startWorkspaceWatcher, restartWorkspaceWatcher, stopWorkspaceWatcher } from './workspace/watcher'
+import { requestWorkspaceSync, startAutoSyncTimer, stopAutoSyncTimer } from './workspace/auto-sync'
 import { trashSourceFile, renameSourceFile, resolveSourceFilePath } from './workspace/sync'
 import { migrateLegacyToWorkspace } from './workspace/migrate'
 import { loadWindowState, trackWindowState } from './window-state'
-import type { WorkspaceReconcileRes, WorkspaceStatusRes, WorkspaceMigrateRes } from '../shared/ipc'
+import type { WorkspaceReconcileRes, WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceSyncReq, WebSourceSyncRes, SkillListRes, SkillSaveReq, SkillSaveRes, SkillDeleteReq } from '../shared/ipc'
 
 const APP_PROTOCOL_WHITELIST = /^https?:\/\//i
 
@@ -135,6 +156,9 @@ function createWindow(): void {
     win.focus()
   })
 
+  // 窗口重新聚焦到最顶层时自动触发一次工作区同步（Task 2.2.5，效果等同手动"同步工作区"）
+  win.on('focus', () => requestWorkspaceSync(pushWorkspaceProgress))
+
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (APP_PROTOCOL_WHITELIST.test(url)) {
       shell.openExternal(url)
@@ -163,6 +187,16 @@ ipcMain.handle(IPC.APP_GET_INFO, (): ApiResult<AppInfoRes> => {
   return { ok: true, data: { version: app.getVersion(), platform: process.platform } }
 })
 
+// 打开外部链接（预设模型注册页等；仅允许 http/https，防滥用）
+ipcMain.handle(IPC.APP_OPEN_EXTERNAL, (_event, params: { url: string }): ApiResult<void> => {
+  const url = (params.url ?? '').trim()
+  if (!APP_PROTOCOL_WHITELIST.test(url)) {
+    return { ok: false, error: { code: 'INVALID_PARAM', message: '仅支持打开 http/https 链接' } }
+  }
+  void shell.openExternal(url).catch((err) => console.error('openExternal failed:', err))
+  return { ok: true, data: undefined }
+})
+
 // 窗口恢复激活：渲染层检测到"窗口可见但未激活"（用户点击本窗口但无法聚焦输入）时请求恢复。
 // 仅用 win.focus() 在 Windows foreground lock 下可能无效，组合 show()+moveTop() 突破。
 ipcMain.handle(IPC.WINDOW_FOCUS, (event): ApiResult<void> => {
@@ -179,9 +213,9 @@ ipcMain.handle(IPC.WINDOW_FOCUS, (event): ApiResult<void> => {
 ipcMain.handle(IPC.SOURCES_IMPORT_FILES, async (_event, params: { paths: string[] }): Promise<ApiResult<{ results: { path: string; source?: Source; error?: string }[] }>> => {
   try {
     const results = await importFiles(params.paths)
-    // 导入成功后异步触发向量索引（不阻塞导入返回；模型缺失时内部标记 failed）
+    // 导入成功后提交后台串行向量索引（不阻塞导入返回；推理在 Worker 线程执行）
     for (const r of results) {
-      if (r.source) void indexSource(r.source.id).catch(() => {})
+      if (r.source) enqueueIndex(r.source.id)
     }
     return {
       ok: true,
@@ -203,11 +237,48 @@ ipcMain.handle(IPC.SOURCES_ADD_URL, async (_event, params: { url: string }): Pro
   try {
     const result = await importUrl(params.url)
     if (result.source) {
-      // 抓取成功后异步触发向量索引
-      void indexSource(result.source.id).catch(() => {})
+      // 抓取成功后提交后台串行向量索引
+      enqueueIndex(result.source.id)
       return { ok: true, data: { source: result.source } }
     }
     return { ok: false, error: { code: result.errorCode ?? 'FETCH_FAILED', message: result.error ?? '未知错误' } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// ---- 网页资料库（2026-08-11）----
+ipcMain.handle(IPC.WEB_SOURCE_LIST, (): ApiResult<WebSourceListRes> => {
+  try {
+    return { ok: true, data: { sites: listWebSites() } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+ipcMain.handle(IPC.WEB_SOURCE_ADD, (_event, params: WebSourceAddReq): ApiResult<WebSourceAddRes> => {
+  try {
+    const site = addWebSite(params.rootUrl, params.title)
+    if (!site) return { ok: false, error: { code: 'ALREADY_EXISTS', message: '该网址已注册为网页资料库' } }
+    return { ok: true, data: { site } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+ipcMain.handle(IPC.WEB_SOURCE_REMOVE, (_event, params: WebSourceRemoveReq): ApiResult<void> => {
+  try {
+    removeWebSite(params.id)
+    return { ok: true, data: undefined }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+ipcMain.handle(IPC.WEB_SOURCE_SYNC, async (_event, params: WebSourceSyncReq): Promise<ApiResult<WebSourceSyncRes>> => {
+  try {
+    const added = await syncSite(params.id)
+    return { ok: true, data: { articles: added } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
@@ -260,46 +331,39 @@ ipcMain.handle(IPC.TAGS_REMOVE_FROM_SOURCE, (_event, params: { sourceId: string;
   }
 })
 
-// Task 2.4 范本管理
-ipcMain.handle(IPC.TEMPLATES_LIST, (): ApiResult<{ items: unknown[] }> => {
+// 写作规范 skills 管理（2026-08-13 由「范本」重构）
+ipcMain.handle(IPC.SKILLS_LIST, (): ApiResult<SkillListRes> => {
   try {
-    const items = listTemplates()
+    const items = listSkills()
     return { ok: true, data: { items } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
 })
 
-ipcMain.handle(IPC.TEMPLATES_IMPORT, async (_event, params: { path: string }): Promise<ApiResult<{ template: unknown }>> => {
+ipcMain.handle(IPC.SKILLS_CREATE, (_event, params: SkillSaveReq): ApiResult<SkillSaveRes> => {
   try {
-    const outline = await parseTemplateFile(params.path)
-    const outlineJson = JSON.stringify(outline)
-
-    const importDir = join(app.getPath('userData'), 'imports')
-    if (!existsSync(importDir)) mkdirSync(importDir, { recursive: true })
-    const destName = `template-${Date.now()}-${basename(params.path)}`
-    copyFileSync(params.path, join(importDir, destName))
-
-    const template = insertTemplate(basename(params.path), destName, outlineJson)
-    return { ok: true, data: { template } }
+    const skill = createSkill({ name: params.name, category: params.category, tags: params.tags, content: params.content })
+    return { ok: true, data: { skill } }
   } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+    return { ok: false, error: { code: 'INVALID_PARAM', message: String(err) } }
   }
 })
 
-ipcMain.handle(IPC.TEMPLATES_GET, (_event, params: { id: string }): ApiResult<unknown> => {
+ipcMain.handle(IPC.SKILLS_UPDATE, (_event, params: SkillSaveReq): ApiResult<SkillSaveRes> => {
   try {
-    const t = getTemplateById(params.id)
-    if (!t) return { ok: false, error: { code: 'INVALID_PARAM', message: '范本不存在' } }
-    return { ok: true, data: t }
+    if (!params.id) return { ok: false, error: { code: 'INVALID_PARAM', message: '缺少规范 id' } }
+    const skill = updateSkill(params.id, { name: params.name, category: params.category, tags: params.tags, content: params.content })
+    if (!skill) return { ok: false, error: { code: 'INVALID_PARAM', message: '规范不存在' } }
+    return { ok: true, data: { skill } }
   } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+    return { ok: false, error: { code: 'INVALID_PARAM', message: String(err) } }
   }
 })
 
-ipcMain.handle(IPC.TEMPLATES_DELETE, (_event, params: { id: string }): ApiResult<void> => {
+ipcMain.handle(IPC.SKILLS_DELETE, (_event, params: SkillDeleteReq): ApiResult<void> => {
   try {
-    deleteTemplate(params.id)
+    deleteSkill(params.id)
     return { ok: true, data: undefined }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
@@ -315,7 +379,7 @@ ipcMain.handle('app:openFileDialog', async (): Promise<ApiResult<{ paths: string
   const result = await dialog.showOpenDialog(win, {
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: '支持的文档', extensions: ['pdf', 'docx', 'txt', 'md', 'png', 'jpg', 'jpeg', 'bmp'] }
+      { name: '支持的文档', extensions: ['pdf', 'docx', 'doc', 'wps', 'xls', 'xlsx', 'txt', 'md', 'png', 'jpg', 'jpeg', 'bmp'] }
     ]
   })
   return { ok: true, data: { paths: result.filePaths } }
@@ -598,18 +662,27 @@ ipcMain.handle(IPC.WORKSPACE_STATUS, (): ApiResult<WorkspaceStatusRes> => {
   }
 })
 
+/** 工作区对账进度推送到所有渲染窗口（workspace:progress，供资料库页显示进度与"新文件预处理"提示） */
+function pushWorkspaceProgress(p: ReconcileProgress): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('workspace:progress', p)
+  }
+}
+
 // 手动触发工作区全量对账（扫描 + 解析 + 索引），实时推送进度到渲染进程
 ipcMain.handle(IPC.WORKSPACE_RECONCILE, async (): Promise<ApiResult<WorkspaceReconcileRes>> => {
   try {
-    const result = await reconcileWorkspace((p) => {
-      for (const win of BrowserWindow.getAllWindows()) {
-        win.webContents.send('workspace:progress', p)
-      }
-    })
+    const result = await reconcileWorkspace(pushWorkspaceProgress)
     return { ok: true, data: result }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
+})
+
+// 渲染层进入"资料库"功能区时自动触发一次同步（Task 2.2.5，效果等同手动"同步工作区"）
+ipcMain.handle(IPC.WORKSPACE_NAV_SYNC, (): ApiResult<void> => {
+  requestWorkspaceSync(pushWorkspaceProgress)
+  return { ok: true, data: undefined }
 })
 
 // 一次性迁移存量导入资料到工作区（Task 2.2.3）
@@ -626,7 +699,8 @@ ipcMain.handle(IPC.WORKSPACE_MIGRATE, async (): Promise<ApiResult<WorkspaceMigra
 
 ipcMain.handle(IPC.WRITING_CREATE_TASK, (_event, params: WritingCreateTaskReq): ApiResult<{ task: WritingTask }> => {
   try {
-    const task = createWritingTask(params)
+    // Phase 3.5：点击"新建任务"立即创建（标题默认"新建任务"、范围=全部文件），可选范本/大模型
+    const task = createWritingTask(params ?? {})
     return { ok: true, data: { task } }
   } catch (err) {
     return { ok: false, error: { code: 'INVALID_PARAM', message: String(err) } }
@@ -650,6 +724,76 @@ ipcMain.handle(IPC.WRITING_DELETE_TASK, (_event, params: { id: string }): ApiRes
   }
 })
 
+// Phase 3.5：右键重命名任务标题（仅中栏列表显示标题；文章标题由大模型抓取）
+ipcMain.handle(IPC.WRITING_RENAME_TASK, (_event, params: WritingRenameTaskReq): ApiResult<WritingRenameTaskRes> => {
+  try {
+    const task = renameTask(params.taskId, params.title)
+    if (!task) return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '撰写任务不存在' } }
+    return { ok: true, data: { task } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INVALID_PARAM', message: String(err) } }
+  }
+})
+
+// 2026-08-13：更新任务选定的部类细则规范 skill（null = 未手动选定，生成时自动匹配）
+ipcMain.handle(IPC.WRITING_UPDATE_SKILLS, (_event, params: WritingUpdateSkillsReq): ApiResult<WritingUpdateSkillsRes> => {
+  try {
+    const task = updateTaskSkillIds(params.taskId, params.skillIds)
+    if (!task) return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '撰写任务不存在' } }
+    return { ok: true, data: { task } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INVALID_PARAM', message: String(err) } }
+  }
+})
+
+// Phase 3.5：更新任务固定使用的大模型（null = 回退全局当前 Provider）
+ipcMain.handle(IPC.WRITING_UPDATE_PROVIDER, (_event, params: WritingUpdateProviderReq): ApiResult<WritingUpdateProviderRes> => {
+  try {
+    const task = updateTaskProvider(params.taskId, params.llmProviderId)
+    if (!task) return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '撰写任务不存在' } }
+    return { ok: true, data: { task } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INVALID_PARAM', message: String(err) } }
+  }
+})
+
+// Phase 3.5：与大模型自由对话（用任务大模型，注入当前初稿作为上下文）
+ipcMain.handle(IPC.WRITING_CHAT, async (_event, params: WritingChatReq): Promise<ApiResult<WritingChatRes>> => {
+  const result = await chatWithTask(params.taskId, params.message, params.history)
+  if (result.ok) return { ok: true, data: { reply: result.reply } }
+  return { ok: false, error: result.error }
+})
+
+// Phase 3.7 Task 3.7.5：文段来源询问（本地精确匹配 → 过滤式检索 → LLM 兜底；消息由主进程写入 task_messages）
+ipcMain.handle(IPC.WRITING_ASK_SOURCE, async (_event, params: WritingAskSourceReq): Promise<ApiResult<WritingAskSourceRes>> => {
+  const result = await askSourceForTask(params.taskId, params.selection)
+  if (result.ok) return { ok: true, data: { reply: result.reply, refs: result.refs } }
+  return { ok: false, error: result.error }
+})
+
+// Phase 3.5 后续：任务对话消息（历史与痕迹）读取/追加
+ipcMain.handle(IPC.TASK_MESSAGES_LIST, (_event, params: TaskMessagesListReq): ApiResult<TaskMessagesListRes> => {
+  try {
+    if (!getTaskById(params.taskId)) {
+      return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '撰写任务不存在' } }
+    }
+    return { ok: true, data: { items: listTaskMessages(params.taskId) } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+ipcMain.handle(IPC.TASK_MESSAGES_ADD, (_event, params: TaskMessagesAddReq): ApiResult<TaskMessagesAddRes> => {
+  try {
+    if (!getTaskById(params.taskId)) {
+      return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '撰写任务不存在' } }
+    }
+    return { ok: true, data: { message: addTaskMessage(params.taskId, params.role, params.content, params.kind) } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
 ipcMain.handle(IPC.WRITING_RETRIEVE, async (_event, params: WritingRetrieveReq): Promise<ApiResult<{ chunks: RetrievedChunk[] }>> => {
   try {
     if (!getTaskById(params.taskId)) {
@@ -661,9 +805,27 @@ ipcMain.handle(IPC.WRITING_RETRIEVE, async (_event, params: WritingRetrieveReq):
   }
 })
 
-ipcMain.handle(IPC.WRITING_GENERATE_DRAFT, async (_event, params: WritingGenerateDraftReq): Promise<ApiResult<{ draft: Draft }>> => {
-  const result = await generateDraft(params.taskId)
-  if (result.ok) return { ok: true, data: { draft: result.draft } }
+ipcMain.handle(IPC.WRITING_GENERATE_DRAFT, async (event, params: WritingGenerateDraftReq): Promise<ApiResult<WritingGenerateDraftRes>> => {
+  // 生成初稿阶段进度推送（Phase 3.5 后续 / 2026-08-11：文字提示 + 进度百分比 + 预计剩余秒数）
+  const onProgress = (stage: string, percent: number, etaSeconds?: number): void => {
+    if (!event.sender.isDestroyed()) {
+      event.sender.send(IPC_EVENTS.DRAFT_GENERATE_PROGRESS, { taskId: params.taskId, stage, percent, etaSeconds })
+    }
+  }
+  const result = await generateDraft(params.taskId, params.instruction, onProgress)
+  if (result.ok) return { ok: true, data: { draft: result.draft, articleTitle: result.articleTitle, contradictions: result.contradictions } }
+  return { ok: false, error: result.error }
+})
+
+// 重新生成初稿（Task 3.4.5）：删除现有第 0 稿后重新生成（覆盖旧稿）
+ipcMain.handle(IPC.DRAFT_REGENERATE, async (event, params: DraftRegenerateReq): Promise<ApiResult<DraftRegenerateRes>> => {
+  const onProgress = (stage: string, percent: number, etaSeconds?: number): void => {
+    if (!event.sender.isDestroyed()) {
+      event.sender.send(IPC_EVENTS.DRAFT_GENERATE_PROGRESS, { taskId: params.taskId, stage, percent, etaSeconds })
+    }
+  }
+  const result = await regenerateDraft(params.taskId, params.instruction, onProgress)
+  if (result.ok) return { ok: true, data: { draft: result.draft, articleTitle: result.articleTitle, contradictions: result.contradictions } }
   return { ok: false, error: result.error }
 })
 
@@ -674,6 +836,85 @@ ipcMain.handle(IPC.DRAFT_GET, (_event, params: DraftGetReq): ApiResult<Draft> =>
     return { ok: true, data: draft }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 整稿保存（Task 3.4.1）：初稿连续显示为整体，编辑后按整稿 Markdown 保存并重建片段
+ipcMain.handle(IPC.DRAFT_UPDATE_CONTENT, (_event, params: DraftUpdateContentReq): ApiResult<DraftUpdateContentRes> => {
+  try {
+    const draft = replaceDraftSegments(params.draftId, params.markdown)
+    if (!draft) return { ok: false, error: { code: 'DRAFT_NOT_FOUND', message: '志稿不存在' } }
+    return { ok: true, data: { draft } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 读取某稿的矛盾清单（Phase 3.7 Task 3.7.4：矛盾弹窗 / 编辑器标注初始化）
+ipcMain.handle(IPC.DRAFT_GET_CONTRADICTIONS, (_event, params: DraftGetContradictionsReq): ApiResult<DraftGetContradictionsRes> => {
+  try {
+    return { ok: true, data: { contradictions: getContradictionsByDraft(params.draftId) } }
+  } catch {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: '读取矛盾清单失败' } }
+  }
+})
+
+// 矛盾取舍（Phase 3.7 Task 3.7.4：采纳某说法 / 忽略该矛盾；adopt 须带属于该矛盾的说法 id）
+// 2026-08-11：新增 revert=撤销采纳（采纳被编辑器"撤销"回退后，矛盾状态回置为待处理）
+ipcMain.handle(
+  IPC.DRAFT_RESOLVE_CONTRADICTION,
+  (_event, params: DraftResolveContradictionReq): ApiResult<DraftResolveContradictionRes> => {
+    try {
+      const statusMap = {
+        adopt: 'adopted',
+        ignore: 'ignored',
+        revert: 'pending'
+      } as const
+      if (!(params.action in statusMap)) {
+        return { ok: false, error: { code: 'INVALID_PARAM', message: '无效的取舍动作' } }
+      }
+      // IPC 动作 adopt → 状态 adopted；ignore → ignored；revert（撤销采纳）→ pending
+      const contradiction = updateContradictionStatus(
+        params.contradictionId,
+        statusMap[params.action],
+        params.variantId
+      )
+      if (!contradiction) {
+        return { ok: false, error: { code: 'INVALID_PARAM', message: '矛盾不存在，或采纳的说法不属于该矛盾' } }
+      }
+      return { ok: true, data: { contradiction } }
+    } catch {
+      return { ok: false, error: { code: 'INTERNAL_ERROR', message: '更新矛盾状态失败' } }
+    }
+  }
+)
+
+// 矛盾采纳 → 正文同步修订（2026-08-11：LLM 生成替换文句，主进程校验定位并落库，移除【矛盾#N】标注；资料库只读）
+ipcMain.handle(IPC.DRAFT_APPLY_CONTRADICTION, async (_event, params: DraftApplyContradictionReq): Promise<ApiResult<DraftApplyContradictionRes>> => {
+  const result = await applyContradictionEdit(params.draftId, params.contradictionId, params.variantId)
+  if (!result.ok) return { ok: false, error: result.error }
+  return { ok: true, data: { draft: result.draft, contradiction: result.contradiction } }
+})
+
+// 用系统默认软件打开资料源文件（Phase 3.7 Task 3.7.6；URL 资料走浏览器）
+ipcMain.handle(IPC.SOURCES_OPEN_PATH, async (_event, params: SourceOpenPathReq): Promise<ApiResult<SourceOpenPathRes>> => {
+  const source = getSourceById(params.sourceId)
+  if (!source) return { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '资料不存在' } }
+  try {
+    if (source.kind === 'url') {
+      if (!source.url) return { ok: false, error: { code: 'INVALID_PARAM', message: '该资料没有可打开的网址' } }
+      await shell.openExternal(source.url)
+      return { ok: true, data: { opened: true } }
+    }
+    const filePath = resolveSourceFilePath(source)
+    if (!filePath || !existsSync(filePath)) {
+      return { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '源文件已不存在（可能被移动或删除）' } }
+    }
+    const errMsg = await shell.openPath(filePath)
+    if (errMsg) return { ok: false, error: { code: 'INTERNAL_ERROR', message: `打开文件失败：${errMsg}` } }
+    return { ok: true, data: { opened: true } }
+  } catch {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: '打开文件失败' } }
   }
 })
 
@@ -689,9 +930,12 @@ ipcMain.handle(IPC.SEGMENT_UPDATE, (_event, params: SegmentUpdateReq): ApiResult
   }
 })
 
-ipcMain.handle(IPC.VERSION_LIST, (_event, params: VersionListReq): ApiResult<VersionListRes> => {
+// 读取任务最新一稿（2026-08-11 删去版本管理后仅保留初稿；替代原 version:list 定位最新稿）
+ipcMain.handle(IPC.DRAFT_GET_LATEST, (_event, params: DraftGetLatestReq): ApiResult<DraftGetLatestRes> => {
   try {
-    return { ok: true, data: { versions: listVersions(params.taskId) } }
+    const draft = getLatestDraftByTask(params.taskId)
+    if (!draft) return { ok: false, error: { code: 'DRAFT_NOT_FOUND', message: '志稿不存在' } }
+    return { ok: true, data: { draft } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
@@ -703,6 +947,9 @@ app.whenReady().then(() => {
   // 初始化数据库（触发迁移）
   getDb()
 
+  // 写入预设写作规范 skills（幂等：仅首次启动表为空时插入）
+  seedPresetSkills()
+
   // 配置本地向量嵌入模型目录（<appPath>/resources/models/<modelId>/）
   configureEmbedModel({ modelPath: join(app.getAppPath(), 'resources', 'models') })
 
@@ -711,11 +958,12 @@ app.whenReady().then(() => {
 
   // 已配置工作区时，启动即触发一次全量对账（扫描 + 解析 + 索引）并启动实时监听
   if (getWorkspaceDir()) {
-    void reconcileWorkspace().catch((err) => {
-      console.error('workspace reconcile failed on startup:', err)
-    })
-    startWorkspaceWatcher()
+    requestWorkspaceSync(pushWorkspaceProgress)
+    startWorkspaceWatcher(pushWorkspaceProgress)
   }
+
+  // 每分钟自动触发一次工作区全量对账（Task 2.2.5，兜底：即使 chokidar 漏事件也会自动收敛）
+  startAutoSyncTimer(pushWorkspaceProgress)
 
   createWindow()
 
@@ -732,6 +980,8 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   stopWorkspaceWatcher()
+  stopAutoSyncTimer()
+  stopEmbedWorker()
   fileServer?.close()
   fileServer = null
 })

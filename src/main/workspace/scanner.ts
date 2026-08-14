@@ -33,7 +33,8 @@ const SKIP_SUFFIXES = ['~', '.tmp', '.bak', '.swp']
 const BATCH = 50
 
 function shouldSkip(name: string): boolean {
-  return name.startsWith('.') || SKIP_SUFFIXES.some((s) => name.endsWith(s))
+  // ~$ 前缀 = Office/WPS 打开文档时生成的临时锁文件（如 ~$教育.docx），无正文，导入只会解析失败
+  return name.startsWith('~$') || name.startsWith('.') || SKIP_SUFFIXES.some((s) => name.endsWith(s))
 }
 
 /** 判断路径是否应被监听/扫描忽略（供 watcher 复用） */

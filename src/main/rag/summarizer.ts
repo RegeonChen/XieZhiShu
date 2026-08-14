@@ -58,6 +58,19 @@ export function getSourceSummary(sourceId: string): SourceSummary | null {
   return row ? rowToSummary(row) : null
 }
 
+/** 批量读取资料摘要（Task 3.4.2：生成初稿前摘要级粗筛） */
+export function getSourceSummariesByIds(sourceIds: string[]): Map<string, SourceSummary> {
+  const db = getDb()
+  const map = new Map<string, SourceSummary>()
+  if (sourceIds.length === 0) return map
+  const placeholders = sourceIds.map(() => '?').join(',')
+  const rows = db
+    .prepare(`SELECT * FROM source_summaries WHERE source_id IN (${placeholders})`)
+    .all(...sourceIds) as SummaryRow[]
+  for (const r of rows) map.set(r.source_id, rowToSummary(r))
+  return map
+}
+
 /** 从 LLM 输出中提取 JSON（支持围栏与包裹文本） */
 function extractJson(text: string): unknown | null {
   const trimmed = text.trim()
@@ -114,7 +127,9 @@ export async function summarizeSource(sourceId: string): Promise<SummarizeResult
 
   const result = await chatCompletion(
     { apiBase: provider.config.apiBase, model: provider.config.model, apiKey: provider.apiKey },
-    messages
+    messages,
+    undefined,
+    { kind: 'summarize' }
   )
   if (!result.ok) return { ok: false, error: result.error }
 
@@ -161,6 +176,34 @@ export async function summarizeAllPending(): Promise<{ processed: number; ok: nu
   return { processed: rows.length, ok, failed }
 }
 
+/** 返回指定范围内尚无摘要的资料 id（幂等：已有摘要的不算待整理，不会重复整理） */
+export function pendingSummarySourceIds(sourceIds: string[]): string[] {
+  const db = getDb()
+  if (sourceIds.length === 0) return []
+  const placeholders = sourceIds.map(() => '?').join(',')
+  const rows = db
+    .prepare(
+      `SELECT s.id FROM sources s
+       LEFT JOIN source_summaries ss ON ss.source_id = s.id
+       WHERE ss.source_id IS NULL AND s.id IN (${placeholders})`
+    )
+    .all(...sourceIds) as { id: string }[]
+  return rows.map((r) => r.id)
+}
+
+/** 整理指定范围内尚无摘要的资料（Task 3.4.9：生成初稿前自动补齐；已整理的不重复处理） */
+export async function summarizePendingForSourceIds(sourceIds: string[]): Promise<{ processed: number; ok: number; failed: number }> {
+  const pending = pendingSummarySourceIds(sourceIds)
+  let ok = 0
+  let failed = 0
+  for (const id of pending) {
+    const res = await summarizeSource(id)
+    if (res.ok) ok += 1
+    else failed += 1
+  }
+  return { processed: pending.length, ok, failed }
+}
+
 // ---- vitest inline test ----
 if (import.meta.vitest) {
   const { describe, expect, it, beforeAll, afterAll } = import.meta.vitest
@@ -199,6 +242,26 @@ if (import.meta.vitest) {
       const res = await summarizeSource('ss1')
       expect(res.ok).toBe(false)
       if (!res.ok) expect(res.error.message).toContain('Provider')
+    })
+
+    it('pendingSummarySourceIds only returns sources without summary (idempotent, Task 3.4.9)', () => {
+      db.prepare(
+        `INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('p1', 'file', '无摘要', '正文一', 'ready')`
+      ).run()
+      db.prepare(
+        `INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('p2', 'file', '有摘要', '正文二', 'ready')`
+      ).run()
+      // p2 已有摘要
+      db.prepare(
+        `INSERT INTO source_summaries (source_id, summary, keywords, entities, llm_model, updated_at)
+         VALUES ('p2', '已有摘要', '[]', '[]', 'test-model', datetime('now'))`
+      ).run()
+      // 范围内：p1（无摘要）、p2（有摘要）、ss1（前序测试已建摘要）→ 只有 p1 待整理
+      expect(pendingSummarySourceIds(['p1', 'p2', 'ss1'])).toEqual(['p1'])
+      expect(pendingSummarySourceIds([])).toEqual([])
+      // 已整理过的不再返回（不重复整理）
+      expect(pendingSummarySourceIds(['p2'])).toEqual([])
+      expect(pendingSummarySourceIds(['ss1'])).toEqual([])
     })
   })
 }

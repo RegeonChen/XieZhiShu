@@ -20,6 +20,7 @@ export interface SourceRow {
   file_mtime: string | null
   file_size: number | null
   workspace: number
+  task_id: string | null
   created_at: string
   updated_at: string
 }
@@ -39,6 +40,7 @@ function rowToSource(row: SourceRow): Source {
     fileMtime: row.file_mtime ?? undefined,
     fileSize: row.file_size ?? undefined,
     workspace: row.workspace === 1,
+    taskId: row.task_id ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   }
@@ -47,13 +49,14 @@ function rowToSource(row: SourceRow): Source {
 export function listSources(params?: { tagIds?: string[]; search?: string }): Source[] {
   const db = getDb()
 
+  // 只返回长期资料（task_id IS NULL）：任务绑定的网页缓存文章不进资料库列表（2026-08-13）
   if (params?.search) {
     // FTS5 全文检索
     const rows = db
       .prepare(
         `SELECT s.* FROM sources s
          INNER JOIN sources_fts ON sources_fts.rowid = s.rowid
-         WHERE sources_fts MATCH ?
+         WHERE sources_fts MATCH ? AND s.task_id IS NULL
          ORDER BY rank LIMIT 50`
       )
       .all(params.search) as SourceRow[]
@@ -67,7 +70,7 @@ export function listSources(params?: { tagIds?: string[]; search?: string }): So
       .prepare(
         `SELECT s.* FROM sources s
          INNER JOIN source_tags st ON st.source_id = s.id
-         WHERE st.tag_id IN (${placeholders})
+         WHERE st.tag_id IN (${placeholders}) AND s.task_id IS NULL
          GROUP BY s.id
          HAVING COUNT(DISTINCT st.tag_id) = ${params.tagIds.length}
          ORDER BY s.created_at DESC`
@@ -76,13 +79,22 @@ export function listSources(params?: { tagIds?: string[]; search?: string }): So
     return rows.map(rowToSource)
   }
 
-  const rows = db.prepare('SELECT * FROM sources ORDER BY created_at DESC').all() as SourceRow[]
+  const rows = db.prepare('SELECT * FROM sources WHERE task_id IS NULL ORDER BY created_at DESC').all() as SourceRow[]
   return rows.map(rowToSource)
 }
 
 export function getSourceById(id: string): Source | null {
   const db = getDb()
   const row = db.prepare('SELECT * FROM sources WHERE id = ?').get(id) as SourceRow | undefined
+  return row ? rowToSource(row) : null
+}
+
+/** 按抓取网址定位资料（网页资料库增量判断：已抓过则跳过）。taskId 非空时按 (url, task_id) 判重，否则仅匹配长期资料（task_id IS NULL） */
+export function getSourceByUrl(url: string, taskId?: string): Source | null {
+  const db = getDb()
+  const row = (taskId
+    ? db.prepare('SELECT * FROM sources WHERE url = ? AND task_id = ?').get(url, taskId)
+    : db.prepare('SELECT * FROM sources WHERE url = ? AND task_id IS NULL').get(url)) as SourceRow | undefined
   return row ? rowToSource(row) : null
 }
 
@@ -102,8 +114,8 @@ export function insertSource(source: Omit<Source, 'createdAt' | 'updatedAt'>): S
   const now = new Date().toISOString()
   db.prepare(
     `INSERT INTO sources (id, kind, title, file_path, url, url_snapshot_at, cleaned_text, status, error_code,
-       content_hash, file_mtime, file_size, workspace, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       content_hash, file_mtime, file_size, workspace, task_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     source.id,
     source.kind,
@@ -118,6 +130,7 @@ export function insertSource(source: Omit<Source, 'createdAt' | 'updatedAt'>): S
     source.fileMtime ?? null,
     source.fileSize ?? null,
     source.workspace ? 1 : 0,
+    source.taskId ?? null,
     now,
     now
   )

@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { zhCN } from '../i18n/zh-CN'
 import ConfirmDialog from './ConfirmDialog'
+import WebSourcePanel from './WebSourcePanel'
 
 interface SourceItem { id: string; title: string; kind: string; status: string; createdAt: string }
 
 interface SourceListProps {
   onSelect: (id: string | null) => void
-  onTagManage: () => void
   /** 批量管理模式（资料管理） */
   bulkMode: boolean
   onExitBulk: () => void
@@ -23,7 +24,7 @@ interface ContextMenuState {
   title: string
 }
 
-function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChanged, reloadKey }: SourceListProps) {
+function SourceList({ onSelect, bulkMode, onExitBulk, onSourcesChanged, reloadKey }: SourceListProps) {
   const [sources, setSources] = useState<SourceItem[]>([])
   const [loading, setLoading] = useState(false)
   const [importing, setImporting] = useState(false)
@@ -44,8 +45,15 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
   const [workspaceDir, setWorkspaceDir] = useState<string | null>(null)
   const [reconciling, setReconciling] = useState(false)
   const [reconcileMsg, setReconcileMsg] = useState<string | null>(null)
-  const [syncProgress, setSyncProgress] = useState<{ done: number; total: number } | null>(null)
+  const [syncProgress, setSyncProgress] = useState<{ done: number; total: number; newFiles?: number } | null>(null)
+  /** 当前展开的说明（key + 触发按钮的屏幕坐标，用于 Portal 悬浮定位）；null 表示全部收起 */
+  const [info, setInfo] = useState<{ key: string; left: number; bottom: number } | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
+  // 手动"同步工作区"进行中标记：其完成后的刷新/提示由按钮处理器负责，避免与自动同步的完成事件重复
+  const manualReconcilingRef = useRef(false)
+  // 实时同步完成事件触发列表刷新时使用最新的标签筛选（避免订阅闭包中 activeTagId 过期）
+  const activeTagIdRef = useRef<string | null>(null)
+  activeTagIdRef.current = activeTagId
 
   const loadSources = useCallback(async (tagId?: string | null) => {
     setLoading(true)
@@ -71,17 +79,49 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
 
   useEffect(() => { loadSources(activeTagId); loadTags(); loadWorkspaceStatus() }, [activeTagId, loadSources, reloadKey, loadWorkspaceStatus])
 
-  // 订阅工作区同步进度（主进程推送）
+  // 订阅工作区同步进度（主进程推送）：进度展示 + 对账完成后自动刷新列表（真正的实时同步）
   useEffect(() => {
     const unsubscribe = window.api.onWorkspaceProgress?.((p) => {
       setSyncProgress(p)
-      if (p.total > 0 && p.done >= p.total) {
+      const isFinished = p.finished === true || (p.total > 0 && p.done >= p.total)
+      if (isFinished) {
         // 完成后稍作停留再清除，避免进度条闪断
         setTimeout(() => setSyncProgress(null), 800)
+        // 手动"同步工作区"的完成刷新/提示由按钮处理器负责，此处仅处理自动同步（watcher / 聚焦 / 定时）
+        if (manualReconcilingRef.current) return
+        const changed = (p.added ?? 0) + (p.changed ?? 0) + (p.removed ?? 0) + (p.moved ?? 0)
+        if (changed > 0) {
+          setReconcileMsg(
+            zhCN.sourceList.reconcileDone
+              .replace('{added}', String(p.added ?? 0))
+              .replace('{changed}', String(p.changed ?? 0))
+              .replace('{removed}', String(p.removed ?? 0))
+              .replace('{moved}', String(p.moved ?? 0))
+              .replace('{errors}', String(p.errors ?? 0))
+          )
+          void loadSources(activeTagIdRef.current)
+        }
       }
     })
     return () => unsubscribe?.()
-  }, [])
+  }, [loadSources])
+
+  // 说明气泡（Portal 悬浮在窗口顶层）：点击外部 / Esc / 滚动 / 窗口缩放时关闭
+  useEffect(() => {
+    if (!info) return
+    const close = () => setInfo(null)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close() }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', onKey)
+    window.addEventListener('scroll', close, true) // 捕获阶段，覆盖内部滚动容器
+    window.addEventListener('resize', close)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('keydown', onKey)
+      window.removeEventListener('scroll', close, true)
+      window.removeEventListener('resize', close)
+    }
+  }, [info])
 
   // 右键菜单：点击外部 / Esc 关闭
   useEffect(() => {
@@ -152,6 +192,7 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
 
   // Phase 2.2：手动触发工作区全量对账（扫描 + 解析 + 索引）
   const handleReconcile = async () => {
+    manualReconcilingRef.current = true
     setReconciling(true)
     setReconcileMsg(null)
     setSyncProgress(null)
@@ -174,6 +215,7 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
     } catch {
       setReconcileMsg(zhCN.sourceList.reconcileFailed.replace('{message}', ''))
     } finally {
+      manualReconcilingRef.current = false
       setReconciling(false)
     }
   }
@@ -231,18 +273,65 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
   return (
     <div className="source-list" ref={rootRef}>
       <div className="source-list__toolbar">
-        <button type="button" className="source-list__btn source-list__btn--primary" onClick={handleImport} disabled={importing}>{importing ? '导入中...' : '导入文件'}</button>
-        <button type="button" className="source-list__btn" onClick={() => loadSources(activeTagId)} disabled={loading}>刷新</button>
-        <button type="button" className="source-list__btn" onClick={onTagManage}>标签管理</button>
-        <button type="button" className="source-list__btn" onClick={handleSummarize} disabled={summarizing}>
-          {summarizing ? zhCN.sourceList.summarizing : zhCN.sourceList.summarizeBtn}
-        </button>
-        {workspaceDir ? (
-          <button type="button" className="source-list__btn" onClick={handleReconcile} disabled={reconciling}>
-            {reconciling ? zhCN.sourceList.reconciling : zhCN.sourceList.reconcileBtn}
+        <div className="source-list__tool-btn">
+          <button type="button" className="source-list__btn source-list__btn--primary" onClick={handleImport} disabled={importing}>{importing ? '导入中...' : '导入'}</button>
+          <button
+            type="button"
+            className="source-list__info-tip"
+            aria-label="导入说明"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation()
+              const r = e.currentTarget.getBoundingClientRect()
+              setInfo(info?.key === 'import' ? null : { key: 'import', left: r.left + r.width / 2, bottom: r.bottom })
+            }}
+          >i</button>
+        </div>
+        <div className="source-list__tool-btn">
+          <button type="button" className="source-list__btn" onClick={handleSummarize} disabled={summarizing}>
+            {summarizing ? zhCN.sourceList.summarizing : zhCN.sourceList.summarizeBtn}
           </button>
+          <button
+            type="button"
+            className="source-list__info-tip"
+            aria-label="整理资料说明"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation()
+              const r = e.currentTarget.getBoundingClientRect()
+              setInfo(info?.key === 'summarize' ? null : { key: 'summarize', left: r.left + r.width / 2, bottom: r.bottom })
+            }}
+          >i</button>
+        </div>
+        {workspaceDir ? (
+          <div className="source-list__tool-btn">
+            <button type="button" className="source-list__btn" onClick={handleReconcile} disabled={reconciling}>
+              {reconciling ? zhCN.sourceList.reconciling : zhCN.sourceList.reconcileBtn}
+            </button>
+            <button
+              type="button"
+              className="source-list__info-tip"
+              aria-label="同步说明"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation()
+                const r = e.currentTarget.getBoundingClientRect()
+                setInfo(info?.key === 'reconcile' ? null : { key: 'reconcile', left: r.left + r.width / 2, bottom: r.bottom })
+              }}
+            >i</button>
+          </div>
         ) : null}
       </div>
+
+      {/* 说明气泡：Portal 到 body 顶层，fixed 定位悬浮在窗口最上方，避免被右栏/滚动容器遮挡 */}
+      {info
+        ? createPortal(
+            <div className="source-list__info-popover" style={{ top: info.bottom + 6, left: info.left, transform: 'translateX(-50%)' }}>
+              {info.key === 'import' ? zhCN.sourceList.infoImport : info.key === 'summarize' ? zhCN.sourceList.infoSummarize : zhCN.sourceList.infoReconcile}
+            </div>,
+            document.body
+          )
+        : null}
       {workspaceDir ? (
         <p className="source-list__workspace" title={workspaceDir}>{zhCN.sourceList.workspaceStatus.replace('{dir}', workspaceDir)}</p>
       ) : (
@@ -250,6 +339,9 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
       )}
       {syncProgress && syncProgress.total > 0 ? (
         <div className="source-list__sync-progress">
+          {(syncProgress.newFiles ?? 0) > 0 && syncProgress.done < syncProgress.total ? (
+            <p className="source-list__preprocess-hint">{zhCN.sourceList.preprocessHint}</p>
+          ) : null}
           <div className="source-list__sync-bar">
             <div className="source-list__sync-bar-fill" style={{ width: `${Math.round((syncProgress.done / syncProgress.total) * 100)}%` }} />
           </div>
@@ -264,6 +356,8 @@ function SourceList({ onSelect, onTagManage, bulkMode, onExitBulk, onSourcesChan
         <input type="url" className="source-list__url-input" placeholder="输入网页网址按回车添加..." value={urlInput} onChange={(e) => setUrlInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleAddUrl() }} />
         <button type="button" className="source-list__btn source-list__btn--primary" onClick={handleAddUrl} disabled={urlAdding || !urlInput.trim()}>{urlAdding ? '抓取中...' : '添加'}</button>
       </div>
+      {/* 网页资料库（2026-08-11）：注册站点后生成初稿时自动检索相关文章 */}
+      <WebSourcePanel />
       {importErr ? <p className="source-list__error">{importErr}</p> : null}
       {deleteErr ? <p className="source-list__error">{deleteErr}</p> : null}
       {tagFilters.length > 0 ? (

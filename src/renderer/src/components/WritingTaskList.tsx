@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { zhCN } from '../i18n/zh-CN'
 import ConfirmDialog from './ConfirmDialog'
+import PromptDialog from './PromptDialog'
 
 export interface WritingTaskItem {
   id: string
@@ -28,6 +29,9 @@ function WritingTaskList({ selectedId, onSelect, reloadKey }: {
   const [pendingDelete, setPendingDelete] = useState<{ taskId: string; title: string } | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteErr, setDeleteErr] = useState<string | null>(null)
+  const [pendingRename, setPendingRename] = useState<{ taskId: string; title: string } | null>(null)
+  const [renaming, setRenaming] = useState(false)
+  const [renameErr, setRenameErr] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -76,6 +80,27 @@ function WritingTaskList({ selectedId, onSelect, reloadKey }: {
     }
   }
 
+  // Phase 3.5：右键重命名任务标题（仅中栏列表显示标题）
+  const handleRename = async (value: string) => {
+    if (!pendingRename) return
+    setRenaming(true)
+    setRenameErr(null)
+    try {
+      const res = await window.api.renameTask(pendingRename.taskId, value)
+      if (res.ok && res.data) {
+        const renamed = res.data.task as WritingTaskItem
+        setTasks((prev) => (prev ? prev.map((t) => (t.id === renamed.id ? { ...t, title: renamed.title } : t)) : prev))
+        setPendingRename(null)
+      } else {
+        setRenameErr(zhCN.writingTasks.renameFailed.replace('{message}', res.error?.message ?? ''))
+      }
+    } catch {
+      setRenameErr(zhCN.writingTasks.renameFailed.replace('{message}', ''))
+    } finally {
+      setRenaming(false)
+    }
+  }
+
   return (
     <div className="writing-task-list">
       {deleteErr ? <p className="source-list__error">{deleteErr}</p> : null}
@@ -97,9 +122,6 @@ function WritingTaskList({ selectedId, onSelect, reloadKey }: {
               }}
             >
               <span className="source-list__item-title">{t.title}</span>
-              <span className="source-list__item-kind">
-                {zhCN.writingTasks.version.replace('{version}', String(t.currentVersion))}
-              </span>
             </li>
           ))}
         </ul>
@@ -114,12 +136,32 @@ function WritingTaskList({ selectedId, onSelect, reloadKey }: {
         >
           <button
             type="button"
+            className="source-list__context-item"
+            onClick={() => { setPendingRename({ taskId: contextMenu.taskId, title: contextMenu.title }); setContextMenu(null) }}
+          >
+            {zhCN.writingTasks.renameBtn}
+          </button>
+          <button
+            type="button"
             className="source-list__context-item source-list__context-item--danger"
             onClick={() => setPendingDelete({ taskId: contextMenu.taskId, title: contextMenu.title })}
           >
             {zhCN.writingTasks.deleteBtn}
           </button>
         </div>
+      ) : null}
+
+      {pendingRename ? (
+        <PromptDialog
+          title={zhCN.writingTasks.renameTitle}
+          label={zhCN.writingTasks.renameLabel}
+          defaultValue={pendingRename.title}
+          confirmText={zhCN.writingTasks.renameBtn}
+          busy={renaming}
+          error={renameErr}
+          onConfirm={(value) => void handleRename(value)}
+          onCancel={() => { setPendingRename(null); setRenameErr(null) }}
+        />
       ) : null}
 
       {pendingDelete ? (

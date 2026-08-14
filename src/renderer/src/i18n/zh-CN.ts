@@ -3,13 +3,13 @@ export const zhCN = {
   appTitle: '志书撰写工具',
   common: {
     cancel: '取消',
-    deleting: '删除中...'
+    deleting: '删除中...',
+    confirm: '确认操作'
   },
   nav: {
     sources: '资料库',
     writing: '撰写',
-    versions: '版本管理',
-    templates: '范本',
+    skills: '规范',
     settings: '设置'
   },
   panes: {
@@ -20,22 +20,16 @@ export const zhCN = {
       detailHint: '导入文件或添加信源网址后，将在这里展示与管理资料。'
     },
     templates: {
-      listTitle: '范本管理',
+      listTitle: '写作规范',
       listEmpty: '',
-      detailTitle: '范本管理',
-      detailHint: '上传历年成品志书作为范本，供撰写任务参照体例。'
+      detailTitle: '写作规范',
+      detailHint: '管理志书写作规范（通用规范 + 部类细则），生成初稿时自动注入相应规范。'
     },
     writing: {
       listTitle: '撰写任务',
       listEmpty: '暂无任务',
-      detailTitle: '还没有撰写任务',
-      detailHint: '新建撰写任务并生成初稿后，将在这里展示志稿片段与审核操作。'
-    },
-    versions: {
-      listTitle: '版本列表',
-      listEmpty: '暂无版本',
-      detailTitle: '暂无版本记录',
-      detailHint: '完成撰写任务的版本确认后，将在这里查看、对比、回滚版本。'
+      detailTitle: '请选择或新建一个撰写任务以开始您的工作',
+      detailHint: ''
     },
     settings: {
       listTitle: '设置项',
@@ -46,10 +40,13 @@ export const zhCN = {
   },
   topbar: {
     version: '版本',
-    platform: '平台'
+    platform: '平台',
+    hideCenter: '隐藏中栏',
+    showCenter: '显示中栏'
   },
   sourceMenu: {
     tooltip: '功能菜单',
+    tagManage: '标签管理',
     manage: '资料管理'
   },
   sourceBulk: {
@@ -69,18 +66,71 @@ export const zhCN = {
     confirmDelete: '确定要删除「{title}」吗？删除后无法恢复。'
   },
   sourceList: {
-    summarizeBtn: '整理资料库',
+    summarizeBtn: '整理资料',
     summarizing: '整理中...',
     summarizeDone: '整理完成：成功 {ok} 篇，失败 {failed} 篇',
     summarizeEmpty: '没有需要整理的资料',
     summarizeFailed: '整理失败：{message}',
     workspaceStatus: '工作区：{dir}',
     workspaceUnset: '未设置工作区（可在设置页指定本地文件夹作为资料库）',
-    reconcileBtn: '同步工作区',
+    reconcileBtn: '同步',
     reconciling: '同步中...',
     syncingProgress: '正在同步 {done}/{total} ...',
+    preprocessHint: '正在预处理新添加的文件…由于后台进程正在处理，软件可能存在短暂卡顿',
     reconcileDone: '同步完成：新增 {added}、变更 {changed}、移除 {removed}、移动 {moved}、失败 {errors}',
-    reconcileFailed: '同步失败：{message}'
+    reconcileFailed: '同步失败：{message}',
+    infoImport: '将本地文件导入资料库，作为撰写志书的资料来源；也可在下方的网址输入框中添加网页信源。',
+    infoSummarize: '对工作区内所有资料逐篇生成预处理信息，供撰写初稿时的资料粗筛使用；后续的撰写任务中，已整理过的资料不会重复整理，如果您想提升之后撰写初稿的效率，可以先进行此操作',
+    infoReconcile: '出于运行效率考量，软件只能以特定频率执行同步操作，您可以自行点击此按钮，将资料库与工作区文件进行及时同步'
+  },
+  webSource: {
+    title: '网页资料库',
+    hint: '注册网站后，每次生成初稿时会自动检索该网站中与撰写要求相关的文章并抓取正文，与本地文件同等参与资料粗筛、矛盾检测与来源溯源。',
+    urlPlaceholder: '输入网站首页网址（如 https://fzxq.fuzhou.gov.cn/）',
+    titlePlaceholder: '站点名称（可选）',
+    add: '注册',
+    adding: '注册中...',
+    empty: '尚未注册网页资料库',
+    sync: '同步',
+    syncing: '同步中...',
+    remove: '删除',
+    removeConfirm: '确定删除网页资料库「{title}」吗？已抓取的文章资料会保留。',
+    syncDone: '同步完成，发现 {added} 篇新文章',
+    added: '注册成功',
+    syncedAt: '上次同步：{time}',
+    neverSynced: '尚未同步',
+    operationFailed: '操作失败：{message}'
+  },
+  skills: {
+    title: '写作规范',
+    hint: '固化志书写作规范：通用规范默认注入所有生成，部类细则按小节标题匹配注入。预设规范可修改，也可自建。',
+    newBtn: '新建规范',
+    loading: '加载中...',
+    empty: '暂无规范',
+    searchPlaceholder: '搜索规范（名称/关键词，支持模糊匹配）',
+    noMatch: '无匹配的规范',
+    general: '通用规范',
+    section: '部类细则',
+    preset: '预设',
+    edit: '编辑',
+    remove: '删除',
+    removeConfirm: '确定删除规范「{name}」吗？',
+    newTitle: '新建写作规范',
+    editTitle: '编辑写作规范',
+    nameLabel: '名称',
+    namePlaceholder: '如：学前教育',
+    categoryLabel: '类型',
+    tagsLabel: '匹配关键词（逗号分隔）',
+    tagsPlaceholder: '如：学前教育,幼儿园,保育',
+    contentLabel: '规范内容',
+    contentPlaceholder: '蒸馏后的写作规范要点（该小节记什么、按什么结构、避免什么）',
+    cancel: '取消',
+    save: '保存',
+    saving: '保存中...',
+    loadFailed: '加载失败',
+    emptyFields: '请填写名称与规范内容',
+    saveFailed: '保存失败',
+    deleteFailed: '删除失败'
   },
   sourceViewer: {
     summaryTitle: '资料摘要',
@@ -136,6 +186,19 @@ export const zhCN = {
   },
   settingsPage: {
     title: '设置',
+    preset: {
+      title: '预设大模型',
+      hint: '无需手动查找地址：选择一个预设模型，点击「使用此模型」自动填充配置；点击「获取 API key」查看该模型的注册与密钥获取教程。',
+      useBtn: '使用此模型',
+      getKeyBtn: '获取 API key',
+      getKeyFailed: '打开注册页失败：{message}'
+    },
+    presetGuide: {
+      title: '获取 API key 教程',
+      hint: '获取密钥后回到「设置」页，点击该模型的「使用此模型」并填入密钥，即可开始调用。',
+      closeBtn: '关闭',
+      openSignupBtn: '打开注册页'
+    },
     provider: {
       title: 'LLM Provider 配置',
       hint: '配置 OpenAI-compatible 模型服务（兼容 DeepSeek、通义等），密钥仅加密保存在本地。',
@@ -194,56 +257,52 @@ export const zhCN = {
   writingTasks: {
     empty: '暂无撰写任务，点击上方「新建任务」开始。',
     newBtn: '新建任务',
-    version: '第 {version} 稿',
     loadFailed: '加载失败：{message}',
     loading: '加载中...',
     deleteBtn: '删除该任务',
     deleteTitle: '删除撰写任务',
     deleteConfirm: '确定要删除撰写任务「{title}」吗？该任务下的全部志稿与片段将一并删除，且无法恢复。',
-    deleteFailed: '删除失败：{message}'
+    deleteFailed: '删除失败：{message}',
+    renameBtn: '重命名',
+    renameTitle: '重命名撰写任务',
+    renameLabel: '任务标题（仅显示在中栏列表中；文章标题由大模型从撰写要求中提取）',
+    renameFailed: '重命名失败：{message}'
   },
-  writingPage: {
-    createTitle: '新建撰写任务',
-    createHint: '填写标题并选择文件范围（手动勾选资料或按标签选择），可选用范本。',
-    submitBtn: '创建任务',
-    cancelBtn: '取消',
-    createFailed: '创建失败：{message}',
-    scopeRequired: '请至少选择一项资料或标签作为文件范围',
-    fields: {
-      title: '撰写标题',
-      titlePlaceholder: '如：新区教育事业发展',
-      scope: '文件范围',
-      scopeSource: '手动选择资料',
-      scopeTag: '按标签选择',
-      template: '参照范本（可选）',
-      templateNone: '不使用范本',
-      sourceSelected: '已选 {count} 项资料',
-      tagSelected: '已选 {count} 个标签',
-      selectAll: '全选',
-      deselectAll: '取消全选'
-    },
-    loadSourcesFailed: '加载资料失败：{message}',
-    loadTagsFailed: '加载标签失败：{message}',
-    loadTemplatesFailed: '加载范本失败：{message}'
+  writingEmpty: {
+    title: '还没有撰写任务',
+    hint: '新建撰写任务并生成初稿后，将在这里展示志稿片段与审核操作。',
+    createBtn: '新建任务',
+    createFailed: '创建失败：{message}'
+  },
+  writingChat: {
+    inputPlaceholder: '输入本次撰写的标题与要求，或与助手对话…',
+    sendBtn: '发送',
+    generateBtn: '生成初稿',
+    generating: '正在整理资料摘要并生成初稿（资料较多时可能需要数分钟，请耐心等待）...',
+    regenerating: '正在整理资料摘要并重新生成初稿（资料较多时可能需要数分钟，请耐心等待）...',
+    generated: '初稿《{title}》已生成。',
+    generateFailed: '生成失败：{message}',
+    chatFailed: '对话失败：{message}',
+    regenerateBtn: '重新生成初稿',
+    regenerateConfirmTitle: '重新生成初稿',
+    regenerateConfirmMessage: '将丢弃当前第 0 稿（含你的修改），按当前要求与资料重新生成。确定继续？',
+    regenerateConfirmBtn: '重新生成',
+    skillLabel: '写作规范',
+    skillAuto: '自动匹配（按标题）',
+    providerLabel: '大模型',
+    providerNone: '跟随全局设置',
+    providerLockHint: '（请先在「设置」页配置大模型）',
+    noDraftHint: '在下方对话框中输入本次撰写的标题与要求（如"这次撰写任务的标题为……"），点击「生成初稿」开始。',
+    emptyChat: '还没有对话。在下方输入撰写要求，点击「生成初稿」开始。',
+    /** 生成进度剩余时间（2026-08-11：进度条旁展示） */
+    etaText: '预计还需 {time}',
+    copyReply: '复制该回复',
+    copied: '已复制',
+    openSourceHint: '打开来源文件：《{title}》'
   },
   writingWorkspace: {
     taskTitle: '撰写任务：{title}',
-    scopeCount: '文件范围：共 {count} 项资料',
-    scopeTagCount: '文件范围：{count} 个标签',
-    noDraft: '尚未生成初稿。先「检索预览」确认将引用的资料片段，再生成初稿。',
-    generateBtn: '生成初稿',
-    generating: '正在检索资料并生成初稿（可能需要数十秒）...',
-    generateFailed: '生成失败：{message}',
-    generateSuccess: '初稿已生成',
-    retrieveBtn: '检索预览',
-    retrieving: '检索中...',
-    retrieveEmpty: '未检索到与标题相关的资料片段',
-    retrieveFailed: '检索失败：{message}',
-    retrievalTitle: '检索到的相关资料片段（{count}）',
-    draftTitle: '第 {version} 稿',
-    segmentSources: '来源（{count}）',
-    segmentSourceLine: '《{title}》 {position}',
-    segmentQuote: '原文摘句：{quote}',
+    articleTitle: '文章标题：《{title}》',
     loading: '加载中...',
     loadFailed: '加载失败：{message}'
   },
@@ -251,6 +310,9 @@ export const zhCN = {
     saving: '保存中...',
     saved: '已保存',
     saveFailed: '保存失败',
+    copyAll: '复制全文',
+    copied: '已复制',
+    askSource: '询问文段来源',
     toolbar: {
       bold: '粗体',
       italic: '斜体',
@@ -266,8 +328,47 @@ export const zhCN = {
       deleteColumn: '删除列',
       deleteTable: '删除表格',
       undo: '撤销',
-      redo: '重做'
+      redo: '重做',
+      contradictions: '矛盾 {count}',
+      contradictionsNone: '矛盾',
+      contradictionsTitle: '查看矛盾清单（{count} 项待处理）',
+      warnings: '警告 {count}',
+      warningsNone: '警告',
+      warningsTitle: '查看资料矛盾警告（{count} 项待处理）'
     }
+  },
+  contradiction: {
+    dialogTitle: '矛盾清单',
+    singleTitle: '矛盾 #{seq}',
+    warningsDialogTitle: '资料矛盾警告',
+    warningSingleTitle: '警告 #{seq}',
+    warningTag: '警告',
+    empty: '当前初稿没有检测到材料矛盾。',
+    emptyWarnings: '没有不在正文中的资料矛盾警告。',
+    kindLabel: '类型',
+    kinds: {
+      data: '数据',
+      time: '时间',
+      place: '地点',
+      fact: '事实经过',
+      other: '其他'
+    },
+    statusPending: '待处理',
+    statusAdopted: '已采纳',
+    statusIgnored: '已忽略',
+    draftQuoteLabel: '正文定位',
+    noQuote: '（未能定位到正文）',
+    variantsLabel: '相左说法',
+    sourceLabel: '来源文件',
+    adopt: '采纳该说法',
+    ignore: '忽略该矛盾',
+    back: '返回清单',
+    mergedHint: '⚠ 正文疑似将相左说法合并/折中，请人工核对原文',
+    warningNotInDraft: '该矛盾点未出现在当前初稿正文中，仅作为资料库潜在风险提示，不影响正文。',
+    applying: '正在更新正文…',
+    applied: '已采纳该说法并同步更新正文',
+    operationFailed: '操作失败',
+    openFailed: '打开来源文件失败：{message}'
   }
 } as const
 

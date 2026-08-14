@@ -112,6 +112,9 @@ function SourceViewer({ sourceId, onBack }: { sourceId: string; onBack: () => vo
 
   // 判断文件类型
   const isDocx = ext.endsWith('.docx')
+  const isDoc = ext.endsWith('.doc')
+  const isWps = ext.endsWith('.wps')
+  const isExcel = ext.endsWith('.xls') || ext.endsWith('.xlsx')
   const isPdf = ext.endsWith('.pdf')
   const isImage = ext.endsWith('.png') || ext.endsWith('.jpg') || ext.endsWith('.jpeg') || ext.endsWith('.bmp')
   const isNativeView = isPdf || isImage
@@ -137,7 +140,7 @@ function SourceViewer({ sourceId, onBack }: { sourceId: string; onBack: () => vo
             {source.status === 'ready' ? '已就绪' : source.status === 'failed' ? '失败' : source.status === 'pending' ? '排队中' : '处理中'}
           </span>
           <span className="source-viewer__kind">
-            {source.kind === 'file' ? (isPdf ? 'PDF' : isImage ? '图片' : isDocx ? 'Word' : '文本') : '网址'}
+            {source.kind === 'file' ? (isPdf ? 'PDF' : isImage ? '图片' : isDocx || isDoc ? 'Word' : isWps ? 'WPS' : isExcel ? 'Excel' : '文本') : '网址'}
           </span>
           {source.url && <span className="source-viewer__url" title={source.url}>{source.url}</span>}
           <span className="source-viewer__date">{new Date(source.createdAt).toLocaleString('zh-CN')}</span>

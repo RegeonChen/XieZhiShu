@@ -4,16 +4,17 @@
  * 性能要点（2026-08-06 优化）：
  *  - 增量处理：事件自带绝对路径，防抖聚合后只对变更文件调用 reconcilePaths，
  *    改动一个文件即为秒级，不再全量重扫整个工作区。
- *  - 兜底对账：5 分钟一次 reconcileWorkspace（全量但已异步化 + mtime 快筛，
- *    覆盖监听漏事件场景：网络盘/杀软干扰）。
+ *  - 互斥与兜底：对账互斥（runWorkspaceSync）与全量兜底对账由 auto-sync.ts 统一承担
+ *    （窗口聚焦 / 进入资料库 / 每分钟定时），watcher 专注实时增量。
  *  - 防环路：对账只做"文件系统 → 数据库"方向、不写文件系统，
  *    应用自身的删除/改名（Task 2.2.3）不会再被监听回调改写，无自触发风暴。
  */
 import chokidar, { type FSWatcher } from 'chokidar'
 import { relative, join } from 'node:path'
-import { getWorkspaceDir, reconcilePaths, reconcileWorkspace } from './reconcile'
+import { getWorkspaceDir, reconcilePaths } from './reconcile'
+import { runWorkspaceSync } from './auto-sync'
 import { isIgnoredPath } from './scanner'
-import { mkdtempSync, writeFileSync, rmSync, readdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import Database from 'better-sqlite3'
 import { setDb, getDb } from '../db/connection'
@@ -21,28 +22,14 @@ import { runMigrations } from '../db/migrate'
 import { updateSettings } from '../db/settings'
 
 const DEBOUNCE_MS = 500
-const HEARTBEAT_MS = 5 * 60 * 1000
 
 let watcher: FSWatcher | null = null
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
-let heartbeatTimer: ReturnType<typeof setInterval> | null = null
-let reconciling = false
 let pendingPaths = new Set<string>()
+let onProgress: ((p: { done: number; total: number; newFiles?: number }) => void) | undefined
 
-async function runTask(task: () => Promise<unknown>): Promise<void> {
-  if (reconciling) return
-  reconciling = true
-  try {
-    await task()
-  } catch (err) {
-    console.error('workspace reconcile failed:', err)
-  } finally {
-    reconciling = false
-  }
-}
-
-/** 增量处理：把绝对路径转换为工作区相对路径并交给 reconcilePaths */
-async function flushPendingPaths(): Promise<void> {
+/** 增量处理：把绝对路径转换为工作区相对路径，经统一调度器交给 reconcilePaths */
+function flushPendingPaths(): void {
   if (pendingPaths.size === 0) return
   const dir = getWorkspaceDir()
   if (!dir) {
@@ -62,21 +49,22 @@ async function flushPendingPaths(): Promise<void> {
     }
   }
   if (rels.length === 0) return
-  await reconcilePaths(rels)
+  runWorkspaceSync(() => reconcilePaths(rels, onProgress))
 }
 
 function scheduleIncremental(): void {
   if (debounceTimer) clearTimeout(debounceTimer)
   debounceTimer = setTimeout(() => {
     debounceTimer = null
-    void runTask(flushPendingPaths)
+    flushPendingPaths()
   }, DEBOUNCE_MS)
 }
 
-/** 启动工作区监听（未配置工作区或已启动时为空操作） */
-export function startWorkspaceWatcher(): void {
+/** 启动工作区监听（未配置工作区或已启动时为空操作）；onProgress 转发增量对账进度（Task 2.2.5） */
+export function startWorkspaceWatcher(progress?: (p: { done: number; total: number; newFiles?: number }) => void): void {
   const dir = getWorkspaceDir()
   if (!dir || watcher) return
+  if (progress) onProgress = progress
 
   watcher = chokidar.watch(dir, {
     ignoreInitial: true, // 初始扫描由启动对账完成，避免重复
@@ -88,21 +76,12 @@ export function startWorkspaceWatcher(): void {
     pendingPaths.add(path)
     scheduleIncremental()
   })
-
-  // 兜底对账：全量（已异步 + mtime 快筛），覆盖监听漏事件场景
-  heartbeatTimer = setInterval(() => {
-    void runTask(() => reconcileWorkspace())
-  }, HEARTBEAT_MS)
 }
 
 export function stopWorkspaceWatcher(): void {
   if (debounceTimer) {
     clearTimeout(debounceTimer)
     debounceTimer = null
-  }
-  if (heartbeatTimer) {
-    clearInterval(heartbeatTimer)
-    heartbeatTimer = null
   }
   if (watcher) {
     void watcher.close()
@@ -162,9 +141,12 @@ if (import.meta.vitest) {
         })
         expect(changed).toBe(true)
 
-        // 3) 删除文件 → 文件系统确实消失（库记录保留，删除语义属 Task 2.2.3）
+        // 3) 删除文件 → 资料库记录实时删除（Task 2.2.4）
         rmSync(join(tmp, '实时新增.txt'))
-        const removedOk = await waitFor(() => readdirSync(tmp).length === 0)
+        const removedOk = await waitFor(() => {
+          const c = getDb().prepare("SELECT COUNT(*) AS c FROM sources WHERE file_path = '实时新增.txt'").get() as { c: number }
+          return c.c === 0
+        })
         expect(removedOk).toBe(true)
       } finally {
         stopWorkspaceWatcher()

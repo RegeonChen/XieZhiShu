@@ -28,7 +28,7 @@ export function cosine(a: Float32Array, b: Float32Array): number {
   return dot / (Math.sqrt(na) * Math.sqrt(nb))
 }
 
-/** 在指定资料范围内做向量相似度检索（按相似度降序，返回前 limit 条） */
+/** 在指定资料范围内做向量相似度检索（按相似度降序；limit=0 表示返回全部，供过滤式检索使用） */
 export function vectorSearch(queryVec: number[], sourceIds: string[], limit = 200): VectorHit[] {
   if (sourceIds.length === 0) return []
   const db = getDb()
@@ -51,7 +51,7 @@ export function vectorSearch(queryVec: number[], sourceIds: string[], limit = 20
     })
   }
   hits.sort((a, b) => b.score - a.score)
-  return hits.slice(0, limit)
+  return limit > 0 ? hits.slice(0, limit) : hits
 }
 
 // ---- vitest inline test ----
