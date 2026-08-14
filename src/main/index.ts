@@ -11,6 +11,8 @@ import {
   type WritingRenameTaskRes,
   type WritingUpdateSkillsReq,
   type WritingUpdateSkillsRes,
+  type WritingSuggestSkillsReq,
+  type WritingSuggestSkillsRes,
   type WritingUpdateProviderReq,
   type WritingUpdateProviderRes,
   type WritingChatReq,
@@ -47,7 +49,7 @@ import { createTask as createWritingTask, listTasks as listWritingTasks, getTask
 import { getDraftById, getLatestDraftByTask, updateSegmentContent, replaceDraftSegments } from './db/drafts'
 import { getContradictionsByDraft, updateContradictionStatus } from './db/contradictions'
 import { listTaskMessages, addTaskMessage } from './db/task-messages'
-import { generateDraft, regenerateDraft, retrieveForTask, chatWithTask } from './writing/generate'
+import { generateDraft, regenerateDraft, retrieveForTask, chatWithTask, suggestSkillsForTask } from './writing/generate'
 import { applyContradictionEdit } from './writing/contradiction-apply'
 import { askSourceForTask } from './writing/source-query'
 import { configureEmbedModel, stopEmbedWorker } from './rag/embed'
@@ -744,6 +746,13 @@ ipcMain.handle(IPC.WRITING_UPDATE_SKILLS, (_event, params: WritingUpdateSkillsRe
   } catch (err) {
     return { ok: false, error: { code: 'INVALID_PARAM', message: String(err) } }
   }
+})
+
+// 2026-08-14：智能匹配写作规范（单独请求大模型，依据用户需求挑选部类细则 skills）
+ipcMain.handle(IPC.WRITING_SUGGEST_SKILLS, async (_event, params: WritingSuggestSkillsReq): Promise<ApiResult<WritingSuggestSkillsRes>> => {
+  const result = await suggestSkillsForTask(params.taskId, params.need)
+  if (result.ok) return { ok: true, data: { skillIds: result.skillIds } }
+  return { ok: false, error: result.error }
 })
 
 // Phase 3.5：更新任务固定使用的大模型（null = 回退全局当前 Provider）

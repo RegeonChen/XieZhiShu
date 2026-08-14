@@ -225,25 +225,8 @@ export default function App() {
           </main>
         )
       case 'writing':
-        return (
-          <main className="work-pane work-pane--writing">
-            <ErrorBoundary>
-              {selectedTaskId ? (
-                <WritingWorkspace
-                  key={selectedTaskId}
-                  taskId={selectedTaskId}
-                  onChanged={() => setWritingReload((v) => v + 1)}
-                />
-              ) : writingTaskCount === 0 ? (
-                <WritingEmptyState
-                  onCreated={(id) => { setSelectedTaskId(id); setWritingReload((v) => v + 1) }}
-                />
-              ) : (
-                <EmptyState title={zhCN.panes.writing.detailTitle} hint={zhCN.panes.writing.detailHint} />
-              )}
-            </ErrorBoundary>
-          </main>
-        )
+        // 撰写工作台改为常驻挂载（见 app-body 中的常驻容器），此处不渲染，避免切换页面时卸载丢失对话/进度状态
+        return null
       case 'templates':
         return (
           <main className="work-pane">
@@ -277,6 +260,24 @@ export default function App() {
           </>
         ) : null}
         {renderWorkPane()}
+        {/* 撰写工作台常驻挂载：切换页面仅隐藏不卸载，保留进行中的对话记录与生成进度（2026-08-14） */}
+        <main className="work-pane work-pane--writing" style={{ display: page === 'writing' ? undefined : 'none' }}>
+          <ErrorBoundary>
+            {selectedTaskId ? (
+              <WritingWorkspace
+                key={selectedTaskId}
+                taskId={selectedTaskId}
+                onChanged={() => setWritingReload((v) => v + 1)}
+              />
+            ) : writingTaskCount === 0 ? (
+              <WritingEmptyState
+                onCreated={(id) => { setSelectedTaskId(id); setWritingReload((v) => v + 1) }}
+              />
+            ) : (
+              <EmptyState title={zhCN.panes.writing.detailTitle} hint={zhCN.panes.writing.detailHint} />
+            )}
+          </ErrorBoundary>
+        </main>
       </div>
     </div>
   )

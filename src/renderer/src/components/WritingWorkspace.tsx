@@ -67,7 +67,7 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
     setErr(null)
     try {
       window.api.listSkills().then((res) => {
-        const items = (res.ok && res.data ? res.data.items : []) as { id: string; name: string; category: string }[]
+        const items = (res.ok && res.data ? res.data.items : []) as { id: string; name: string; category: string; tags?: string[] }[]
         setSectionSkills(items.filter((s) => s.category === 'section') as SkillOption[])
       }).catch(() => setSectionSkills([]))
       window.api.listProviders().then((res) => {
@@ -185,6 +185,29 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
     } else {
       appendAssistant(`更新写作规范失败：${res.error?.message ?? ''}`)
     }
+  }
+
+  /** 智能匹配写作规范（2026-08-14）：单独请求大模型，把匹配结果写回任务 skillIds */
+  const handleSuggestSkills = async (need: string) => {
+    if (!task || busy) return
+    const res = await window.api.suggestSkills(task.id, need)
+    if (!res.ok) {
+      appendAssistant(`智能匹配写作规范失败：${res.error?.message ?? ''}`)
+      return
+    }
+    const ids = res.data?.skillIds ?? []
+    const writeRes = await window.api.updateTaskSkills(task.id, ids.length > 0 ? ids : null)
+    if (!writeRes.ok) {
+      appendAssistant(`更新写作规范失败：${writeRes.error?.message ?? ''}`)
+      return
+    }
+    setTask((cur) => (cur ? { ...cur, skillIds: ids.length > 0 ? ids : undefined } : cur))
+    const names = (sectionSkills ?? []).filter((s) => ids.includes(s.id)).map((s) => s.name)
+    appendAssistant(
+      names.length > 0
+        ? `已智能匹配到写作规范：${names.join('、')}`
+        : '未匹配到合适的部类细则规范，生成时将按标题自动匹配。'
+    )
   }
 
   /** 更换任务固定使用的大模型（'' 表示跟随全局设置） */
@@ -330,6 +353,8 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
             sectionSkills={sectionSkills}
             selectedSkillIds={task.skillIds ?? []}
             onSkillsChange={(ids) => void handleSkillsChange(ids)}
+            articleTitle={task.articleTitle}
+            onSuggestSkills={handleSuggestSkills}
             providers={providers}
             providerId={task.llmProviderId}
             onProviderChange={(id) => void handleProviderChange(id)}

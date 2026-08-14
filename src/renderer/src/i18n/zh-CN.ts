@@ -79,7 +79,7 @@ export const zhCN = {
     preprocessHint: '正在预处理新添加的文件…由于后台进程正在处理，软件可能存在短暂卡顿',
     reconcileDone: '同步完成：新增 {added}、变更 {changed}、移除 {removed}、移动 {moved}、失败 {errors}',
     reconcileFailed: '同步失败：{message}',
-    infoImport: '将本地文件导入资料库，作为撰写志书的资料来源；也可在下方的网址输入框中添加网页信源。',
+    infoImport: '将本地文件导入资料库，作为撰写志书的资料来源；也可在下方「网页资料库」中注册网站，生成初稿时自动检索相关文章。',
     infoSummarize: '对工作区内所有资料逐篇生成预处理信息，供撰写初稿时的资料粗筛使用；后续的撰写任务中，已整理过的资料不会重复整理，如果您想提升之后撰写初稿的效率，可以先进行此操作',
     infoReconcile: '出于运行效率考量，软件只能以特定频率执行同步操作，您可以自行点击此按钮，将资料库与工作区文件进行及时同步'
   },
@@ -288,7 +288,11 @@ export const zhCN = {
     regenerateConfirmMessage: '将丢弃当前第 0 稿（含你的修改），按当前要求与资料重新生成。确定继续？',
     regenerateConfirmBtn: '重新生成',
     skillLabel: '写作规范',
-    skillAuto: '自动匹配（按标题）',
+    skillAuto: '未手动选定（生成时自动匹配）',
+    suggestBtn: '智能匹配',
+    suggesting: '匹配中...',
+    suggestNeedEmpty: '请先在下方输入撰写要求，再进行智能匹配',
+    pickBtn: '手动选择',
     providerLabel: '大模型',
     providerNone: '跟随全局设置',
     providerLockHint: '（请先在「设置」页配置大模型）',
@@ -299,6 +303,14 @@ export const zhCN = {
     copyReply: '复制该回复',
     copied: '已复制',
     openSourceHint: '打开来源文件：《{title}》'
+  },
+  skillPicker: {
+    title: '手动选择写作规范',
+    searchPlaceholder: '搜索规范（名称/关键词，支持模糊匹配）',
+    noMatch: '无匹配的规范',
+    selected: '已选 {count} 项',
+    confirm: '确定',
+    cancel: '取消'
   },
   writingWorkspace: {
     taskTitle: '撰写任务：{title}',
