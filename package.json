@@ -13,7 +13,8 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "test": "vitest run"
+    "test": "vitest run",
+    "dist:win": "npm run build && electron-builder --win nsis --x64 --publish never"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
@@ -49,6 +50,7 @@
     "@types/word-extractor": "^1.0.6",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^43.2.0",
+    "electron-builder": "^26.0.0",
     "electron-vite": "^3.0.0",
     "typescript": "^5.7.2",
     "vite": "^6.0.0",
@@ -59,5 +61,39 @@
     "esbuild@0.25.12": true,
     "better-sqlite3@13.0.2": true,
     "tesseract.js@5.1.1": true
+  },
+  "build": {
+    "appId": "com.regeonchen.xiezhishu",
+    "productName": "志书撰写工具",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/onnxruntime-web/dist/*.wasm"
+    ],
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/models",
+        "to": "models"
+      }
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "artifactName": "XieZhiShu-Setup-${version}-${arch}.${ext}",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   }
 }
