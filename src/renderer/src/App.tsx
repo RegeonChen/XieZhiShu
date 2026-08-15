@@ -12,6 +12,7 @@ import WritingEmptyState from './components/WritingEmptyState'
 import WritingWorkspace from './components/WritingWorkspace'
 import ResizeHandle from './components/ResizeHandle'
 import ErrorBoundary from './components/ErrorBoundary'
+import OnboardingOverlay from './components/OnboardingOverlay/OnboardingOverlay'
 import { zhCN } from './i18n/zh-CN'
 
 interface AppInfo { version: string; platform: string }
@@ -34,6 +35,8 @@ const LS_SIDEBAR_W = 'ui.sidebarWidthV2'
 const LS_CENTER_W = 'ui.centerWidth'
 // 中栏显隐持久化键
 const LS_CENTER_VISIBLE = 'ui.centerVisible'
+// 新手引导完成标记（首次启动无标记时自动展示，可从设置页重新打开）
+const LS_ONBOARDING_DONE = 'ui.onboardingDone'
 
 function readLayout(key: string, fallback: number): number {
   try {
@@ -61,6 +64,10 @@ export default function App() {
   // 中栏显隐（默认显示；顶栏按钮切换，持久化）
   const [centerVisible, setCenterVisible] = useState(() => {
     try { return localStorage.getItem(LS_CENTER_VISIBLE) !== '0' } catch { return true }
+  })
+  // 新手引导（首次启动自动展示；完成后写入 localStorage，设置页可重新打开）
+  const [onboardingOpen, setOnboardingOpen] = useState(() => {
+    try { return localStorage.getItem(LS_ONBOARDING_DONE) !== '1' } catch { return true }
   })
 
   // 三栏宽度变化时持久化（下次启动恢复）
@@ -129,6 +136,17 @@ export default function App() {
     setCenterW((w) => Math.max(MIN_CENTER, Math.min(w + delta, 600)))
   }, [])
 
+  // 新手引导：结束/跳过时写入完成标记并关闭
+  const handleOnboardingDismiss = useCallback((_reason: 'completed' | 'skipped') => {
+    setOnboardingOpen(false)
+    try { localStorage.setItem(LS_ONBOARDING_DONE, '1') } catch { /* 忽略 */ }
+  }, [])
+
+  // 新手引导：步骤切换时联动切换功能区页面，使目标元素渲染出来
+  const handleOnboardingStepChange = useCallback((page: string) => {
+    setPage(page as PageKey)
+  }, [])
+
   const renderCenterPane = () => {
     switch (page) {
       case 'sources':
@@ -182,6 +200,7 @@ export default function App() {
               <button
                 type="button"
                 className="source-list__btn source-list__btn--primary"
+                data-onboarding="writing-new-task"
                 onClick={() => void handleCreateTask()}
               >
                 {zhCN.writingTasks.newBtn}
@@ -236,7 +255,7 @@ export default function App() {
       case 'settings':
         return (
           <main className="work-pane">
-            <Settings />
+            <Settings onOpenOnboarding={() => setOnboardingOpen(true)} />
           </main>
         )
     }
@@ -279,6 +298,12 @@ export default function App() {
           </ErrorBoundary>
         </main>
       </div>
+      {/* 新手引导聚光覆盖层（首次启动自动展示，可从设置页重新打开） */}
+      <OnboardingOverlay
+        open={onboardingOpen}
+        onDismiss={handleOnboardingDismiss}
+        onStepChange={handleOnboardingStepChange}
+      />
     </div>
   )
 }

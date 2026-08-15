@@ -27,7 +27,12 @@ interface ProviderForm {
 
 const EMPTY_FORM: ProviderForm = { name: '', apiBase: '', model: '', apiKey: '' }
 
-function Settings() {
+interface SettingsProps {
+  /** 重新打开新手引导（由 App 注入） */
+  onOpenOnboarding?: () => void
+}
+
+function Settings({ onOpenOnboarding }: SettingsProps) {
   const [providers, setProviders] = useState<ProviderItem[] | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadErr, setLoadErr] = useState<string | null>(null)
@@ -46,6 +51,10 @@ function Settings() {
 
   // Phase 3.6 预设大模型
   const [guidePreset, setGuidePreset] = useState<LlmPreset | null>(null)
+
+  // 诊断日志导出（2026-08-14）
+  const [exporting, setExporting] = useState(false)
+  const [exportMsg, setExportMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
   // Phase 2.2 工作区
   const [workspaceDir, setWorkspaceDir] = useState<string | null>(null)
@@ -231,12 +240,49 @@ function Settings() {
 
   const isEditingExisting = editing !== null && editing !== 'new'
 
+  // 导出诊断日志（2026-08-14）：一键导出，供开发者复现 bug
+  const handleExportLog = async () => {
+    if (exporting) return
+    setExporting(true)
+    setExportMsg(null)
+    try {
+      const res = await window.api.exportLog()
+      if (res.ok && res.data?.path) {
+        setExportMsg({ ok: true, text: zhCN.settingsPage.exportLog.done.replace('{path}', res.data.path) })
+      } else if (res.ok) {
+        // 用户取消保存对话框，静默
+        setExportMsg(null)
+      } else {
+        setExportMsg({ ok: false, text: zhCN.settingsPage.exportLog.failed.replace('{message}', res.error?.message ?? '') })
+      }
+    } catch {
+      setExportMsg({ ok: false, text: zhCN.settingsPage.exportLog.failed.replace('{message}', '') })
+    } finally {
+      setExporting(false)
+    }
+  }
+
   return (
     <div className="settings">
-      <h3 className="settings__title">{zhCN.settingsPage.title}</h3>
+      <div className="settings__head">
+        <h3 className="settings__title">{zhCN.settingsPage.title}</h3>
+        <div className="settings__head-actions">
+          {onOpenOnboarding ? (
+            <button type="button" className="source-list__btn" onClick={onOpenOnboarding}>
+              {zhCN.settingsPage.onboardingBtn}
+            </button>
+          ) : null}
+          <button type="button" className="source-list__btn" onClick={handleExportLog} disabled={exporting}>
+            {exporting ? zhCN.settingsPage.exportLog.exporting : zhCN.settingsPage.exportLog.btn}
+          </button>
+        </div>
+      </div>
+      {exportMsg ? (
+        <p className={`settings__hint ${exportMsg.ok ? 'settings__hint--ok' : 'settings__hint--err'}`}>{exportMsg.text}</p>
+      ) : null}
 
       {/* Phase 2.2 工作区资料库 */}
-      <section className="settings__section">
+      <section className="settings__section" data-onboarding="settings-workspace">
         <div className="settings__section-header">
           <h4 className="settings__section-title">{zhCN.settingsPage.workspace.title}</h4>
           {!workspaceSaving ? (
@@ -314,7 +360,7 @@ function Settings() {
         </ul>
       </section>
 
-      <section className="settings__section">
+      <section className="settings__section" data-onboarding="settings-provider">
         <div className="settings__section-header">
           <h4 className="settings__section-title">{zhCN.settingsPage.provider.title}</h4>
           <button type="button" className="source-list__btn source-list__btn--primary" onClick={startCreate}>

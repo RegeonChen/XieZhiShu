@@ -76,6 +76,10 @@ export interface AppApi {
   updateSegment(segmentId: string, content: string): Promise<{ ok: boolean; data?: { segment: unknown }; error?: { code: string; message: string } }>
   getLatestDraftByTask(taskId: string): Promise<{ ok: boolean; data?: { draft: unknown }; error?: { code: string; message: string } }>
   focusWindow(): Promise<{ ok: boolean; error?: { code: string; message: string } }>
+  /** 渲染进程上报诊断日志（2026-08-14） */
+  appendLog(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', tag: string, message: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
+  /** 导出诊断日志文件（2026-08-14） */
+  exportLog(): Promise<{ ok: boolean; data?: { path: string; fileName: string }; error?: { code: string; message: string } }>
 }
 
 declare global {

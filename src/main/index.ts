@@ -39,7 +39,7 @@ import { listTags, createTag, updateTag, deleteTag, addTagToSource, removeTagFro
 import { importFiles, importUrl } from './import'
 import { addWebSite, listWebSites, removeWebSite } from './db/web-sites'
 import { syncSite } from './web-source/site-crawler'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { listSkills, createSkill, updateSkill, deleteSkill, seedPresetSkills } from './db/writing-skills'
 import { safeStorageCodec } from './llm/secret'
 import { listProviders, saveProvider, deleteProvider } from './llm/provider-store'
@@ -61,7 +61,8 @@ import { requestWorkspaceSync, startAutoSyncTimer, stopAutoSyncTimer } from './w
 import { trashSourceFile, renameSourceFile, resolveSourceFilePath } from './workspace/sync'
 import { migrateLegacyToWorkspace } from './workspace/migrate'
 import { loadWindowState, trackWindowState } from './window-state'
-import type { WorkspaceReconcileRes, WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceSyncReq, WebSourceSyncRes, SkillListRes, SkillSaveReq, SkillSaveRes, SkillDeleteReq } from '../shared/ipc'
+import type { WorkspaceReconcileRes, WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceSyncReq, WebSourceSyncRes, SkillListRes, SkillSaveReq, SkillSaveRes, SkillDeleteReq, LogAppendReq, LogExportRes } from '../shared/ipc'
+import { logMain, logIpc, logRenderer, exportLogsText } from './logger'
 
 const APP_PROTOCOL_WHITELIST = /^https?:\/\//i
 
@@ -183,14 +184,60 @@ function createWindow(): void {
   trackWindowState(win)
 }
 
+// ===== 诊断日志：自动记录所有 IPC 调用（通道 + 脱敏参数），用于复现用户试用中的 bug（2026-08-14） =====
+const rawIpcHandle = ipcMain.handle.bind(ipcMain)
+function handleLogged(
+  channel: string,
+  listener: (event: Electron.IpcMainInvokeEvent, ...args: any[]) => any
+): void {
+  rawIpcHandle(channel, async (event: Electron.IpcMainInvokeEvent, ...args: any[]) => {
+    logIpc(channel, args)
+    try {
+      return await listener(event, ...args)
+    } catch (err) {
+      logMain('ipc', `${channel} 抛出未捕获异常: ${err instanceof Error ? err.message : String(err)}`, 'ERROR')
+      throw err
+    }
+  })
+}
+
+// 渲染进程上报 UI 交互日志（绕过 handleLogged，避免日志里出现 log:append 自身的 ipc 记录）
+rawIpcHandle(IPC.LOG_APPEND, (_event, params: LogAppendReq): ApiResult<void> => {
+  logRenderer(params.tag, params.message, params.level ?? 'INFO')
+  return { ok: true, data: undefined }
+})
+
+// 一键导出诊断日志文件（弹出保存对话框）
+rawIpcHandle(IPC.LOG_EXPORT, async (): Promise<ApiResult<LogExportRes>> => {
+  const now = new Date()
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  const defaultName = `志书撰写工具-诊断日志-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.log`
+  try {
+    const res = await dialog.showSaveDialog({
+      title: '导出诊断日志',
+      defaultPath: defaultName,
+      filters: [
+        { name: '日志文件', extensions: ['log'] },
+        { name: '文本文件', extensions: ['txt'] },
+        { name: '所有文件', extensions: ['*'] }
+      ]
+    })
+    if (res.canceled || !res.filePath) return { ok: true, data: { path: '', fileName: defaultName } }
+    writeFileSync(res.filePath, exportLogsText(), 'utf-8')
+    return { ok: true, data: { path: res.filePath, fileName: defaultName } }
+  } catch (err) {
+    return { ok: false, error: { code: 'LOG_EXPORT_FAILED', message: err instanceof Error ? err.message : '导出失败' } }
+  }
+})
+
 // ===== IPC handlers =====
 
-ipcMain.handle(IPC.APP_GET_INFO, (): ApiResult<AppInfoRes> => {
+handleLogged(IPC.APP_GET_INFO, (): ApiResult<AppInfoRes> => {
   return { ok: true, data: { version: app.getVersion(), platform: process.platform } }
 })
 
 // 打开外部链接（预设模型注册页等；仅允许 http/https，防滥用）
-ipcMain.handle(IPC.APP_OPEN_EXTERNAL, (_event, params: { url: string }): ApiResult<void> => {
+handleLogged(IPC.APP_OPEN_EXTERNAL, (_event, params: { url: string }): ApiResult<void> => {
   const url = (params.url ?? '').trim()
   if (!APP_PROTOCOL_WHITELIST.test(url)) {
     return { ok: false, error: { code: 'INVALID_PARAM', message: '仅支持打开 http/https 链接' } }
@@ -201,7 +248,7 @@ ipcMain.handle(IPC.APP_OPEN_EXTERNAL, (_event, params: { url: string }): ApiResu
 
 // 窗口恢复激活：渲染层检测到"窗口可见但未激活"（用户点击本窗口但无法聚焦输入）时请求恢复。
 // 仅用 win.focus() 在 Windows foreground lock 下可能无效，组合 show()+moveTop() 突破。
-ipcMain.handle(IPC.WINDOW_FOCUS, (event): ApiResult<void> => {
+handleLogged(IPC.WINDOW_FOCUS, (event): ApiResult<void> => {
   const win = BrowserWindow.fromWebContents(event.sender)
   if (win && !win.isDestroyed() && win.isVisible() && !win.isFocused()) {
     win.show()
@@ -212,7 +259,7 @@ ipcMain.handle(IPC.WINDOW_FOCUS, (event): ApiResult<void> => {
 })
 
 // Task 2.1 文件导入
-ipcMain.handle(IPC.SOURCES_IMPORT_FILES, async (_event, params: { paths: string[] }): Promise<ApiResult<{ results: { path: string; source?: Source; error?: string }[] }>> => {
+handleLogged(IPC.SOURCES_IMPORT_FILES, async (_event, params: { paths: string[] }): Promise<ApiResult<{ results: { path: string; source?: Source; error?: string }[] }>> => {
   try {
     const results = await importFiles(params.paths)
     // 导入成功后提交后台串行向量索引（不阻塞导入返回；推理在 Worker 线程执行）
@@ -235,7 +282,7 @@ ipcMain.handle(IPC.SOURCES_IMPORT_FILES, async (_event, params: { paths: string[
 })
 
 // Task 2.2 信源网址抓取
-ipcMain.handle(IPC.SOURCES_ADD_URL, async (_event, params: { url: string }): Promise<ApiResult<{ source: Source }>> => {
+handleLogged(IPC.SOURCES_ADD_URL, async (_event, params: { url: string }): Promise<ApiResult<{ source: Source }>> => {
   try {
     const result = await importUrl(params.url)
     if (result.source) {
@@ -250,7 +297,7 @@ ipcMain.handle(IPC.SOURCES_ADD_URL, async (_event, params: { url: string }): Pro
 })
 
 // ---- 网页资料库（2026-08-11）----
-ipcMain.handle(IPC.WEB_SOURCE_LIST, (): ApiResult<WebSourceListRes> => {
+handleLogged(IPC.WEB_SOURCE_LIST, (): ApiResult<WebSourceListRes> => {
   try {
     return { ok: true, data: { sites: listWebSites() } }
   } catch (err) {
@@ -258,7 +305,7 @@ ipcMain.handle(IPC.WEB_SOURCE_LIST, (): ApiResult<WebSourceListRes> => {
   }
 })
 
-ipcMain.handle(IPC.WEB_SOURCE_ADD, (_event, params: WebSourceAddReq): ApiResult<WebSourceAddRes> => {
+handleLogged(IPC.WEB_SOURCE_ADD, (_event, params: WebSourceAddReq): ApiResult<WebSourceAddRes> => {
   try {
     const site = addWebSite(params.rootUrl, params.title)
     if (!site) return { ok: false, error: { code: 'ALREADY_EXISTS', message: '该网址已注册为网页资料库' } }
@@ -268,7 +315,7 @@ ipcMain.handle(IPC.WEB_SOURCE_ADD, (_event, params: WebSourceAddReq): ApiResult<
   }
 })
 
-ipcMain.handle(IPC.WEB_SOURCE_REMOVE, (_event, params: WebSourceRemoveReq): ApiResult<void> => {
+handleLogged(IPC.WEB_SOURCE_REMOVE, (_event, params: WebSourceRemoveReq): ApiResult<void> => {
   try {
     removeWebSite(params.id)
     return { ok: true, data: undefined }
@@ -277,7 +324,7 @@ ipcMain.handle(IPC.WEB_SOURCE_REMOVE, (_event, params: WebSourceRemoveReq): ApiR
   }
 })
 
-ipcMain.handle(IPC.WEB_SOURCE_SYNC, async (_event, params: WebSourceSyncReq): Promise<ApiResult<WebSourceSyncRes>> => {
+handleLogged(IPC.WEB_SOURCE_SYNC, async (_event, params: WebSourceSyncReq): Promise<ApiResult<WebSourceSyncRes>> => {
   try {
     const added = await syncSite(params.id)
     return { ok: true, data: { articles: added } }
@@ -287,7 +334,7 @@ ipcMain.handle(IPC.WEB_SOURCE_SYNC, async (_event, params: WebSourceSyncReq): Pr
 })
 
 // Task 2.3 标签 CRUD
-ipcMain.handle(IPC.TAGS_CREATE, (_event, params: { name: string }): ApiResult<{ tag: Tag }> => {
+handleLogged(IPC.TAGS_CREATE, (_event, params: { name: string }): ApiResult<{ tag: Tag }> => {
   try {
     const tag = createTag(params.name)
     return { ok: true, data: { tag } }
@@ -296,7 +343,7 @@ ipcMain.handle(IPC.TAGS_CREATE, (_event, params: { name: string }): ApiResult<{ 
   }
 })
 
-ipcMain.handle(IPC.TAGS_UPDATE, (_event, params: { id: string; name?: string }): ApiResult<Tag> => {
+handleLogged(IPC.TAGS_UPDATE, (_event, params: { id: string; name?: string }): ApiResult<Tag> => {
   try {
     const tag = updateTag(params.id, params.name)
     if (!tag) return { ok: false, error: { code: 'INVALID_PARAM', message: '标签不存在' } }
@@ -306,7 +353,7 @@ ipcMain.handle(IPC.TAGS_UPDATE, (_event, params: { id: string; name?: string }):
   }
 })
 
-ipcMain.handle(IPC.TAGS_DELETE, (_event, params: { id: string }): ApiResult<void> => {
+handleLogged(IPC.TAGS_DELETE, (_event, params: { id: string }): ApiResult<void> => {
   try {
     deleteTag(params.id)
     return { ok: true, data: undefined }
@@ -315,7 +362,7 @@ ipcMain.handle(IPC.TAGS_DELETE, (_event, params: { id: string }): ApiResult<void
   }
 })
 
-ipcMain.handle(IPC.TAGS_ADD_TO_SOURCE, (_event, params: { sourceId: string; tagId: string }): ApiResult<void> => {
+handleLogged(IPC.TAGS_ADD_TO_SOURCE, (_event, params: { sourceId: string; tagId: string }): ApiResult<void> => {
   try {
     addTagToSource(params.sourceId, params.tagId)
     return { ok: true, data: undefined }
@@ -324,7 +371,7 @@ ipcMain.handle(IPC.TAGS_ADD_TO_SOURCE, (_event, params: { sourceId: string; tagI
   }
 })
 
-ipcMain.handle(IPC.TAGS_REMOVE_FROM_SOURCE, (_event, params: { sourceId: string; tagId: string }): ApiResult<void> => {
+handleLogged(IPC.TAGS_REMOVE_FROM_SOURCE, (_event, params: { sourceId: string; tagId: string }): ApiResult<void> => {
   try {
     removeTagFromSource(params.sourceId, params.tagId)
     return { ok: true, data: undefined }
@@ -334,7 +381,7 @@ ipcMain.handle(IPC.TAGS_REMOVE_FROM_SOURCE, (_event, params: { sourceId: string;
 })
 
 // 写作规范 skills 管理（2026-08-13 由「范本」重构）
-ipcMain.handle(IPC.SKILLS_LIST, (): ApiResult<SkillListRes> => {
+handleLogged(IPC.SKILLS_LIST, (): ApiResult<SkillListRes> => {
   try {
     const items = listSkills()
     return { ok: true, data: { items } }
@@ -343,7 +390,7 @@ ipcMain.handle(IPC.SKILLS_LIST, (): ApiResult<SkillListRes> => {
   }
 })
 
-ipcMain.handle(IPC.SKILLS_CREATE, (_event, params: SkillSaveReq): ApiResult<SkillSaveRes> => {
+handleLogged(IPC.SKILLS_CREATE, (_event, params: SkillSaveReq): ApiResult<SkillSaveRes> => {
   try {
     const skill = createSkill({ name: params.name, category: params.category, tags: params.tags, content: params.content })
     return { ok: true, data: { skill } }
@@ -352,7 +399,7 @@ ipcMain.handle(IPC.SKILLS_CREATE, (_event, params: SkillSaveReq): ApiResult<Skil
   }
 })
 
-ipcMain.handle(IPC.SKILLS_UPDATE, (_event, params: SkillSaveReq): ApiResult<SkillSaveRes> => {
+handleLogged(IPC.SKILLS_UPDATE, (_event, params: SkillSaveReq): ApiResult<SkillSaveRes> => {
   try {
     if (!params.id) return { ok: false, error: { code: 'INVALID_PARAM', message: '缺少规范 id' } }
     const skill = updateSkill(params.id, { name: params.name, category: params.category, tags: params.tags, content: params.content })
@@ -363,7 +410,7 @@ ipcMain.handle(IPC.SKILLS_UPDATE, (_event, params: SkillSaveReq): ApiResult<Skil
   }
 })
 
-ipcMain.handle(IPC.SKILLS_DELETE, (_event, params: SkillDeleteReq): ApiResult<void> => {
+handleLogged(IPC.SKILLS_DELETE, (_event, params: SkillDeleteReq): ApiResult<void> => {
   try {
     deleteSkill(params.id)
     return { ok: true, data: undefined }
@@ -373,7 +420,7 @@ ipcMain.handle(IPC.SKILLS_DELETE, (_event, params: SkillDeleteReq): ApiResult<vo
 })
 
 // 文件选择对话框（安全：在 main 进程打开，仅返回路径给 renderer）
-ipcMain.handle('app:openFileDialog', async (): Promise<ApiResult<{ paths: string[] }>> => {
+handleLogged('app:openFileDialog', async (): Promise<ApiResult<{ paths: string[] }>> => {
   const win = BrowserWindow.getFocusedWindow()
   if (!win) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'No focused window' } }
@@ -388,7 +435,7 @@ ipcMain.handle('app:openFileDialog', async (): Promise<ApiResult<{ paths: string
 })
 
 // 目录选择对话框（Phase 2.2：选择工作区文件夹）
-ipcMain.handle('app:openDirectoryDialog', async (): Promise<ApiResult<{ path: string | null }>> => {
+handleLogged('app:openDirectoryDialog', async (): Promise<ApiResult<{ path: string | null }>> => {
   const win = BrowserWindow.getFocusedWindow()
   if (!win) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'No focused window' } }
@@ -400,7 +447,7 @@ ipcMain.handle('app:openDirectoryDialog', async (): Promise<ApiResult<{ path: st
 })
 
 // Task 1.3 端到端验证：sources:list 与 tags:list
-ipcMain.handle(IPC.SOURCES_LIST, (_event, params?: { tagIds?: string[]; search?: string }): ApiResult<{ items: Source[] }> => {
+handleLogged(IPC.SOURCES_LIST, (_event, params?: { tagIds?: string[]; search?: string }): ApiResult<{ items: Source[] }> => {
   try {
     const items = listSources(params)
     return { ok: true, data: { items } }
@@ -410,7 +457,7 @@ ipcMain.handle(IPC.SOURCES_LIST, (_event, params?: { tagIds?: string[]; search?:
 })
 
 // Phase 2.1: 获取资料详情（含标签）
-ipcMain.handle(IPC.SOURCES_GET, (_event, params: { id: string }): ApiResult<{ source: Source; tags: Tag[] }> => {
+handleLogged(IPC.SOURCES_GET, (_event, params: { id: string }): ApiResult<{ source: Source; tags: Tag[] }> => {
   try {
     const source = getSourceById(params.id)
     if (!source) return { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '资料不存在' } }
@@ -422,7 +469,7 @@ ipcMain.handle(IPC.SOURCES_GET, (_event, params: { id: string }): ApiResult<{ so
 })
 
 // Phase 2.x: 将 .docx 资料实时转换为 HTML 供前端渲染
-ipcMain.handle(IPC.SOURCES_RENDER_HTML, async (_event, params: { id: string }): Promise<ApiResult<{ html: string }>> => {
+handleLogged(IPC.SOURCES_RENDER_HTML, async (_event, params: { id: string }): Promise<ApiResult<{ html: string }>> => {
   try {
     const source = getSourceById(params.id)
     if (!source) return { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '资料不存在' } }
@@ -449,7 +496,7 @@ ipcMain.handle(IPC.SOURCES_RENDER_HTML, async (_event, params: { id: string }): 
 })
 
 // 获取资料文件的本地访问 URL（通过内嵌 HTTP 文件服务提供，PDF 查看器不支持 data: URL）
-ipcMain.handle(IPC.SOURCES_GET_FILE_URL, (_event, params: { id: string }): ApiResult<{ url: string }> => {
+handleLogged(IPC.SOURCES_GET_FILE_URL, (_event, params: { id: string }): ApiResult<{ url: string }> => {
   try {
     const source = getSourceById(params.id)
     if (!source) return { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '资料不存在' } }
@@ -465,7 +512,7 @@ ipcMain.handle(IPC.SOURCES_GET_FILE_URL, (_event, params: { id: string }): ApiRe
 })
 
 // 删除单个资料（Phase 2.2：工作区文件先移入回收站，再删库）
-ipcMain.handle(IPC.SOURCES_DELETE, async (_event, params: { id: string }): Promise<ApiResult<void>> => {
+handleLogged(IPC.SOURCES_DELETE, async (_event, params: { id: string }): Promise<ApiResult<void>> => {
   try {
     const source = getSourceById(params.id)
     if (!source) return { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '资料不存在' } }
@@ -480,7 +527,7 @@ ipcMain.handle(IPC.SOURCES_DELETE, async (_event, params: { id: string }): Promi
 })
 
 // 批量删除资料（Phase 2.2：逐个先移入回收站，再统一删库）
-ipcMain.handle(IPC.SOURCES_DELETE_MANY, async (_event, params: { ids: string[] }): Promise<ApiResult<void>> => {
+handleLogged(IPC.SOURCES_DELETE_MANY, async (_event, params: { ids: string[] }): Promise<ApiResult<void>> => {
   try {
     if (!Array.isArray(params.ids) || params.ids.length === 0) {
       return { ok: false, error: { code: 'INVALID_PARAM', message: '未指定要删除的资料' } }
@@ -497,7 +544,7 @@ ipcMain.handle(IPC.SOURCES_DELETE_MANY, async (_event, params: { ids: string[] }
 })
 
 // 修改资料标题（Phase 2.2：工作区文件同步重命名，保留扩展名；重名自动加后缀）
-ipcMain.handle(IPC.SOURCES_UPDATE_TITLE, (_event, params: { id: string; title: string }): ApiResult<Source> => {
+handleLogged(IPC.SOURCES_UPDATE_TITLE, (_event, params: { id: string; title: string }): ApiResult<Source> => {
   try {
     const source = getSourceById(params.id)
     if (!source) return { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '资料不存在' } }
@@ -520,7 +567,7 @@ ipcMain.handle(IPC.SOURCES_UPDATE_TITLE, (_event, params: { id: string; title: s
 })
 
 // 整理资料库：对尚无摘要的资料逐篇调用 LLM 生成摘要（Task 3.2.3）
-ipcMain.handle(IPC.SOURCES_SUMMARIZE_ALL, async (): Promise<ApiResult<{ processed: number; ok: number; failed: number }>> => {
+handleLogged(IPC.SOURCES_SUMMARIZE_ALL, async (): Promise<ApiResult<{ processed: number; ok: number; failed: number }>> => {
   try {
     const res = await summarizeAllPending()
     return { ok: true, data: res }
@@ -530,7 +577,7 @@ ipcMain.handle(IPC.SOURCES_SUMMARIZE_ALL, async (): Promise<ApiResult<{ processe
 })
 
 // 读取单篇资料摘要
-ipcMain.handle(IPC.SOURCES_GET_SUMMARY, (_event, params: { id: string }): ApiResult<{ summary?: unknown }> => {
+handleLogged(IPC.SOURCES_GET_SUMMARY, (_event, params: { id: string }): ApiResult<{ summary?: unknown }> => {
   try {
     const summary = getSourceSummary(params.id)
     return { ok: true, data: { summary: summary ?? undefined } }
@@ -539,7 +586,7 @@ ipcMain.handle(IPC.SOURCES_GET_SUMMARY, (_event, params: { id: string }): ApiRes
   }
 })
 
-ipcMain.handle(IPC.TAGS_LIST, (): ApiResult<{ items: Tag[] }> => {
+handleLogged(IPC.TAGS_LIST, (): ApiResult<{ items: Tag[] }> => {
   try {
     const items = listTags()
     return { ok: true, data: { items } }
@@ -549,7 +596,7 @@ ipcMain.handle(IPC.TAGS_LIST, (): ApiResult<{ items: Tag[] }> => {
 })
 
 // Phase 2.1.2: 相似标签搜索（新建标签时的 Top5 建议）
-ipcMain.handle(IPC.TAGS_SEARCH, (_event, params: { query: string; limit?: number }): ApiResult<{ items: Tag[] }> => {
+handleLogged(IPC.TAGS_SEARCH, (_event, params: { query: string; limit?: number }): ApiResult<{ items: Tag[] }> => {
   try {
     const items = searchTags(params.query ?? '', params.limit ?? 5)
     return { ok: true, data: { items } }
@@ -559,7 +606,7 @@ ipcMain.handle(IPC.TAGS_SEARCH, (_event, params: { query: string; limit?: number
 })
 
 // Phase 2.1.2: 批量打标（多标签 → 多资料）
-ipcMain.handle(IPC.TAGS_BATCH_ADD, (_event, params: { tagIds: string[]; sourceIds: string[] }): ApiResult<void> => {
+handleLogged(IPC.TAGS_BATCH_ADD, (_event, params: { tagIds: string[]; sourceIds: string[] }): ApiResult<void> => {
   try {
     if (!Array.isArray(params.tagIds) || !Array.isArray(params.sourceIds) || params.sourceIds.length === 0 || params.tagIds.length === 0) {
       return { ok: false, error: { code: 'INVALID_PARAM', message: '缺少标签或资料' } }
@@ -572,7 +619,7 @@ ipcMain.handle(IPC.TAGS_BATCH_ADD, (_event, params: { tagIds: string[]; sourceId
 })
 
 // Phase 2.1.2: 获取带有指定标签的所有资料 ID
-ipcMain.handle(IPC.TAGS_SOURCES_BY_TAG, (_event, params: { tagId: string }): ApiResult<{ sourceIds: string[] }> => {
+handleLogged(IPC.TAGS_SOURCES_BY_TAG, (_event, params: { tagId: string }): ApiResult<{ sourceIds: string[] }> => {
   try {
     const sourceIds = getSourceIdsByTag(params.tagId)
     return { ok: true, data: { sourceIds } }
@@ -583,7 +630,7 @@ ipcMain.handle(IPC.TAGS_SOURCES_BY_TAG, (_event, params: { tagId: string }): Api
 
 // ===== Phase 3 Task 3.1: LLM Provider 配置 =====
 
-ipcMain.handle(IPC.LLM_LIST_PROVIDERS, (): ApiResult<{ items: LlmProviderConfig[] }> => {
+handleLogged(IPC.LLM_LIST_PROVIDERS, (): ApiResult<{ items: LlmProviderConfig[] }> => {
   try {
     return { ok: true, data: { items: listProviders() } }
   } catch (err) {
@@ -591,7 +638,7 @@ ipcMain.handle(IPC.LLM_LIST_PROVIDERS, (): ApiResult<{ items: LlmProviderConfig[
   }
 })
 
-ipcMain.handle(IPC.LLM_SAVE_PROVIDER, (_event, params: LlmSaveProviderReq): ApiResult<{ provider: LlmProviderConfig }> => {
+handleLogged(IPC.LLM_SAVE_PROVIDER, (_event, params: LlmSaveProviderReq): ApiResult<{ provider: LlmProviderConfig }> => {
   try {
     const provider = saveProvider(params, safeStorageCodec)
     return { ok: true, data: { provider } }
@@ -600,7 +647,7 @@ ipcMain.handle(IPC.LLM_SAVE_PROVIDER, (_event, params: LlmSaveProviderReq): ApiR
   }
 })
 
-ipcMain.handle(IPC.LLM_DELETE_PROVIDER, (_event, params: { id: string }): ApiResult<void> => {
+handleLogged(IPC.LLM_DELETE_PROVIDER, (_event, params: { id: string }): ApiResult<void> => {
   try {
     deleteProvider(params.id)
     // 若删除的是当前 Provider，同步清除设置
@@ -613,7 +660,7 @@ ipcMain.handle(IPC.LLM_DELETE_PROVIDER, (_event, params: { id: string }): ApiRes
   }
 })
 
-ipcMain.handle(IPC.LLM_TEST_CONNECTION, async (_event, params: { id: string }): Promise<ApiResult<void>> => {
+handleLogged(IPC.LLM_TEST_CONNECTION, async (_event, params: { id: string }): Promise<ApiResult<void>> => {
   const result = await testProviderConnection(params.id, safeStorageCodec)
   if (result.ok) return { ok: true, data: undefined }
   return { ok: false, error: result.error! }
@@ -621,7 +668,7 @@ ipcMain.handle(IPC.LLM_TEST_CONNECTION, async (_event, params: { id: string }): 
 
 // ===== Phase 3 Task 3.1: 本地设置 =====
 
-ipcMain.handle(IPC.SETTINGS_GET, (): ApiResult<AppSettings> => {
+handleLogged(IPC.SETTINGS_GET, (): ApiResult<AppSettings> => {
   try {
     return { ok: true, data: getSettings() }
   } catch (err) {
@@ -629,7 +676,7 @@ ipcMain.handle(IPC.SETTINGS_GET, (): ApiResult<AppSettings> => {
   }
 })
 
-ipcMain.handle(IPC.SETTINGS_UPDATE, (_event, params: { patch: Partial<AppSettings> }): ApiResult<AppSettings> => {
+handleLogged(IPC.SETTINGS_UPDATE, (_event, params: { patch: Partial<AppSettings> }): ApiResult<AppSettings> => {
   try {
     const settings = updateSettings(params.patch)
     // 工作区路径变化时重启监听（并触发一次对账）
@@ -649,7 +696,7 @@ ipcMain.handle(IPC.SETTINGS_UPDATE, (_event, params: { patch: Partial<AppSetting
 
 // ===== Phase 2.2: 工作区 =====
 
-ipcMain.handle(IPC.WORKSPACE_STATUS, (): ApiResult<WorkspaceStatusRes> => {
+handleLogged(IPC.WORKSPACE_STATUS, (): ApiResult<WorkspaceStatusRes> => {
   try {
     const workspaceDir = getWorkspaceDir()
     const all = listSources()
@@ -672,7 +719,7 @@ function pushWorkspaceProgress(p: ReconcileProgress): void {
 }
 
 // 手动触发工作区全量对账（扫描 + 解析 + 索引），实时推送进度到渲染进程
-ipcMain.handle(IPC.WORKSPACE_RECONCILE, async (): Promise<ApiResult<WorkspaceReconcileRes>> => {
+handleLogged(IPC.WORKSPACE_RECONCILE, async (): Promise<ApiResult<WorkspaceReconcileRes>> => {
   try {
     const result = await reconcileWorkspace(pushWorkspaceProgress)
     return { ok: true, data: result }
@@ -682,13 +729,13 @@ ipcMain.handle(IPC.WORKSPACE_RECONCILE, async (): Promise<ApiResult<WorkspaceRec
 })
 
 // 渲染层进入"资料库"功能区时自动触发一次同步（Task 2.2.5，效果等同手动"同步工作区"）
-ipcMain.handle(IPC.WORKSPACE_NAV_SYNC, (): ApiResult<void> => {
+handleLogged(IPC.WORKSPACE_NAV_SYNC, (): ApiResult<void> => {
   requestWorkspaceSync(pushWorkspaceProgress)
   return { ok: true, data: undefined }
 })
 
 // 一次性迁移存量导入资料到工作区（Task 2.2.3）
-ipcMain.handle(IPC.WORKSPACE_MIGRATE, async (): Promise<ApiResult<WorkspaceMigrateRes>> => {
+handleLogged(IPC.WORKSPACE_MIGRATE, async (): Promise<ApiResult<WorkspaceMigrateRes>> => {
   try {
     const result = await migrateLegacyToWorkspace()
     return { ok: true, data: result }
@@ -699,7 +746,7 @@ ipcMain.handle(IPC.WORKSPACE_MIGRATE, async (): Promise<ApiResult<WorkspaceMigra
 
 // ===== Phase 3 Task 3.2/3.3: 撰写任务与初稿 =====
 
-ipcMain.handle(IPC.WRITING_CREATE_TASK, (_event, params: WritingCreateTaskReq): ApiResult<{ task: WritingTask }> => {
+handleLogged(IPC.WRITING_CREATE_TASK, (_event, params: WritingCreateTaskReq): ApiResult<{ task: WritingTask }> => {
   try {
     // Phase 3.5：点击"新建任务"立即创建（标题默认"新建任务"、范围=全部文件），可选范本/大模型
     const task = createWritingTask(params ?? {})
@@ -709,7 +756,7 @@ ipcMain.handle(IPC.WRITING_CREATE_TASK, (_event, params: WritingCreateTaskReq): 
   }
 })
 
-ipcMain.handle(IPC.WRITING_LIST_TASKS, (): ApiResult<{ items: WritingTask[] }> => {
+handleLogged(IPC.WRITING_LIST_TASKS, (): ApiResult<{ items: WritingTask[] }> => {
   try {
     return { ok: true, data: { items: listWritingTasks() } }
   } catch (err) {
@@ -717,7 +764,7 @@ ipcMain.handle(IPC.WRITING_LIST_TASKS, (): ApiResult<{ items: WritingTask[] }> =
   }
 })
 
-ipcMain.handle(IPC.WRITING_DELETE_TASK, (_event, params: { id: string }): ApiResult<void> => {
+handleLogged(IPC.WRITING_DELETE_TASK, (_event, params: { id: string }): ApiResult<void> => {
   try {
     deleteWritingTask(params.id)
     return { ok: true, data: undefined }
@@ -727,7 +774,7 @@ ipcMain.handle(IPC.WRITING_DELETE_TASK, (_event, params: { id: string }): ApiRes
 })
 
 // Phase 3.5：右键重命名任务标题（仅中栏列表显示标题；文章标题由大模型抓取）
-ipcMain.handle(IPC.WRITING_RENAME_TASK, (_event, params: WritingRenameTaskReq): ApiResult<WritingRenameTaskRes> => {
+handleLogged(IPC.WRITING_RENAME_TASK, (_event, params: WritingRenameTaskReq): ApiResult<WritingRenameTaskRes> => {
   try {
     const task = renameTask(params.taskId, params.title)
     if (!task) return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '撰写任务不存在' } }
@@ -738,7 +785,7 @@ ipcMain.handle(IPC.WRITING_RENAME_TASK, (_event, params: WritingRenameTaskReq): 
 })
 
 // 2026-08-13：更新任务选定的部类细则规范 skill（null = 未手动选定，生成时自动匹配）
-ipcMain.handle(IPC.WRITING_UPDATE_SKILLS, (_event, params: WritingUpdateSkillsReq): ApiResult<WritingUpdateSkillsRes> => {
+handleLogged(IPC.WRITING_UPDATE_SKILLS, (_event, params: WritingUpdateSkillsReq): ApiResult<WritingUpdateSkillsRes> => {
   try {
     const task = updateTaskSkillIds(params.taskId, params.skillIds)
     if (!task) return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '撰写任务不存在' } }
@@ -749,14 +796,14 @@ ipcMain.handle(IPC.WRITING_UPDATE_SKILLS, (_event, params: WritingUpdateSkillsRe
 })
 
 // 2026-08-14：智能匹配写作规范（单独请求大模型，依据用户需求挑选部类细则 skills）
-ipcMain.handle(IPC.WRITING_SUGGEST_SKILLS, async (_event, params: WritingSuggestSkillsReq): Promise<ApiResult<WritingSuggestSkillsRes>> => {
+handleLogged(IPC.WRITING_SUGGEST_SKILLS, async (_event, params: WritingSuggestSkillsReq): Promise<ApiResult<WritingSuggestSkillsRes>> => {
   const result = await suggestSkillsForTask(params.taskId, params.need)
   if (result.ok) return { ok: true, data: { skillIds: result.skillIds } }
   return { ok: false, error: result.error }
 })
 
 // Phase 3.5：更新任务固定使用的大模型（null = 回退全局当前 Provider）
-ipcMain.handle(IPC.WRITING_UPDATE_PROVIDER, (_event, params: WritingUpdateProviderReq): ApiResult<WritingUpdateProviderRes> => {
+handleLogged(IPC.WRITING_UPDATE_PROVIDER, (_event, params: WritingUpdateProviderReq): ApiResult<WritingUpdateProviderRes> => {
   try {
     const task = updateTaskProvider(params.taskId, params.llmProviderId)
     if (!task) return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '撰写任务不存在' } }
@@ -767,21 +814,21 @@ ipcMain.handle(IPC.WRITING_UPDATE_PROVIDER, (_event, params: WritingUpdateProvid
 })
 
 // Phase 3.5：与大模型自由对话（用任务大模型，注入当前初稿作为上下文）
-ipcMain.handle(IPC.WRITING_CHAT, async (_event, params: WritingChatReq): Promise<ApiResult<WritingChatRes>> => {
+handleLogged(IPC.WRITING_CHAT, async (_event, params: WritingChatReq): Promise<ApiResult<WritingChatRes>> => {
   const result = await chatWithTask(params.taskId, params.message, params.history)
   if (result.ok) return { ok: true, data: { reply: result.reply } }
   return { ok: false, error: result.error }
 })
 
 // Phase 3.7 Task 3.7.5：文段来源询问（本地精确匹配 → 过滤式检索 → LLM 兜底；消息由主进程写入 task_messages）
-ipcMain.handle(IPC.WRITING_ASK_SOURCE, async (_event, params: WritingAskSourceReq): Promise<ApiResult<WritingAskSourceRes>> => {
+handleLogged(IPC.WRITING_ASK_SOURCE, async (_event, params: WritingAskSourceReq): Promise<ApiResult<WritingAskSourceRes>> => {
   const result = await askSourceForTask(params.taskId, params.selection)
   if (result.ok) return { ok: true, data: { reply: result.reply, refs: result.refs } }
   return { ok: false, error: result.error }
 })
 
 // Phase 3.5 后续：任务对话消息（历史与痕迹）读取/追加
-ipcMain.handle(IPC.TASK_MESSAGES_LIST, (_event, params: TaskMessagesListReq): ApiResult<TaskMessagesListRes> => {
+handleLogged(IPC.TASK_MESSAGES_LIST, (_event, params: TaskMessagesListReq): ApiResult<TaskMessagesListRes> => {
   try {
     if (!getTaskById(params.taskId)) {
       return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '撰写任务不存在' } }
@@ -792,7 +839,7 @@ ipcMain.handle(IPC.TASK_MESSAGES_LIST, (_event, params: TaskMessagesListReq): Ap
   }
 })
 
-ipcMain.handle(IPC.TASK_MESSAGES_ADD, (_event, params: TaskMessagesAddReq): ApiResult<TaskMessagesAddRes> => {
+handleLogged(IPC.TASK_MESSAGES_ADD, (_event, params: TaskMessagesAddReq): ApiResult<TaskMessagesAddRes> => {
   try {
     if (!getTaskById(params.taskId)) {
       return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '撰写任务不存在' } }
@@ -803,7 +850,7 @@ ipcMain.handle(IPC.TASK_MESSAGES_ADD, (_event, params: TaskMessagesAddReq): ApiR
   }
 })
 
-ipcMain.handle(IPC.WRITING_RETRIEVE, async (_event, params: WritingRetrieveReq): Promise<ApiResult<{ chunks: RetrievedChunk[] }>> => {
+handleLogged(IPC.WRITING_RETRIEVE, async (_event, params: WritingRetrieveReq): Promise<ApiResult<{ chunks: RetrievedChunk[] }>> => {
   try {
     if (!getTaskById(params.taskId)) {
       return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '撰写任务不存在' } }
@@ -814,7 +861,7 @@ ipcMain.handle(IPC.WRITING_RETRIEVE, async (_event, params: WritingRetrieveReq):
   }
 })
 
-ipcMain.handle(IPC.WRITING_GENERATE_DRAFT, async (event, params: WritingGenerateDraftReq): Promise<ApiResult<WritingGenerateDraftRes>> => {
+handleLogged(IPC.WRITING_GENERATE_DRAFT, async (event, params: WritingGenerateDraftReq): Promise<ApiResult<WritingGenerateDraftRes>> => {
   // 生成初稿阶段进度推送（Phase 3.5 后续 / 2026-08-11：文字提示 + 进度百分比 + 预计剩余秒数）
   const onProgress = (stage: string, percent: number, etaSeconds?: number): void => {
     if (!event.sender.isDestroyed()) {
@@ -827,7 +874,7 @@ ipcMain.handle(IPC.WRITING_GENERATE_DRAFT, async (event, params: WritingGenerate
 })
 
 // 重新生成初稿（Task 3.4.5）：删除现有第 0 稿后重新生成（覆盖旧稿）
-ipcMain.handle(IPC.DRAFT_REGENERATE, async (event, params: DraftRegenerateReq): Promise<ApiResult<DraftRegenerateRes>> => {
+handleLogged(IPC.DRAFT_REGENERATE, async (event, params: DraftRegenerateReq): Promise<ApiResult<DraftRegenerateRes>> => {
   const onProgress = (stage: string, percent: number, etaSeconds?: number): void => {
     if (!event.sender.isDestroyed()) {
       event.sender.send(IPC_EVENTS.DRAFT_GENERATE_PROGRESS, { taskId: params.taskId, stage, percent, etaSeconds })
@@ -838,7 +885,7 @@ ipcMain.handle(IPC.DRAFT_REGENERATE, async (event, params: DraftRegenerateReq): 
   return { ok: false, error: result.error }
 })
 
-ipcMain.handle(IPC.DRAFT_GET, (_event, params: DraftGetReq): ApiResult<Draft> => {
+handleLogged(IPC.DRAFT_GET, (_event, params: DraftGetReq): ApiResult<Draft> => {
   try {
     const draft = getDraftById(params.draftId)
     if (!draft) return { ok: false, error: { code: 'DRAFT_NOT_FOUND', message: '志稿不存在' } }
@@ -849,7 +896,7 @@ ipcMain.handle(IPC.DRAFT_GET, (_event, params: DraftGetReq): ApiResult<Draft> =>
 })
 
 // 整稿保存（Task 3.4.1）：初稿连续显示为整体，编辑后按整稿 Markdown 保存并重建片段
-ipcMain.handle(IPC.DRAFT_UPDATE_CONTENT, (_event, params: DraftUpdateContentReq): ApiResult<DraftUpdateContentRes> => {
+handleLogged(IPC.DRAFT_UPDATE_CONTENT, (_event, params: DraftUpdateContentReq): ApiResult<DraftUpdateContentRes> => {
   try {
     const draft = replaceDraftSegments(params.draftId, params.markdown)
     if (!draft) return { ok: false, error: { code: 'DRAFT_NOT_FOUND', message: '志稿不存在' } }
@@ -860,7 +907,7 @@ ipcMain.handle(IPC.DRAFT_UPDATE_CONTENT, (_event, params: DraftUpdateContentReq)
 })
 
 // 读取某稿的矛盾清单（Phase 3.7 Task 3.7.4：矛盾弹窗 / 编辑器标注初始化）
-ipcMain.handle(IPC.DRAFT_GET_CONTRADICTIONS, (_event, params: DraftGetContradictionsReq): ApiResult<DraftGetContradictionsRes> => {
+handleLogged(IPC.DRAFT_GET_CONTRADICTIONS, (_event, params: DraftGetContradictionsReq): ApiResult<DraftGetContradictionsRes> => {
   try {
     return { ok: true, data: { contradictions: getContradictionsByDraft(params.draftId) } }
   } catch {
@@ -870,7 +917,7 @@ ipcMain.handle(IPC.DRAFT_GET_CONTRADICTIONS, (_event, params: DraftGetContradict
 
 // 矛盾取舍（Phase 3.7 Task 3.7.4：采纳某说法 / 忽略该矛盾；adopt 须带属于该矛盾的说法 id）
 // 2026-08-11：新增 revert=撤销采纳（采纳被编辑器"撤销"回退后，矛盾状态回置为待处理）
-ipcMain.handle(
+handleLogged(
   IPC.DRAFT_RESOLVE_CONTRADICTION,
   (_event, params: DraftResolveContradictionReq): ApiResult<DraftResolveContradictionRes> => {
     try {
@@ -899,14 +946,14 @@ ipcMain.handle(
 )
 
 // 矛盾采纳 → 正文同步修订（2026-08-11：LLM 生成替换文句，主进程校验定位并落库，移除【矛盾#N】标注；资料库只读）
-ipcMain.handle(IPC.DRAFT_APPLY_CONTRADICTION, async (_event, params: DraftApplyContradictionReq): Promise<ApiResult<DraftApplyContradictionRes>> => {
+handleLogged(IPC.DRAFT_APPLY_CONTRADICTION, async (_event, params: DraftApplyContradictionReq): Promise<ApiResult<DraftApplyContradictionRes>> => {
   const result = await applyContradictionEdit(params.draftId, params.contradictionId, params.variantId)
   if (!result.ok) return { ok: false, error: result.error }
   return { ok: true, data: { draft: result.draft, contradiction: result.contradiction } }
 })
 
 // 用系统默认软件打开资料源文件（Phase 3.7 Task 3.7.6；URL 资料走浏览器）
-ipcMain.handle(IPC.SOURCES_OPEN_PATH, async (_event, params: SourceOpenPathReq): Promise<ApiResult<SourceOpenPathRes>> => {
+handleLogged(IPC.SOURCES_OPEN_PATH, async (_event, params: SourceOpenPathReq): Promise<ApiResult<SourceOpenPathRes>> => {
   const source = getSourceById(params.sourceId)
   if (!source) return { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '资料不存在' } }
   try {
@@ -927,7 +974,7 @@ ipcMain.handle(IPC.SOURCES_OPEN_PATH, async (_event, params: SourceOpenPathReq):
   }
 })
 
-ipcMain.handle(IPC.SEGMENT_UPDATE, (_event, params: SegmentUpdateReq): ApiResult<SegmentUpdateRes> => {
+handleLogged(IPC.SEGMENT_UPDATE, (_event, params: SegmentUpdateReq): ApiResult<SegmentUpdateRes> => {
   try {
     const content = params.content?.trim()
     if (!content) return { ok: false, error: { code: 'INVALID_PARAM', message: '片段内容不能为空' } }
@@ -940,7 +987,7 @@ ipcMain.handle(IPC.SEGMENT_UPDATE, (_event, params: SegmentUpdateReq): ApiResult
 })
 
 // 读取任务最新一稿（2026-08-11 删去版本管理后仅保留初稿；替代原 version:list 定位最新稿）
-ipcMain.handle(IPC.DRAFT_GET_LATEST, (_event, params: DraftGetLatestReq): ApiResult<DraftGetLatestRes> => {
+handleLogged(IPC.DRAFT_GET_LATEST, (_event, params: DraftGetLatestReq): ApiResult<DraftGetLatestRes> => {
   try {
     const draft = getLatestDraftByTask(params.taskId)
     if (!draft) return { ok: false, error: { code: 'DRAFT_NOT_FOUND', message: '志稿不存在' } }
@@ -953,6 +1000,9 @@ ipcMain.handle(IPC.DRAFT_GET_LATEST, (_event, params: DraftGetLatestReq): ApiRes
 // ===== 启动 =====
 
 app.whenReady().then(() => {
+  // 记录启动日志（诊断日志起点）
+  logMain('app', `应用启动 (version=${app.getVersion()}, platform=${process.platform}, arch=${process.arch})`)
+
   // 初始化数据库（触发迁移）
   getDb()
 
@@ -988,6 +1038,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('will-quit', () => {
+  logMain('app', '应用退出')
   stopWorkspaceWatcher()
   stopAutoSyncTimer()
   stopEmbedWorker()

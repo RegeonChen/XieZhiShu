@@ -109,7 +109,11 @@ export const IPC = {
   WEB_SOURCE_SYNC: 'webSource:sync',
 
   /* 窗口 */
-  WINDOW_FOCUS: 'window:focus'
+  WINDOW_FOCUS: 'window:focus',
+
+  /* 诊断日志（2026-08-14：渲染进程上报 + 导出文件） */
+  LOG_APPEND: 'log:append',
+  LOG_EXPORT: 'log:export'
 } as const
 
 /** 主进程 → 渲染进程 的推送事件名（非请求/响应通道） */
@@ -466,6 +470,14 @@ export interface AppOpenExternalReq {
   url: string
 }
 
+// -- 诊断日志（2026-08-14） --
+export interface LogAppendReq {
+  level?: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG'
+  tag: string
+  message: string
+}
+export type LogExportRes = { path: string; fileName: string }
+
 // ============================================================
 // 类型安全的 IPC 接口映射（供 preload 侧使用，确保返回值类型与通道绑定一致）
 // ============================================================
@@ -476,6 +488,9 @@ export interface IpcMapping {
 
   // 窗口
   [IPC.WINDOW_FOCUS]: { _req: void; _res: ApiResult<void> }
+  // 诊断日志（2026-08-14）
+  [IPC.LOG_APPEND]: { _req: LogAppendReq; _res: ApiResult<void> }
+  [IPC.LOG_EXPORT]: { _req: void; _res: ApiResult<LogExportRes> }
   // 资料
   [IPC.SOURCES_LIST]: { _req: SourceListReq; _res: ApiResult<SourceListRes> }
   [IPC.SOURCES_IMPORT_FILES]: { _req: SourceImportFilesReq; _res: ApiResult<SourceImportFilesRes> }

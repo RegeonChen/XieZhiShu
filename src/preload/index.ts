@@ -279,6 +279,14 @@ const api = {
   /** 请求主进程恢复窗口激活（窗口"可见但未激活"时输入无法聚焦） */
   focusWindow(): Promise<ApiResult<void>> {
     return ipcRenderer.invoke(IPC.WINDOW_FOCUS)
+  },
+  /** 渲染进程上报一条诊断日志（按钮点击、页面切换等 UI 交互，2026-08-14） */
+  appendLog(level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', tag: string, message: string): Promise<ApiResult<void>> {
+    return ipcRenderer.invoke(IPC.LOG_APPEND, { level, tag, message })
+  },
+  /** 导出诊断日志文件（弹出保存对话框，返回保存路径；2026-08-14） */
+  exportLog(): Promise<ApiResult<{ path: string; fileName: string }>> {
+    return ipcRenderer.invoke(IPC.LOG_EXPORT)
   }
 }
 
