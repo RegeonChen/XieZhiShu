@@ -95,7 +95,7 @@ function WebSourcePanel() {
   }
 
   return (
-    <div className="web-source">
+    <div className="web-source" data-onboarding="web-source">
       <div className="web-source__head">
         <span className="web-source__title">{t.title}</span>
         <span className="web-source__hint">{t.hint}</span>

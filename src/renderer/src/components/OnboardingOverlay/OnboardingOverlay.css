@@ -1,0 +1,186 @@
+/* 新手引导聚光覆盖层（2026-08-14，借鉴聚合拾遗） */
+.onboarding-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  color: #1f2329;
+}
+
+.onboarding-overlay__shade {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* 目标高亮框：白色描边 + 强调色外晕，仅作视觉标识 */
+.onboarding-overlay__spotlight {
+  position: absolute;
+  border-radius: 9px;
+  box-shadow:
+    0 0 0 2px rgba(255, 255, 255, 0.85),
+    0 0 0 5px rgba(47, 111, 237, 0.45);
+  pointer-events: none;
+}
+
+/* 提示卡片定位容器 */
+.onboarding-card-positioner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  will-change: transform;
+}
+
+.onboarding-card {
+  width: 380px;
+  background: #ffffff;
+  border-radius: 12px;
+  box-shadow:
+    0 12px 32px rgba(8, 11, 18, 0.24),
+    0 2px 8px rgba(8, 11, 18, 0.12);
+  padding: 16px 18px;
+  outline: none;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.onboarding-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.onboarding-card__brand {
+  font-size: 12px;
+  font-weight: 600;
+  color: #6b7280;
+  letter-spacing: 0.3px;
+}
+
+.onboarding-card__skip {
+  border: none;
+  background: transparent;
+  color: #6b7280;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+.onboarding-card__skip:hover {
+  background: #f3f4f6;
+  color: #1f2329;
+}
+
+.onboarding-card__progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.onboarding-card__progress-track {
+  height: 4px;
+  background: #eef0f3;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.onboarding-card__progress-track > span {
+  display: block;
+  height: 100%;
+  background: #2f6fed;
+  border-radius: 2px;
+  transition: width 220ms ease;
+}
+
+.onboarding-card__body {
+  display: flex;
+  gap: 12px;
+  min-height: 92px;
+}
+.onboarding-card__body.is-transitioning {
+  opacity: 0.4;
+  transition: opacity 120ms ease;
+}
+
+.onboarding-card__step-number {
+  flex-shrink: 0;
+  font-size: 22px;
+  font-weight: 700;
+  color: #dbe3f5;
+  line-height: 1;
+}
+
+.onboarding-card__title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 6px;
+  color: #1f2329;
+}
+
+.onboarding-card__description {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #374151;
+  margin: 0;
+}
+
+.onboarding-card__locating {
+  font-size: 12px;
+  color: #9ca3af;
+  margin: 6px 0 0;
+}
+
+.onboarding-card__footer {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.onboarding-card__hint {
+  font-size: 12px;
+  color: #6b7280;
+  margin: 0 0 4px;
+}
+
+.onboarding-card__reopen-hint {
+  font-size: 11px;
+  color: #9ca3af;
+  margin: 0;
+}
+
+.onboarding-card__actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.onboarding-card__button {
+  border: 1px solid #e2e4e8;
+  background: #ffffff;
+  color: #1f2329;
+  font-size: 13px;
+  padding: 7px 14px;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.onboarding-card__button:hover:not(:disabled) {
+  background: #f3f4f6;
+}
+.onboarding-card__button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.onboarding-card__button--primary {
+  background: #2f6fed;
+  border-color: #2f6fed;
+  color: #ffffff;
+}
+.onboarding-card__button--primary:hover:not(:disabled) {
+  background: #245cd3;
+}

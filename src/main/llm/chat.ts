@@ -5,6 +5,7 @@
 import { net } from 'electron'
 import { ErrorCodes } from '../../shared/types'
 import { getDb } from '../db/connection'
+import { logLlm, logLlmPayload } from '../logger'
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
@@ -86,14 +87,30 @@ export async function chatCompletion(provider: ChatProvider, messages: ChatMessa
   const inputChars = JSON.stringify(messages).length
   const started = Date.now()
   const result = await doCompletion(provider, messages, timeoutMs, opts)
+  const elapsedMs = Date.now() - started
+  const kind = meta?.kind ?? 'misc'
   logLlmCall(
     meta ?? { kind: 'misc' },
     provider.model,
     inputChars,
     result.ok ? result.text.length : 0,
-    Date.now() - started,
+    elapsedMs,
     result
   )
+  // 诊断日志（内存缓冲，供「日志导出」；不含密钥）
+  logLlm(
+    kind,
+    provider.model,
+    inputChars,
+    result.ok ? result.text.length : 0,
+    elapsedMs,
+    result.ok,
+    result.ok ? undefined : result.error.code
+  )
+  // 记录提交物内容（仅关键调用；矛盾扫描/摘要等高频调用跳过，避免淹没提交物缓冲）
+  if (kind === 'generate' || kind === 'chat' || kind === 'suggest-skills' || kind === 'contradiction-locate') {
+    logLlmPayload(kind, provider.model, messages)
+  }
   return result
 }
 

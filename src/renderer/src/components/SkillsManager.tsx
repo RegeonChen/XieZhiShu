@@ -113,7 +113,7 @@ function SkillsManager() {
   }
 
   return (
-    <div className="skills-manager">
+    <div className="skills-manager" data-onboarding="skills">
       <div className="skills-manager__head">
         <h3 className="skills-manager__title">{t.title}</h3>
         <p className="skills-manager__hint">{t.hint}</p>

@@ -186,6 +186,13 @@ export const zhCN = {
   },
   settingsPage: {
     title: '设置',
+    onboardingBtn: '新手教程',
+    exportLog: {
+      btn: '导出日志',
+      exporting: '导出中...',
+      done: '日志已导出：{path}',
+      failed: '导出失败：{message}'
+    },
     preset: {
       title: '预设大模型',
       hint: '无需手动查找地址：选择一个预设模型，点击「使用此模型」自动填充配置；点击「获取 API key」查看该模型的注册与密钥获取教程。',
