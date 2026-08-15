@@ -1009,8 +1009,12 @@ app.whenReady().then(() => {
   // 写入预设写作规范 skills（幂等：仅首次启动表为空时插入）
   seedPresetSkills()
 
-  // 配置本地向量嵌入模型目录（<appPath>/resources/models/<modelId>/）
-  configureEmbedModel({ modelPath: join(app.getAppPath(), 'resources', 'models') })
+  // 配置本地向量嵌入模型目录。
+  // 开发环境模型位于项目根 resources/models；打包后经 electron-builder extraResources 复制到
+  // <安装目录>/resources/models，需改用 process.resourcesPath 定位（app.getAppPath 打包后指向 app.asar）。
+  configureEmbedModel({
+    modelPath: app.isPackaged ? join(process.resourcesPath, 'models') : join(app.getAppPath(), 'resources', 'models')
+  })
 
   // 启动内嵌文件服务（提供 PDF/图片等本地文件）
   startFileServer()
