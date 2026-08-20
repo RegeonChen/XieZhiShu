@@ -70,7 +70,8 @@ AI 辅助地方志 / 志书编纂的 Windows 桌面工具。围绕「收集 → 
 
 ### 关键实现
 
-- **RAG 检索**：采用「摘要级粗筛 + 词法 / 向量混合检索」——段落分块 + 字符 bigram 词法打分 + 本地向量余弦检索，RRF 融合排序；支持可选的 LLM 摘要索引（「整理资料」手动触发）。
+- **RAG 检索**：采用「摘要级粗筛 + 过滤式精检」——段落分块 + 字符 bigram 词法打分 + 本地向量余弦检索（词法相关或向量相似度达标的段落全部保留，不做 Top-N 截断）；支持可选的 LLM 摘要索引（「整理资料」手动触发）。
+- **LLM 调用健壮性（2026-08-19）**：瞬时故障（429/5xx/网络抖动）自动指数退避重试；生成初稿与自由对话支持 SSE 流式输出，聊天面板实时显示正文/回复。
 - **本地嵌入**：`bge-small-zh-v1.5` 在 Electron 主进程中通过 onnxruntime-web 的 WASM 后端加载，`allowRemoteModels=false` 严格本地；为避免 Windows System32 的 `onnxruntime.dll` 与原生绑定版本冲突，`onnxruntime-node` 通过本地 stub 转发到 `onnxruntime-web`。
 - **工作区同步**：以 `content_hash`（sha256）+ 文件 `mtime/size` 为映射锚点，chokidar 监听 + 防抖 + 兜底对账，实现文件系统 ↔ 数据库的双向同步。
 - **来源溯源**：AI 输出按片段标注来源，可回溯到具体资料与原文。

@@ -32,3 +32,6 @@ Thumbs.db
 # External project reference files (not part of this repo)
 参考-agents.md
 参考-PLAN.md
+
+# Debug artifacts
+.dbg/
