@@ -17,7 +17,7 @@ import { getSourceIdsByTag } from '../db/tags'
 import { listGeneralSkills, matchSectionSkills, getSkillById, listSectionSkills } from '../db/writing-skills'
 import { getProviderSecret } from '../llm/provider-store'
 import { safeStorageCodec } from '../llm/secret'
-import { chatCompletion, type ChatMessage } from '../llm/chat'
+import { chatCompletion, createJsonFieldStreamer, type ChatMessage } from '../llm/chat'
 import { retrieveChunks, bigrams, dice } from '../rag/retrieval'
 import { embedTexts } from '../rag/embed'
 import { getSourceSummariesByIds, summarizePendingForSourceIds, type SourceSummary } from '../rag/summarizer'
@@ -772,7 +772,9 @@ function estimateLlmSeconds(kind: string, fallbackSec: number): number {
 export async function generateDraft(
   taskId: string,
   instruction: string,
-  onProgress?: (stage: string, percent: number, etaSeconds?: number) => void
+  onProgress?: (stage: string, percent: number, etaSeconds?: number) => void,
+  /** 流式输出：正文 content 的增量文本（2026-08-19，供前端实时显示） */
+  onDelta?: (text: string) => void
 ): Promise<GenerateResult> {
   const task = getTaskById(taskId)
   if (!task) return fail(ErrorCodes.TASK_NOT_FOUND, '撰写任务不存在')
@@ -782,6 +784,14 @@ export async function generateDraft(
 
   const prov = resolveTaskProvider(task)
   if (!prov.ok) return prov
+
+  // 幂等：第 0 稿已存在则直接返回（含既有矛盾清单）。
+  // 检查前置到任何副作用之前：避免重复写入指令消息、重复整理摘要/抓取网页/检索/扫描等重开销工作。
+  const existing = getDraftRowByVersion(taskId, 0)
+  if (existing) {
+    const draft = getDraftById(existing.id)
+    if (draft) return { ok: true, draft, articleTitle: task.articleTitle ?? null, contradictions: getContradictionsByDraft(existing.id) }
+  }
 
   let scopeIds = resolveScopeSourceIds(task, { getSourceIdsByTag, getAllSourceIds })
   if (scopeIds.length === 0) return fail(ErrorCodes.TASK_NO_SCOPE, '资料库中没有可用资料')
@@ -824,13 +834,6 @@ export async function generateDraft(
   // 使矛盾扫描输入在"同一主题、不同措辞"的两次任务间保持一致；scanQuery 与 inst 相同时复用 chunks，不额外检索。
   const scanChunks = scanQuery === inst ? chunks : await retrieveChunksHybrid(scopeIds, scanQuery)
 
-  // 幂等：第 0 稿已存在则直接返回（含既有矛盾清单）
-  const existing = getDraftRowByVersion(taskId, 0)
-  if (existing) {
-    const draft = getDraftById(existing.id)
-    if (draft) return { ok: true, draft, articleTitle: task.articleTitle ?? null, contradictions: getContradictionsByDraft(existing.id) }
-  }
-
   const { general: generalSkills, section: sectionSkills } = resolveTaskSkills(task)
 
   // ---- 矛盾预扫描（Phase 3.7 Task 3.7.2）：失败不阻断生成，仅提示 ----
@@ -852,7 +855,13 @@ export async function generateDraft(
   ]
 
   onProgress?.('正在等待大模型回应，预计需要 1~5 分钟（资料较多时可能更久）…', GENERATE_PROGRESS.generateFrom, generateEta)
-  const result = await chatCompletion(prov.provider, messages, DRAFT_GENERATE_TIMEOUT_MS, { kind: 'generate', taskId })
+  // 流式输出：只把 JSON 中 content 字段的正文增量回调给前端（原始 JSON 不刷屏）；
+  // 同时启用瞬时故障自动重试（429/5xx/网络错误 2 次指数退避）。
+  const contentStreamer = onDelta ? createJsonFieldStreamer('content') : null
+  const result = await chatCompletion(prov.provider, messages, DRAFT_GENERATE_TIMEOUT_MS, { kind: 'generate', taskId }, {
+    maxRetries: 2,
+    onDelta: contentStreamer ? (delta) => onDelta?.(contentStreamer.feed(delta)) : undefined
+  })
   if (!result.ok) {
     const message = `生成失败：${result.error.message}`
     addTaskMessage(taskId, 'assistant', message, 'notice')
@@ -920,10 +929,11 @@ export async function generateDraft(
 export async function regenerateDraft(
   taskId: string,
   instruction: string,
-  onProgress?: (stage: string, percent: number, etaSeconds?: number) => void
+  onProgress?: (stage: string, percent: number, etaSeconds?: number) => void,
+  onDelta?: (text: string) => void
 ): Promise<GenerateResult> {
   deleteDraftByVersion(taskId, 0)
-  return generateDraft(taskId, instruction, onProgress)
+  return generateDraft(taskId, instruction, onProgress, onDelta)
 }
 
 /** 任务当前最新一稿的正文文本（用于对话上下文；无初稿返回空串） */
@@ -948,7 +958,9 @@ function getLatestDraftText(taskId: string): string {
 export async function chatWithTask(
   taskId: string,
   message: string,
-  history: { role: 'user' | 'assistant'; content: string }[] = []
+  history: { role: 'user' | 'assistant'; content: string }[] = [],
+  /** 流式输出：回复文本增量（2026-08-19，供前端实时显示） */
+  onDelta?: (text: string) => void
 ): Promise<{ ok: true; reply: string } | { ok: false; error: { code: string; message: string } }> {
   const task = getTaskById(taskId)
   if (!task) return { ok: false, error: { code: ErrorCodes.TASK_NOT_FOUND, message: '撰写任务不存在' } }
@@ -977,7 +989,11 @@ export async function chatWithTask(
   // 持久化用户消息（痕迹）
   addTaskMessage(taskId, 'user', message, 'chat')
   // 对话超时放宽到 5 分钟（问题3修复：携带初稿+历史时 Deepseek 等模型响应较慢，默认 60s 不够）
-  const result = await chatCompletion(prov.provider, messages, CHAT_TIMEOUT_MS, { kind: 'chat', taskId })
+  // 2026-08-19：流式增量 + 瞬时故障自动重试（429/5xx/网络错误 2 次指数退避）
+  const result = await chatCompletion(prov.provider, messages, CHAT_TIMEOUT_MS, { kind: 'chat', taskId }, {
+    maxRetries: 2,
+    onDelta
+  })
   if (!result.ok) {
     addTaskMessage(taskId, 'assistant', `对话失败：${result.error.message}`, 'notice')
     return { ok: false, error: result.error }
@@ -1032,7 +1048,7 @@ export async function suggestSkillsForTask(
     }
   ]
 
-  const result = await chatCompletion(prov.provider, messages, SUGGEST_SKILLS_TIMEOUT_MS, { kind: 'suggest-skills', taskId }, { temperature: 0 })
+  const result = await chatCompletion(prov.provider, messages, SUGGEST_SKILLS_TIMEOUT_MS, { kind: 'suggest-skills', taskId }, { temperature: 0, maxRetries: 1 })
   if (!result.ok) return { ok: false, error: result.error }
 
   const parsed = parseSuggestSkillsOutput(result.text)

@@ -66,7 +66,7 @@ export function splitMarkdownIntoSegments(markdown: string): { heading?: string;
   }
 
   for (const line of lines) {
-    const m = line.match(/^(#{1,6})\s+(.+)/)
+    const m = line.match(/^(#{1,6})\s*(.+)/)
     if (m) {
       flush()
       current.heading = m[2].trim()

@@ -53,9 +53,12 @@ export async function fetchUrl(url: string): Promise<FetchResult> {
   }
 
   // 读取响应体，限制大小
+  if (!response.body) {
+    throw Object.assign(new Error('响应体为空'), { code: 'FETCH_FAILED' })
+  }
   const chunks: Buffer[] = []
   let total = 0
-  const reader = response.body!.getReader()
+  const reader = response.body.getReader()
   while (true) {
     const { done, value } = await reader.read()
     if (done) break

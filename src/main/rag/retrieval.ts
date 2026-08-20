@@ -6,7 +6,7 @@
  * 检索范围严格限定在用户导入的资料（sourceIds 白名单）内，不引入外部信息。
  */
 import Database from 'better-sqlite3'
-import type { RetrievedChunk } from '../../shared/types'
+import type { RetrievedChunk, Source } from '../../shared/types'
 import { setDb } from '../db/connection'
 import { runMigrations } from '../db/migrate'
 import { getSourcesByIds } from '../db/sources'
@@ -37,6 +37,28 @@ export function isTitleLikeLine(text: string): boolean {
 interface Chunk {
   text: string
   position: string
+}
+
+/**
+ * chunkText 结果缓存（按 sourceId + contentHash 键控）：
+ * 同一轮生成中 retrieveChunks 会被调用多次（正文检索 / 稳定主题词检索 / 检索预览），
+ * 大资料（百万字 PDF）反复切分会造成不必要的 CPU 开销，这里按内容哈希缓存。
+ * 无 contentHash 的存量资料不缓存（避免同长度不同内容的碰撞）。
+ */
+interface ChunkCacheEntry {
+  hash: string
+  chunks: Chunk[]
+}
+
+const chunkCache = new Map<string, ChunkCacheEntry>()
+
+function chunkSourceText(source: Source): Chunk[] {
+  if (!source.contentHash) return chunkText(source.cleanedText ?? '')
+  const hit = chunkCache.get(source.id)
+  if (hit && hit.hash === source.contentHash) return hit.chunks
+  const chunks = chunkText(source.cleanedText ?? '')
+  chunkCache.set(source.id, { hash: source.contentHash, chunks })
+  return chunks
 }
 
 /** 按段落切分；超长段落按句读（。！？；）折分成 ≤ CHUNK_MAX 的块 */
@@ -88,19 +110,28 @@ export function dice(a: string[], b: string[]): number {
   return (2 * common) / (a.length + b.length)
 }
 
-/** 块与查询的相似度打分 */
-export function scoreChunk(query: string, chunk: string, sourceTitle: string): number {
+/** 块与查询的相似度打分（queryBigrams/queryTerms 为预计算缓存，缺省时自行计算，保证纯函数可测） */
+export function scoreChunk(
+  query: string,
+  chunk: string,
+  sourceTitle: string,
+  queryBigrams?: string[],
+  queryTerms?: string[]
+): number {
   const q = query.trim().toLowerCase()
   const t = chunk.trim().toLowerCase()
   if (!q || !t) return 0
 
+  const qBigrams = queryBigrams ?? bigrams(q)
+  const terms = queryTerms ?? q.split(/\s+/).filter(Boolean)
+
   let score = 0
   if (t.includes(q)) score += 100 + q.length // 完整查询命中
   // 查询含空格时按词分别命中
-  for (const term of q.split(/\s+/).filter(Boolean)) {
+  for (const term of terms) {
     if (term.length > 1 && t.includes(term)) score += 20
   }
-  score += dice(bigrams(q), bigrams(t)) * 60 // bigram 重叠
+  score += dice(qBigrams, bigrams(t)) * 60 // bigram 重叠
   if (sourceTitle.toLowerCase().includes(q)) score += 20 // 标题相关加成
   return Math.round(score)
 }
@@ -126,13 +157,17 @@ export function retrieveChunks(params: RetrieveParams): RetrievedChunk[] {
   if (!q || sourceIds.length === 0) return []
 
   const sources = getSourcesByIds(sourceIds)
+  const sourceById = new Map(sources.map((s) => [s.id, s]))
   const out: RetrievedChunk[] = []
   const seen = new Set<string>()
+  // 查询侧 bigram/词条只算一次，供全部块复用（大资料量下显著省时）
+  const qBigrams = bigrams(q)
+  const qTerms = q.split(/\s+/).filter(Boolean)
 
   // 词法路：score > 0 保留（score === 0 = 与标题完全无字面/字符对关联 → 非常确定无关，剔除）
   for (const s of sources) {
-    for (const c of chunkText(s.cleanedText ?? '')) {
-      const score = scoreChunk(q, c.text, s.title)
+    for (const c of chunkSourceText(s)) {
+      const score = scoreChunk(q, c.text, s.title, qBigrams, qTerms)
       if (score <= 0) continue
       const key = `${s.id}|${c.position}`
       if (seen.has(key)) continue
@@ -150,7 +185,7 @@ export function retrieveChunks(params: RetrieveParams): RetrievedChunk[] {
       const key = `${h.sourceId}|${h.position}`
       if (seen.has(key)) continue
       seen.add(key)
-      const srcTitle = sources.find((s) => s.id === h.sourceId)?.title ?? ''
+      const srcTitle = sourceById.get(h.sourceId)?.title ?? ''
       out.push({
         sourceId: h.sourceId,
         sourceTitle: srcTitle,
