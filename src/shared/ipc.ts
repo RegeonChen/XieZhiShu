@@ -102,6 +102,10 @@ export const IPC = {
   /* 打开外部链接（预设模型注册页等） */
   APP_OPEN_EXTERNAL: 'app:openExternal',
 
+  /* 剪贴板（2026-08-20：沙箱渲染进程经主进程读写系统剪贴板，用于自定义右键菜单的复制/粘贴） */
+  CLIPBOARD_READ_TEXT: 'clipboard:readText',
+  CLIPBOARD_WRITE_TEXT: 'clipboard:writeText',
+
   /* 网页资料库（2026-08-11：站点注册/列表/删除/同步文章清单） */
   WEB_SOURCE_LIST: 'webSource:list',
   WEB_SOURCE_ADD: 'webSource:add',
@@ -447,6 +451,12 @@ export type WorkspaceMigrateRes = {
 // -- 应用元数据 --
 export type AppInfoRes = { version: string; platform: string }
 
+// -- 剪贴板（2026-08-20）--
+export interface ClipboardWriteTextReq {
+  text: string
+}
+export type ClipboardReadTextRes = { text: string }
+
 // -- 打开外部链接 --
 export interface AppOpenExternalReq {
   url: string
@@ -469,6 +479,8 @@ export interface IpcMapping {
   [IPC.APP_OPEN_EXTERNAL]: { _req: AppOpenExternalReq; _res: ApiResult<void> }
   [IPC.APP_OPEN_FILE_DIALOG]: { _req: void; _res: ApiResult<{ paths: string[] }> }
   [IPC.APP_OPEN_DIRECTORY_DIALOG]: { _req: void; _res: ApiResult<{ path: string | null }> }
+  [IPC.CLIPBOARD_READ_TEXT]: { _req: void; _res: ApiResult<ClipboardReadTextRes> }
+  [IPC.CLIPBOARD_WRITE_TEXT]: { _req: ClipboardWriteTextReq; _res: ApiResult<void> }
 
   // 窗口
   [IPC.WINDOW_FOCUS]: { _req: void; _res: ApiResult<void> }

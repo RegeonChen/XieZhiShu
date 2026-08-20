@@ -369,15 +369,46 @@ function DraftEditor(
     : status === 'error' ? zhCN.draftEditor.saveFailed
     : ''
 
-  /** 右键选中文段 → 弹出"询问文段来源"菜单（Phase 3.7 Task 3.7.5） */
+  /** 右键正文 → 弹出文本菜单（2026-08-20：复制/剪切/粘贴/全选 + 文段来源询问） */
   const handleContextMenu = (e: React.MouseEvent): void => {
     if (!editor) return
-    const { from, to } = editor.state.selection
-    if (from === to) return
-    const selection = editor.state.doc.textBetween(from, to, ' ').trim()
-    if (!selection) return
     e.preventDefault()
+    // 未选中文本时，把光标定位到右键位置（便于「粘贴」插入到正确位置）
+    if (editor.state.selection.empty) {
+      const pos = editor.view.posAtCoords({ left: e.clientX, top: e.clientY })
+      if (pos) editor.chain().focus().setTextSelection(pos.pos).run()
+    }
+    const sel = editor.state.selection
+    const selection = sel.empty ? '' : editor.state.doc.textBetween(sel.from, sel.to, ' ').trim()
     setCtxMenu({ x: e.clientX, y: e.clientY, selection })
+  }
+
+  const handleEditorCopy = async (): Promise<void> => {
+    if (ctxMenu?.selection) await copyPlainText(ctxMenu.selection)
+    setCtxMenu(null)
+  }
+
+  const handleEditorCut = async (): Promise<void> => {
+    if (!editor || !ctxMenu?.selection) return
+    await copyPlainText(ctxMenu.selection)
+    editor.chain().focus().deleteSelection().run()
+    setCtxMenu(null)
+  }
+
+  const handleEditorPaste = async (): Promise<void> => {
+    if (!editor) return
+    const res = await window.api.readClipboardText()
+    const text = res.ok && res.data ? res.data.text : ''
+    if (text) {
+      // 以纯文本节点插入，避免剪贴板内容中的 <>& 等字符被当作 HTML/Markdown 解析
+      editor.chain().focus().insertContent({ type: 'text', text }).run()
+    }
+    setCtxMenu(null)
+  }
+
+  const handleEditorSelectAll = (): void => {
+    editor?.chain().focus().selectAll().run()
+    setCtxMenu(null)
   }
 
   return (
@@ -400,16 +431,30 @@ function DraftEditor(
         <>
           <div className="draft-editor__ctx-backdrop" onMouseDown={() => setCtxMenu(null)} />
           <div className="draft-editor__ctx" style={{ left: ctxMenu.x, top: ctxMenu.y }} onMouseDown={(e) => e.stopPropagation()}>
-            <button
-              type="button"
-              onClick={() => {
-                const selection = ctxMenu.selection
-                setCtxMenu(null)
-                onAskSource?.(selection)
-              }}
-            >
-              {zhCN.draftEditor.askSource}
+            <button type="button" disabled={!ctxMenu.selection} onClick={() => void handleEditorCut()}>
+              {zhCN.contextMenu.cut}
             </button>
+            <button type="button" disabled={!ctxMenu.selection} onClick={() => void handleEditorCopy()}>
+              {zhCN.contextMenu.copy}
+            </button>
+            <button type="button" onClick={() => void handleEditorPaste()}>
+              {zhCN.contextMenu.paste}
+            </button>
+            <button type="button" onClick={handleEditorSelectAll}>
+              {zhCN.contextMenu.selectAll}
+            </button>
+            {ctxMenu.selection ? (
+              <button
+                type="button"
+                onClick={() => {
+                  const selection = ctxMenu.selection
+                  setCtxMenu(null)
+                  onAskSource?.(selection)
+                }}
+              >
+                {zhCN.draftEditor.askSource}
+              </button>
+            ) : null}
           </div>
         </>
       ) : null}
