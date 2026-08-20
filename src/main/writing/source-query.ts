@@ -95,7 +95,7 @@ async function traceByGenerationContext(
   if (!prov.ok) return null
 
   const messages = buildContextTracePrompt(selection, top)
-  const result = await chatCompletion(prov.provider, messages, SOURCE_QUERY_TIMEOUT_MS, { kind: 'source-query', taskId })
+  const result = await chatCompletion(prov.provider, messages, SOURCE_QUERY_TIMEOUT_MS, { kind: 'source-query', taskId }, { maxRetries: 1 })
   if (!result.ok) return null
   const text = result.text.trim()
   const reply = text || '未能确定这段文字的来源文件。'
@@ -213,7 +213,7 @@ async function llmFallback(taskId: string, selection: string, refList: SourceRef
       content: `【文件清单】\n${fileList}\n\n【正文文段】\n「${selection}」\n\n请用文件编号（如 #1、#2）回答这段文段最可能源自哪些文件。`
     }
   ]
-  const result = await chatCompletion(prov.provider, messages, SOURCE_QUERY_TIMEOUT_MS, { kind: 'source-query', taskId })
+  const result = await chatCompletion(prov.provider, messages, SOURCE_QUERY_TIMEOUT_MS, { kind: 'source-query', taskId }, { maxRetries: 1 })
   if (!result.ok) throw new Error(result.error.message)
   const text = result.text.trim()
   return text || '未能确定这段文字的来源文件。'

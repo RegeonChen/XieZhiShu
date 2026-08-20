@@ -420,7 +420,7 @@ handleLogged(IPC.SKILLS_DELETE, (_event, params: SkillDeleteReq): ApiResult<void
 })
 
 // 文件选择对话框（安全：在 main 进程打开，仅返回路径给 renderer）
-handleLogged('app:openFileDialog', async (): Promise<ApiResult<{ paths: string[] }>> => {
+handleLogged(IPC.APP_OPEN_FILE_DIALOG, async (): Promise<ApiResult<{ paths: string[] }>> => {
   const win = BrowserWindow.getFocusedWindow()
   if (!win) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'No focused window' } }
@@ -435,7 +435,7 @@ handleLogged('app:openFileDialog', async (): Promise<ApiResult<{ paths: string[]
 })
 
 // 目录选择对话框（Phase 2.2：选择工作区文件夹）
-handleLogged('app:openDirectoryDialog', async (): Promise<ApiResult<{ path: string | null }>> => {
+handleLogged(IPC.APP_OPEN_DIRECTORY_DIALOG, async (): Promise<ApiResult<{ path: string | null }>> => {
   const win = BrowserWindow.getFocusedWindow()
   if (!win) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: 'No focused window' } }
@@ -714,7 +714,7 @@ handleLogged(IPC.WORKSPACE_STATUS, (): ApiResult<WorkspaceStatusRes> => {
 /** 工作区对账进度推送到所有渲染窗口（workspace:progress，供资料库页显示进度与"新文件预处理"提示） */
 function pushWorkspaceProgress(p: ReconcileProgress): void {
   for (const win of BrowserWindow.getAllWindows()) {
-    win.webContents.send('workspace:progress', p)
+    win.webContents.send(IPC_EVENTS.WORKSPACE_PROGRESS, p)
   }
 }
 
@@ -814,8 +814,14 @@ handleLogged(IPC.WRITING_UPDATE_PROVIDER, (_event, params: WritingUpdateProvider
 })
 
 // Phase 3.5：与大模型自由对话（用任务大模型，注入当前初稿作为上下文）
-handleLogged(IPC.WRITING_CHAT, async (_event, params: WritingChatReq): Promise<ApiResult<WritingChatRes>> => {
-  const result = await chatWithTask(params.taskId, params.message, params.history)
+handleLogged(IPC.WRITING_CHAT, async (event, params: WritingChatReq): Promise<ApiResult<WritingChatRes>> => {
+  // 对话回复流式增量推送（2026-08-19）
+  const onDelta = (text: string): void => {
+    if (!event.sender.isDestroyed()) {
+      event.sender.send(IPC_EVENTS.WRITING_STREAM_DELTA, { taskId: params.taskId, text })
+    }
+  }
+  const result = await chatWithTask(params.taskId, params.message, params.history, onDelta)
   if (result.ok) return { ok: true, data: { reply: result.reply } }
   return { ok: false, error: result.error }
 })
@@ -868,7 +874,13 @@ handleLogged(IPC.WRITING_GENERATE_DRAFT, async (event, params: WritingGenerateDr
       event.sender.send(IPC_EVENTS.DRAFT_GENERATE_PROGRESS, { taskId: params.taskId, stage, percent, etaSeconds })
     }
   }
-  const result = await generateDraft(params.taskId, params.instruction, onProgress)
+  // 流式增量推送（2026-08-19：正文逐字显示，缩短感知等待）
+  const onDelta = (text: string): void => {
+    if (!event.sender.isDestroyed()) {
+      event.sender.send(IPC_EVENTS.WRITING_STREAM_DELTA, { taskId: params.taskId, text })
+    }
+  }
+  const result = await generateDraft(params.taskId, params.instruction, onProgress, onDelta)
   if (result.ok) return { ok: true, data: { draft: result.draft, articleTitle: result.articleTitle, contradictions: result.contradictions } }
   return { ok: false, error: result.error }
 })
@@ -880,7 +892,12 @@ handleLogged(IPC.DRAFT_REGENERATE, async (event, params: DraftRegenerateReq): Pr
       event.sender.send(IPC_EVENTS.DRAFT_GENERATE_PROGRESS, { taskId: params.taskId, stage, percent, etaSeconds })
     }
   }
-  const result = await regenerateDraft(params.taskId, params.instruction, onProgress)
+  const onDelta = (text: string): void => {
+    if (!event.sender.isDestroyed()) {
+      event.sender.send(IPC_EVENTS.WRITING_STREAM_DELTA, { taskId: params.taskId, text })
+    }
+  }
+  const result = await regenerateDraft(params.taskId, params.instruction, onProgress, onDelta)
   if (result.ok) return { ok: true, data: { draft: result.draft, articleTitle: result.articleTitle, contradictions: result.contradictions } }
   return { ok: false, error: result.error }
 })

@@ -129,7 +129,8 @@ export async function summarizeSource(sourceId: string): Promise<SummarizeResult
     { apiBase: provider.config.apiBase, model: provider.config.model, apiKey: provider.apiKey },
     messages,
     undefined,
-    { kind: 'summarize' }
+    { kind: 'summarize' },
+    { maxRetries: 1 }
   )
   if (!result.ok) return { ok: false, error: result.error }
 

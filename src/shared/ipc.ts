@@ -26,7 +26,6 @@ export const IPC = {
   SOURCES_LIST: 'sources:list',
   SOURCES_IMPORT_FILES: 'sources:importFiles',
   SOURCES_ADD_URL: 'sources:addUrl',
-  SOURCES_REFRESH: 'sources:refresh',
   SOURCES_GET: 'sources:get',
   SOURCES_RENDER_HTML: 'sources:renderHtml',
   SOURCES_GET_FILE_URL: 'sources:getFileUrl',
@@ -76,9 +75,6 @@ export const IPC = {
   DRAFT_GET_LATEST: 'draft:getLatest',
   SOURCES_OPEN_PATH: 'sources:openPath',
   SEGMENT_UPDATE: 'segment:update',
-  SEGMENT_RESOLVE_CONFLICT: 'segment:resolveConflict',
-  SEGMENT_ADD_MANUAL: 'segment:addManual',
-  SEGMENT_INSERT_GENERATED: 'segment:insertGenerated',
 
   /* LLM */
   LLM_LIST_PROVIDERS: 'llm:listProviders',
@@ -98,6 +94,10 @@ export const IPC = {
 
   /* 应用元数据（Task 1.1 已实现） */
   APP_GET_INFO: 'app:getInfo',
+
+  /* 系统文件/目录选择对话框（安全：主进程打开，仅回传路径） */
+  APP_OPEN_FILE_DIALOG: 'app:openFileDialog',
+  APP_OPEN_DIRECTORY_DIALOG: 'app:openDirectoryDialog',
 
   /* 打开外部链接（预设模型注册页等） */
   APP_OPEN_EXTERNAL: 'app:openExternal',
@@ -119,7 +119,11 @@ export const IPC = {
 /** 主进程 → 渲染进程 的推送事件名（非请求/响应通道） */
 export const IPC_EVENTS = {
   /** 生成初稿阶段进度：{ taskId, stage } */
-  DRAFT_GENERATE_PROGRESS: 'draft:generateProgress'
+  DRAFT_GENERATE_PROGRESS: 'draft:generateProgress',
+  /** 工作区对账进度（含完成事件 finished 与最终计数），主进程推送到所有渲染窗口 */
+  WORKSPACE_PROGRESS: 'workspace:progress',
+  /** 生成初稿/自由对话的流式增量文本：{ taskId, text }（2026-08-19，供聊天面板实时显示） */
+  WRITING_STREAM_DELTA: 'writing:streamDelta'
 } as const
 
 // ============================================================
@@ -163,15 +167,13 @@ export interface WebSourceSyncReq {
 /** 手动同步站点：发现文章清单（web_site_articles）；返回本次发现的文章数 */
 export type WebSourceSyncRes = { articles: number }
 
-export interface SourceRefreshReq {
+export interface SourceGetReq {
   id: string
 }
-export type SourceDeleteReq = SourceRefreshReq
 export interface SourceDeleteManyReq {
   ids: string[]
 }
-export type SourceGetReq = SourceRefreshReq
-export type SourceRenderHtmlReq = SourceRefreshReq
+export type SourceRenderHtmlReq = SourceGetReq
 export type SourceRenderHtmlRes = { html: string }
 export type SourceGetFileUrlRes = { url: string }
 export interface SourceUpdateTitleReq {
@@ -405,26 +407,6 @@ export interface SourceOpenPathReq {
 }
 export type SourceOpenPathRes = { opened: boolean }
 
-export interface SegmentResolveConflictReq {
-  segmentId: string
-  chosenSourceId: string
-  note?: string
-}
-
-export interface SegmentAddManualReq {
-  draftId: string
-  heading?: string
-  content: string
-  insertAfter?: number // ordering 位置，不传则追加到末尾
-}
-
-export interface SegmentInsertGeneratedReq {
-  draftId: string
-  heading?: string
-  scope: { sourceIds: string[] } | { tagIds: string[] }
-  insertAfter?: number
-}
-
 // -- LLM --
 export type LlmListProvidersRes = { items: LlmProviderConfig[] }
 
@@ -485,6 +467,8 @@ export interface IpcMapping {
   // 应用元数据
   [IPC.APP_GET_INFO]: { _req: void; _res: ApiResult<AppInfoRes> }
   [IPC.APP_OPEN_EXTERNAL]: { _req: AppOpenExternalReq; _res: ApiResult<void> }
+  [IPC.APP_OPEN_FILE_DIALOG]: { _req: void; _res: ApiResult<{ paths: string[] }> }
+  [IPC.APP_OPEN_DIRECTORY_DIALOG]: { _req: void; _res: ApiResult<{ path: string | null }> }
 
   // 窗口
   [IPC.WINDOW_FOCUS]: { _req: void; _res: ApiResult<void> }
@@ -499,11 +483,10 @@ export interface IpcMapping {
   [IPC.WEB_SOURCE_ADD]: { _req: WebSourceAddReq; _res: ApiResult<WebSourceAddRes> }
   [IPC.WEB_SOURCE_REMOVE]: { _req: WebSourceRemoveReq; _res: ApiResult<void> }
   [IPC.WEB_SOURCE_SYNC]: { _req: WebSourceSyncReq; _res: ApiResult<WebSourceSyncRes> }
-  [IPC.SOURCES_REFRESH]: { _req: SourceRefreshReq; _res: ApiResult<Source> }
-  [IPC.SOURCES_GET]: { _req: SourceGetReq; _res: ApiResult<Source> }
+  [IPC.SOURCES_GET]: { _req: SourceGetReq; _res: ApiResult<{ source: Source; tags: Tag[] }> }
   [IPC.SOURCES_RENDER_HTML]: { _req: SourceRenderHtmlReq; _res: ApiResult<SourceRenderHtmlRes> }
   [IPC.SOURCES_GET_FILE_URL]: { _req: SourceGetReq; _res: ApiResult<SourceGetFileUrlRes> }
-  [IPC.SOURCES_DELETE]: { _req: SourceDeleteReq; _res: ApiResult<void> }
+  [IPC.SOURCES_DELETE]: { _req: SourceGetReq; _res: ApiResult<void> }
   [IPC.SOURCES_DELETE_MANY]: { _req: SourceDeleteManyReq; _res: ApiResult<void> }
   [IPC.SOURCES_UPDATE_TITLE]: { _req: SourceUpdateTitleReq; _res: ApiResult<Source> }
   [IPC.SOURCES_SUMMARIZE_ALL]: { _req: void; _res: ApiResult<SourceSummarizeAllRes> }
@@ -546,9 +529,6 @@ export interface IpcMapping {
   [IPC.DRAFT_GET_LATEST]: { _req: DraftGetLatestReq; _res: ApiResult<DraftGetLatestRes> }
   [IPC.SOURCES_OPEN_PATH]: { _req: SourceOpenPathReq; _res: ApiResult<SourceOpenPathRes> }
   [IPC.SEGMENT_UPDATE]: { _req: SegmentUpdateReq; _res: ApiResult<SegmentUpdateRes> }
-  [IPC.SEGMENT_RESOLVE_CONFLICT]: { _req: SegmentResolveConflictReq; _res: ApiResult<Segment> }
-  [IPC.SEGMENT_ADD_MANUAL]: { _req: SegmentAddManualReq; _res: ApiResult<Segment> }
-  [IPC.SEGMENT_INSERT_GENERATED]: { _req: SegmentInsertGeneratedReq; _res: ApiResult<Segment> }
   // LLM
   [IPC.LLM_LIST_PROVIDERS]: { _req: void; _res: ApiResult<LlmListProvidersRes> }
   [IPC.LLM_SAVE_PROVIDER]: { _req: LlmSaveProviderReq; _res: ApiResult<LlmSaveProviderRes> }

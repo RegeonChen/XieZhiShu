@@ -176,17 +176,19 @@ function parseText(buffer: Buffer, ext: 'txt' | 'md'): ParseResult {
 }
 
 async function parseImage(filePath: string): Promise<ParseResult> {
+  const { createWorker } = await import('tesseract.js')
+  const worker = await createWorker('chi_sim')
   try {
-    const { createWorker } = await import('tesseract.js')
-    const worker = await createWorker('chi_sim')
     const result = await worker.recognize(filePath)
-    await worker.terminate()
     return { text: result.data.text, format: 'image' }
   } catch (err) {
     throw Object.assign(
       new Error(`OCR 识别失败: ${(err as Error).message}`),
       { code: 'PARSE_FAILED' }
     )
+  } finally {
+    // 无论识别成功与否都释放 worker，避免失败路径泄漏 tesseract worker
+    await worker.terminate().catch(() => undefined)
   }
 }
 
