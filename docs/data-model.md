@@ -37,6 +37,7 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 | file_mtime | TEXT | NULL | 文件修改时间 ISO |
 | file_size | INTEGER | NULL | 文件字节数 |
 | workspace | INTEGER | NOT NULL DEFAULT 0 | 1=直接引用用户工作区文件（不转存副本） |
+| task_id | TEXT | NULL | 非空 = 某任务生成初稿时抓取的网页缓存文章（Migration 013，暂存、不属于长期资料库；删任务时级联清理；资料库列表只显示 task_id IS NULL 的长期资料） |
 | created_at / updated_at | TEXT | NOT NULL | |
 
 > 注：Phase 2.2（Migration 006，2026-08-06）新增 `content_hash`/`file_mtime`/`file_size`/`workspace` 四列，作为"文件系统 ↔ 数据库"映射锚点；工作区资料 `file_path` 存工作区相对路径（正斜杠分隔）。
@@ -57,7 +58,9 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 - `tag_id` TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE
 - PRIMARY KEY(source_id, tag_id)
 
-### 2.4 template_books（范本）
+### 2.4 template_books（范本，已废弃保留）
+
+> 2026-08-13「范本」重构为「写作规范 skills」（见 2.19）：表保留不删（避免迁移风险），不再有新数据写入。
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -102,9 +105,13 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | id | TEXT PK | |
-| title | TEXT NOT NULL | 需要撰写部分的标题 |
-| scope_json | TEXT NOT NULL | 文件范围：`{ sourceIds: [] }` 或 `{ tagIds: [] }`，二者取一 |
-| template_book_id | TEXT NULL REFERENCES template_books(id) ON DELETE SET NULL | 参照范本 |
+| title | TEXT NOT NULL | 需要撰写部分的标题（中栏显示，可重命名） |
+| scope_json | TEXT NOT NULL | 文件范围：`{ all: true }`（Phase 3.5 起固定全部长期资料）/ `{ sourceIds: [] }` / `{ tagIds: [] }`（旧任务兼容） |
+| template_book_id | TEXT NULL REFERENCES template_books(id) ON DELETE SET NULL | 参照范本（已废弃，2026-08-13 由 skill_ids 替代） |
+| llm_provider_id | TEXT NULL | 任务固定大模型（Migration 007；未设置回退全局当前 Provider） |
+| article_title | TEXT NULL | 大模型从用户要求中抓取的文章标题（Migration 007） |
+| user_instruction | TEXT NULL | 生成初稿时用户的最新要求，重新生成复用（Migration 007） |
+| skill_ids | TEXT NULL | 任务选定的部类细则规范 id（JSON 数组，Migration 014；NULL/空 = 未手动选定，生成时按标题自动匹配） |
 | current_version | INTEGER NOT NULL DEFAULT 0 | 当前稿号（恒为 0 = 初稿；版本管理已删除，列保留兼容） |
 | created_at / updated_at | TEXT NOT NULL | |
 
@@ -247,6 +254,30 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 
 > 重新生成初稿时按 draft 覆盖写入；初稿删除后随外键级联清理。
 
+### 2.18 task_messages 与 llm_call_logs（对话持久化与调用痕迹，Migration 008，2026-08-08）
+
+- `task_messages`：id PK、task_id（FK CASCADE）、role CHECK('user','assistant')、kind CHECK('chat','instruction','notice')、content、created_at；索引 (task_id, created_at)。
+- `llm_call_logs`：id PK、task_id、kind、model、input_chars/output_chars、elapsed_ms、status CHECK('ok','error')、error_code、error_message、created_at；**只存元数据与字符数/耗时，不存密钥与正文**，用于诊断"生成慢/超时"与剩余时间预估。
+
+### 2.19 writing_skills（写作规范，Migration 014，2026-08-13 由「范本」重构）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | TEXT PK | |
+| name | TEXT NOT NULL | 规范名（如「学前教育」「志书文体文风与行文规则」） |
+| category | TEXT NOT NULL CHECK('general','section') | general=通用规范（默认注入）；section=部类细则（按标题匹配/智能匹配/手动选择） |
+| tags | TEXT NOT NULL DEFAULT '[]' | 匹配关键词（JSON 数组） |
+| content | TEXT NOT NULL | 蒸馏后的规范要点（Markdown） |
+| is_preset | INTEGER NOT NULL DEFAULT 0 | 预设（内置，可修改）或用户自建 |
+| created_at / updated_at | TEXT NOT NULL | |
+
+> 首次启动幂等写入预设规范（`seedPresetSkills`，仅当表为空时）。
+
+### 2.20 web_sites 与 web_site_articles（网页资料库，Migration 012，2026-08-11）
+
+- `web_sites`：id PK、root_url NOT NULL UNIQUE（去尾部斜杠归一）、title、created_at/updated_at、last_synced_at。
+- `web_site_articles`：site_id（FK CASCADE）+ url 联合主键、title、discovered_at——站点文章 URL 清单缓存（生成初稿时先同步清单，再用撰写要求标题粗筛，命中文章增量抓取正文落库为 `sources`（kind='url'，task_id 绑定任务））。
+
 ## 3. 关键设计决策
 
 - **资料统一抽象**：文件与信源网址合并为 `sources.kind`，撰写范围、来源标注不区分类型。
@@ -258,5 +289,5 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 
 ## 4. 待定项
 
-- 向量检索表结构（Phase 3 确定后追加）。
+- 向量检索当前为内存暴力余弦（资料规模下足够），大规模时再考虑 ANN 索引。
 - LLM 凭证加密已落地（2026-08-05）：Electron `safeStorage`（Windows DPAPI）加密后存入 `llm_providers.api_key`。
