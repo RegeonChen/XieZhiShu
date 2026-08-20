@@ -30,9 +30,14 @@ const EMPTY_FORM: ProviderForm = { name: '', apiBase: '', model: '', apiKey: '' 
 interface SettingsProps {
   /** 重新打开新手引导（由 App 注入） */
   onOpenOnboarding?: () => void
+  /** 滚动定位（scroll-spy）回调：当前视口内最靠上的设置区块 id（供中栏导航高亮） */
+  onActiveChange?: (id: string) => void
 }
 
-function Settings({ onOpenOnboarding }: SettingsProps) {
+/** 设置页区块顺序（与中栏导航一致；scroll-spy 观察对象） */
+const SETTING_SECTIONS = ['overview', 'workspace', 'preset', 'provider'] as const
+
+function Settings({ onOpenOnboarding, onActiveChange }: SettingsProps) {
   const [providers, setProviders] = useState<ProviderItem[] | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadErr, setLoadErr] = useState<string | null>(null)
@@ -92,6 +97,27 @@ function Settings({ onOpenOnboarding }: SettingsProps) {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  // scroll-spy：观察各设置区块，视口内最靠上的区块上报给中栏导航高亮（2026-08-19）
+  useEffect(() => {
+    if (!onActiveChange) return
+    const els = SETTING_SECTIONS.map((id) => document.getElementById(`settings-${id}`)).filter(
+      (el): el is HTMLElement => el !== null
+    )
+    if (els.length === 0) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.filter((e) => e.isIntersecting)
+        if (visible.length === 0) return
+        const top = visible.reduce((a, b) => (a.boundingClientRect.top <= b.boundingClientRect.top ? a : b))
+        const id = (top.target as HTMLElement).id.replace(/^settings-/, '')
+        onActiveChange(id)
+      },
+      { rootMargin: '-15% 0px -65% 0px', threshold: 0 }
+    )
+    els.forEach((el) => observer.observe(el))
+    return () => observer.disconnect()
+  }, [onActiveChange])
 
   const startCreate = () => {
     setEditing('new')
@@ -262,11 +288,33 @@ function Settings({ onOpenOnboarding }: SettingsProps) {
     }
   }
 
+  const currentProviderName = providers?.find((p) => p.id === currentId)?.name ?? null
+
   return (
     <div className="settings">
       <div className="settings__head">
         <h3 className="settings__title">{zhCN.settingsPage.title}</h3>
-        <div className="settings__head-actions">
+        <p className="settings__subtitle">{zhCN.settingsPage.subtitle}</p>
+      </div>
+      {exportMsg ? (
+        <p className={`settings__hint ${exportMsg.ok ? 'settings__hint--ok' : 'settings__hint--err'}`}>{exportMsg.text}</p>
+      ) : null}
+
+      {/* 总览卡（2026-08-19）：当前配置状态速览 + 常用入口 */}
+      <section className="settings__overview" id="settings-overview">
+        <div>
+          <h4 className="settings__overview-title">{zhCN.settingsPage.overview.title}</h4>
+          <p className="settings__overview-hint">{zhCN.settingsPage.overview.hint}</p>
+        </div>
+        <div className="settings__overview-chips">
+          <span className="settings__overview-chip">
+            {zhCN.settingsPage.overview.providerLabel}：{currentProviderName ?? zhCN.settingsPage.overview.providerNone}
+          </span>
+          <span className="settings__overview-chip">
+            {zhCN.settingsPage.overview.workspaceLabel}：{workspaceDir ?? zhCN.settingsPage.overview.workspaceNone}
+          </span>
+        </div>
+        <div className="settings__overview-actions">
           {onOpenOnboarding ? (
             <button type="button" className="source-list__btn" onClick={onOpenOnboarding}>
               {zhCN.settingsPage.onboardingBtn}
@@ -276,14 +324,16 @@ function Settings({ onOpenOnboarding }: SettingsProps) {
             {exporting ? zhCN.settingsPage.exportLog.exporting : zhCN.settingsPage.exportLog.btn}
           </button>
         </div>
-      </div>
-      {exportMsg ? (
-        <p className={`settings__hint ${exportMsg.ok ? 'settings__hint--ok' : 'settings__hint--err'}`}>{exportMsg.text}</p>
-      ) : null}
+      </section>
 
       {/* Phase 2.2 工作区资料库 */}
-      <section className="settings__section" data-onboarding="settings-workspace">
+      <section className="settings__section" id="settings-workspace" data-onboarding="settings-workspace">
         <div className="settings__section-header">
+          <span className="settings__section-icon settings__section-icon--workspace" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+            </svg>
+          </span>
           <h4 className="settings__section-title">{zhCN.settingsPage.workspace.title}</h4>
           {!workspaceSaving ? (
             <div className="settings__workspace-actions">
@@ -312,14 +362,22 @@ function Settings({ onOpenOnboarding }: SettingsProps) {
         <p className="settings__workspace-path">
           <span className="settings__field-label">{zhCN.settingsPage.workspace.current}：</span>
           <code>{workspaceDir ?? zhCN.settingsPage.workspace.notSet}</code>
+          <span className={`settings__status-chip${workspaceDir ? ' is-ok' : ''}`}>
+            {workspaceDir ? zhCN.settingsPage.workspace.configured : zhCN.settingsPage.workspace.notConfigured}
+          </span>
         </p>
         {workspaceMsg ? (
           <p className={`settings__hint ${workspaceMsg.ok ? 'settings__hint--ok' : 'settings__hint--err'}`}>{workspaceMsg.text}</p>
         ) : null}
       </section>
 
-      <section className="settings__section">
+      <section className="settings__section" id="settings-preset">
         <div className="settings__section-header">
+          <span className="settings__section-icon settings__section-icon--preset" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 7.7l5.4-.8L12 2z" />
+            </svg>
+          </span>
           <h4 className="settings__section-title">{zhCN.settingsPage.preset.title}</h4>
         </div>
         <p className="settings__hint">{zhCN.settingsPage.preset.hint}</p>
@@ -330,6 +388,7 @@ function Settings({ onOpenOnboarding }: SettingsProps) {
               <li key={preset.id} className="settings__preset-item">
                 <div className="settings__preset-info">
                   <span className="settings__preset-name">
+                    <span className="settings__preset-avatar" aria-hidden="true">{preset.name.charAt(0)}</span>
                     {preset.name}
                     <span className={`settings__badge${isFree ? ' settings__badge--free' : ''}`}>{preset.pricing}</span>
                   </span>
@@ -360,8 +419,15 @@ function Settings({ onOpenOnboarding }: SettingsProps) {
         </ul>
       </section>
 
-      <section className="settings__section" data-onboarding="settings-provider">
+      <section className="settings__section" id="settings-provider" data-onboarding="settings-provider">
         <div className="settings__section-header">
+          <span className="settings__section-icon settings__section-icon--provider" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M8 9l-4 4 4 4" />
+              <path d="M16 9l4 4-4 4" />
+              <path d="M13 5l-2 14" />
+            </svg>
+          </span>
           <h4 className="settings__section-title">{zhCN.settingsPage.provider.title}</h4>
           <button type="button" className="source-list__btn source-list__btn--primary" onClick={startCreate}>
             {zhCN.settingsPage.provider.addBtn}
@@ -425,7 +491,10 @@ function Settings({ onOpenOnboarding }: SettingsProps) {
         ) : null}
 
         {loading ? (
-          <p className="settings__hint">{zhCN.settingsPage.provider.loading}</p>
+          <p className="settings__hint settings__hint--loading">
+            <span className="spinner" aria-hidden="true" />
+            {zhCN.settingsPage.provider.loading}
+          </p>
         ) : loadErr ? (
           <p className="settings__error">{loadErr}</p>
         ) : providers === null || providers.length === 0 ? (
@@ -436,13 +505,16 @@ function Settings({ onOpenOnboarding }: SettingsProps) {
               <li key={p.id} className={`settings__provider-item${currentId === p.id ? ' settings__provider-item--current' : ''}`}>
                 <div className="settings__provider-info">
                   <span className="settings__provider-name">
+                    <span className="settings__provider-avatar" aria-hidden="true">{p.name.charAt(0)}</span>
                     {p.name}
                     {currentId === p.id ? <span className="settings__badge">{zhCN.settingsPage.provider.currentBadge}</span> : null}
                   </span>
                   <span className="settings__provider-meta">
-                    {p.model} · {p.apiBase}
+                    <span className="settings__provider-model">{p.model}</span>
+                    <span className="settings__provider-base">{p.apiBase}</span>
                   </span>
                   <span className={`settings__key-state${p.apiKeySet ? ' is-set' : ''}`}>
+                    <i className="settings__key-dot" aria-hidden="true" />
                     {p.apiKeySet ? zhCN.settingsPage.provider.keySet : zhCN.settingsPage.provider.keyUnset}
                   </span>
                 </div>

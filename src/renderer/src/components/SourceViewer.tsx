@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import PdfViewer from './PdfViewer'
 import { zhCN } from '../i18n/zh-CN'
+import { copyPlainText } from '../utils/clipboard'
 
 interface SourceDetail {
   source: {
@@ -30,6 +31,17 @@ function SourceViewer({ sourceId, onBack }: { sourceId: string; onBack: () => vo
   const [htmlLoading, setHtmlLoading] = useState(false)
   const [fileUrl, setFileUrl] = useState<string | null>(null)
   const [summary, setSummary] = useState<SummaryShape | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  /** 复制资料全文（纯文本，来自清洗后的正文） */
+  const handleCopy = async () => {
+    if (!data) return
+    const ok = await copyPlainText(data.source.cleanedText)
+    if (ok) {
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    }
+  }
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -103,7 +115,7 @@ function SourceViewer({ sourceId, onBack }: { sourceId: string; onBack: () => vo
     return () => { cancelled = true }
   }, [data, sourceId])
 
-  if (loading) return <div className="source-viewer__status">加载中...</div>
+  if (loading) return <div className="source-viewer__status source-viewer__status--loading"><span className="spinner" aria-hidden="true" />{zhCN.common.loading}</div>
   if (error) return <div className="source-viewer__status" style={{ color: '#dc2626' }}>{error}</div>
   if (!data) return <div className="source-viewer__status">未找到资料</div>
 
@@ -122,9 +134,14 @@ function SourceViewer({ sourceId, onBack }: { sourceId: string; onBack: () => vo
   return (
     <div className="source-viewer">
       <div className="source-viewer__header">
-        <button type="button" className="source-viewer__back" onClick={onBack} title="返回列表">
-          &larr; 返回
-        </button>
+        <div className="source-viewer__header-actions">
+          <button type="button" className="source-viewer__back" onClick={onBack} title={zhCN.sourceViewer.back}>
+            &larr; {zhCN.sourceViewer.back}
+          </button>
+          <button type="button" className="source-list__btn" onClick={() => void handleCopy()} title={zhCN.sourceViewer.copyText}>
+            {copied ? zhCN.sourceViewer.copied : zhCN.sourceViewer.copyText}
+          </button>
+        </div>
         <h3 className="source-viewer__title">{source.title}</h3>
         {tags.length > 0 && (
           <div className="source-viewer__tags">
@@ -137,7 +154,7 @@ function SourceViewer({ sourceId, onBack }: { sourceId: string; onBack: () => vo
         )}
         <div className="source-viewer__meta">
           <span className={`source-viewer__badge source-viewer__badge--${source.status}`}>
-            {source.status === 'ready' ? '已就绪' : source.status === 'failed' ? '失败' : source.status === 'pending' ? '排队中' : '处理中'}
+            {zhCN.sourceStatus[source.status as 'ready' | 'failed' | 'pending' | 'processing']}
           </span>
           <span className="source-viewer__kind">
             {source.kind === 'file' ? (isPdf ? 'PDF' : isImage ? '图片' : isDocx || isDoc ? 'Word' : isWps ? 'WPS' : isExcel ? 'Excel' : '文本') : '网址'}

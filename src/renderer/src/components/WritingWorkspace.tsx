@@ -40,6 +40,8 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
   const [messages, setMessages] = useState<ChatMessageItem[]>([])
   const [busy, setBusy] = useState<BusyState>(null)
   const [busyText, setBusyText] = useState<string | null>(null)
+  /** 流式增量文本（2026-08-19：生成/对话期间实时显示的正文/回复） */
+  const [streamText, setStreamText] = useState<string | null>(null)
   /** 生成初稿进度（2026-08-11：主进程推送 percent + etaSeconds，ChatPanel 进度条展示） */
   const [progress, setProgress] = useState<{ percent: number; etaSeconds?: number } | null>(null)
   const [confirmingRegenerate, setConfirmingRegenerate] = useState(false)
@@ -123,6 +125,16 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
     return () => { off?.() }
   }, [taskId])
 
+  // 订阅流式增量文本（2026-08-19：生成正文 / 对话回复逐字推送）
+  useEffect(() => {
+    const off = window.api.onWritingStreamDelta?.((p) => {
+      if (p.taskId === taskId) {
+        setStreamText((prev) => (prev ?? '') + p.text)
+      }
+    })
+    return () => { off?.() }
+  }, [taskId])
+
   const appendAssistant = (text: string) => {
     setMessages((prev) => [...prev, { role: 'assistant', content: text }])
   }
@@ -141,6 +153,7 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
     setMessages((prev) => [...prev, { role: 'user', content: instruction }])
     setBusy('generating')
     setBusyText(zhCN.writingChat.generating)
+    setStreamText(null)
     try {
       const res = await window.api.generateDraft(taskId, instruction)
       if (res.ok && res.data) {
@@ -155,6 +168,7 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
       setBusy(null)
       setBusyText(null)
       setProgress(null)
+      setStreamText(null)
     }
   }
 
@@ -164,7 +178,8 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
     const history = messagesRef.current.map((m) => ({ role: m.role, content: m.content }))
     setMessages((prev) => [...prev, { role: 'user', content: message }])
     setBusy('chatting')
-    setBusyText('正在等待大模型回应…')
+    setBusyText(zhCN.writingChat.thinking)
+    setStreamText(null)
     try {
       await window.api.chatWithTask(taskId, message, history)
       // 用户消息与回复（或失败提示）均由主进程写入，成功后统一重新加载
@@ -173,6 +188,7 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
       setBusy(null)
       setBusyText(null)
       setProgress(null)
+      setStreamText(null)
     }
   }
 
@@ -233,6 +249,7 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
     }
     setBusy('generating')
     setBusyText(zhCN.writingChat.regenerating)
+    setStreamText(null)
     try {
       const res = await window.api.regenerateDraft(taskId, instruction)
       if (res.ok && res.data) {
@@ -247,6 +264,7 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
       setBusy(null)
       setBusyText(null)
       setProgress(null)
+      setStreamText(null)
     }
   }
 
@@ -268,7 +286,14 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
     setContradictions(snapshot)
   }, [])
 
-  if (loading) return <p className="source-list__status">{zhCN.writingWorkspace.loading}</p>
+  if (loading) {
+    return (
+      <p className="source-list__status source-list__status--loading">
+        <span className="spinner" aria-hidden="true" />
+        {zhCN.writingWorkspace.loading}
+      </p>
+    )
+  }
   if (err) return <p className="source-list__error">{err}</p>
   if (!task) return <p className="source-list__error">{zhCN.writingWorkspace.loadFailed.replace('{message}', '任务不存在')}</p>
 
@@ -349,6 +374,7 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
             draftExisted={!!draft}
             busy={busy !== null}
             busyText={busyText}
+            streamText={streamText}
             progress={progress}
             sectionSkills={sectionSkills}
             selectedSkillIds={task.skillIds ?? []}

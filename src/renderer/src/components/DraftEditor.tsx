@@ -266,6 +266,7 @@ function DraftEditor(
   ref: React.ForwardedRef<DraftEditorHandle>
 ) {
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const [charCount, setCharCount] = useState(0)
   const timerRef = useRef<number | null>(null)
   // 加载时把标记转节点会产生一次事务（onUpdate 会触发），用该标志跳过首次保存
   const convertedRef = useRef(false)
@@ -303,8 +304,10 @@ function DraftEditor(
       // 加载时标注文本 → 节点属于程序性初始化，不进 undo 历史（避免用户撤销普通编辑时误触发）
       convertMarkerTextToNodes(editor, validSeqs, false)
       convertedRef.current = true
+      setCharCount(editor.getText().length)
     },
     onUpdate: ({ editor }) => {
+      setCharCount(editor.getText().length)
       if (!convertedRef.current) return
       scheduleSave(editor.storage.markdown.getMarkdown())
     }
@@ -390,6 +393,7 @@ function DraftEditor(
         <EditorContent editor={editor} />
       </div>
       <div className="draft-editor__foot">
+        <span className="draft-editor__char-count">{zhCN.draftEditor.charCount.replace('{count}', String(charCount))}</span>
         {statusText ? <span className={`draft-editor__status is-${status}`}>{statusText}</span> : null}
       </div>
       {ctxMenu ? (

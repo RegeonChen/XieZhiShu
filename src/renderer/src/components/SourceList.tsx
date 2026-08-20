@@ -8,6 +8,8 @@ interface SourceItem { id: string; title: string; kind: string; status: string; 
 
 interface SourceListProps {
   onSelect: (id: string | null) => void
+  /** 当前选中的资料 id（高亮列表项） */
+  activeId?: string | null
   /** 批量管理模式（资料管理） */
   bulkMode: boolean
   onExitBulk: () => void
@@ -24,7 +26,7 @@ interface ContextMenuState {
   title: string
 }
 
-function SourceList({ onSelect, bulkMode, onExitBulk, onSourcesChanged, reloadKey }: SourceListProps) {
+function SourceList({ onSelect, activeId = null, bulkMode, onExitBulk, onSourcesChanged, reloadKey }: SourceListProps) {
   const [sources, setSources] = useState<SourceItem[]>([])
   const [loading, setLoading] = useState(false)
   const [importing, setImporting] = useState(false)
@@ -257,7 +259,7 @@ function SourceList({ onSelect, bulkMode, onExitBulk, onSourcesChanged, reloadKe
     <div className="source-list" ref={rootRef}>
       <div className="source-list__toolbar">
         <div className="source-list__tool-btn">
-          <button type="button" className="source-list__btn source-list__btn--primary" onClick={handleImport} disabled={importing}>{importing ? '导入中...' : '导入'}</button>
+          <button type="button" className="source-list__btn source-list__btn--primary" onClick={handleImport} disabled={importing}>{importing ? zhCN.sourceList.importing : '导入'}</button>
           <button
             type="button"
             className="source-list__info-tip"
@@ -362,8 +364,20 @@ function SourceList({ onSelect, bulkMode, onExitBulk, onSourcesChanged, reloadKe
         </div>
       ) : null}
 
-      {loading ? <p className="source-list__status">加载中...</p> : sources.length === 0 ? (
-        <div className="empty-state"><p className="empty-state__hint">{bulkMode ? zhCN.sourceBulk.empty : '暂无资料。导入文件，或在下方「网页资料库」注册网站。'}</p></div>
+      {loading ? (
+        <p className="source-list__status source-list__status--loading">
+          <span className="spinner" aria-hidden="true" />
+          {zhCN.common.loading}
+        </p>
+      ) : sources.length === 0 ? (
+        <div className="empty-state">
+          <svg className="source-list__empty-illustration" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#9db8ee" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+            <path d="M12 11v6" />
+            <path d="M9 14h6" />
+          </svg>
+          <p className="empty-state__hint">{bulkMode ? zhCN.sourceBulk.empty : zhCN.sourceList.emptyHint}</p>
+        </div>
       ) : (
         <ul className="source-list__items">
           {sources.map((s) => {
@@ -372,7 +386,7 @@ function SourceList({ onSelect, bulkMode, onExitBulk, onSourcesChanged, reloadKe
             return (
               <li
                 key={s.id}
-                className={`source-list__item${bulkMode ? ' source-list__item--bulk' : ''}`}
+                className={`source-list__item${bulkMode ? ' source-list__item--bulk' : ''}${activeId === s.id ? ' is-active' : ''}`}
                 onClick={() => (bulkMode ? toggleSelect(s.id) : onSelect(s.id))}
                 onContextMenu={(e) => {
                   e.preventDefault()
@@ -384,7 +398,7 @@ function SourceList({ onSelect, bulkMode, onExitBulk, onSourcesChanged, reloadKe
                 ) : null}
                 <span className="source-list__item-title">{cleanTitle}</span>
                 <span className={`source-list__item-badge source-list__item-badge--${s.status}`}>
-                  {s.status === 'ready' ? '已就绪' : s.status === 'failed' ? '失败' : s.status === 'pending' ? '排队中' : '处理中'}
+                  {zhCN.sourceStatus[s.status as 'ready' | 'failed' | 'pending' | 'processing']}
                 </span>
                 <span className="source-list__item-kind">{s.kind === 'file' ? '文件' : '网址'}</span>
               </li>

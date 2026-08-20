@@ -24,11 +24,11 @@ const api = {
   },
   /** 打开系统文件选择对话框 */
   openFileDialog(): Promise<ApiResult<{ paths: string[] }>> {
-    return ipcRenderer.invoke('app:openFileDialog')
+    return ipcRenderer.invoke(IPC.APP_OPEN_FILE_DIALOG)
   },
   /** 打开系统目录选择对话框（工作区选择） */
   openDirectoryDialog(): Promise<ApiResult<{ path: string | null }>> {
-    return ipcRenderer.invoke('app:openDirectoryDialog')
+    return ipcRenderer.invoke(IPC.APP_OPEN_DIRECTORY_DIALOG)
   },
   /** 标签列表 */
   listTags(): Promise<ApiResult<{ items: unknown[] }>> {
@@ -179,8 +179,8 @@ const api = {
   /** 订阅工作区同步进度（返回取消订阅函数）；newFiles>0 表示本轮发现并处理新文件；finished 为对账完成事件（含计数，供列表自动刷新） */
   onWorkspaceProgress(cb: (p: { done: number; total: number; newFiles?: number; added?: number; changed?: number; removed?: number; moved?: number; errors?: number; finished?: boolean }) => void): () => void {
     const listener = (_event: Electron.IpcRendererEvent, p: { done: number; total: number; newFiles?: number; added?: number; changed?: number; removed?: number; moved?: number; errors?: number; finished?: boolean }): void => cb(p)
-    ipcRenderer.on('workspace:progress', listener)
-    return () => ipcRenderer.removeListener('workspace:progress', listener)
+    ipcRenderer.on(IPC_EVENTS.WORKSPACE_PROGRESS, listener)
+    return () => ipcRenderer.removeListener(IPC_EVENTS.WORKSPACE_PROGRESS, listener)
   },
   /** 新建撰写任务（Phase 3.5：点击立即创建，标题默认"新建任务"、范围=全部文件；可传大模型） */
   createTask(input?: { title?: string; scope?: { all: true } | { sourceIds: string[] } | { tagIds: string[] }; llmProviderId?: string }): Promise<ApiResult<{ task: unknown }>> {
@@ -227,6 +227,12 @@ const api = {
     const listener = (_event: Electron.IpcRendererEvent, p: { taskId: string; stage: string; percent: number; etaSeconds?: number }): void => cb(p)
     ipcRenderer.on(IPC_EVENTS.DRAFT_GENERATE_PROGRESS, listener)
     return () => ipcRenderer.removeListener(IPC_EVENTS.DRAFT_GENERATE_PROGRESS, listener)
+  },
+  /** 订阅生成/对话的流式增量文本（2026-08-19：正文/回复逐字推送，供聊天面板实时显示） */
+  onWritingStreamDelta(cb: (p: { taskId: string; text: string }) => void): () => void {
+    const listener = (_event: Electron.IpcRendererEvent, p: { taskId: string; text: string }): void => cb(p)
+    ipcRenderer.on(IPC_EVENTS.WRITING_STREAM_DELTA, listener)
+    return () => ipcRenderer.removeListener(IPC_EVENTS.WRITING_STREAM_DELTA, listener)
   },
   /** 任务范围内的资料检索（RAG 预览） */
   retrieveChunks(taskId: string): Promise<ApiResult<{ chunks: unknown[] }>> {

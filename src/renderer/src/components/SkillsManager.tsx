@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, type ReactNode } from 'react'
 import { zhCN } from '../i18n/zh-CN'
 import ConfirmDialog from './ConfirmDialog'
 
@@ -18,6 +18,9 @@ interface SkillFormState {
   tags: string
   content: string
 }
+
+/** 拼接 className（替代模板字符串，避免嵌套转义） */
+const cls = (...parts: Array<string | false | null | undefined>): string => parts.filter(Boolean).join(' ')
 
 /**
  * 模糊匹配：搜索词对 skill 名称/标签/内容做匹配。
@@ -42,11 +45,44 @@ function fuzzyMatch(skill: SkillItem, query: string): boolean {
   return skill.content.toLowerCase().includes(q)
 }
 
+/** 规范页区块（与中栏导航一致；scroll-spy 观察对象，元素 id 为 skills-<id>） */
+const SKILL_SECTIONS = ['overview', 'general', 'section'] as const
+
+interface SkillsManagerProps {
+  /** 滚动定位（scroll-spy）回调：当前视口内最靠上的区块 id（供中栏导航高亮） */
+  onActiveChange?: (id: string) => void
+}
+
+const GENERAL_ICON: ReactNode = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+  </svg>
+)
+
+const SECTION_ICON: ReactNode = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M8 6h13" />
+    <path d="M8 12h13" />
+    <path d="M8 18h13" />
+    <path d="M3 6h.01" />
+    <path d="M3 12h.01" />
+    <path d="M3 18h.01" />
+  </svg>
+)
+
+const SEARCH_ICON: ReactNode = (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <circle cx="11" cy="11" r="7" />
+    <path d="M21 21l-4.3-4.3" />
+  </svg>
+)
+
 /**
- * 写作规范（skills）管理页（2026-08-13 由「范本」重构）：
- * 列表展示预设/自建规范，支持新建、编辑、删除；内容为蒸馏后的志书写作规范要点。
+ * 写作规范（skills）管理页（2026-08-13 由「范本」重构；2026-08-19 与设置页统一风格）：
+ * 总览卡 + 搜索工具栏 + 通用规范/部类细则两张卡片式区块；支持新建、编辑、删除。
  */
-function SkillsManager() {
+function SkillsManager({ onActiveChange }: SkillsManagerProps) {
   const t = zhCN.skills
   const [skills, setSkills] = useState<SkillItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -56,7 +92,12 @@ function SkillsManager() {
   const [pendingDelete, setPendingDelete] = useState<SkillItem | null>(null)
   const [search, setSearch] = useState('')
 
-  const filtered = skills.filter((s) => fuzzyMatch(s, search))
+  const searching = search.trim().length > 0
+  const generalSkills = skills.filter((s) => s.category === 'general')
+  const sectionSkills = skills.filter((s) => s.category === 'section')
+  const presetCount = skills.filter((s) => s.isPreset).length
+  const filteredGeneral = generalSkills.filter((s) => fuzzyMatch(s, search))
+  const filteredSection = sectionSkills.filter((s) => fuzzyMatch(s, search))
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -72,12 +113,37 @@ function SkillsManager() {
 
   useEffect(() => { void load() }, [load])
 
+  // scroll-spy：观察各区块，视口内最靠上的区块上报给中栏导航高亮（2026-08-19）
+  useEffect(() => {
+    if (!onActiveChange) return
+    const els = SKILL_SECTIONS.map((id) => document.getElementById('skills-' + id)).filter(
+      (el): el is HTMLElement => el !== null
+    )
+    if (els.length === 0) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.filter((e) => e.isIntersecting)
+        if (visible.length === 0) return
+        const top = visible.reduce((a, b) => (a.boundingClientRect.top <= b.boundingClientRect.top ? a : b))
+        const id = (top.target as HTMLElement).id.replace(/^skills-/, '')
+        onActiveChange(id)
+      },
+      { rootMargin: '-15% 0px -65% 0px', threshold: 0 }
+    )
+    els.forEach((el) => observer.observe(el))
+    return () => observer.disconnect()
+  }, [onActiveChange])
+
+  const startCreate = () => setForm({ name: '', category: 'section', tags: '', content: '' })
+  const startEdit = (s: SkillItem) =>
+    setForm({ id: s.id, name: s.name, category: s.category, tags: s.tags.join(', '), content: s.content })
+
   const handleSave = async () => {
     if (!form || busy) return
     const name = form.name.trim()
     const content = form.content.trim()
     if (!name || !content) { setErr(t.emptyFields); return }
-    const tags = form.tags.split(/[,，、\s]+/).map((s) => s.trim()).filter(Boolean)
+    const tags = form.tags.split(/[,，、s]+/).map((s) => s.trim()).filter(Boolean)
     setBusy(true)
     setErr(null)
     try {
@@ -112,45 +178,35 @@ function SkillsManager() {
     }
   }
 
-  return (
-    <div className="skills-manager" data-onboarding="skills">
-      <div className="skills-manager__head">
-        <h3 className="skills-manager__title">{t.title}</h3>
-        <p className="skills-manager__hint">{t.hint}</p>
-        <button
-          type="button"
-          className="source-list__btn source-list__btn--primary"
-          onClick={() => setForm({ name: '', category: 'section', tags: '', content: '' })}
-        >
-          {t.newBtn}
-        </button>
+  const renderSection = (
+    id: 'general' | 'section',
+    title: string,
+    hint: string,
+    icon: ReactNode,
+    items: SkillItem[],
+    emptyText: string
+  ): ReactNode => (
+    <section className="skills-manager__section" id={'skills-' + id}>
+      <div className="skills-manager__section-header">
+        <span className={cls('skills-manager__section-icon', 'skills-manager__section-icon--' + id)} aria-hidden="true">
+          {icon}
+        </span>
+        <div className="skills-manager__section-titlewrap">
+          <h4 className="skills-manager__section-title">{title}</h4>
+          <p className="skills-manager__section-hint">{hint}</p>
+        </div>
+        <span className="skills-manager__count">{items.length}</span>
       </div>
-
-      {err ? <p className="source-list__error">{err}</p> : null}
-
-      <div className="skills-manager__search">
-        <input
-          type="text"
-          className="source-list__url-input"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder={t.searchPlaceholder}
-        />
-      </div>
-
-      {loading ? (
-        <p className="source-list__status">{t.loading}</p>
-      ) : skills.length === 0 ? (
-        <p className="source-list__status">{t.empty}</p>
-      ) : filtered.length === 0 ? (
-        <p className="source-list__status">{t.noMatch}</p>
+      {items.length === 0 ? (
+        <p className="skills-manager__section-empty">{emptyText}</p>
       ) : (
         <ul className="skills-manager__list">
-          {filtered.map((s) => (
+          {items.map((s) => (
             <li key={s.id} className="skills-manager__item">
               <div className="skills-manager__item-head">
+                <span className="skills-manager__item-avatar" aria-hidden="true">{s.name.charAt(0)}</span>
                 <span className="skills-manager__item-name">{s.name}</span>
-                <span className={`skills-manager__badge skills-manager__badge--${s.category}`}>
+                <span className={cls('skills-manager__badge', 'skills-manager__badge--' + s.category)}>
                   {s.category === 'general' ? t.general : t.section}
                 </span>
                 {s.isPreset ? <span className="skills-manager__badge skills-manager__badge--preset">{t.preset}</span> : null}
@@ -164,24 +220,80 @@ function SkillsManager() {
               ) : null}
               <p className="skills-manager__item-content">{s.content.slice(0, 120)}{s.content.length > 120 ? '…' : ''}</p>
               <div className="skills-manager__item-actions">
-                <button
-                  type="button"
-                  className="source-list__btn"
-                  onClick={() => setForm({ id: s.id, name: s.name, category: s.category, tags: s.tags.join(', '), content: s.content })}
-                >
+                <button type="button" className="source-list__btn" onClick={() => startEdit(s)}>
                   {t.edit}
                 </button>
-                <button
-                  type="button"
-                  className="source-list__btn source-list__btn--danger"
-                  onClick={() => setPendingDelete(s)}
-                >
+                <button type="button" className="source-list__btn source-list__btn--danger" onClick={() => setPendingDelete(s)}>
                   {t.remove}
                 </button>
               </div>
             </li>
           ))}
         </ul>
+      )}
+    </section>
+  )
+
+  return (
+    <div className="skills-manager" data-onboarding="skills">
+      <div className="skills-manager__head">
+        <h3 className="skills-manager__title">{t.title}</h3>
+      </div>
+
+      {err ? <p className="source-list__error">{err}</p> : null}
+
+      {/* 总览卡（2026-08-19）：统计速览 + 新建入口 */}
+      <section className="skills-overview" id="skills-overview">
+        <div>
+          <h4 className="skills-overview__title">{t.overview.title}</h4>
+          <p className="skills-overview__hint">{t.overview.hint}</p>
+        </div>
+        <div className="skills-overview__chips">
+          <span className="skills-overview__chip">{t.overview.generalCount.replace('{count}', String(generalSkills.length))}</span>
+          <span className="skills-overview__chip">{t.overview.sectionCount.replace('{count}', String(sectionSkills.length))}</span>
+          <span className="skills-overview__chip">{t.overview.presetCount.replace('{count}', String(presetCount))}</span>
+        </div>
+        <div className="skills-overview__actions">
+          <button type="button" className="source-list__btn" onClick={startCreate}>
+            {t.newBtn}
+          </button>
+        </div>
+      </section>
+
+      {/* 搜索工具栏 */}
+      <div className="skills-manager__toolbar">
+        <span className="skills-manager__search-icon" aria-hidden="true">{SEARCH_ICON}</span>
+        <input
+          type="text"
+          className="source-list__url-input skills-manager__search-input"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder={t.searchPlaceholder}
+        />
+        {search ? (
+          <button type="button" className="skills-manager__clear" title={t.searchClear} onClick={() => setSearch('')}>
+            ×
+          </button>
+        ) : null}
+      </div>
+
+      {loading ? (
+        <p className="source-list__status source-list__status--loading">
+          <span className="spinner" aria-hidden="true" />
+          {t.loading}
+        </p>
+      ) : skills.length === 0 ? (
+        <div className="empty-state">
+          <p className="empty-state__hint">{t.empty}</p>
+          <button type="button" className="source-list__btn source-list__btn--primary" onClick={startCreate}>
+            {t.newBtn}
+          </button>
+        </div>
+      ) : (
+        <>
+          {renderSection('general', t.nav.general, t.generalHint, GENERAL_ICON, filteredGeneral, searching ? t.noMatch : t.noGeneral)}
+          {renderSection('section', t.nav.section, t.sectionHint, SECTION_ICON, filteredSection, searching ? t.noMatch : t.noSection)}
+        </>
       )}
 
       {form ? (

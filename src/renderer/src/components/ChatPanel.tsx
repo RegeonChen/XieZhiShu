@@ -25,6 +25,8 @@ interface ChatPanelProps {
   /** 生成/对话进行中（展示状态文本并禁用输入） */
   busy: boolean
   busyText: string | null
+  /** 流式增量文本（2026-08-19：生成/对话期间实时显示的正文或回复） */
+  streamText?: string | null
   /** 生成初稿进度（2026-08-11：percent 进度百分比 + etaSeconds 预计剩余秒数，供进度条显示） */
   progress?: { percent: number; etaSeconds?: number } | null
   sectionSkills: SkillOption[] | null
@@ -60,6 +62,7 @@ function ChatPanel({
   draftExisted,
   busy,
   busyText,
+  streamText = null,
   progress,
   sectionSkills,
   selectedSkillIds,
@@ -81,10 +84,13 @@ function ChatPanel({
   const [pickerOpen, setPickerOpen] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
 
+  // 自动滚动：用户已接近底部时才跟随（正在阅读历史时不抢滚动位置）；busy 提示始终可见
   useEffect(() => {
     const el = listRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [messages, busyText])
+    if (!el) return
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    if (nearBottom || busyText) el.scrollTop = el.scrollHeight
+  }, [messages, busyText, streamText])
 
   /** 复制某条 AI 回复（纯文本） */
   const handleCopy = async (idx: number, text: string): Promise<void> => {
@@ -154,7 +160,17 @@ function ChatPanel({
     <div className="chat-panel">
       <div className="chat-panel__messages" ref={listRef}>
         {messages.length === 0 ? (
-          <p className="chat-panel__empty">{zhCN.writingChat.emptyChat}</p>
+          <div className="chat-panel__empty">
+            <p className="chat-panel__empty-title">{zhCN.writingChat.emptyHintTitle}</p>
+            <p className="chat-panel__empty-steps">
+              {zhCN.writingChat.emptyHintSteps.split('\n').map((line, i) => (
+                <span key={i}>
+                  {line}
+                  <br />
+                </span>
+              ))}
+            </p>
+          </div>
         ) : (
           messages.map((m, i) => (
             <div key={i} className={`chat-panel__msg chat-panel__msg--${m.role}`}>
@@ -183,10 +199,41 @@ function ChatPanel({
             </div>
           ))
         )}
-        {busyText ? (
+        {busyText && !streamText ? (
           <div className="chat-panel__msg chat-panel__msg--assistant">
             <div className="chat-panel__bubble chat-panel__bubble--busy">
-              <div>{busyText}</div>
+              <div>
+                {busyText}
+                <span className="typing-dots" aria-hidden="true">
+                  <i /><i /><i />
+                </span>
+              </div>
+              {progress ? (
+                <div className="chat-panel__progress">
+                  <div className="chat-panel__progress-track">
+                    <div
+                      className="chat-panel__progress-bar"
+                      style={{ width: `${Math.min(100, Math.max(0, progress.percent))}%` }}
+                    />
+                  </div>
+                  <div className="chat-panel__progress-meta">
+                    <span>{Math.round(progress.percent)}%</span>
+                    {progress.etaSeconds != null && progress.etaSeconds > 0 ? (
+                      <span>{zhCN.writingChat.etaText.replace('{time}', formatEta(progress.etaSeconds))}</span>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+        {busy && streamText ? (
+          <div className="chat-panel__msg chat-panel__msg--assistant">
+            <div className="chat-panel__assistant-block">
+              <span className="chat-panel__bubble chat-panel__bubble--streaming">
+                {streamText}
+                <span className="stream-cursor" aria-hidden="true" />
+              </span>
               {progress ? (
                 <div className="chat-panel__progress">
                   <div className="chat-panel__progress-track">
