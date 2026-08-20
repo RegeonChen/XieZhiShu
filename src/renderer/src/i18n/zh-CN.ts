@@ -7,6 +7,12 @@ export const zhCN = {
     loading: '加载中...',
     confirm: '确认操作'
   },
+  contextMenu: {
+    copy: '复制',
+    cut: '剪切',
+    paste: '粘贴',
+    selectAll: '全选'
+  },
   nav: {
     sources: '资料库',
     writing: '撰写',

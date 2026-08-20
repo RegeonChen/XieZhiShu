@@ -3815,3 +3815,45 @@ textarea:focus-visible {
   margin-left: 40px;
 }
 
+
+/* ============================================================
+   2026-08-20 全局文本右键菜单（复制/剪切/粘贴/全选）
+   ============================================================ */
+.text-context-menu__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 902;
+}
+.text-context-menu {
+  position: fixed;
+  z-index: 903;
+  min-width: 150px;
+  padding: 4px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-md);
+  animation: menu-pop 0.12s ease-out;
+  transform-origin: top left;
+}
+.text-context-menu__item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.text-context-menu__item:hover:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.text-context-menu__item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+

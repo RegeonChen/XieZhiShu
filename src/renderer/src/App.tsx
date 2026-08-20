@@ -14,6 +14,7 @@ import WritingWorkspace from './components/WritingWorkspace'
 import ResizeHandle from './components/ResizeHandle'
 import ErrorBoundary from './components/ErrorBoundary'
 import OnboardingOverlay from './components/OnboardingOverlay/OnboardingOverlay'
+import TextContextMenu from './components/TextContextMenu'
 import { zhCN } from './i18n/zh-CN'
 
 interface AppInfo { version: string; platform: string }
@@ -373,6 +374,8 @@ export default function App() {
         onDismiss={handleOnboardingDismiss}
         onStepChange={handleOnboardingStepChange}
       />
+      {/* 全局文本右键菜单（2026-08-20）：input/textarea/contenteditable 的复制/剪切/粘贴/全选 */}
+      <TextContextMenu />
     </div>
   )
 }

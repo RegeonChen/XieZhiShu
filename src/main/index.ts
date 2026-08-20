@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { createServer } from 'node:http'
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
 import {
   IPC,
   IPC_EVENTS,
@@ -244,6 +244,28 @@ handleLogged(IPC.APP_OPEN_EXTERNAL, (_event, params: { url: string }): ApiResult
   }
   void shell.openExternal(url).catch((err) => console.error('openExternal failed:', err))
   return { ok: true, data: undefined }
+})
+
+// 读取系统剪贴板纯文本（2026-08-20：渲染进程自定义右键菜单「粘贴」经主进程读取，沙箱下不可直接访问）
+handleLogged(IPC.CLIPBOARD_READ_TEXT, (): ApiResult<{ text: string }> => {
+  try {
+    return { ok: true, data: { text: clipboard.readText() } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 写入系统剪贴板纯文本（渲染进程自定义右键菜单「复制/剪切」经主进程写入，保证沙箱下可用）
+handleLogged(IPC.CLIPBOARD_WRITE_TEXT, (_event, params: { text: string }): ApiResult<void> => {
+  try {
+    if (typeof params.text !== 'string') {
+      return { ok: false, error: { code: 'INVALID_PARAM', message: '缺少要写入剪贴板的文本' } }
+    }
+    clipboard.writeText(params.text)
+    return { ok: true, data: undefined }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
 })
 
 // 窗口恢复激活：渲染层检测到"窗口可见但未激活"（用户点击本窗口但无法聚焦输入）时请求恢复。

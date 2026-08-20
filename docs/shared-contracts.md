@@ -225,6 +225,8 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `app:openDirectoryDialog` | `{}` → `{ path: string \| null }` | 系统目录选择对话框（工作区选择） |
 | `app:getInfo` | `{}` → `{ version, platform }` | 应用版本与平台 |
 | `app:openExternal` | `{ url }` → `{ ok: true }` | 打开外部链接（http/https 白名单，预设模型注册页等） |
+| `clipboard:readText` | `{}` → `{ text: string }` | 读取系统剪贴板纯文本（自定义右键菜单「粘贴」经主进程访问 clipboard） |
+| `clipboard:writeText` | `{ text }` → `{ ok: true }` | 写入系统剪贴板纯文本（自定义右键菜单「复制/剪切」经主进程访问 clipboard） |
 | `window:focus` | `{}` → `{ ok: true }` | 请求主进程恢复窗口激活（输入失焦兜底） |
 | `log:append` | `{ level?, tag, message }` → `{ ok: true }` | 渲染进程上报诊断日志（脱敏） |
 | `log:export` | `{}` → `{ path, fileName }` | 导出诊断日志文件（含大模型提交物记录） |

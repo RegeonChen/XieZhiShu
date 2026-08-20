@@ -7,6 +7,8 @@ export interface ImportResult {
 export interface AppApi {
   getAppInfo(): Promise<{ ok: boolean; data?: { version: string; platform: string }; error?: { code: string; message: string } }>
   openExternal(url: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
+  readClipboardText(): Promise<{ ok: boolean; data?: { text: string }; error?: { code: string; message: string } }>
+  writeClipboardText(text: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   addUrl(url: string): Promise<{ ok: boolean; data?: { source: unknown }; error?: { code: string; message: string } }>
   /** 网页资料库站点列表（2026-08-11） */
   listWebSources(): Promise<{ ok: boolean; data?: { sites: unknown[] }; error?: { code: string; message: string } }>

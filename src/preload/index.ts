@@ -14,6 +14,14 @@ const api = {
   openExternal(url: string): Promise<ApiResult<void>> {
     return ipcRenderer.invoke(IPC.APP_OPEN_EXTERNAL, { url })
   },
+  /** 读取系统剪贴板纯文本（自定义右键菜单「粘贴」用，经主进程访问 clipboard） */
+  readClipboardText(): Promise<ApiResult<{ text: string }>> {
+    return ipcRenderer.invoke(IPC.CLIPBOARD_READ_TEXT)
+  },
+  /** 写入系统剪贴板纯文本（自定义右键菜单「复制/剪切」用，经主进程访问 clipboard） */
+  writeClipboardText(text: string): Promise<ApiResult<void>> {
+    return ipcRenderer.invoke(IPC.CLIPBOARD_WRITE_TEXT, { text })
+  },
   /** 资料列表 */
   listSources(params?: { tagIds?: string[]; search?: string }): Promise<ApiResult<{ items: unknown[] }>> {
     return ipcRenderer.invoke(IPC.SOURCES_LIST, params)
