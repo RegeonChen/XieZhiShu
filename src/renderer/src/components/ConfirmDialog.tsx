@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { zhCN } from '../i18n/zh-CN'
 
 interface ConfirmDialogProps {
@@ -22,6 +23,15 @@ function ConfirmDialog({
   onConfirm,
   onCancel
 }: ConfirmDialogProps) {
+  // Esc 取消（busy 时不允许取消，防止误操作中途关闭）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape' && !busy) onCancel()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [busy, onCancel])
+
   return (
     <div className="confirm-dialog__overlay" onMouseDown={(e) => e.stopPropagation()}>
       <div className="confirm-dialog" role="dialog" aria-modal="true" aria-label={title}>

@@ -4,6 +4,7 @@ export const zhCN = {
   common: {
     cancel: '取消',
     deleting: '删除中...',
+    loading: '加载中...',
     confirm: '确认操作'
   },
   nav: {
@@ -66,6 +67,8 @@ export const zhCN = {
     confirmDelete: '确定要删除「{title}」吗？删除后无法恢复。'
   },
   sourceList: {
+    importing: '导入中...',
+    emptyHint: '暂无资料。导入文件，或在下方「网页资料库」注册网站。',
     summarizeBtn: '整理资料',
     summarizing: '整理中...',
     summarizeDone: '整理完成：成功 {ok} 篇，失败 {failed} 篇',
@@ -104,6 +107,25 @@ export const zhCN = {
   skills: {
     title: '写作规范',
     hint: '固化志书写作规范：通用规范默认注入所有生成，部类细则按小节标题匹配注入。预设规范可修改，也可自建。',
+    nav: {
+      title: '规范导航',
+      hint: '点击条目快速跳转到对应规范区块',
+      overview: '总览',
+      general: '通用规范',
+      section: '部类细则'
+    },
+    overview: {
+      title: '写作规范库',
+      hint: '通用规范默认注入所有生成任务；部类细则按撰写标题自动匹配，也可智能匹配或手动选择。预设规范可修改，也可自建。',
+      generalCount: '通用规范 {count} 条',
+      sectionCount: '部类细则 {count} 条',
+      presetCount: '预设 {count} 条'
+    },
+    generalHint: '默认注入所有生成任务（文体文风与行文规则等）',
+    sectionHint: '按撰写标题匹配 / 智能匹配 / 手动选择',
+    noGeneral: '暂无通用规范',
+    noSection: '暂无部类细则规范',
+    searchClear: '清空搜索',
     newBtn: '新建规范',
     loading: '加载中...',
     empty: '暂无规范',
@@ -135,7 +157,16 @@ export const zhCN = {
   sourceViewer: {
     summaryTitle: '资料摘要',
     keywords: '主题词',
-    entities: '关键实体'
+    entities: '关键实体',
+    back: '返回',
+    copyText: '复制全文',
+    copied: '已复制'
+  },
+  sourceStatus: {
+    ready: '已就绪',
+    failed: '失败',
+    pending: '排队中',
+    processing: '处理中'
   },
   sourceDelete: {
     success: '删除成功',
@@ -186,7 +217,24 @@ export const zhCN = {
   },
   settingsPage: {
     title: '设置',
+    subtitle: '配置本地工作区与模型服务，所有数据仅保存在本机。',
     onboardingBtn: '新手教程',
+    nav: {
+      title: '设置导航',
+      hint: '点击条目快速跳转到对应设置区块',
+      overview: '总览',
+      workspace: '工作区资料库',
+      preset: '预设大模型',
+      provider: '模型服务（Provider）'
+    },
+    overview: {
+      title: '欢迎使用志书撰写工具',
+      hint: '完成以下配置即可开始撰写：选择工作区资料库 → 配置大模型 → 新建撰写任务。所有用户数据均保存在本地。',
+      providerLabel: '当前大模型',
+      providerNone: '未选择',
+      workspaceLabel: '工作区',
+      workspaceNone: '未设置'
+    },
     exportLog: {
       btn: '导出日志',
       exporting: '导出中...',
@@ -249,6 +297,8 @@ export const zhCN = {
       hint: '指定一个本地文件夹作为资料库：文件夹内（含多级子目录）的支持文件会被自动读取、解析与理解并同步到软件；软件内对资料的删除/改名也会同步回该文件夹。',
       current: '当前工作区',
       notSet: '尚未设置工作区',
+      configured: '已配置',
+      notConfigured: '未设置',
       chooseBtn: '选择文件夹',
       clearBtn: '清除工作区',
       migrateBtn: '迁移旧资料到工作区',
@@ -309,7 +359,10 @@ export const zhCN = {
     etaText: '预计还需 {time}',
     copyReply: '复制该回复',
     copied: '已复制',
-    openSourceHint: '打开来源文件：《{title}》'
+    openSourceHint: '打开来源文件：《{title}》',
+    thinking: '正在思考',
+    emptyHintTitle: '开始你的第一篇志稿',
+    emptyHintSteps: '1. 在下方输入本次撰写的标题与要求\n2. 可先「智能匹配」或「手动选择」写作规范\n3. 点击「生成初稿」，等待初稿完成'
   },
   skillPicker: {
     title: '手动选择写作规范',
@@ -332,6 +385,7 @@ export const zhCN = {
     copyAll: '复制全文',
     copied: '已复制',
     askSource: '询问文段来源',
+    charCount: '{count} 字',
     toolbar: {
       bold: '粗体',
       italic: '斜体',

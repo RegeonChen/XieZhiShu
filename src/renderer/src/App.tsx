@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, type ReactNode } from 'react'
 import TopBar from './components/TopBar'
 import SideNav, { type PageKey } from './components/SideNav'
 import EmptyState from './components/EmptyState'
@@ -7,6 +7,7 @@ import TagManager from './components/TagManager'
 import SourceViewer from './components/SourceViewer'
 import SkillsManager from './components/SkillsManager'
 import Settings from './components/Settings'
+import SectionNav, { type SectionNavItem } from './components/SectionNav'
 import WritingTaskList from './components/WritingTaskList'
 import WritingEmptyState from './components/WritingEmptyState'
 import WritingWorkspace from './components/WritingWorkspace'
@@ -22,6 +23,38 @@ const NAV_ITEMS: { key: PageKey; label: string }[] = [
   { key: 'writing', label: zhCN.nav.writing },
   { key: 'templates', label: zhCN.nav.skills },
   { key: 'settings', label: zhCN.nav.settings }
+]
+
+/** 中栏区块导航的小图标 */
+function navIcon(paths: string[]): ReactNode {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {paths.map((d) => (
+        <path key={d} d={d} />
+      ))}
+    </svg>
+  )
+}
+
+const SETTINGS_SECTIONS: SectionNavItem[] = [
+  {
+    id: 'overview',
+    label: zhCN.settingsPage.nav.overview,
+    icon: navIcon(['M3 3h7v9H3z', 'M14 3h7v5h-7z', 'M14 12h7v9h-7z', 'M3 16h7v5H3z'])
+  },
+  { id: 'workspace', label: zhCN.settingsPage.nav.workspace, icon: navIcon(['M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z']) },
+  { id: 'preset', label: zhCN.settingsPage.nav.preset, icon: navIcon(['M12 2l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 7.7l5.4-.8L12 2z']) },
+  { id: 'provider', label: zhCN.settingsPage.nav.provider, icon: navIcon(['M8 9l-4 4 4 4', 'M16 9l4 4-4 4', 'M13 5l-2 14']) }
+]
+
+const SKILLS_SECTIONS: SectionNavItem[] = [
+  {
+    id: 'overview',
+    label: zhCN.skills.nav.overview,
+    icon: navIcon(['M3 3h7v9H3z', 'M14 3h7v5h-7z', 'M14 12h7v9h-7z', 'M3 16h7v5H3z'])
+  },
+  { id: 'general', label: zhCN.skills.nav.general, icon: navIcon(['M4 19.5A2.5 2.5 0 0 1 6.5 17H20', 'M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z']) },
+  { id: 'section', label: zhCN.skills.nav.section, icon: navIcon(['M8 6h13', 'M8 12h13', 'M8 18h13', 'M3 6h.01', 'M3 12h.01', 'M3 18h.01']) }
 ]
 
 const MIN_SIDEBAR = 64
@@ -69,6 +102,20 @@ export default function App() {
   const [onboardingOpen, setOnboardingOpen] = useState(() => {
     try { return localStorage.getItem(LS_ONBOARDING_DONE) !== '1' } catch { return true }
   })
+  /** 设置页中栏导航当前激活的区块（scroll-spy 由 Settings 上报） */
+  const [settingsActive, setSettingsActive] = useState<string | null>(null)
+  /** 规范页中栏导航当前激活的区块（scroll-spy 由 SkillsManager 上报） */
+  const [skillsActive, setSkillsActive] = useState<string | null>(null)
+
+  /** 区块导航跳转：平滑滚动到对应区块并即时高亮 */
+  const handleSettingsNavigate = useCallback((id: string) => {
+    setSettingsActive(id)
+    document.getElementById('settings-' + id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [])
+  const handleSkillsNavigate = useCallback((id: string) => {
+    setSkillsActive(id)
+    document.getElementById('skills-' + id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [])
 
   // 三栏宽度变化时持久化（下次启动恢复）
   useEffect(() => {
@@ -185,6 +232,7 @@ export default function App() {
             </div>
             <SourceList
               onSelect={(id) => { setSelectedSourceId(id); setShowTagManager(false) }}
+              activeId={selectedSourceId}
               bulkMode={bulkMode}
               onExitBulk={() => setBulkMode(false)}
               onSourcesChanged={handleSourcesChanged}
@@ -213,11 +261,32 @@ export default function App() {
             />
           </section>
         )
-      default:
+      case 'settings':
         return (
           <section className="center-pane" style={{ width: centerW, flexShrink: 0 }}>
-            <h3 className="center-pane__title">{zhCN.panes[page].listTitle}</h3>
-            <p className="center-pane__empty">{zhCN.panes[page].listEmpty}</p>
+            <div className="center-pane__header">
+              <h3 className="center-pane__title">{zhCN.settingsPage.nav.title}</h3>
+            </div>
+            <SectionNav
+              hint={zhCN.settingsPage.nav.hint}
+              items={SETTINGS_SECTIONS}
+              activeId={settingsActive}
+              onNavigate={handleSettingsNavigate}
+            />
+          </section>
+        )
+      case 'templates':
+        return (
+          <section className="center-pane" style={{ width: centerW, flexShrink: 0 }}>
+            <div className="center-pane__header">
+              <h3 className="center-pane__title">{zhCN.skills.nav.title}</h3>
+            </div>
+            <SectionNav
+              hint={zhCN.skills.nav.hint}
+              items={SKILLS_SECTIONS}
+              activeId={skillsActive}
+              onNavigate={handleSkillsNavigate}
+            />
           </section>
         )
     }
@@ -249,13 +318,13 @@ export default function App() {
       case 'templates':
         return (
           <main className="work-pane">
-            <SkillsManager />
+            <SkillsManager onActiveChange={(id) => setSkillsActive(id)} />
           </main>
         )
       case 'settings':
         return (
           <main className="work-pane">
-            <Settings onOpenOnboarding={() => setOnboardingOpen(true)} />
+            <Settings onOpenOnboarding={() => setOnboardingOpen(true)} onActiveChange={(id) => setSettingsActive(id)} />
           </main>
         )
     }

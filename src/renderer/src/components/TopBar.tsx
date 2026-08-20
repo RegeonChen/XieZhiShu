@@ -11,6 +11,13 @@ export default function TopBar({ pageTitle, appInfo, centerVisible, onToggleCent
   return (
     <header className="topbar">
       <div className="topbar__left">
+        <span className="topbar__logo" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+            <path d="M10 8l2.5 4L10 16" />
+          </svg>
+        </span>
         <span className="topbar__app-title">{zhCN.appTitle}</span>
         <span className="topbar__divider" />
         <span className="topbar__page-title">{pageTitle}</span>

@@ -6,8 +6,15 @@ import PromptDialog from './PromptDialog'
 export interface WritingTaskItem {
   id: string
   title: string
+  articleTitle?: string
   currentVersion: number
   createdAt: string
+}
+
+/** 任务列表第二行（文章标题或创建时间） */
+function taskSubLine(t: WritingTaskItem): string {
+  const date = new Date(t.createdAt).toLocaleDateString('zh-CN')
+  return t.articleTitle ? `${t.articleTitle} · ${date}` : date
 }
 
 interface ContextMenuState {
@@ -106,7 +113,10 @@ function WritingTaskList({ selectedId, onSelect, reloadKey }: {
       {deleteErr ? <p className="source-list__error">{deleteErr}</p> : null}
       {err ? <p className="source-list__error">{err}</p> : null}
       {loading ? (
-        <p className="source-list__status">{zhCN.writingTasks.loading}</p>
+        <p className="source-list__status source-list__status--loading">
+          <span className="spinner" aria-hidden="true" />
+          {zhCN.writingTasks.loading}
+        </p>
       ) : tasks === null || tasks.length === 0 ? (
         <p className="source-list__status">{zhCN.writingTasks.empty}</p>
       ) : (
@@ -122,6 +132,7 @@ function WritingTaskList({ selectedId, onSelect, reloadKey }: {
               }}
             >
               <span className="source-list__item-title">{t.title}</span>
+              <span className="source-list__item-sub">{taskSubLine(t)}</span>
             </li>
           ))}
         </ul>
