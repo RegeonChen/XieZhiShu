@@ -5,6 +5,9 @@
 import type {
   ApiResult,
   AppSettings,
+  Compilation,
+  CompilationContradiction,
+  CompilationItem,
   Contradiction,
   Draft,
   LlmProviderConfig,
@@ -51,6 +54,16 @@ export const IPC = {
   SKILLS_CREATE: 'skills:create',
   SKILLS_UPDATE: 'skills:update',
   SKILLS_DELETE: 'skills:delete',
+
+  /* 资料汇编（Phase 6：三段式撰写重构） */
+  COMPILATION_LIST: 'compilation:list',
+  COMPILATION_GET: 'compilation:get',
+  COMPILATION_GENERATE: 'compilation:generate',
+  COMPILATION_UPDATE_ITEM: 'compilation:updateItem',
+  COMPILATION_DELETE_ITEM: 'compilation:deleteItem',
+  COMPILATION_RESOLVE_CONTRADICTION: 'compilation:resolveContradiction',
+  COMPILATION_CONFIRM: 'compilation:confirm',
+  COMPILATION_REGENERATE: 'compilation:regenerate',
 
   /* 撰写与初稿 */
   WRITING_CREATE_TASK: 'writing:createTask',
@@ -247,6 +260,52 @@ export type SkillSaveRes = { skill: WritingSkill }
 export interface SkillDeleteReq {
   id: string
 }
+
+// -- 资料汇编（Phase 6：三段式撰写重构） --
+export interface CompilationListReq {
+  taskId: string
+}
+export type CompilationListRes = { compilations: Compilation[] }
+
+export interface CompilationGetReq {
+  compilationId: string
+}
+export type CompilationGetRes = { compilation: Compilation }
+
+export interface CompilationGenerateReq {
+  taskId: string
+  title: string
+}
+export type CompilationGenerateRes = { compilation: Compilation }
+export type CompilationRegenerateReq = CompilationGenerateReq
+export type CompilationRegenerateRes = CompilationGenerateRes
+
+export interface CompilationUpdateItemReq {
+  itemId: string
+  excerpt?: string
+  ts?: string | null
+  note?: string | null
+  extraTags?: string[]
+  kept?: boolean
+}
+export type CompilationUpdateItemRes = { item: CompilationItem }
+
+export interface CompilationDeleteItemReq {
+  itemId: string
+}
+
+export interface CompilationResolveContradictionReq {
+  contradictionId: string
+  action: 'resolve' | 'ignore'
+  /** action=resolve 时必填：用户保留的卡片 id（须属于该矛盾） */
+  chosenItemId?: string
+}
+export type CompilationResolveContradictionRes = { contradiction: CompilationContradiction }
+
+export interface CompilationConfirmReq {
+  compilationId: string
+}
+export type CompilationConfirmRes = { compilation: Compilation }
 
 // -- 撰写与初稿 --
 export interface WritingCreateTaskReq {
@@ -508,6 +567,15 @@ export interface IpcMapping {
   [IPC.SKILLS_CREATE]: { _req: SkillSaveReq; _res: ApiResult<SkillSaveRes> }
   [IPC.SKILLS_UPDATE]: { _req: SkillSaveReq; _res: ApiResult<SkillSaveRes> }
   [IPC.SKILLS_DELETE]: { _req: SkillDeleteReq; _res: ApiResult<void> }
+  // 资料汇编（Phase 6）
+  [IPC.COMPILATION_LIST]: { _req: CompilationListReq; _res: ApiResult<CompilationListRes> }
+  [IPC.COMPILATION_GET]: { _req: CompilationGetReq; _res: ApiResult<CompilationGetRes> }
+  [IPC.COMPILATION_GENERATE]: { _req: CompilationGenerateReq; _res: ApiResult<CompilationGenerateRes> }
+  [IPC.COMPILATION_UPDATE_ITEM]: { _req: CompilationUpdateItemReq; _res: ApiResult<CompilationUpdateItemRes> }
+  [IPC.COMPILATION_DELETE_ITEM]: { _req: CompilationDeleteItemReq; _res: ApiResult<void> }
+  [IPC.COMPILATION_RESOLVE_CONTRADICTION]: { _req: CompilationResolveContradictionReq; _res: ApiResult<CompilationResolveContradictionRes> }
+  [IPC.COMPILATION_CONFIRM]: { _req: CompilationConfirmReq; _res: ApiResult<CompilationConfirmRes> }
+  [IPC.COMPILATION_REGENERATE]: { _req: CompilationRegenerateReq; _res: ApiResult<CompilationRegenerateRes> }
   // 撰写
   [IPC.WRITING_CREATE_TASK]: { _req: WritingCreateTaskReq; _res: ApiResult<WritingCreateTaskRes> }
   [IPC.WRITING_LIST_TASKS]: { _req: void; _res: ApiResult<WritingListTasksRes> }

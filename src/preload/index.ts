@@ -144,6 +144,40 @@ const api = {
   deleteSkill(id: string): Promise<ApiResult<void>> {
     return ipcRenderer.invoke(IPC.SKILLS_DELETE, { id })
   },
+
+  // ---- 资料汇编（Phase 6.0）----
+  /** 任务的全部资料汇编（按时间倒序） */
+  listCompilations(taskId: string): Promise<ApiResult<{ compilations: unknown[] }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_LIST, { taskId })
+  },
+  /** 读取一次资料汇编（含卡片与矛盾） */
+  getCompilation(compilationId: string): Promise<ApiResult<{ compilation: unknown }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_GET, { compilationId })
+  },
+  /** 生成资料汇编（AI 服务 Phase 6.1 实现） */
+  generateCompilation(taskId: string, title: string): Promise<ApiResult<{ compilation: unknown }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_GENERATE, { taskId, title })
+  },
+  /** 重新生成资料汇编（AI 服务 Phase 6.1 实现） */
+  regenerateCompilation(taskId: string, title: string): Promise<ApiResult<{ compilation: unknown }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_REGENERATE, { taskId, title })
+  },
+  /** 编辑资料卡片 */
+  updateCompilationItem(itemId: string, patch: { excerpt?: string; ts?: string | null; note?: string | null; extraTags?: string[]; kept?: boolean }): Promise<ApiResult<{ item: unknown }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_UPDATE_ITEM, { itemId, ...patch })
+  },
+  /** 删除资料卡片 */
+  deleteCompilationItem(itemId: string): Promise<ApiResult<void>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_DELETE_ITEM, { itemId })
+  },
+  /** 资料汇编矛盾取舍（resolve 须传 chosenItemId；ignore 清空已选） */
+  resolveCompilationContradiction(contradictionId: string, action: 'resolve' | 'ignore', chosenItemId?: string): Promise<ApiResult<{ contradiction: unknown }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_RESOLVE_CONTRADICTION, { contradictionId, action, chosenItemId })
+  },
+  /** 确认资料汇编（finalize） */
+  confirmCompilation(compilationId: string): Promise<ApiResult<{ compilation: unknown }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_CONFIRM, { compilationId })
+  },
   /** Provider 列表（只回 apiKeySet，不回密钥） */
   listProviders(): Promise<ApiResult<{ items: unknown[] }>> {
     return ipcRenderer.invoke(IPC.LLM_LIST_PROVIDERS)

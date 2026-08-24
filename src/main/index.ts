@@ -30,7 +30,22 @@ import {
   type DraftRegenerateReq,
   type DraftRegenerateRes,
   type SegmentUpdateReq,
-  type SegmentUpdateRes
+  type SegmentUpdateRes,
+  type CompilationListReq,
+  type CompilationListRes,
+  type CompilationGetReq,
+  type CompilationGetRes,
+  type CompilationGenerateReq,
+  type CompilationGenerateRes,
+  type CompilationUpdateItemReq,
+  type CompilationUpdateItemRes,
+  type CompilationDeleteItemReq,
+  type CompilationResolveContradictionReq,
+  type CompilationResolveContradictionRes,
+  type CompilationConfirmReq,
+  type CompilationConfirmRes,
+  type CompilationRegenerateReq,
+  type CompilationRegenerateRes
 } from '../shared/ipc'
 import type { ApiResult, Source, Tag, LlmProviderConfig, AppSettings, WritingTask, Draft, RetrievedChunk } from '../shared/types'
 import { getDb } from './db/connection'
@@ -48,6 +63,14 @@ import { getSettings, updateSettings } from './db/settings'
 import { createTask as createWritingTask, listTasks as listWritingTasks, getTaskById, deleteTask as deleteWritingTask, updateTaskSkillIds, renameTask, updateTaskProvider } from './db/tasks'
 import { getDraftById, getLatestDraftByTask, updateSegmentContent, replaceDraftSegments } from './db/drafts'
 import { getContradictionsByDraft, updateContradictionStatus } from './db/contradictions'
+import {
+  listCompilationsByTask,
+  getCompilationById,
+  updateCompilationItem,
+  deleteCompilationItem,
+  updateCompilationContradictionStatus,
+  confirmCompilation
+} from './db/compilations'
 import { listTaskMessages, addTaskMessage } from './db/task-messages'
 import { generateDraft, regenerateDraft, retrieveForTask, chatWithTask, suggestSkillsForTask } from './writing/generate'
 import { applyContradictionEdit } from './writing/contradiction-apply'
@@ -439,6 +462,89 @@ handleLogged(IPC.SKILLS_DELETE, (_event, params: SkillDeleteReq): ApiResult<void
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
+})
+
+// ===== Phase 6.0：资料汇编（compilations）=====
+
+handleLogged(IPC.COMPILATION_LIST, (_event, params: CompilationListReq): ApiResult<CompilationListRes> => {
+  try {
+    if (!getTaskById(params.taskId)) {
+      return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '撰写任务不存在' } }
+    }
+    return { ok: true, data: { compilations: listCompilationsByTask(params.taskId) } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.COMPILATION_GET, (_event, params: CompilationGetReq): ApiResult<CompilationGetRes> => {
+  try {
+    const compilation = getCompilationById(params.compilationId)
+    if (!compilation) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料汇编不存在' } }
+    return { ok: true, data: { compilation } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 生成资料汇编的 AI 服务将在 Phase 6.1 实现；此处先提供契约通道，明确未实现错误。
+handleLogged(IPC.COMPILATION_GENERATE, async (_event, _params: CompilationGenerateReq): Promise<ApiResult<CompilationGenerateRes>> => {
+  return { ok: false, error: { code: 'INTERNAL_ERROR', message: '资料汇编生成将在 Phase 6.1 实现' } }
+})
+
+handleLogged(IPC.COMPILATION_UPDATE_ITEM, (_event, params: CompilationUpdateItemReq): ApiResult<CompilationUpdateItemRes> => {
+  try {
+    const item = updateCompilationItem(params.itemId, {
+      excerpt: params.excerpt,
+      ts: params.ts,
+      note: params.note,
+      extraTags: params.extraTags,
+      kept: params.kept
+    })
+    if (!item) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料卡片不存在' } }
+    return { ok: true, data: { item } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.COMPILATION_DELETE_ITEM, (_event, params: CompilationDeleteItemReq): ApiResult<void> => {
+  try {
+    deleteCompilationItem(params.itemId)
+    return { ok: true, data: undefined }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(
+  IPC.COMPILATION_RESOLVE_CONTRADICTION,
+  (_event, params: CompilationResolveContradictionReq): ApiResult<CompilationResolveContradictionRes> => {
+    try {
+      const status = params.action === 'resolve' ? 'resolved' : 'ignored'
+      const contradiction = updateCompilationContradictionStatus(params.contradictionId, status, params.chosenItemId)
+      if (!contradiction) {
+        return { ok: false, error: { code: 'INVALID_PARAM', message: '矛盾不存在，或保留的卡片不属于该矛盾' } }
+      }
+      return { ok: true, data: { contradiction } }
+    } catch (err) {
+      return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+    }
+  }
+)
+
+handleLogged(IPC.COMPILATION_CONFIRM, (_event, params: CompilationConfirmReq): ApiResult<CompilationConfirmRes> => {
+  try {
+    const compilation = confirmCompilation(params.compilationId)
+    if (!compilation) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料汇编不存在' } }
+    return { ok: true, data: { compilation } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.COMPILATION_REGENERATE, async (_event, _params: CompilationRegenerateReq): Promise<ApiResult<CompilationRegenerateRes>> => {
+  return { ok: false, error: { code: 'INTERNAL_ERROR', message: '资料汇编重新生成将在 Phase 6.1 实现' } }
 })
 
 // 文件选择对话框（安全：在 main 进程打开，仅返回路径给 renderer）

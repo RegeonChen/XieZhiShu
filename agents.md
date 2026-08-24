@@ -23,7 +23,7 @@
 | 决策点 | 方案 | 状态 |
 |---|---|---|
 | 桌面框架 | Electron 43 + React 18 + TypeScript strict（electron-vite 构建） | 已确认 |
-| 本地数据库 | SQLite（better-sqlite3 13，WAL + 外键 + 嵌入式迁移框架 Migration 001–014） | 已确认 |
+| 本地数据库 | SQLite（better-sqlite3 13，WAL + 外键 + 嵌入式迁移框架 Migration 001–016） | 已确认 |
 | 检索增强（RAG） | 本地向量嵌入（BGE-small-zh-v1.5，transformers.js + onnxruntime-web WASM 后端，纯本地）+ 词法 bigram 过滤式检索 + 可选 LLM 摘要粗筛；模型/引擎不可用自动降级纯词法 | 已确认 |
 | 文档解析 | PDF(pdf-parse) / Word(mammoth + word-extractor) / WPS(签名分发) / Excel(xlsx 0.20.3) / TXT / MD / 图片OCR(tesseract.js) | 已确认 |
 | 工作区资料库 | 指定本地文件夹即资料库：sha256+mtime/size 指纹对账、chokidar 实时监听 + 聚焦/进资料库/每分钟确定性兜底、双向同步（删除→回收站、改名→重命名文件） | 已确认 |
@@ -100,12 +100,12 @@
 
 ## 当前状态
 
-截至 2026-08-19（本轮优化后）：
+截至 2026-08-25（三段式撰写重构启动）：
 
 - **已完成**：Phase 1（脚手架/共享契约/数据库迁移框架）、Phase 2（文件导入/信源抓取/标签）、Phase 2.1（删除与标签重构）、Phase 2.2（工作区资料库 + 实时双向同步 + 自动同步触发源）、Phase 3.1（LLM Provider 配置）、Phase 3.2（BGE 向量嵌入 + 词法/向量混合检索 + LLM 摘要索引）、Phase 3.3（范本 → 后重构为写作规范 skills）、Phase 3.4（连续整稿显示 / 摘要粗筛 / 检索过滤式 / 重新生成）、Phase 3.5（聊天式工作台 + 对话持久化 + 进度提示）、Phase 3.6（预设大模型 + 获取 API key 指引）、Phase 3.7（矛盾预扫描 → 生成注入 → 定位审查三次调用链路、编辑器内嵌矛盾标注与弹窗、采纳本地修订 + 撤销兼容、矛盾/警告分类、文段来源询问、来源文件打开）、网页资料库（站点注册/发现/粗筛/增量抓取，任务绑定缓存文章）。
 - **产品范围**：收敛为"资料收集 → 撰写 → 初稿完成"；版本管理已删除（数据库保留旧列不动），每个任务仅保留初稿。
-- **验证基线**：typecheck 零错误；vitest 内联单测 140 项通过；生产构建成功。端到端实测（真实大模型生成/矛盾取舍/站点抓取）部分场景留待用户操作。
-- **下一步**：Phase 5（验收与打包——Windows 安装包、端到端演示、文档）。
+- **验证基线**：typecheck 零错误；vitest 内联单测 144 项通过；生产构建成功。端到端实测（真实大模型生成/矛盾取舍/站点抓取）部分场景留待用户操作。
+- **进行中**：Phase 6.0 已完成（Migration 016 资料汇编数据模型 `compilations`/`compilation_items`/`compilation_contradictions`/`compilation_contradiction_variants` + 共享类型 + `compilation:*` IPC/preload/main CRUD 与矛盾取舍/确认通道；`generate`/`regenerate` 契约已登记、AI 服务待 Phase 6.1 实现）；`PLAN.md` 已写入 Phase 6 完整规划与验收标准；`docs/design-preview/index.html` 三套 UI 风格交互预览已产出。下一步 Phase 6.1（资料汇编生成服务：本地宽召回宁多勿漏 + AI 细读 + 矛盾标注）。
 
 ## 设计决策（要点，按时间倒序）
 
@@ -133,6 +133,8 @@
 ## 近期记录（摘要）
 
 > 完整的历史修改日志已整理进 `PLAN.md` 各阶段摘要；此处保留对未来开发仍有价值的根因结论。
+
+- **2026-08-25（Phase 6.0 资料汇编数据模型）**：三段式撰写重构启动——Migration 016 新增 `compilations`/`compilation_items`/`compilation_contradictions`/`compilation_contradiction_variants`；`shared/types.ts` 新增 Compilation/Item/Contradiction/Variant；`shared/ipc.ts` 新增 `compilation:list/get/generate/regenerate/updateItem/deleteItem/resolveContradiction/confirm`；新仓储 `db/compilations.ts`（创建/读取、卡片写入/编辑/删除、矛盾写入/取舍[resolve 校验卡片归属]、确认 finalize、级联删除）+ 4 项单测；主进程 CRUD/取舍/确认 handler 已实现，`generate`/`regenerate` 契约登记、AI 服务待 Phase 6.1。已确认决策固化在 `PLAN.md` Phase 6：本地宽召回+AI 细读（**宁多勿漏**）、深改 TipTap、三主题发布版可切换、三步为独立页面由向导切换、矛盾必须取舍后才能进下一步、通用规范默认注入、初稿仅汇编层溯源。UI 风格交互预览 `docs/design-preview/index.html`。验证：typecheck 零错误、144 项单测、生产构建成功。
 
 - **2026-08-24（移除手动「同步工作区」）**：决策——手动同步按钮及其调用的 `workspace:reconcile` 通道、preload API、i18n 文案与 SourceList 相关逻辑整体删除；同步改为纯自动（启动 / 窗口聚焦 / 进入资料库 / 每分钟定时 / 设置页变更工作区 / chokidar 监听增量）。理由：自动触发已全覆盖手动按钮的功效，保留只会多一个入口与 UI 负担，删除后涉及「手动同步」的代码面归零，也消除了未来新增调用路径时绕过互斥调度的风险。清理范围：`shared/ipc.ts`（WORKSPACE_RECONCILE 通道与 WorkspaceReconcileRes 类型、IpcMapping 项）、`main/index.ts`（handler）、`preload`（方法 + 类型声明）、`SourceList.tsx`（按钮/说明气泡/handleReconcile/reconciling/manualReconcilingRef）、`zh-CN.ts`（reconcileBtn/reconciling/infoReconcile/reconcileFailed）、`docs/shared-contracts.md`、`docs/ui-architecture.md`。自动同步完成事件保留列表刷新与提示逻辑。验证：typecheck 零错误、140 项单测、生产构建成功。
 

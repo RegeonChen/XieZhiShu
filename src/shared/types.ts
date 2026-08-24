@@ -208,6 +208,67 @@ export interface Contradiction {
 }
 
 // ============================================================
+// 资料汇编（Phase 6：三段式撰写重构）
+// ============================================================
+
+export type CompilationStatus = 'drafting' | 'reviewing' | 'finalized'
+export type CompilationContradictionStatus = 'pending' | 'resolved' | 'ignored'
+
+/** 资料卡片（汇编中的一条资料摘录，可编辑/删除/取舍） */
+export interface CompilationItem {
+  id: string
+  compilationId: string
+  /** 时间排序位次 */
+  position: number
+  sourceId: string
+  excerpt: string
+  /** 时间标签（如「2005 年」/「2005—2010 年」） */
+  ts?: string
+  note?: string
+  extraTags: string[]
+  kept: boolean
+  /** 来源标题（服务端 JOIN 填充） */
+  sourceTitle?: string
+  createdAt: string
+}
+
+/** 汇编阶段的一个矛盾「说法」（对应一张资料卡片/来源） */
+export interface CompilationContradictionVariant {
+  id: string
+  contradictionId: string
+  itemId: string
+  variantText: string
+  sourceId: string
+  sourceTitle?: string
+  createdAt: string
+}
+
+/** 汇编阶段的矛盾分组（用户需取舍后进入下一步） */
+export interface CompilationContradiction {
+  id: string
+  compilationId: string
+  topic: string
+  kind: ContradictionKind
+  status: CompilationContradictionStatus
+  /** 用户采纳/保留的卡片 id（status=resolved 时） */
+  chosenItemId?: string
+  createdAt: string
+  variants: CompilationContradictionVariant[]
+}
+
+/** 一次资料汇编（生成后待用户审阅，确认后 finalize） */
+export interface Compilation {
+  id: string
+  taskId: string
+  title: string
+  status: CompilationStatus
+  createdAt: string
+  updatedAt: string
+  items: CompilationItem[]
+  contradictions: CompilationContradiction[]
+}
+
+// ============================================================
 // LLM Provider
 // ============================================================
 export interface LlmProviderConfig {

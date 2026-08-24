@@ -35,6 +35,14 @@ export interface AppApi {
   createSkill(input: { name: string; category: 'general' | 'section'; tags: string[]; content: string }): Promise<{ ok: boolean; data?: { skill: unknown }; error?: { code: string; message: string } }>
   updateSkill(id: string, input: { name: string; category: 'general' | 'section'; tags: string[]; content: string }): Promise<{ ok: boolean; data?: { skill: unknown }; error?: { code: string; message: string } }>
   deleteSkill(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
+  listCompilations(taskId: string): Promise<{ ok: boolean; data?: { compilations: unknown[] }; error?: { code: string; message: string } }>
+  getCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
+  generateCompilation(taskId: string, title: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
+  regenerateCompilation(taskId: string, title: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
+  updateCompilationItem(itemId: string, patch: { excerpt?: string; ts?: string | null; note?: string | null; extraTags?: string[]; kept?: boolean }): Promise<{ ok: boolean; data?: { item: unknown }; error?: { code: string; message: string } }>
+  deleteCompilationItem(itemId: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
+  resolveCompilationContradiction(contradictionId: string, action: 'resolve' | 'ignore', chosenItemId?: string): Promise<{ ok: boolean; data?: { contradiction: unknown }; error?: { code: string; message: string } }>
+  confirmCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
   getSource(id: string): Promise<{ ok: boolean; data?: { source: unknown; tags: unknown[] }; error?: { code: string; message: string } }>
   renderSourceHtml(id: string): Promise<{ ok: boolean; data?: { html: string }; error?: { code: string; message: string } }>
   getSourceFileUrl(id: string): Promise<{ ok: boolean; data?: { url: string }; error?: { code: string; message: string } }>

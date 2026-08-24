@@ -176,6 +176,21 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 
 > 原 `templates:*` 通道随范本重构移除（`template_books` 表保留不删，避免迁移风险）。
 
+### 2.3.1 资料汇编（compilation，Phase 6.0，2026-08-25）
+
+三段式撰写第一步的资料汇编契约。当前 `compilation:generate` / `compilation:regenerate` 为已登记通道（AI 服务在 Phase 6.1 实现，暂返回稳定错误），其余 CRUD / 矛盾取舍 / 确认已实现。
+
+| 通道 | 请求 → 响应 data | 说明 |
+|---|---|---|
+| `compilation:list` | `{ taskId }` → `{ compilations: Compilation[] }` | 任务的全部资料汇编（按时间倒序，含卡片与矛盾） |
+| `compilation:get` | `{ compilationId }` → `{ compilation: Compilation }` | 读取一次资料汇编 |
+| `compilation:generate` | `{ taskId, title }` → `{ compilation: Compilation }` | 生成资料汇编（本地宽召回 + AI 细读；Phase 6.1 实现） |
+| `compilation:regenerate` | `{ taskId, title }` → `{ compilation: Compilation }` | 重新生成资料汇编（Phase 6.1 实现） |
+| `compilation:updateItem` | `{ itemId, excerpt?, ts?, note?, extraTags?, kept? }` → `{ item: CompilationItem }` | 编辑资料卡片 |
+| `compilation:deleteItem` | `{ itemId }` → `{ ok: true }` | 删除资料卡片 |
+| `compilation:resolveContradiction` | `{ contradictionId, action: 'resolve'\|'ignore', chosenItemId? }` → `{ contradiction: CompilationContradiction }` | 汇编矛盾取舍：resolve 须传保留的卡片 id（属于该矛盾）；ignore 清空已选 |
+| `compilation:confirm` | `{ compilationId }` → `{ compilation: Compilation }` | 确认汇编（finalize），进入下一步 |
+
 ### 2.4 撰写与初稿（writing / draft）
 
 | 通道 | 请求 → 响应 data | 说明 |
