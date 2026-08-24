@@ -82,6 +82,93 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 
 ---
 
+
+---
+
+## Phase 6: 三段式撰写重构（资料汇编 → 行文规范 → 初稿）（2026-08-25 规划中）
+
+> 产品形态大改：把目前「输入要求 → 黑箱检索+矛盾+生成」一条龙，拆成**用户可见、可介入**的三个环节，每个环节仍以**对话框**为主要交互方式，中间结果与进度全程可见。
+> **已确认决策（2026-08-25）**：
+> - 资料汇编 = **本地宽召回 + AI 细读**；硬约束：**召回阶段宁多勿漏**（宁可给 AI 的提交物偏大，也不能把可能相关的材料筛掉；召回阈值放宽 + 相关来源整篇全分块，候选集规模对用户可见）。
+> - 文档编辑器 = **深改现有 TipTap**（按成熟文档软件观感重做，不再要求在正文逐段标来源）。
+> - 整体界面 = **三套风格全保留**（简洁明亮 / 明亮+深色可切换 / 古典公文风），发布版**内置主题切换**（用户可切换并记忆）；已产出单页交互预览供参考。
+> - 三个环节 = **三个独立页面**，用户通过顶部「三步向导」点击切换显示（并非同一页面堆叠）；每步有「上一步 / 下一步」，对话框贯穿。
+> - 三步入口 = **同一撰写工作台内的三步向导**（顶部步骤条，右侧内容区随步骤切换，对话框贯穿）。
+> - 矛盾取舍 = **卡片级标注，必须完成取舍后才可进入下一步**。
+> - 行文规范 = **整理现有通用规范并作为默认注入**；删除全部部类细则（预设 + 自建）；①之后、③之前的「指定行文规范」环节**本次仅预留数据结构与把规范文本传入③的通道**，不开发独立 UI。
+> - 初稿来源 = **仅汇编层溯源**（正文不逐段标注来源，溯源收敛到资料卡片层）。
+>
+> 覆盖范围：本条规划落地后，新任务完整路径为「新建任务 → ① 生成资料汇编（审阅/取舍/确认）→ ② 行文规范（预留）→ ③ 生成志书初稿」；原「单次生成（内部完成检索/矛盾/生成）」链路退役，相关旧逻辑按需保留兼容或删除。
+
+### Phase 6.0 数据模型与共享契约（Migration 016）
+
+- 新增表：
+  - `compilations`：`id TEXT PK`、`task_id TEXT NOT NULL REFERENCES writing_tasks(id) ON DELETE CASCADE`、`title TEXT NOT NULL`、`status TEXT NOT NULL DEFAULT 'drafting' CHECK('drafting','reviewing','finalized')`、`created_at/updated_at`。
+  - `compilation_items`（资料卡片）：`id TEXT PK`、`compilation_id TEXT NOT NULL REFERENCES compilations(id) ON DELETE CASCADE`、`position INTEGER NOT NULL`（时间排序）、`source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE`、`excerpt TEXT NOT NULL`、`ts TEXT NULL`（时间标签，如年份/时间范围）、`note TEXT NULL`、`extra_tags TEXT NOT NULL DEFAULT '[]'`、`kept INTEGER NOT NULL DEFAULT 1`。
+  - `compilation_contradictions`（矛盾分组）：`id TEXT PK`、`compilation_id FK CASCADE`、`topic TEXT`、`kind TEXT`、`status TEXT CHECK('pending','resolved','ignored')`、`chosen_item_id TEXT NULL`；`compilation_contradiction_variants`（每组内各说法）：`id TEXT PK`、`contradiction_id FK CASCADE`、`item_id TEXT NOT NULL REFERENCES compilation_items(id) ON DELETE CASCADE`、`variant_text TEXT`、`source_id TEXT`。采用独立表（取舍持久化、可级联）。旧 `draft_contradictions` 保留（兼容初稿阶段，但生成链路不再在③里做矛盾扫描）。
+- `src/shared/types.ts`：新增 `Compilation / CompilationItem / CompilationContradiction / CompilationContradictionVariant`（读取时 `sourceTitles/sourcePath` 由服务端 JOIN 填充）。
+- `src/shared/ipc.ts`：新增 `compilation:*` 通道——`compilation:list/get/generate/updateItem/deleteItem/resolveContradiction/confirm/regenerate` 与进度事件 `compilation:progress`（含阶段/百分比/剩余秒/候选统计）；请求/响应均为 `ApiResult<T>`。
+- preload / main handler / `docs/data-model.md`、`docs/shared-contracts.md` 同步。
+
+### Phase 6.1 资料汇编生成服务（后端核心）
+
+- **召回（宁多勿漏）**：以撰写标题/要求生成稳定主题词（复用 `extractTopicTerms`/`expandDomainHints`），在任务范围（资料库全部长期资料 + 网页资料库缓存文章）内做**宽松召回**：放宽词法 `scoreChunk>0` 与向量 `vecMinScore`（如 0.2）、摘要粗筛对“命中即保留”，并对**摘要相关来源取整篇全部有效分块**；候选集上限做防御（如 2000 块），上限内“宁可多”。候选统计（命中多少来源 / 多少块）经进度事件对用户可见。
+- **AI 细读**：新模块 `src/main/writing/compilation-service.ts`，对候选集分窗提交 LLM，系统提示：判定相关性、提取时间标签、按主题去重、保留可溯源（强制引原文 + 来源编号 `#N`）、识别同一事实的相左说法；输出结构化卡片 JSON（`createJsonFieldStreamer` 仅流正文/摘要，原始 JSON 不刷屏）。失败降级：无 Provider / 调用失败 → 退回“本地候选直接成卡片 + 无矛盾标注”，不阻断。
+- **矛盾标注**：在候选集（或 AI 细读命中的卡片集）上复用/改造现有 `scanContradictions`（窗口并发、温度阶梯、低温度确定性），产出矛盾分组并挂到卡片。
+- **落库**：`insertCompilation` + `insertCompilationItems` + `insertCompilationContradictions`（事务），初始 `status='drafting'`；返回卡片列表（含来源标题/位置/时间标签）。
+
+### Phase 6.2 资料卡片审阅 UI（Step 1）
+
+- 撰写工作台顶部**步骤条**：①资料汇编 → ②行文规范 → ③生成初稿（②当前为“预留/占位”，仅提示）。
+- 右栏「资料汇编」视图：卡片按时间升序；每张卡片显示——时间标签 chip、来源文件徽标（`sources:openPath` 可打开原文）、正文摘录、相关度/备注；操作：编辑、删除、打开来源；疑似矛盾卡片加“⚠ 矛盾”标记与分组。
+- 左侧对话框贯穿：可就汇编与 AI 对话（如“仅保留 2010 年后的内容”），对话记录持久化。
+- 矛盾取舍：点击矛盾标注 → 多说法对比弹窗（复用/改造 `ContradictionDialog` 交互），用户选择保留某张卡片（或“忽略”）；**未处理完的矛盾会阻止进入下一步**（finish 时校验 `resolved/ignored`，有 `pending` 则给出明确提示）。
+- 「确认汇编」→ `status='finalized'`，锁定卡片（不可再增删/编辑，除非“重新生成汇编”）；Step 2/3 才可用。
+
+### Phase 6.3 生成链路改造（Step 3 只基于最终汇编）
+
+- `generateDraft` 改为接收 `{ taskId, compilationId, instruction }`：材料仅取该汇编的 `kept` 卡片文本（按时间排序、去重），**不再实时检索、不再做矛盾预扫描/定位**（矛盾已在 Step 1 处理；初稿来源只到汇编层）。
+- 上下文：通用规范（`resolveTaskSkills` 改为仅通用规范，删除部类细则注入）+ 用户要求 `instruction`（含风格文本）。
+- 保留：流式输出（`onDelta` + `createJsonFieldStreamer`）、进度事件（`draft:generateProgress`，阶段：整理汇编 → 准备上下文 → 生成 → 完成）。
+- 重生成：基于同一 `compilationId` 重跑；「重新生成汇编」在 Step 1 触发（重新生成会覆盖当前汇编并回到 drafting，需二次确认）。
+- 落库：初稿仍为 Draft/Segments；本次仅做“汇编卡片 → 初稿”统计，不逐段标来源。
+
+### Phase 6.4 行文规范简化（删除部类细则，整理通用规范）
+
+- 移除非 `category='general'` 的 `writing_skills`（预设 + 自建，Migration 016 `run` 清理或备份）；规范页仅展示/管理**通用规范**。
+- 移除撰写任务**部类细则**相关 UI 与逻辑：`WRITING_UPDATE_SKILLS`/`WRITING_SUGGEST_SKILLS` 通道与 `matchSectionSkills`、智能匹配/手动选择弹窗、`skillIds` 注入；保留“通用规范默认注入”。
+- `docs/{shared-contracts,data-model,ui-architecture}.md` 同步；`agents.md` 记录本决策。
+
+### Phase 6.5 前端工作台重构（三步向导 + 商业化风格，先出预览）
+
+- **交付项：UI 预览（已完成）**——`docs/design-preview/index.html` 单页交互演示，覆盖三套风格（简洁明亮 / 明亮+深色切换 / 古典公文风）与三步向导（资料汇编卡片列表 + 矛盾弹窗 / 行文规范 / 初稿编辑器 + 顶栏/导航）。
+- **落地为正式功能**：三套风格全保留，发布版内置**主题切换**（设置项持久化）；三个环节为**独立页面**，通过三步向导点击切换（每步含「上一步/下一步」），并非同页堆叠。
+- 选定风格细节后重构：撰写任务页顶部步骤条 + 主区域随步骤整页切换；左侧对话框 + 右侧内容区；整体配色/排版/间距/圆角/阴影统一；滚动条、动效、空态、加载态按商业软件标准；旧版“参考范本 / 部类细则 / 版本”等入口清理。
+- AI 过程可见：检索/AI 细读/矛盾扫描用进度事件 + 流式输出；Step 1 可将 AI 细读结论以卡片实时追加；Step 3 流式正文。
+
+### Phase 6.6 初稿编辑器升级（深改 TipTap）
+
+- 目标观感接近成熟文档软件：正文衬线（宋体）排版、最大阅读宽度、标题层级、页边距、目录/页脚字数统计、撤销重做、打印友好工具栏。
+- 保留：Markdown 存储、800ms 防抖整稿保存、`draft:updateContent`、右键菜单（复制/粘贴/全选等）。
+- 由于“仅汇编层溯源”，正文不再需矛盾/来源节点，可移除矛盾标注相关扩展（按需保留旧数据兼容）。
+
+### Phase 6.7 测试、文档与发布
+
+- 更新 `docs/{data-model,shared-contracts,ui-architecture}.md`、`PLAN.md`（本阶段标记完成）、`README.md`、`agents.md`（决策与近期记录）。
+- 全量验证：typecheck 零错误 / 单测（预计 150+）/ 生产构建；端到端演示：选工作区 → ① 生成汇编（召回+细读+矛盾）→ 审阅取舍 → 确认 → ② 规范（预留）→ ③ 生成初稿（流式）→ 编辑保存。
+- 视达成度发布新版本（如 `v0.2.0`），配置 GitHub Actions release（沿用 v* tag 触发）。
+
+### 验收标准汇总
+
+- **6.0**：迁移可重复、级联删除正确；类型/IPC/preload/main 对齐；typecheck 零错误、新增 ≥4 项单测、构建成功。
+- **6.1**：给定真实标题（如“学前教育中的园所设置”）产出按时间排序的卡片列表，每张含来源+位置+时间标签；**召回不丢相关材料**（用含近期数据/无字面重叠的样例验证仍能召回）；矛盾分组正确；无 Provider 时降级返回本地候选不阻断；typecheck/单测（新增 ≥5 项）/构建通过。
+- **6.2**：卡片按时间返回、来源可打开；编辑/删除持久化、重启保持；矛盾取舍后解锁下一步；存在未处理矛盾时确认被阻止并提示；typecheck/单测（新增 ≥3 项）/构建通过；端到端可审阅并确认。
+- **6.3**：用已确认汇编生成连贯初稿；材料与汇编完全一致（无库外内容）；流式输出 + 进度可见；重生成不重检；缺标题等必要信息时大模型详细报错；typecheck/单测（generate 相关 ≥6 项）/构建通过。
+- **6.4**：规范页仅显示通用规范；生成仅注入通用规范；任务无部类细则选择；迁移后无 section 残留；typecheck/单测/构建通过。
+- **6.5**：UI 预览 2–3 套交付并选定风格；三步向导状态正确；各步过程可见（进度+流式）；无死链；typecheck/构建通过；端到端走完三步。
+- **6.6**：编辑器观感达到选定样板；Markdown 存储/防抖保存/撤销重做正常；typecheck/构建通过。
+- **6.7**：文档与代码一致；三项验证通过；端到端闭环可用；发布产物可安装。
+
 ## Phase 5: Acceptance & Packaging（待进行）
 
 **Overall Goal:** 产出 Windows 安装包、完成端到端演示与项目文档。

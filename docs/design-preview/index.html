@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>志书撰写工具 · UI 风格预览</title>
+<style>
+  :root {
+    --bg:#f5f6f8; --panel:#ffffff; --panel2:#fafbfc; --border:#e6e8ee; --fg:#1f2329; --fg-soft:#6b7280; --fg-faint:#9aa1ab;
+    --accent:#2f6fed; --accent-soft:#e8effd; --accent-line:#bfd4fb; --ok:#16a34a; --ok-soft:#ecfdf5; --warn:#b45309; --warn-soft:#fff7e6; --danger:#dc2626; --danger-soft:#fef2f2;
+    --shadow-sm:0 1px 2px rgba(16,24,40,.05); --shadow-md:0 6px 20px rgba(16,24,40,.12);
+    --radius:10px; --font-sans:'Segoe UI','Microsoft YaHei',sans-serif; --font-body:'Segoe UI','Microsoft YaHei',sans-serif;
+  }
+  body[data-theme="dark"] {
+    --bg:#15171b; --panel:#1f2329; --panel2:#262b33; --border:#2c323c; --fg:#e6e8ec; --fg-soft:#a3abb6; --fg-faint:#7a828d;
+    --accent:#6ea2ff; --accent-soft:#22304a; --accent-line:#3a4d73; --ok:#34d399; --ok-soft:#12241f; --warn:#fbbf24; --warn-soft:#2a2315; --danger:#f87171; --danger-soft:#301a1a;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.4); --shadow-md:0 8px 24px rgba(0,0,0,.5);
+  }
+  body[data-theme="classic"] {
+    --bg:#f4eee1; --panel:#fdfaf2; --panel2:#f8f3e8; --border:#e0d5c0; --fg:#3a3226; --fg-soft:#7c7059; --fg-faint:#a2967f;
+    --accent:#8c2f0d; --accent-soft:#f3e3d7; --accent-line:#e0c3ad; --ok:#2f6b3a; --ok-soft:#e5efe4; --warn:#8a5a10; --warn-soft:#f5ead2; --danger:#a62a2a; --danger-soft:#f6e1e1;
+    --shadow-sm:0 1px 2px rgba(60,50,20,.08); --shadow-md:0 6px 18px rgba(60,50,20,.16);
+    --font-body:'SimSun','Songti SC',serif; --radius:6px;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  .hidden { display:none !important; }
+  body { font-family:var(--font-sans); font-size:14px; background:var(--bg); color:var(--fg); height:100vh; overflow:hidden; }
+  .preview-badge { position:fixed; left:14px; top:12px; z-index:60; background:#111827; color:#fff; font-size:12px; padding:3px 10px; border-radius:999px; letter-spacing:1px; }
+  .topbar { height:52px; display:flex; align-items:center; gap:14px; padding:0 18px; background:var(--panel); border-bottom:1px solid var(--border); }
+  .brand { display:flex; align-items:center; gap:7px; font-weight:700; }
+  .brand .logo { width:24px; height:24px; border-radius:6px; background:linear-gradient(135deg,var(--accent),var(--accent-line)); color:#fff; display:grid; place-items:center; font-size:13px; }
+  .brand .sep { width:1px; height:16px; background:var(--border); }
+  .page-title { color:var(--fg-soft); font-size:13px; }
+  .topbar .spacer { flex:1; }
+  .theme-switch { display:flex; gap:6px; }
+  .theme-switch button { border:1px solid var(--border); background:var(--panel); color:var(--fg-soft); padding:5px 12px; border-radius:8px; font-size:12px; cursor:pointer; }
+  .theme-switch button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .theme-switch button:hover { border-color:var(--accent); }
+
+  .app { display:flex; height:calc(100% - 52px); }
+  .nav { width:86px; flex:0 0 86px; background:var(--panel); border-right:1px solid var(--border); padding:12px 8px; display:flex; flex-direction:column; gap:6px; }
+  .nav .ni { display:flex; flex-direction:column; align-items:center; gap:4px; padding:10px 4px; border-radius:8px; color:var(--fg-soft); font-size:11px; cursor:pointer; }
+  .nav .ni.on { background:var(--accent-soft); color:var(--accent); font-weight:600; }
+  .nav .ni i { width:20px; height:20px; }
+  .nav .ni i svg { width:20px; height:20px; }
+
+  .workspace { flex:1; min-width:0; padding:16px 18px; display:flex; flex-direction:column; gap:12px; overflow:hidden; }
+  .task-head { display:flex; align-items:center; gap:16px; }
+  .task-title { font-weight:700; font-size:16px; }
+  .task-title .sub { display:block; font-size:12px; color:var(--fg-soft); font-weight:400; margin-top:2px; }
+  .mart { margin-left:auto; font-size:12px; color:var(--fg-soft); }
+
+  /* 步骤条 */
+  .stepper { display:flex; align-items:center; gap:0; background:var(--panel); border:1px solid var(--border); border-radius:var(--radius); padding:10px 14px; box-shadow:var(--shadow-sm); }
+  .step { display:flex; align-items:center; gap:8px; position:relative; }
+  .step .n { width:24px; height:24px; border-radius:50%; background:var(--bg); border:1px solid var(--border); color:var(--fg-soft); display:grid; place-items:center; font-size:12px; font-weight:600; }
+  .step .txt { font-size:13px; }
+  .step.on .n { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .step.on .txt { color:var(--fg); font-weight:600; }
+  .step.done .n { background:var(--ok); color:#fff; border-color:var(--ok); }
+  .step .txt .s { display:block; font-size:11px; color:var(--fg-soft); font-weight:400; }
+  .step .bar { position:absolute; left:120%; width:100%; top:50%; height:2px; background:var(--border); }
+  .step.done .bar { background:var(--ok); }
+  .step-connector { width:60px; height:2px; background:var(--border); margin:0 14px; }
+  .step-connector.done { background:var(--ok); }
+
+  .stepper .hint { margin:0 8px 0 0; font-size:12px; color:var(--fg-soft); }
+  .pager { margin-left:auto; display:flex; gap:6px; }
+  .page-note { font-size:12px; color:var(--fg-soft); }
+  .page-note b { color:var(--accent); }
+
+  /* 主体：左对话 + 右内容 */
+  .body { flex:1; min-height:0; display:flex; gap:12px; }
+  .chat { width:320px; flex:0 0 320px; display:flex; flex-direction:column; background:var(--panel); border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow-sm); overflow:hidden; }
+  .chat-head { padding:10px 12px; border-bottom:1px solid var(--border); font-weight:600; font-size:13px; }
+  .chat-msgs { flex:1; overflow:auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
+  .m { max-width:82%; padding:8px 11px; border-radius:10px; font-size:13px; line-height:1.6; white-space:pre-wrap; }
+  .m.user { align-self:flex-end; background:var(--accent); color:#fff; border-bottom-right-radius:2px; }
+  .m.ai { align-self:flex-start; background:var(--panel2); border:1px solid var(--border); color:var(--fg); border-bottom-left-radius:2px; }
+  .m.sys { align-self:center; max-width:100%; font-size:12px; color:var(--fg-soft); text-align:center; }
+  .typing { display:inline-flex; gap:3px; } .typing i { width:5px; height:5px; border-radius:50%; background:var(--fg-soft); }
+  .chat-input { padding:10px 12px; border-top:1px solid var(--border); display:flex; gap:8px; }
+  .chat-input input { flex:1; min-width:0; border:1px solid var(--border); border-radius:8px; padding:8px 10px; font-size:13px; background:var(--panel); color:var(--fg); }
+  .chat-input button { border:1px solid var(--accent); background:var(--accent); color:#fff; border-radius:8px; padding:8px 14px; font-size:13px; cursor:pointer; }
+
+  /* 内容 */
+  .content { flex:1; min-width:0; display:flex; flex-direction:column; gap:12px; overflow:auto; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow-sm); padding:14px 16px; }
+  .panel h4 { font-size:14px; margin-bottom:8px; }
+  .panel .hint { font-size:12px; color:var(--fg-soft); line-height:1.7; }
+
+  .cards-head { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
+  .stat { font-size:12px; color:var(--fg-soft); background:var(--bg); border:1px solid var(--border); padding:3px 10px; border-radius:999px; }
+  .btn { border:1px solid var(--border); background:var(--panel); color:var(--fg); padding:6px 14px; border-radius:8px; font-size:13px; cursor:pointer; }
+  .btn.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .btn.ghost { background:transparent; }
+  .btn.danger { color:var(--danger); border-color:var(--danger-soft); }
+  .cards { display:flex; flex-direction:column; gap:10px; }
+  .card { border:1px solid var(--border); border-radius:8px; background:var(--panel); padding:12px 14px; display:flex; gap:12px; }
+  .card.warn { border-color:var(--warn); }
+  .card .tagcol { display:flex; flex-direction:column; gap:6px; width:130px; flex:0 0 130px; }
+  .chip { display:inline-flex; align-items:center; gap:4px; font-size:11px; padding:2px 8px; border-radius:999px; width:fit-content; }
+  .chip.time { background:var(--accent-soft); color:var(--accent); }
+  .chip.src { background:var(--panel2); border:1px solid var(--border); color:var(--fg-soft); }
+  .chip.conflict { background:var(--warn-soft); color:var(--warn); font-weight:600; }
+  .card .body { flex:1; min-width:0; }
+  .card .body .excerpt { font-size:13px; line-height:1.8; font-family:var(--font-body); }
+  .card .ops { margin-top:8px; display:flex; gap:6px; }
+  .card .ops button { font-size:12px; border:1px solid var(--border); background:var(--panel2); color:var(--fg-soft); padding:3px 10px; border-radius:6px; cursor:pointer; }
+  .card .ops button:hover { color:var(--accent); border-color:var(--accent); }
+
+  .step2-body { display:flex; flex-direction:column; gap:14px; }
+  .style-opt { display:flex; align-items:center; gap:10px; border:1px solid var(--border); border-radius:8px; padding:12px 14px; }
+  .style-opt .radio { width:16px; height:16px; border-radius:50%; border:2px solid var(--border); }
+  .style-opt.on { border-color:var(--accent); background:var(--accent-soft); }
+  .style-opt.on .radio { border-color:var(--accent); box-shadow:inset 0 0 0 4px var(--accent); }
+
+  /* 编辑器 */
+  .edtbar { display:flex; gap:4px; align-items:center; border:1px solid var(--border); border-radius:8px; padding:6px 8px; background:var(--panel); box-shadow:var(--shadow-sm); flex-wrap:wrap; }
+  .edtbar button { width:26px; height:26px; border:1px solid transparent; background:transparent; color:var(--fg); border-radius:6px; cursor:pointer; font-size:13px; }
+  .edtbar button:hover { background:var(--accent-soft); color:var(--accent); }
+  .edtbar .sep { width:1px; height:16px; background:var(--border); margin:0 4px; }
+  .edtbar .info { margin-left:auto; font-size:12px; color:var(--fg-soft); }
+  .doc { border:1px solid var(--border); border-radius:8px; background:var(--panel); box-shadow:var(--shadow-sm); padding:24px 30px; max-width:820px; font-family:var(--font-body); overflow:auto; }
+  .doc h2 { font-size:20px; margin:0 0 14px; font-family:var(--font-sans); }
+  .doc h3 { font-size:15px; margin:14px 0 6px; }
+  .doc p { font-size:14px; line-height:2; text-indent:2em; margin:0 0 8px; }
+  .doc .note { font-size:12px; color:var(--fg-soft); }
+
+  /* 弹窗 */
+  .overlay { position:fixed; inset:0; background:rgba(10,15,20,.45); display:none; align-items:center; justify-content:center; z-index:50; }
+  .overlay.open { display:flex; }
+  .dialog { width:640px; max-width:92vw; max-height:82vh; background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:18px 20px; box-shadow:var(--shadow-md); overflow:auto; }
+  .dialog h4 { font-size:15px; margin-bottom:6px; }
+  .dialog .meta { font-size:12px; color:var(--fg-soft); margin-bottom:12px; }
+  .dialog .quote { border-left:3px solid var(--border); background:var(--panel2); padding:8px 12px; border-radius:6px; font-size:13px; margin:10px 0; }
+  .var { border:1px solid var(--border); border-radius:8px; padding:10px 12px; margin-bottom:8px; background:var(--panel2); }
+  .var.picked { border-color:var(--ok); background:var(--ok-soft); }
+  .var .t { font-size:13px; line-height:1.7; }
+  .var .src { margin-top:4px; font-size:12px; color:var(--fg-soft); }
+  .var .pick { margin-top:8px; }
+  .dialog .acts { display:flex; justify-content:flex-end; gap:8px; margin-top:14px; }
+  .fnote { font-size:12px; color:var(--fg-soft); margin-top:8px; }
+</style>
+</head>
+<body data-theme="bright">
+  <div class="preview-badge">UI 预览示意 · 非真实数据</div>
+
+  <div class="topbar">
+    <div class="brand">
+      <span class="logo">志</span>
+      <span>志书撰写工具</span>
+      <span class="sep"></span>
+      <span class="page-title">撰写 · 学前教育 · 园所设置</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="theme-switch" id="themeSwitch">
+      <button data-theme="bright" class="on">简洁明亮</button>
+      <button data-theme="dark">明亮+深色</button>
+      <button data-theme="classic">古典公文风</button>
+    </div>
+  </div>
+
+  <div class="app">
+    <div class="nav">
+      <div class="ni on"><i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg></i>资料库</div>
+      <div class="ni on"><i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg></i>撰写</div>
+      <div class="ni"><i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></i>规范</div>
+      <div class="ni"><i><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></i>设置</div>
+    </div>
+
+    <div class="workspace">
+      <div class="task-head">
+        <div class="task-title">学前教育 · 园所设置
+          <span class="sub">撰写任务 · 大模型：DeepSeek v4 Flash</span>
+        </div>
+        <div class="mart">资料库 36 篇 · 网页资料库 5 站</div>
+      </div>
+
+      <div class="stepper">
+        <div class="step on" data-step="1"><span class="n">1</span><span class="txt">① 生成资料汇编<span class="s">进行中 · 2 组矛盾待处理</span></span></div>
+        <div class="step-connector"></div>
+        <div class="step" data-step="2"><span class="n">2</span><span class="txt">② 指定行文规范<span class="s">默认通用规范</span></span></div>
+        <div class="step-connector"></div>
+        <div class="step" data-step="3"><span class="n">3</span><span class="txt">③ 生成志书初稿<span class="s">待开始</span></span></div>
+        <span class="hint">①存在 2 组矛盾待处理</span>
+        <div class="pager">
+          <button type="button" class="btn" id="prevStep">‹ 上一步</button>
+          <button type="button" class="btn primary" id="nextStep">下一步 ›</button>
+        </div>
+      </div>
+      <div class="page-note">当前页面：<b>① 生成资料汇编</b> —— 三个环节为<b>独立页面</b>，请点击上方步骤（或用「上一步/下一步」）切换。</div>
+
+      <div class="body">
+        <div class="chat">
+          <div class="chat-head">与助手对话</div>
+          <div class="chat-msgs" id="chatMsgs">
+            <div class="m sys">—— 资料汇编已完成，正在等待你的审阅 ——</div>
+            <div class="m ai">已从资料库检索到 128 段候选，AI 细读后整理为 38 张资料卡片，并按时间排列；其中发现 2 组资料矛盾（#1 公办园数量、#2 毛入园率），请逐张审阅。</div>
+            <div class="m user">请只保留 2005 年之后的内容，并把民办园相关卡片也纳入。</div>
+            <div class="m ai">好的，已重新筛选：保留 2005—2022 年共 21 张卡片；新增 3 张关于民办园设置与收费的卡片。</div>
+            <div class="m ai">矛盾 #1（2021 年公办园数量：76 所 vs 82 所）仍需你取舍。</div>
+          </div>
+          <div class="chat-input">
+            <input placeholder="输入对资料汇编的调整要求…">
+            <button>发送</button>
+          </div>
+        </div>
+
+        <div class="content">
+          <!-- Step 1 -->
+          <section class="step-pane" data-pane="1">
+            <div class="cards-head">
+              <span class="stat">候选 128 段</span>
+              <span class="stat">卡片 38 张</span>
+              <span class="stat">矛盾 2 组</span>
+              <button class="btn ghost">重新生成汇编</button>
+              <button class="btn primary" style="margin-left:auto">确认汇编，进入下一步</button>
+            </div>
+
+            <div class="panel hint">资料卡片按时间升序排列；每张卡片可打开来源、编辑摘录、删除；带「⚠ 矛盾」的卡片需在矛盾弹窗中取舍。</div>
+
+            <div class="cards">
+              <div class="card">
+                <div class="tagcol">
+                  <span class="chip time">2005 年</span>
+                  <span class="chip src">《教育发展报告》</span>
+                </div>
+                <div class="body">
+                  <div class="excerpt">2005 年，全县共有幼儿园 89 所，其中教育部门办 42 所、企事业单位办 15 所、民办园 32 所，民办园占比首次达到 36%。</div>
+                  <div class="ops"><button>打开来源</button><button>编辑</button><button>删除</button></div>
+                </div>
+              </div>
+
+              <div class="card warn">
+                <div class="tagcol">
+                  <span class="chip time">2021 年</span>
+                  <span class="chip src">《学前教育发展报告》</span>
+                  <span class="chip conflict">⚠ 矛盾 #1</span>
+                </div>
+                <div class="body">
+                  <div class="excerpt">2021 年全区共有幼儿园 212 所，其中公办园 76 所、民办园 136 所；在园幼儿 2.1 万人。</div>
+                  <div class="ops"><button>打开来源</button><button>编辑</button><button>删除</button><button class="conflict">查看矛盾 #1</button></div>
+                </div>
+              </div>
+
+              <div class="card warn">
+                <div class="tagcol">
+                  <span class="chip time">2021 年</span>
+                  <span class="chip src">《区教育局统计表》</span>
+                  <span class="chip conflict">⚠ 矛盾 #1</span>
+                </div>
+                <div class="body">
+                  <div class="excerpt">全区共有幼儿园 212 所，其中公办园 82 所、民办园 130 所；在园幼儿 2.3 万人。</div>
+                  <div class="ops"><button>打开来源</button><button>编辑</button><button>删除</button></div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="tagcol">
+                  <span class="chip time">2022 年</span>
+                  <span class="chip src">《幼儿园督导简报》</span>
+                </div>
+                <div class="body">
+                  <div class="excerpt">截至 2022 年 9 月，全区幼儿园 218 所，普惠性幼儿园覆盖率达 89.3%。</div>
+                  <div class="ops"><button>打开来源</button><button>编辑</button><button>删除</button></div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Step 2 -->
+          <section class="step-pane hidden" data-pane="2">
+            <div class="panel">
+              <h4>指定行文规范</h4>
+              <p class="hint">你可以直接在下方的对话框中提出行文要求，或选择一条已保存的通用规范（默认注入）。本次为预留环节，功能将在后续版本完善。</p>
+            </div>
+            <div class="step2-body">
+              <div class="style-opt on"><span class="radio"></span><div><b>默认：志书通用行文规范</b><br><span class="hint" style="font-size:12px;color:var(--fg-soft)">述而不作、横排门类、纵述史实；数据注明年份与来源；语言客观平实。</span></div></div>
+              <div class="style-opt"><span class="radio"></span><div><b>自定义（在对话框输入）</b><br><span class="hint" style="font-size:12px;color:var(--fg-soft)">例如：按时间顺序，先总述后分述，突出年份与数据对比。</span></div></div>
+            </div>
+          </section>
+
+          <!-- Step 3 -->
+          <section class="step-pane hidden" data-pane="3">
+            <div class="edtbar">
+              <button title="撤销">↶</button><button title="重做">↷</button><span class="sep"></span>
+              <button title="标题">H1</button><button title="列表">•≡</button><button title="表格">☐</button><button title="引用">”</button>
+              <span class="info">已保存 · 共 1386 字</span>
+            </div>
+            <div class="doc">
+              <h2>第三节 园所设置</h2>
+              <p>新中国成立初期，境内仅有县办幼儿园 2 所，多为整日制。20 世纪 80 年代，随着机关、企事业单位兴办托幼机构，幼儿园数量逐步增加。1985 年全县共有幼儿园 12 所，均为县办。</p>
+              <p>1990 年代学前教育进入快速发展阶段，企事业办、集体办幼儿园增多，民办园开始出现。2005 年全县共有幼儿园 89 所，其中教育部门办 42 所、企事业单位办 15 所、民办园 32 所，民办园占比首次达到 36%。</p>
+              <h3>园所布局与结构</h3>
+              <p>2010 年后，学前教育纳入基本公共服务体系，普惠性幼儿园建设加快。2021 年全区共有幼儿园 212 所，其中公办园 76 所、民办园 136 所，在园幼儿 2.1 万人，学前三年毛入园率达 96.5%。</p>
+              <p>2022 年全区幼儿园增至 218 所，普惠性幼儿园覆盖率达 89.3%，城乡幼儿园布局进一步均衡。</p>
+              <p class="note">（初稿由大模型基于「已确认资料汇编」生成，来源可回溯至资料卡片层。）</p>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 矛盾弹窗 -->
+  <div class="overlay" id="ovl">
+    <div class="dialog">
+      <h4>矛盾 #1 · 2021 年公办园数量</h4>
+      <div class="meta">数据相左 · 需二选一（或忽略）后进入下一步</div>
+      <div class="quote">正文定位（汇编引文）：2021 年全区共有幼儿园 212 所，其中公办园 <b>76/82</b> 所、民办园 136/130 所；在园幼儿 2.1/2.3 万人。</div>
+      <div class="var"><div class="t">说法一：公办园 76 所、民办园 136 所，在园幼儿 2.1 万人</div><div class="src">来源：《学前教育发展报告》</div><div class="pick"><button class="btn primary">采纳该说法</button></div></div>
+      <div class="var picked"><div class="t">说法二：公办园 82 所、民办园 130 所，在园幼儿 2.3 万人</div><div class="src">来源：《区教育局统计表》</div><div class="pick"><span style="font-size:12px;color:var(--ok)">✓ 已采纳</span></div></div>
+      <div class="acts"><button class="btn ghost">忽略该矛盾</button><button class="btn">返回清单</button></div>
+      <div class="fnote">小提示：采纳后，后续初稿将以你选择的说法为唯一材料，正文不会出现矛盾。</div>
+    </div>
+  </div>
+
+<script>
+  (function(){
+    var body=document.body;
+    var themeBtns=document.querySelectorAll('#themeSwitch button');
+    themeBtns.forEach(function(b){
+      b.addEventListener('click',function(){
+        body.setAttribute('data-theme',b.getAttribute('data-theme'));
+        themeBtns.forEach(function(x){x.classList.remove('on')});
+        b.classList.add('on');
+      });
+    });
+
+    var steps=document.querySelectorAll('.step');
+    var panes=document.querySelectorAll('.step-pane');
+    var names=['① 生成资料汇编','② 指定行文规范','③ 生成志书初稿'];
+    var note=document.querySelector('.page-note');
+    function goto(n){
+      panes.forEach(function(p){p.classList.toggle('hidden',p.getAttribute('data-pane')!==n)});
+      steps.forEach(function(s){s.classList.toggle('on',s.getAttribute('data-step')===n)});
+      if(note){note.innerHTML='当前页面：<b>'+names[n-1]+'</b> —— 三个环节为<b>独立页面</b>，请点击上方步骤（或用「上一步/下一步」）切换。';}
+    }
+    steps.forEach(function(st){
+      st.addEventListener('click',function(){goto(Number(st.getAttribute('data-step')))});
+    });
+    var prev=document.getElementById('prevStep');
+    var next=document.getElementById('nextStep');
+    var cur=1;
+    function setCur(n){cur=n;goto(n);}
+    if(prev){prev.addEventListener('click',function(){if(cur>1){setCur(cur-1);}});}
+    if(next){next.addEventListener('click',function(){if(cur<3){setCur(cur+1);}});}
+    goto(1);
+
+    document.querySelectorAll('.chip.conflict').forEach(function(c){
+      c.style.cursor='pointer';
+    });
+    document.querySelector('.card.warn .ops .conflict').addEventListener('click',function(){
+      document.getElementById('ovl').classList.add('open');
+    });
+    document.querySelectorAll('#ovl .btn').forEach(function(b){
+      b.addEventListener('click',function(){document.getElementById('ovl').classList.remove('open')});
+    });
+    document.getElementById('ovl').addEventListener('click',function(e){
+      if(e.target===this){this.classList.remove('open')}
+    });
+  })();
+</script>
+</body>
+</html>
