@@ -82,15 +82,11 @@ export const zhCN = {
     summarizeFailed: '整理失败：{message}',
     workspaceStatus: '工作区：{dir}',
     workspaceUnset: '未设置工作区（可在设置页指定本地文件夹作为资料库）',
-    reconcileBtn: '同步',
-    reconciling: '同步中...',
     syncingProgress: '正在同步 {done}/{total} ...',
     preprocessHint: '正在预处理新添加的文件…由于后台进程正在处理，软件可能存在短暂卡顿',
     reconcileDone: '同步完成：新增 {added}、变更 {changed}、移除 {removed}、移动 {moved}、失败 {errors}',
-    reconcileFailed: '同步失败：{message}',
     infoImport: '将本地文件导入资料库，作为撰写志书的资料来源；也可在下方「网页资料库」中注册网站，生成初稿时自动检索相关文章。',
-    infoSummarize: '对工作区内所有资料逐篇生成预处理信息，供撰写初稿时的资料粗筛使用；后续的撰写任务中，已整理过的资料不会重复整理，如果您想提升之后撰写初稿的效率，可以先进行此操作',
-    infoReconcile: '出于运行效率考量，软件只能以特定频率执行同步操作，您可以自行点击此按钮，将资料库与工作区文件进行及时同步'
+    infoSummarize: '对工作区内所有资料逐篇生成预处理信息，供撰写初稿时的资料粗筛使用；后续的撰写任务中，已整理过的资料不会重复整理，如果您想提升之后撰写初稿的效率，可以先进行此操作'
   },
   webSource: {
     title: '网页资料库',

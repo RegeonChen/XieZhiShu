@@ -207,3 +207,19 @@ export function findSourceByContentHash(contentHash: string): Source | null {
     | undefined
   return row ? rowToSource(row) : null
 }
+
+/**
+ * 按内容 sha256 查找「存量导入副本」（workspace=0 的旧导入文件，2026-08-24 审计）：
+ * 用户把同一批文件既通过旧版「导入文件」存过副本、又将来源文件夹指定为工作区时，
+ * 会出现「旧副本记录 + 工作区记录」并存导致同一文件显示两次。
+ * 对账扫描到工作区内同哈希文件时，用此函数定位旧记录并吸收（保留 id/标签/摘要），而非再插一行。
+ */
+export function findLegacySourceByContentHash(contentHash: string): Source | null {
+  const db = getDb()
+  const row = db
+    .prepare(
+      "SELECT * FROM sources WHERE kind = 'file' AND content_hash = ? AND workspace = 0 ORDER BY created_at ASC, rowid ASC LIMIT 1"
+    )
+    .get(contentHash) as SourceRow | undefined
+  return row ? rowToSource(row) : null
+}

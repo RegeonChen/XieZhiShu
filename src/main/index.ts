@@ -55,13 +55,13 @@ import { askSourceForTask } from './writing/source-query'
 import { configureEmbedModel, stopEmbedWorker } from './rag/embed'
 import { enqueueIndex } from './rag/indexer'
 import { summarizeAllPending, getSourceSummary } from './rag/summarizer'
-import { getWorkspaceDir, reconcileWorkspace, type ReconcileProgress } from './workspace/reconcile'
+import { getWorkspaceDir, type ReconcileProgress } from './workspace/reconcile'
 import { startWorkspaceWatcher, restartWorkspaceWatcher, stopWorkspaceWatcher } from './workspace/watcher'
 import { requestWorkspaceSync, runWorkspaceSync, startAutoSyncTimer, stopAutoSyncTimer } from './workspace/auto-sync'
 import { trashSourceFile, renameSourceFile, resolveSourceFilePath } from './workspace/sync'
 import { migrateLegacyToWorkspace } from './workspace/migrate'
 import { loadWindowState, trackWindowState } from './window-state'
-import type { WorkspaceReconcileRes, WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceSyncReq, WebSourceSyncRes, SkillListRes, SkillSaveReq, SkillSaveRes, SkillDeleteReq, LogAppendReq, LogExportRes } from '../shared/ipc'
+import type { WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceSyncReq, WebSourceSyncRes, SkillListRes, SkillSaveReq, SkillSaveRes, SkillDeleteReq, LogAppendReq, LogExportRes } from '../shared/ipc'
 import { logMain, logIpc, logRenderer, exportLogsText } from './logger'
 
 const APP_PROTOCOL_WHITELIST = /^https?:\/\//i
@@ -701,9 +701,10 @@ handleLogged(IPC.SETTINGS_GET, (): ApiResult<AppSettings> => {
 handleLogged(IPC.SETTINGS_UPDATE, (_event, params: { patch: Partial<AppSettings> }): ApiResult<AppSettings> => {
   try {
     const settings = updateSettings(params.patch)
-    // 工作区路径变化时重启监听，并触发一次对账（必须走统一调度器，避免与自动同步并发重复入库，2026-08-20）
+    // 工作区路径变化时重启监听（带上进度回调，避免切换工作区后增量同步无进度），并触发一次对账
+    // 对账必须走统一调度器，避免与自动同步并发重复入库（2026-08-20；2026-08-24 审计确认）
     if ('workspaceDir' in params.patch) {
-      restartWorkspaceWatcher()
+      restartWorkspaceWatcher(pushWorkspaceProgress)
       requestWorkspaceSync(pushWorkspaceProgress)
     }
     return { ok: true, data: settings }
@@ -736,33 +737,21 @@ function pushWorkspaceProgress(p: ReconcileProgress): void {
   }
 }
 
-// 手动触发工作区全量对账（扫描 + 解析 + 索引），实时推送进度到渲染进程
-// 2026-08-20：与自动同步/监听增量共用统一互斥调度，修复并发对账导致的重复入库
-handleLogged(IPC.WORKSPACE_RECONCILE, async (): Promise<ApiResult<WorkspaceReconcileRes>> => {
-  try {
-    let result: WorkspaceReconcileRes | null = null
-    await runWorkspaceSync(async () => {
-      result = await reconcileWorkspace(pushWorkspaceProgress)
-    })
-    if (result) return { ok: true, data: result }
-    // 极少数情况：本次提交在排队期间被更新的任务合并（队列已清空且无并发），直接再跑一次兜底
-    const fallback = await reconcileWorkspace(pushWorkspaceProgress)
-    return { ok: true, data: fallback }
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-})
-
-// 渲染层进入"资料库"功能区时自动触发一次同步（Task 2.2.5，效果等同手动"同步工作区"）
+// 渲染层进入"资料库"功能区时自动触发一次同步（Task 2.2.5，自动同步与手动等效；手动按钮已于 2026-08-24 移除）
 handleLogged(IPC.WORKSPACE_NAV_SYNC, (): ApiResult<void> => {
   requestWorkspaceSync(pushWorkspaceProgress)
   return { ok: true, data: undefined }
 })
 
 // 一次性迁移存量导入资料到工作区（Task 2.2.3）
+// 2026-08-24 审计加固：迁移过程会读/写工作区文件并更新 DB，必须与所有对账任务串行，
+// 否则迁移搬入工作区的文件可能被并发的对账扫描重复入库（随后 UPDATE 撞唯一索引导致迁移失败）。
 handleLogged(IPC.WORKSPACE_MIGRATE, async (): Promise<ApiResult<WorkspaceMigrateRes>> => {
   try {
-    const result = await migrateLegacyToWorkspace()
+    let result: WorkspaceMigrateRes = { migrated: 0, failed: 0, skipped: 0 }
+    await runWorkspaceSync(async () => {
+      result = await migrateLegacyToWorkspace()
+    })
     return { ok: true, data: result }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }

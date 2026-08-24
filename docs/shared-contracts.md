@@ -218,8 +218,8 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | 通道 | 请求 → 响应 data | 说明 |
 |---|---|---|
 | `workspace:status` | `{}` → `{ workspaceDir?, workspaceSources, legacySources, totalSources }` | 工作区状态与资料统计 |
-| `workspace:reconcile` | `{}` → `{ workspaceDir, added, changed, removed, moved, errors, total }` | 手动全量对账（扫描 + 解析 + 索引）；进度经事件 `workspace:progress` 推送（含 finished 完成事件与最终计数） |
-| `workspace:navSync` | `{}` → `{}` | 进入"资料库"功能区时自动触发一次同步（效果等同手动按钮） |
+| `workspace:progress`（主进程推送事件） | `{ done, total, newFiles?, added?, changed?, removed?, moved?, errors?, finished? }` | 自动同步进度推送（含 finished 完成事件与最终计数；手动「同步工作区」按钮已于 2026-08-24 移除，由聚焦/进资料库/每分钟/设置变更/监听增量自动触发） |
+| `workspace:navSync` | `{}` → `{}` | 进入"资料库"功能区时自动触发一次同步 |
 | `workspace:migrate` | `{}` → `{ migrated, failed, skipped }` | 一次性迁移存量导入资料到工作区 |
 | `app:openFileDialog` | `{}` → `{ paths: string[] }` | 系统文件选择对话框（主进程打开，仅回传路径） |
 | `app:openDirectoryDialog` | `{}` → `{ path: string \| null }` | 系统目录选择对话框（工作区选择） |

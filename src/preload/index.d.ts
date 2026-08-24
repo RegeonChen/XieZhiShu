@@ -50,7 +50,6 @@ export interface AppApi {
   getSettings(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   updateSettings(patch: { currentLlmProviderId?: string; dataDir?: string; workspaceDir?: string }): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   getWorkspaceStatus(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
-  reconcileWorkspace(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   workspaceNavSync(): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   migrateLegacyWorkspace(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   onWorkspaceProgress(cb: (p: { done: number; total: number; newFiles?: number; added?: number; changed?: number; removed?: number; moved?: number; errors?: number; finished?: boolean }) => void): () => void

@@ -16,7 +16,7 @@
 import { basename, join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { getDb } from '../db/connection'
-import { insertSource, findSourceByContentHash, updateSourceFingerprint, deleteSources } from '../db/sources'
+import { insertSource, findSourceByContentHash, findLegacySourceByContentHash, updateSourceFingerprint, deleteSources } from '../db/sources'
 import { getSettings, updateSettings } from '../db/settings'
 import { parseFile } from '../import/file-parser'
 import { enqueueIndex } from '../rag/indexer'
@@ -137,6 +137,23 @@ async function ingestFile(workspaceDir: string, rel: string, result: ReconcileRe
     return
   }
 
+  // 2026-08-24 审计：与「存量导入副本」内容一致时，吸收旧记录为工作区记录（保留 id/标签/摘要），
+  // 避免同一文件以「旧副本（workspace=0）+ 工作区记录」两条同时出现在资料库（用户视角仍为重复）。
+  const legacy = findLegacySourceByContentHash(fp.contentHash)
+  if (legacy) {
+    updateSourceFingerprint(legacy.id, {
+      filePath: rel,
+      contentHash: fp.contentHash,
+      fileMtime: fp.fileMtime,
+      fileSize: fp.fileSize,
+      status: 'ready',
+      workspace: true
+    })
+    result.moved += 1
+    enqueueIndex(legacy.id)
+    return
+  }
+
   // 真正的新增（解析完成后再复核一次路径：调度器已消除并发，此处为兜底，防止其他入口带来重复入库）
   try {
     const { text } = await parseFile(abs)
@@ -192,7 +209,7 @@ async function ingestFile(workspaceDir: string, rel: string, result: ReconcileRe
   }
 }
 
-/** 执行一次全量对账（启动 / 手动"同步工作区" / 心跳兜底）；未配置工作区时返回空结果 */
+/** 执行一次全量对账（启动 / 自动同步触发源 / 心跳兜底）；未配置工作区时返回空结果 */
 export async function reconcileWorkspace(onProgress?: (p: ReconcileProgress) => void): Promise<ReconcileResult> {
   const workspaceDir = getWorkspaceDir()
   if (!workspaceDir) return emptyResult(null)
@@ -360,6 +377,28 @@ if (import.meta.vitest) {
         content_hash: string
       }
       expect(row.cleaned_text).toContain('修改后')
+    })
+
+    it('absorbs a legacy import copy with the same content hash instead of duplicating (2026-08-24 audit)', async () => {
+      // 模拟：用户旧版「导入文件」存过副本（workspace=0），随后把同一来源文件夹指定为工作区
+      writeFileSync(join(tmp, '副本同名.txt'), '与旧副本一致的正文。')
+      const fp = await fingerprintFileAsync(join(tmp, '副本同名.txt'))
+      db.prepare(
+        "INSERT INTO sources (id, kind, title, file_path, cleaned_text, status, content_hash, workspace) VALUES ('legacy-copy', 'file', '副本同名.txt', 'imports/副本同名.txt', '', 'ready', ?, 0)"
+      ).run(fp!.contentHash)
+      updateSettings({ workspaceDir: tmp })
+
+      const res = await reconcileWorkspace()
+      // 不再新增一行：旧副本被吸收为工作区记录（保留 id / 标签 / 摘要）
+      expect(res.added).toBe(0)
+      expect(res.moved).toBe(1)
+      const rows = db
+        .prepare("SELECT id, workspace, file_path FROM sources WHERE kind = 'file' AND file_path = '副本同名.txt'")
+        .all() as { id: string; workspace: number; file_path: string }[]
+      expect(rows).toHaveLength(1)
+      expect(rows[0].id).toBe('legacy-copy')
+      expect(rows[0].workspace).toBe(1)
+      expect(rows[0].file_path).toBe('副本同名.txt')
     })
 
     it('recognizes move/rename by content hash, keeping source id', async () => {

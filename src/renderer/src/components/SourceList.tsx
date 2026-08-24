@@ -43,14 +43,11 @@ function SourceList({ onSelect, activeId = null, bulkMode, onExitBulk, onSources
 
   // Phase 2.2 工作区状态
   const [workspaceDir, setWorkspaceDir] = useState<string | null>(null)
-  const [reconciling, setReconciling] = useState(false)
   const [reconcileMsg, setReconcileMsg] = useState<string | null>(null)
   const [syncProgress, setSyncProgress] = useState<{ done: number; total: number; newFiles?: number } | null>(null)
   /** 当前展开的说明（key + 触发按钮的屏幕坐标，用于 Portal 悬浮定位）；null 表示全部收起 */
   const [info, setInfo] = useState<{ key: string; left: number; bottom: number } | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
-  // 手动"同步工作区"进行中标记：其完成后的刷新/提示由按钮处理器负责，避免与自动同步的完成事件重复
-  const manualReconcilingRef = useRef(false)
   // 实时同步完成事件触发列表刷新时使用最新的标签筛选（避免订阅闭包中 activeTagId 过期）
   const activeTagIdRef = useRef<string | null>(null)
   activeTagIdRef.current = activeTagId
@@ -87,8 +84,7 @@ function SourceList({ onSelect, activeId = null, bulkMode, onExitBulk, onSources
       if (isFinished) {
         // 完成后稍作停留再清除，避免进度条闪断
         setTimeout(() => setSyncProgress(null), 800)
-        // 手动"同步工作区"的完成刷新/提示由按钮处理器负责，此处仅处理自动同步（watcher / 聚焦 / 定时）
-        if (manualReconcilingRef.current) return
+        // 所有同步均为自动触发（watcher / 聚焦 / 进资料库 / 定时 / 设置变更），完成事件统一刷新列表与提示
         const changed = (p.added ?? 0) + (p.changed ?? 0) + (p.removed ?? 0) + (p.moved ?? 0)
         if (changed > 0) {
           setReconcileMsg(
@@ -175,36 +171,6 @@ function SourceList({ onSelect, activeId = null, bulkMode, onExitBulk, onSources
     }
   }
 
-  // Phase 2.2：手动触发工作区全量对账（扫描 + 解析 + 索引）
-  const handleReconcile = async () => {
-    manualReconcilingRef.current = true
-    setReconciling(true)
-    setReconcileMsg(null)
-    setSyncProgress(null)
-    try {
-      const res = await window.api.reconcileWorkspace()
-      if (res.ok && res.data) {
-        const r = res.data as { added: number; changed: number; removed: number; moved: number; errors: number }
-        setReconcileMsg(
-          zhCN.sourceList.reconcileDone
-            .replace('{added}', String(r.added))
-            .replace('{changed}', String(r.changed))
-            .replace('{removed}', String(r.removed))
-            .replace('{moved}', String(r.moved))
-            .replace('{errors}', String(r.errors))
-        )
-        await loadSources(activeTagId)
-      } else {
-        setReconcileMsg(zhCN.sourceList.reconcileFailed.replace('{message}', res.error?.message ?? ''))
-      }
-    } catch {
-      setReconcileMsg(zhCN.sourceList.reconcileFailed.replace('{message}', ''))
-    } finally {
-      manualReconcilingRef.current = false
-      setReconciling(false)
-    }
-  }
-
   // 删除单个资料（右键菜单）
   const handleDeleteOne = async () => {
     if (!pendingDelete || pendingDelete.kind !== 'one') return
@@ -288,31 +254,13 @@ function SourceList({ onSelect, activeId = null, bulkMode, onExitBulk, onSources
             }}
           >i</button>
         </div>
-        {workspaceDir ? (
-          <div className="source-list__tool-btn">
-            <button type="button" className="source-list__btn" onClick={handleReconcile} disabled={reconciling}>
-              {reconciling ? zhCN.sourceList.reconciling : zhCN.sourceList.reconcileBtn}
-            </button>
-            <button
-              type="button"
-              className="source-list__info-tip"
-              aria-label="同步说明"
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={(e) => {
-                e.stopPropagation()
-                const r = e.currentTarget.getBoundingClientRect()
-                setInfo(info?.key === 'reconcile' ? null : { key: 'reconcile', left: r.left + r.width / 2, bottom: r.bottom })
-              }}
-            >i</button>
-          </div>
-        ) : null}
       </div>
 
       {/* 说明气泡：Portal 到 body 顶层，fixed 定位悬浮在窗口最上方，避免被右栏/滚动容器遮挡 */}
       {info
         ? createPortal(
             <div className="source-list__info-popover" style={{ top: info.bottom + 6, left: info.left, transform: 'translateX(-50%)' }}>
-              {info.key === 'import' ? zhCN.sourceList.infoImport : info.key === 'summarize' ? zhCN.sourceList.infoSummarize : zhCN.sourceList.infoReconcile}
+              {info.key === 'import' ? zhCN.sourceList.infoImport : zhCN.sourceList.infoSummarize}
             </div>,
             document.body
           )
