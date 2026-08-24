@@ -57,7 +57,7 @@ import { enqueueIndex } from './rag/indexer'
 import { summarizeAllPending, getSourceSummary } from './rag/summarizer'
 import { getWorkspaceDir, reconcileWorkspace, type ReconcileProgress } from './workspace/reconcile'
 import { startWorkspaceWatcher, restartWorkspaceWatcher, stopWorkspaceWatcher } from './workspace/watcher'
-import { requestWorkspaceSync, startAutoSyncTimer, stopAutoSyncTimer } from './workspace/auto-sync'
+import { requestWorkspaceSync, runWorkspaceSync, startAutoSyncTimer, stopAutoSyncTimer } from './workspace/auto-sync'
 import { trashSourceFile, renameSourceFile, resolveSourceFilePath } from './workspace/sync'
 import { migrateLegacyToWorkspace } from './workspace/migrate'
 import { loadWindowState, trackWindowState } from './window-state'
@@ -701,14 +701,10 @@ handleLogged(IPC.SETTINGS_GET, (): ApiResult<AppSettings> => {
 handleLogged(IPC.SETTINGS_UPDATE, (_event, params: { patch: Partial<AppSettings> }): ApiResult<AppSettings> => {
   try {
     const settings = updateSettings(params.patch)
-    // 工作区路径变化时重启监听（并触发一次对账）
+    // 工作区路径变化时重启监听，并触发一次对账（必须走统一调度器，避免与自动同步并发重复入库，2026-08-20）
     if ('workspaceDir' in params.patch) {
       restartWorkspaceWatcher()
-      if (getWorkspaceDir()) {
-        void reconcileWorkspace().catch((err) => {
-          console.error('workspace reconcile failed after settings change:', err)
-        })
-      }
+      requestWorkspaceSync(pushWorkspaceProgress)
     }
     return { ok: true, data: settings }
   } catch (err) {
@@ -741,10 +737,17 @@ function pushWorkspaceProgress(p: ReconcileProgress): void {
 }
 
 // 手动触发工作区全量对账（扫描 + 解析 + 索引），实时推送进度到渲染进程
+// 2026-08-20：与自动同步/监听增量共用统一互斥调度，修复并发对账导致的重复入库
 handleLogged(IPC.WORKSPACE_RECONCILE, async (): Promise<ApiResult<WorkspaceReconcileRes>> => {
   try {
-    const result = await reconcileWorkspace(pushWorkspaceProgress)
-    return { ok: true, data: result }
+    let result: WorkspaceReconcileRes | null = null
+    await runWorkspaceSync(async () => {
+      result = await reconcileWorkspace(pushWorkspaceProgress)
+    })
+    if (result) return { ok: true, data: result }
+    // 极少数情况：本次提交在排队期间被更新的任务合并（队列已清空且无并发），直接再跑一次兜底
+    const fallback = await reconcileWorkspace(pushWorkspaceProgress)
+    return { ok: true, data: fallback }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }

@@ -137,9 +137,22 @@ async function ingestFile(workspaceDir: string, rel: string, result: ReconcileRe
     return
   }
 
-  // 真正的新增
+  // 真正的新增（解析完成后再复核一次路径：调度器已消除并发，此处为兜底，防止其他入口带来重复入库）
   try {
     const { text } = await parseFile(abs)
+    const duplicate = findWorkspaceSourceByPath(rel)
+    if (duplicate) {
+      updateSourceFingerprint(duplicate.id, {
+        cleanedText: text,
+        contentHash: fp.contentHash,
+        fileMtime: fp.fileMtime,
+        fileSize: fp.fileSize,
+        status: 'ready'
+      })
+      result.changed += 1
+      enqueueIndex(duplicate.id)
+      return
+    }
     const source = insertSource({
       id: crypto.randomUUID(),
       kind: 'file',
@@ -157,6 +170,12 @@ async function ingestFile(workspaceDir: string, rel: string, result: ReconcileRe
   } catch (err) {
     const e = err as Error & { code?: string }
     result.errors += 1
+    const duplicate = findWorkspaceSourceByPath(rel)
+    if (duplicate) {
+      // 并发对账已入库且本分支解析失败：仅把状态标记为失败，不重复插入
+      updateSourceFingerprint(duplicate.id, { status: 'failed', errorCode: e.code ?? 'PARSE_FAILED' })
+      return
+    }
     insertSource({
       id: crypto.randomUUID(),
       kind: 'file',
