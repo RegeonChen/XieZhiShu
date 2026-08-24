@@ -151,5 +151,49 @@ if (import.meta.vitest) {
       expect(getTitle('legacy3')).toBe('无前缀的标题')
       old.close()
     })
+
+    it('migration 015 dedupes duplicate workspace files and enforces unique path (2026-08-20)', () => {
+      // 模拟升级前状态：仅应用迁移 1-14
+      const old = new Database(':memory:')
+      old.exec(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `)
+      const insertMigration = old.prepare('INSERT INTO schema_migrations (version) VALUES (?)')
+      const applyAll = old.transaction(() => {
+        for (const m of MIGRATIONS.filter((x) => x.version < 15)) {
+          if (m.sql) old.exec(m.sql)
+          insertMigration.run(m.version)
+        }
+      })
+      applyAll()
+      // 同路径的重复工作区资料（模拟并发对账重复入库）+ 一条同路径的非工作区存量资料（不应被误删）
+      const insert = old.prepare(
+        `INSERT INTO sources (id, kind, title, file_path, cleaned_text, status, workspace)
+         VALUES (?, 'file', ?, ?, '', 'ready', ?)`
+      )
+      insert.run('dup-early', 'a.txt', 'a.txt', 1)
+      insert.run('dup-late', 'a.txt', 'a.txt', 1)
+      insert.run('legacy-same', 'a.txt', 'a.txt', 0)
+      insert.run('unique-other', 'b.txt', 'b.txt', 1)
+
+      // 升级：应用迁移 15（去重 + 部分唯一索引）
+      runMigrations(old)
+
+      // 每个 workspace 文件路径只保留最早一条（本用例中 dup-early 保留）
+      const rows = old
+        .prepare('SELECT id, workspace FROM sources WHERE file_path = ? ORDER BY workspace DESC, id ASC')
+        .all('a.txt') as { id: string; workspace: number }[]
+      expect(rows.map((r) => r.id).sort()).toEqual(['dup-early', 'legacy-same'])
+      expect(old.prepare('SELECT COUNT(*) AS c FROM sources WHERE id = ?').get('dup-late') as { c: number }).toEqual({ c: 0 })
+
+      // 唯一索引生效：再次插入同路径的 workspace 文件必须失败
+      expect(() => insert.run('dup-again', 'a.txt', 'a.txt', 1)).toThrow()
+      // 不同路径 / 非工作区（workspace=0）不受唯一索引约束
+      expect(() => insert.run('legacy-again', 'a.txt', 'a.txt', 0)).not.toThrow()
+      old.close()
+    })
   })
 }

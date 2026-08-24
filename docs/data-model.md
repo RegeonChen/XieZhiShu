@@ -41,6 +41,8 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 | created_at / updated_at | TEXT | NOT NULL | |
 
 > 注：Phase 2.2（Migration 006，2026-08-06）新增 `content_hash`/`file_mtime`/`file_size`/`workspace` 四列，作为"文件系统 ↔ 数据库"映射锚点；工作区资料 `file_path` 存工作区相对路径（正斜杠分隔）。
+>
+> 注：Migration 015（2026-08-20）清理工作区重复行（并发对账导致的同 `file_path` 重复入库，保留最早一条）并建立部分唯一索引 `idx_sources_workspace_path（file_path WHERE workspace=1 AND kind='file'）`，从结构上杜绝再次重复。
 
 ### 2.2 tags（标签）
 

@@ -372,6 +372,27 @@ CREATE TABLE IF NOT EXISTS writing_skills (
 );
 ALTER TABLE writing_tasks ADD COLUMN skill_ids TEXT;
 `
+  },
+  {
+    // 工作区资料去重 + 路径唯一索引（2026-08-20）：
+    // 此前设置页触发与手动"同步工作区"直接调用 reconcileWorkspace，绕过 auto-sync 互斥调度器，
+    // 与自动同步/监听增量并发对账，同一新文件被两路同时扫描入库（资料列表重复显示）。
+    // 本迁移清理已有重复行（每个 file_path 保留最早一条，其余随外键级联清理其关联），
+    // 并建立部分唯一索引（workspace=1 文件按 file_path 唯一），从结构上杜绝再次重复入库。
+    version: 15,
+    sql: `
+DELETE FROM sources
+WHERE workspace = 1 AND kind = 'file' AND file_path IS NOT NULL
+  AND EXISTS (
+    SELECT 1 FROM sources s2
+    WHERE s2.workspace = 1 AND s2.kind = 'file'
+      AND s2.file_path = sources.file_path
+      AND (s2.created_at < sources.created_at OR (s2.created_at = sources.created_at AND s2.rowid < sources.rowid))
+  );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_workspace_path
+  ON sources(file_path)
+  WHERE workspace = 1 AND kind = 'file';
+`
   }
 ]
 

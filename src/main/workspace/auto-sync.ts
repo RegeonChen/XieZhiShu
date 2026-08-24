@@ -17,31 +17,59 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 let busy = false
-let queued = false
+/** 排队中的最新任务（对账任务都是幂等/收敛的，排队期间只保留最新一个即可）；null = 无排队 */
+let queuedTask: (() => Promise<unknown>) | null = null
+/** 等待队列清空的 resolver（供 runWorkspaceSync 的调用方 await 完成） */
+const queuedWaiters: (() => void)[] = []
 
-/**
- * 通用工作区对账调度：同一时刻只跑一个对账任务（全量对账 / watcher 增量对账共用）。
- * 对账进行中到达的新请求不丢弃——置 queued 标记，当前任务结束后立即补跑同一个任务。
- */
-export function runWorkspaceSync(task: () => Promise<unknown>): void {
-  if (busy) {
-    queued = true
+/** 前一个任务结束：若有排队任务则继续跑；否则唤醒所有等待者 */
+function finishRun(): void {
+  busy = false
+  const next = queuedTask
+  queuedTask = null
+  if (next) {
+    busy = true
+    void (async () => {
+      try {
+        await next()
+      } catch (err) {
+        console.error('workspace sync failed:', err)
+      } finally {
+        finishRun()
+      }
+    })()
     return
   }
-  busy = true
-  void (async () => {
-    try {
-      await task()
-    } catch (err) {
-      console.error('workspace sync failed:', err)
-    } finally {
-      busy = false
-      if (queued) {
-        queued = false
-        runWorkspaceSync(task)
-      }
+  const waiters = queuedWaiters.splice(0)
+  for (const w of waiters) w()
+}
+
+/**
+ * 通用工作区对账调度：**所有**工作区对账（全量 / 增量 / 手动 / 设置触发）必须经此入口，
+ * 同一时刻只跑一个对账任务（2026-08-20 修复：此前设置页触发与手动按钮直接调用 reconcileWorkspace，
+ * 绕过互斥，与自动同步/监听增量并发执行，同一新文件被两次扫描、两次入库 → 列表重复显示）。
+ * 对账进行中到达的新请求按「最新任务优先」排队补跑（对账幂等，旧请求可被新请求合并）；
+ * 返回的 Promise 在本次提交（或其后排队的任务）执行完毕后 resolve。
+ */
+export function runWorkspaceSync(task: () => Promise<unknown>): Promise<void> {
+  return new Promise<void>((resolve) => {
+    // 无论首发还是排队提交，都把 resolver 挂到「队列清空」上统一 resolve（首发任务在 finishRun 时一并唤醒）
+    queuedWaiters.push(resolve)
+    if (busy) {
+      queuedTask = task
+      return
     }
-  })()
+    busy = true
+    void (async () => {
+      try {
+        await task()
+      } catch (err) {
+        console.error('workspace sync failed:', err)
+      } finally {
+        finishRun()
+      }
+    })()
+  })
 }
 
 /** 触发一次全量对账（效果等同手动"同步工作区"） */
