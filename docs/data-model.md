@@ -280,6 +280,39 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 - `web_sites`：id PK、root_url NOT NULL UNIQUE（去尾部斜杠归一）、title、created_at/updated_at、last_synced_at。
 - `web_site_articles`：site_id（FK CASCADE）+ url 联合主键、title、discovered_at——站点文章 URL 清单缓存（生成初稿时先同步清单，再用撰写要求标题粗筛，命中文章增量抓取正文落库为 `sources`（kind='url'，task_id 绑定任务））。
 
+### 2.21 compilations（资料汇编，Migration 016，Phase 6.0，2026-08-25）
+
+三段式撰写第一步：一次「资料汇编」对应一个撰写任务的多张资料卡片与汇编阶段矛盾。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | TEXT PK | |
+| task_id | TEXT NOT NULL REFERENCES writing_tasks(id) ON DELETE CASCADE | 所属任务 |
+| title | TEXT NOT NULL | 汇编标题（通常与撰写标题一致） |
+| status | TEXT NOT NULL DEFAULT 'drafting' CHECK('drafting','reviewing','finalized') | drafting=生成中/待审阅；reviewing=审阅中；finalized=已确认 |
+| created_at / updated_at | TEXT NOT NULL | |
+
+### 2.22 compilation_items（资料卡片，Migration 016，Phase 6.0）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| id | TEXT PK | |
+| compilation_id | TEXT NOT NULL REFERENCES compilations(id) ON DELETE CASCADE | 所属汇编 |
+| position | INTEGER NOT NULL | 时间升序位次 |
+| source_id | TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE | 来源资料 |
+| excerpt | TEXT NOT NULL | 卡片正文摘录 |
+| ts | TEXT NULL | 时间标签（如「2005 年」） |
+| note | TEXT NULL | 用户/大模型备注 |
+| extra_tags | TEXT NOT NULL DEFAULT '[]' | 附加标签（JSON 数组） |
+| kept | INTEGER NOT NULL DEFAULT 1 | 用户是否保留（编辑/删除卡片） |
+| created_at | TEXT NOT NULL | |
+
+### 2.23 compilation_contradictions / compilation_contradiction_variants（汇编矛盾，Migration 016，Phase 6.0）
+
+- `compilation_contradictions`：id PK、compilation_id FK CASCADE、topic NOT NULL、kind CHECK('data','time','place','fact','other')、status CHECK('pending','resolved','ignored')、chosen_item_id（status=resolved 时用户保留的卡片 id）、created_at、UNIQUE(compilation_id, topic)。
+- `compilation_contradiction_variants`：id PK、contradiction_id FK CASCADE、item_id REFERENCES compilation_items(id) ON DELETE CASCADE、variant_text、source_id REFERENCES sources(id) ON DELETE CASCADE、created_at。
+- 矛盾取舍只在汇编阶段发生（初稿生成不再扫描矛盾）；`pending` 未处理完时前端阻止进入下一步。
+
 ## 3. 关键设计决策
 
 - **资料统一抽象**：文件与信源网址合并为 `sources.kind`，撰写范围、来源标注不区分类型。

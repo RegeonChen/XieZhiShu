@@ -393,6 +393,59 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_workspace_path
   ON sources(file_path)
   WHERE workspace = 1 AND kind = 'file';
 `
+  },
+  {
+    // 三段式撰写重构（Phase 6.0，2026-08-25）：资料汇编 → 行文规范 → 初稿。
+    // compilations = 一次「资料汇编」；compilation_items = 审阅中的资料卡片；
+    // compilation_contradictions/variants = 汇编阶段的资料矛盾分组与取舍。
+    version: 16,
+    sql: `
+CREATE TABLE IF NOT EXISTS compilations (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES writing_tasks(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'drafting' CHECK (status IN ('drafting','reviewing','finalized')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compilations_task ON compilations(task_id);
+
+CREATE TABLE IF NOT EXISTS compilation_items (
+  id TEXT PRIMARY KEY,
+  compilation_id TEXT NOT NULL REFERENCES compilations(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  excerpt TEXT NOT NULL,
+  ts TEXT,
+  note TEXT,
+  extra_tags TEXT NOT NULL DEFAULT '[]',
+  kept INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compilation_items_comp ON compilation_items(compilation_id);
+
+CREATE TABLE IF NOT EXISTS compilation_contradictions (
+  id TEXT PRIMARY KEY,
+  compilation_id TEXT NOT NULL REFERENCES compilations(id) ON DELETE CASCADE,
+  topic TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'other' CHECK (kind IN ('data','time','place','fact','other')),
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','resolved','ignored')),
+  chosen_item_id TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE (compilation_id, topic)
+);
+CREATE INDEX IF NOT EXISTS idx_compilation_contradictions_comp ON compilation_contradictions(compilation_id);
+
+CREATE TABLE IF NOT EXISTS compilation_contradiction_variants (
+  id TEXT PRIMARY KEY,
+  contradiction_id TEXT NOT NULL REFERENCES compilation_contradictions(id) ON DELETE CASCADE,
+  item_id TEXT NOT NULL REFERENCES compilation_items(id) ON DELETE CASCADE,
+  variant_text TEXT NOT NULL,
+  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compilation_cv_contradiction ON compilation_contradiction_variants(contradiction_id);
+`
   }
 ]
 
