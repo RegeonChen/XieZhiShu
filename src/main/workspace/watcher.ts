@@ -90,10 +90,10 @@ export function stopWorkspaceWatcher(): void {
   pendingPaths = new Set()
 }
 
-/** 工作区路径变更后重启监听 */
-export function restartWorkspaceWatcher(): void {
+/** 工作区路径变更后重启监听（可替换 progress 回调，确保切换工作区后增量进度仍推送到界面） */
+export function restartWorkspaceWatcher(progress?: (p: { done: number; total: number; newFiles?: number }) => void): void {
   stopWorkspaceWatcher()
-  startWorkspaceWatcher()
+  startWorkspaceWatcher(progress)
 }
 
 // ---- vitest inline test ----

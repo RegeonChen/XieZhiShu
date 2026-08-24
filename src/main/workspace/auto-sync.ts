@@ -1,8 +1,8 @@
 /**
  * auto-sync.ts —— 工作区同步统一调度器（Task 2.2.5）。
  * 职责：
- *  - 全量对账（reconcileWorkspace）的确定性触发源：窗口聚焦 / 进入资料库 / 每分钟定时 / 启动。
- *    每个触发的效果与手动点击"同步工作区"按钮完全一致（全量对账 + 进度推送）。
+ *  - 全量对账（reconcileWorkspace）的确定性触发源：窗口聚焦 / 进入资料库 / 每分钟定时 / 启动 / 设置页变更工作区。
+ *    每个触发的效果一致（全量对账 + 进度推送）；手动"同步工作区"按钮已于 2026-08-24 移除（被这些自动触发覆盖）。
  *  - 通用互斥调度 `runWorkspaceSync`：全量对账与 watcher 增量对账共用，
  *    同一时刻只跑一个对账任务，期间到达的请求排队补跑（事件不丢）。
  * 全量对账带 mtime/size 快筛，重复触发开销低。
@@ -72,7 +72,7 @@ export function runWorkspaceSync(task: () => Promise<unknown>): Promise<void> {
   })
 }
 
-/** 触发一次全量对账（效果等同手动"同步工作区"） */
+/** 触发一次全量对账（自动同步触发源统一入口：聚焦 / 进资料库 / 定时 / 设置变更 / 启动） */
 export function requestWorkspaceSync(onProgress?: (p: ReconcileProgress) => void): void {
   if (!getWorkspaceDir()) return
   runWorkspaceSync(() => reconcileWorkspace(onProgress))
@@ -161,6 +161,32 @@ if (import.meta.vitest) {
       release()
       await new Promise((r) => setTimeout(r, 50))
       expect(calls).toBe(2)
+    })
+
+    it('awaits queue drain and runs the latest queued task (manual sync contract, 2026-08-24)', async () => {
+      let firstRan = false
+      let secondRan = false
+      let release: () => void = () => {}
+      const gate = new Promise<void>((r) => {
+        release = r
+      })
+      const p1 = runWorkspaceSync(async () => {
+        firstRan = true
+        await gate
+      })
+      await new Promise((r) => setTimeout(r, 20))
+      let captured: string | null = null
+      const p2 = runWorkspaceSync(async () => {
+        secondRan = true
+        captured = 'done'
+      })
+      // 释放首发任务 → 排队中的最新任务继续执行，两个提交的 Promise 均在队列清空后 resolve
+      release()
+      await p1
+      await p2
+      expect(firstRan).toBe(true)
+      expect(secondRan).toBe(true)
+      expect(captured).toBe('done')
     })
   })
 }

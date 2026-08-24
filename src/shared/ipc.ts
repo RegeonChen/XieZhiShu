@@ -88,7 +88,6 @@ export const IPC = {
 
   /* 工作区（Phase 2.2） */
   WORKSPACE_STATUS: 'workspace:status',
-  WORKSPACE_RECONCILE: 'workspace:reconcile',
   WORKSPACE_MIGRATE: 'workspace:migrate',
   WORKSPACE_NAV_SYNC: 'workspace:navSync',
 
@@ -433,15 +432,6 @@ export interface WorkspaceStatusRes {
   legacySources: number // 传统导入（尚未迁移到工作区）的文件资料数
   totalSources: number // 资料总数
 }
-export type WorkspaceReconcileRes = {
-  workspaceDir: string | null
-  added: number
-  changed: number
-  removed: number
-  moved: number
-  errors: number
-  total: number
-}
 export type WorkspaceMigrateRes = {
   migrated: number
   failed: number
@@ -551,7 +541,6 @@ export interface IpcMapping {
   [IPC.SETTINGS_UPDATE]: { _req: SettingsUpdateReq; _res: ApiResult<AppSettings> }
   // 工作区
   [IPC.WORKSPACE_STATUS]: { _req: void; _res: ApiResult<WorkspaceStatusRes> }
-  [IPC.WORKSPACE_RECONCILE]: { _req: void; _res: ApiResult<WorkspaceReconcileRes> }
   [IPC.WORKSPACE_MIGRATE]: { _req: void; _res: ApiResult<WorkspaceMigrateRes> }
   [IPC.WORKSPACE_NAV_SYNC]: { _req: void; _res: ApiResult<void> }
 }

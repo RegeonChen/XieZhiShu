@@ -172,11 +172,7 @@ const api = {
   getWorkspaceStatus(): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.WORKSPACE_STATUS)
   },
-  /** 手动触发工作区全量对账（扫描 + 解析 + 索引） */
-  reconcileWorkspace(): Promise<ApiResult<unknown>> {
-    return ipcRenderer.invoke(IPC.WORKSPACE_RECONCILE)
-  },
-  /** 进入"资料库"功能区时自动触发一次同步（Task 2.2.5，效果等同手动"同步工作区"） */
+  /** 进入"资料库"功能区时自动触发一次同步（Task 2.2.5） */
   workspaceNavSync(): Promise<ApiResult<void>> {
     return ipcRenderer.invoke(IPC.WORKSPACE_NAV_SYNC)
   },
