@@ -1,6 +1,6 @@
 {
   "name": "xie-zhishu",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "AI 辅助志书撰写工具（Windows 桌面）——收集、整理、归纳、撰写、审校志书",
   "main": "./out/main/index.js",
   "author": "RegeonChen",
