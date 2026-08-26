@@ -9,7 +9,8 @@ import type {
   CompilationContradiction,
   CompilationContradictionStatus,
   CompilationItem,
-  CompilationStatus
+  CompilationStatus,
+  CompilationRecycleBinItem
 } from '../../shared/types'
 import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
@@ -349,6 +350,22 @@ export function updateCompilationContradictionStatus(
     chosen,
     contradictionId
   )
+  // 2026-08-25：采纳/忽略后，把整组矛盾“原封不动”快照到回收站；采纳时用 kept=0 软删除未被采纳的卡片，
+  // 以便恢复时直接改回 kept=1（不重建卡片，避免重复卡片 / 卡片数异常）。
+  const now = new Date().toISOString()
+  const binId = crypto.randomUUID()
+  db.prepare(
+    'INSERT INTO compilation_recycle_bin (id, compilation_id, contradiction_id, topic, kind, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).run(binId, row.compilation_id, contradictionId, row.topic, row.kind, status, now)
+  if (status === 'resolved' && chosenItemId) {
+    const variantItems = db
+      .prepare('SELECT item_id FROM compilation_contradiction_variants WHERE contradiction_id = ?')
+      .all(contradictionId) as { item_id: string }[]
+    const softDel = db.prepare('UPDATE compilation_items SET kept = 0 WHERE id = ?')
+    for (const v of variantItems) {
+      if (v.item_id !== chosenItemId) softDel.run(v.item_id)
+    }
+  }
   return getContradictionById(contradictionId)
 }
 
@@ -361,6 +378,43 @@ export function confirmCompilation(compilationId: string): Compilation | null {
     compilationId
   )
   return getCompilationById(compilationId)
+}
+
+/** 某汇编的回收站条目（按时间倒序） */
+export function listRecycleBinByCompilation(compilationId: string): CompilationRecycleBinItem[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM compilation_recycle_bin WHERE compilation_id = ? ORDER BY created_at DESC')
+    .all(compilationId) as { id: string; contradiction_id: string; topic: string; kind: string; status: string; created_at: string }[]
+  const out: CompilationRecycleBinItem[] = []
+  for (const r of rows) {
+    const contradiction = getContradictionById(r.contradiction_id)
+    if (!contradiction) continue
+    out.push({
+      id: r.id,
+      compilationId,
+      contradictionId: r.contradiction_id,
+      topic: r.topic,
+      kind: contradiction.kind,
+      status: r.status === 'resolved' ? 'resolved' : 'ignored',
+      createdAt: r.created_at,
+      contradiction
+    })
+  }
+  return out
+}
+
+/** 从回收站恢复某组矛盾：所有 variant 卡片改回 kept=1，矛盾状态回到 pending，并删除回收站条目 */
+export function restoreRecycleBinContradiction(binId: string): CompilationContradiction | null {
+  const db = getDb()
+  const row = db
+    .prepare('SELECT * FROM compilation_recycle_bin WHERE id = ?')
+    .get(binId) as { id: string; contradiction_id: string } | undefined
+  if (!row) return null
+  db.prepare('UPDATE compilation_items SET kept = 1 WHERE id IN (SELECT item_id FROM compilation_contradiction_variants WHERE contradiction_id = ?)').run(row.contradiction_id)
+  db.prepare("UPDATE compilation_contradictions SET status = 'pending', chosen_item_id = NULL WHERE id = ?").run(row.contradiction_id)
+  db.prepare('DELETE FROM compilation_recycle_bin WHERE id = ?').run(binId)
+  return getContradictionById(row.contradiction_id)
 }
 
 // ---- vitest inline test ----
@@ -451,6 +505,42 @@ if (import.meta.vitest) {
       const ignored = updateCompilationContradictionStatus(g.id, 'ignored')!
       expect(ignored.status).toBe('ignored')
       expect(ignored.chosenItemId).toBeUndefined()
+    })
+    it('resolving soft-deletes non-chosen cards and pushes to recycle bin; restore reverses (2026-08-25)', () => {
+      const { taskId, sourceIds } = seed()
+      const c = createCompilation({ taskId, title: '汇编' })
+      const items = insertCompilationItems(c.id, [
+        { sourceId: sourceIds[0], excerpt: '公办园 76 所', ts: '2021 年' },
+        { sourceId: sourceIds[1], excerpt: '公办园 82 所', ts: '2021 年' },
+        { sourceId: sourceIds[1], excerpt: '无关卡片', ts: '2000 年' }
+      ])
+      const g = insertCompilationContradictions(c.id, [
+        {
+          topic: '2021 年公办园数量',
+          kind: 'data',
+          variants: [
+            { itemId: items[0].id, variantText: '公办园 76 所', sourceId: sourceIds[0] },
+            { itemId: items[1].id, variantText: '公办园 82 所', sourceId: sourceIds[1] }
+          ]
+        }
+      ])[0]
+      const resolved = updateCompilationContradictionStatus(g.id, 'resolved', items[1].id)!
+      expect(resolved.status).toBe('resolved')
+      const after = getCompilationById(c.id)!
+      const byId = new Map(after.items.map((it) => [it.id, it]))
+      expect(byId.get(items[1].id)!.kept).toBe(true)
+      expect(byId.get(items[0].id)!.kept).toBe(false)
+      expect(byId.get(items[2].id)!.kept).toBe(true)
+      expect(getContradictionById(g.id)!.variants).toHaveLength(2)
+      const bin = listRecycleBinByCompilation(c.id)
+      expect(bin).toHaveLength(1)
+      expect(bin[0].topic).toBe('2021 年公办园数量')
+      const restored = restoreRecycleBinContradiction(bin[0].id)!
+      expect(restored.status).toBe('pending')
+      expect(restored.chosenItemId).toBeUndefined()
+      const after2 = getCompilationById(c.id)!
+      expect(after2.items.every((it) => it.kept)).toBe(true)
+      expect(after2.items).toHaveLength(3)
     })
 
     it('cascades compilation data on task delete and confirm marks finalized', () => {

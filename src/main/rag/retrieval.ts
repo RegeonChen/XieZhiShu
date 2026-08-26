@@ -96,6 +96,25 @@ export function chunkText(text: string): Chunk[] {
   return chunks
 }
 
+/**
+ * 按原始换行划分的粗粒度段落块（Phase 6.1 资料汇编用）：
+ * 不再按句/字数做二次切分，避免把一句话从中间截断；超长整段直接保留为一块，
+ * 由 AI 细读时再按时间/事实/条目等做更细的切分。仅剔除标题行。
+ */
+export function chunkParagraphs(text: string): Chunk[] {
+  const paras = text
+    .split(/\r?\n+/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+  const chunks: Chunk[] = []
+  paras.forEach((p, i) => {
+    const pos = `第${i + 1}段`
+    if (isTitleLikeLine(p)) return
+    chunks.push({ text: p, position: pos })
+  })
+  return chunks
+}
+
 /** 字符 bigram（中文无需分词，用相邻字符对近似文本相似度） */
 export function bigrams(s: string): string[] {
   const chars = Array.from(s.replace(/\s+/g, ''))
@@ -223,6 +242,17 @@ if (import.meta.vitest) {
       expect(chunks[0].text).toContain('第一段')
       expect(chunks[0].position).toBe('第1段')
       expect(chunks.length).toBeGreaterThanOrEqual(2)
+    })
+
+    it('chunkParagraphs keeps whole original paragraphs without splitting sentences (Phase 6.1)', () => {
+      const paras = ['第一段完整的一句话，很长很长也不截断。', '教育', '', '第二段也完整，包含超过 500 字的连续文字。' + '何况这是一句。'.repeat(300)]
+      const chunks = chunkParagraphs(paras.join('\n'))
+      // 跳过标题行
+      expect(chunks.some((c) => c.text === '教育')).toBe(false)
+      // 原始段落作为一整块返回，不按句/字数截断
+      expect(chunks.some((c) => c.text.startsWith('第一段完整的一句话'))).toBe(true)
+      expect(chunks.some((c) => c.text.endsWith('何况这是一句。'))).toBe(true)
+      expect(chunks.some((c) => c.position.includes('片段'))).toBe(false)
     })
 
     it('keeps all lexically related paragraphs and drops definitely-unrelated ones (Task 3.4.7)', () => {

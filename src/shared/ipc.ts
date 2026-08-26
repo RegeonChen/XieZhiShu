@@ -8,6 +8,7 @@ import type {
   Compilation,
   CompilationContradiction,
   CompilationItem,
+  CompilationRecycleBinItem,
   Contradiction,
   Draft,
   LlmProviderConfig,
@@ -64,14 +65,14 @@ export const IPC = {
   COMPILATION_RESOLVE_CONTRADICTION: 'compilation:resolveContradiction',
   COMPILATION_CONFIRM: 'compilation:confirm',
   COMPILATION_REGENERATE: 'compilation:regenerate',
+  COMPILATION_RECYCLE_BIN_LIST: 'compilation:recycleBin:list',
+  COMPILATION_RECYCLE_BIN_RESTORE: 'compilation:recycleBin:restore',
 
   /* 撰写与初稿 */
   WRITING_CREATE_TASK: 'writing:createTask',
   WRITING_LIST_TASKS: 'writing:listTasks',
   WRITING_DELETE_TASK: 'writing:deleteTask',
   WRITING_RENAME_TASK: 'writing:renameTask',
-  WRITING_UPDATE_SKILLS: 'writing:updateSkills',
-  WRITING_SUGGEST_SKILLS: 'writing:suggestSkills',
   WRITING_UPDATE_PROVIDER: 'writing:updateProvider',
   WRITING_CHAT: 'writing:chat',
   WRITING_RETRIEVE: 'writing:retrieve',
@@ -139,7 +140,9 @@ export const IPC_EVENTS = {
   /** 工作区对账进度（含完成事件 finished 与最终计数），主进程推送到所有渲染窗口 */
   WORKSPACE_PROGRESS: 'workspace:progress',
   /** 生成初稿/自由对话的流式增量文本：{ taskId, text }（2026-08-19，供聊天面板实时显示） */
-  WRITING_STREAM_DELTA: 'writing:streamDelta'
+  WRITING_STREAM_DELTA: 'writing:streamDelta',
+  /** 资料汇编生成进度：{ taskId, stage, percent, etaSeconds?, candidateChunks?, candidateSources? }（Phase 6.1） */
+  COMPILATION_PROGRESS: 'compilation:progress'
 } as const
 
 // ============================================================
@@ -307,6 +310,16 @@ export interface CompilationConfirmReq {
 }
 export type CompilationConfirmRes = { compilation: Compilation }
 
+export interface CompilationRecycleBinListReq {
+  compilationId: string
+}
+export type CompilationRecycleBinListRes = { items: CompilationRecycleBinItem[] }
+
+export interface CompilationRecycleBinRestoreReq {
+  binId: string
+}
+export type CompilationRecycleBinRestoreRes = { contradiction: CompilationContradiction }
+
 // -- 撰写与初稿 --
 export interface WritingCreateTaskReq {
   /** 中栏显示的任务标题；缺省为"新建任务"（Phase 3.5 起点击"新建任务"立即创建） */
@@ -329,20 +342,6 @@ export interface WritingRenameTaskReq {
   title: string
 }
 export type WritingRenameTaskRes = { task: WritingTask }
-
-export interface WritingUpdateSkillsReq {
-  taskId: string
-  skillIds: string[] | null // null = 未手动选定（生成时按标题自动匹配）
-}
-export type WritingUpdateSkillsRes = { task: WritingTask }
-
-/** 智能匹配写作规范（2026-08-14）：单独请求大模型，依据用户需求从部类细则中挑选匹配的 skills */
-export interface WritingSuggestSkillsReq {
-  taskId: string
-  /** 用户需求文本（撰写要求 / 文章标题） */
-  need: string
-}
-export type WritingSuggestSkillsRes = { skillIds: string[] }
 
 export interface WritingUpdateProviderReq {
   taskId: string
@@ -403,6 +402,8 @@ export interface WritingGenerateDraftReq {
   taskId: string
   /** 用户要求（应包含标题与可能的其他要求）；大模型缺必要信息时返回详细报错 */
   instruction: string
+  /** Phase 6.3：使用已确认的资料汇编作为材料（缺省走旧检索链路） */
+  compilationId?: string
 }
 export type WritingGenerateDraftRes = {
   draft: Draft
@@ -576,13 +577,13 @@ export interface IpcMapping {
   [IPC.COMPILATION_RESOLVE_CONTRADICTION]: { _req: CompilationResolveContradictionReq; _res: ApiResult<CompilationResolveContradictionRes> }
   [IPC.COMPILATION_CONFIRM]: { _req: CompilationConfirmReq; _res: ApiResult<CompilationConfirmRes> }
   [IPC.COMPILATION_REGENERATE]: { _req: CompilationRegenerateReq; _res: ApiResult<CompilationRegenerateRes> }
+  [IPC.COMPILATION_RECYCLE_BIN_LIST]: { _req: CompilationRecycleBinListReq; _res: ApiResult<CompilationRecycleBinListRes> }
+  [IPC.COMPILATION_RECYCLE_BIN_RESTORE]: { _req: CompilationRecycleBinRestoreReq; _res: ApiResult<CompilationRecycleBinRestoreRes> }
   // 撰写
   [IPC.WRITING_CREATE_TASK]: { _req: WritingCreateTaskReq; _res: ApiResult<WritingCreateTaskRes> }
   [IPC.WRITING_LIST_TASKS]: { _req: void; _res: ApiResult<WritingListTasksRes> }
   [IPC.WRITING_DELETE_TASK]: { _req: WritingDeleteTaskReq; _res: ApiResult<void> }
   [IPC.WRITING_RENAME_TASK]: { _req: WritingRenameTaskReq; _res: ApiResult<WritingRenameTaskRes> }
-  [IPC.WRITING_UPDATE_SKILLS]: { _req: WritingUpdateSkillsReq; _res: ApiResult<WritingUpdateSkillsRes> }
-  [IPC.WRITING_SUGGEST_SKILLS]: { _req: WritingSuggestSkillsReq; _res: ApiResult<WritingSuggestSkillsRes> }
   [IPC.WRITING_UPDATE_PROVIDER]: { _req: WritingUpdateProviderReq; _res: ApiResult<WritingUpdateProviderRes> }
   [IPC.WRITING_CHAT]: { _req: WritingChatReq; _res: ApiResult<WritingChatRes> }
   [IPC.TASK_MESSAGES_LIST]: { _req: TaskMessagesListReq; _res: ApiResult<TaskMessagesListRes> }

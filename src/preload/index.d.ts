@@ -43,6 +43,8 @@ export interface AppApi {
   deleteCompilationItem(itemId: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   resolveCompilationContradiction(contradictionId: string, action: 'resolve' | 'ignore', chosenItemId?: string): Promise<{ ok: boolean; data?: { contradiction: unknown }; error?: { code: string; message: string } }>
   confirmCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
+  listCompilationRecycleBin(compilationId: string): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
+  restoreCompilationRecycleBin(binId: string): Promise<{ ok: boolean; data?: { contradiction: unknown }; error?: { code: string; message: string } }>
   getSource(id: string): Promise<{ ok: boolean; data?: { source: unknown; tags: unknown[] }; error?: { code: string; message: string } }>
   renderSourceHtml(id: string): Promise<{ ok: boolean; data?: { html: string }; error?: { code: string; message: string } }>
   getSourceFileUrl(id: string): Promise<{ ok: boolean; data?: { url: string }; error?: { code: string; message: string } }>
@@ -65,18 +67,17 @@ export interface AppApi {
   listTasks(): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   deleteTask(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   renameTask(taskId: string, title: string): Promise<{ ok: boolean; data?: { task: unknown }; error?: { code: string; message: string } }>
-  updateTaskSkills(taskId: string, skillIds: string[] | null): Promise<{ ok: boolean; data?: { task: unknown }; error?: { code: string; message: string } }>
-  suggestSkills(taskId: string, need: string): Promise<{ ok: boolean; data?: { skillIds: string[] }; error?: { code: string; message: string } }>
   updateTaskProvider(taskId: string, llmProviderId: string | null): Promise<{ ok: boolean; data?: { task: unknown }; error?: { code: string; message: string } }>
   chatWithTask(taskId: string, message: string, history?: { role: 'user' | 'assistant'; content: string }[]): Promise<{ ok: boolean; data?: { reply: string }; error?: { code: string; message: string } }>
   listTaskMessages(taskId: string): Promise<{ ok: boolean; data?: { items: { id: string; taskId: string; role: 'user' | 'assistant'; kind: 'chat' | 'instruction' | 'notice'; content: string; createdAt: string }[] }; error?: { code: string; message: string } }>
   addTaskMessage(taskId: string, role: 'user' | 'assistant', content: string, kind: 'chat' | 'instruction' | 'notice'): Promise<{ ok: boolean; data?: { message: unknown }; error?: { code: string; message: string } }>
   onDraftGenerateProgress(cb: (p: { taskId: string; stage: string; percent: number; etaSeconds?: number }) => void): () => void
+  onCompilationProgress(cb: (p: { taskId: string; stage: string; percent: number; etaSeconds?: number; candidateChunks?: number; candidateSources?: number }) => void): () => void
   onWritingStreamDelta(cb: (p: { taskId: string; text: string }) => void): () => void
   retrieveChunks(taskId: string): Promise<{ ok: boolean; data?: { chunks: unknown[] }; error?: { code: string; message: string } }>
   askSource(taskId: string, selection: string): Promise<{ ok: boolean; data?: { reply: string; refs: { index: number; sourceId: string; title: string; position?: string }[] }; error?: { code: string; message: string } }>
-  generateDraft(taskId: string, instruction: string): Promise<{ ok: boolean; data?: { draft: unknown; articleTitle: string | null; contradictions: unknown[] }; error?: { code: string; message: string } }>
-  regenerateDraft(taskId: string, instruction: string): Promise<{ ok: boolean; data?: { draft: unknown; articleTitle: string | null; contradictions: unknown[] }; error?: { code: string; message: string } }>
+  generateDraft(taskId: string, instruction: string, compilationId?: string): Promise<{ ok: boolean; data?: { draft: unknown; articleTitle: string | null; contradictions: unknown[] }; error?: { code: string; message: string } }>
+  regenerateDraft(taskId: string, instruction: string, compilationId?: string): Promise<{ ok: boolean; data?: { draft: unknown; articleTitle: string | null; contradictions: unknown[] }; error?: { code: string; message: string } }>
   getDraft(draftId: string): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   updateDraftContent(draftId: string, markdown: string): Promise<{ ok: boolean; data?: { draft: unknown }; error?: { code: string; message: string } }>
   getDraftContradictions(draftId: string): Promise<{ ok: boolean; data?: { contradictions: unknown[] }; error?: { code: string; message: string } }>

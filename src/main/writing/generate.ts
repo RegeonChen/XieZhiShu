@@ -9,12 +9,13 @@ import { ErrorCodes } from '../../shared/types'
 import { getTaskById, resolveScopeSourceIds, getAllSourceIds, updateTaskArticleTitle, updateTaskInstruction } from '../db/tasks'
 import { getDraftRowByVersion, createDraft, addSegment, getDraftById, deleteDraftByVersion } from '../db/drafts'
 import { insertContradictions, getContradictionsByDraft, updateContradictionQuote, updateVariantReplacement } from '../db/contradictions'
+import { getCompilationById } from '../db/compilations'
 import { saveDraftGenerationContext } from '../db/draft-context'
 import { getDb } from '../db/connection'
 import { addTaskMessage } from '../db/task-messages'
 import { getSettings } from '../db/settings'
 import { getSourceIdsByTag } from '../db/tags'
-import { listGeneralSkills, matchSectionSkills, getSkillById, listSectionSkills } from '../db/writing-skills'
+import { listGeneralSkills, matchSectionSkills, getSkillById } from '../db/writing-skills'
 import { getProviderSecret } from '../llm/provider-store'
 import { safeStorageCodec } from '../llm/secret'
 import { chatCompletion, createJsonFieldStreamer, type ChatMessage } from '../llm/chat'
@@ -37,9 +38,6 @@ const CONTRADICTION_SCAN_TIMEOUT_MS = 600000
 
 /** 矛盾定位审查超时（Phase 3.7 Task 3.7.2：携带材料 + 初稿 + 矛盾清单） */
 const CONTRADICTION_LOCATE_TIMEOUT_MS = 600000
-
-/** 智能匹配写作规范超时（2026-08-14：提交 skills 清单 + 用户需求，量级较小但需解析 JSON） */
-const SUGGEST_SKILLS_TIMEOUT_MS = 120000
 
 /**
  * 矛盾扫描/定位的确定性采样温度阶梯（2026-08-11）：大模型默认采样温度下，
@@ -774,7 +772,9 @@ export async function generateDraft(
   instruction: string,
   onProgress?: (stage: string, percent: number, etaSeconds?: number) => void,
   /** 流式输出：正文 content 的增量文本（2026-08-19，供前端实时显示） */
-  onDelta?: (text: string) => void
+  onDelta?: (text: string) => void,
+  /** Phase 6.3：使用已确认的资料汇编作为材料（缺省走旧检索链路） */
+  compilationId?: string
 ): Promise<GenerateResult> {
   const task = getTaskById(taskId)
   if (!task) return fail(ErrorCodes.TASK_NOT_FOUND, '撰写任务不存在')
@@ -791,6 +791,62 @@ export async function generateDraft(
   if (existing) {
     const draft = getDraftById(existing.id)
     if (draft) return { ok: true, draft, articleTitle: task.articleTitle ?? null, contradictions: getContradictionsByDraft(existing.id) }
+  }
+
+  // Phase 6.3：已确认资料汇编路径——材料仅取汇编卡片，不再检索/摘要/网页抓取/矛盾扫描
+  if (compilationId) {
+    const compilation = getCompilationById(compilationId)
+    if (!compilation) return fail(ErrorCodes.INVALID_PARAM, '资料汇编不存在')
+    if (compilation.status !== 'finalized') return fail(ErrorCodes.INVALID_PARAM, '资料汇编尚未确认，请先在第一步确认汇编')
+
+    updateTaskInstruction(taskId, inst)
+    addTaskMessage(taskId, 'user', inst, 'instruction')
+
+    const chunks: RetrievedChunk[] = compilation.items
+      .filter((it) => it.kept)
+      .map((it) => ({
+        sourceId: it.sourceId,
+        sourceTitle: it.sourceTitle ?? it.sourceId,
+        position: it.note ?? '',
+        text: it.excerpt,
+        score: 0
+      }))
+    if (chunks.length === 0) return fail(ErrorCodes.LLM_NO_CANDIDATES, '资料汇编中没有可用的资料卡片')
+
+    const { general: generalSkills, section: sectionSkills } = resolveTaskSkills(task)
+    const messages: ChatMessage[] = [
+      { role: 'system', content: buildSystemPrompt(undefined, generalSkills) },
+      { role: 'user', content: buildUserPrompt(inst, chunks, sectionSkills) }
+    ]
+
+    onProgress?.('正在基于已确认汇编生成初稿…', GENERATE_PROGRESS.generateFrom, estimateLlmSeconds('generate', 180))
+    const contentStreamer = onDelta ? createJsonFieldStreamer('content') : null
+    const result = await chatCompletion(prov.provider, messages, DRAFT_GENERATE_TIMEOUT_MS, { kind: 'generate', taskId }, {
+      maxRetries: 2,
+      onDelta: contentStreamer ? (delta) => onDelta?.(contentStreamer.feed(delta)) : undefined
+    })
+    if (!result.ok) {
+      addTaskMessage(taskId, 'assistant', '生成失败：' + result.error.message, 'notice')
+      return { ok: false, error: result.error }
+    }
+    const parsed = parseGenerateOutput(result.text)
+    if (!parsed) {
+      addTaskMessage(taskId, 'assistant', '生成失败：模型输出无法解析为「标题 + 正文」结构，请重试', 'notice')
+      return fail(ErrorCodes.LLM_FORMAT_INVALID, '模型输出无法解析为「标题 + 正文」结构，请重试')
+    }
+    if ('error' in parsed) {
+      addTaskMessage(taskId, 'assistant', '生成失败：' + parsed.error, 'notice')
+      return fail(ErrorCodes.LLM_FORMAT_INVALID, parsed.error)
+    }
+    const draft = createDraft(taskId, 0)
+    saveDraftGenerationContext(draft.id, chunks)
+    addSegment({ draftId: draft.id, ordering: 0, content: parsed.content, aiGenerated: true })
+    updateTaskArticleTitle(taskId, parsed.title)
+    addTaskMessage(taskId, 'assistant', '初稿《' + parsed.title + '》已生成。', 'notice')
+    const saved = getDraftById(draft.id)
+    if (!saved) return fail(ErrorCodes.INTERNAL_ERROR, '初稿保存失败')
+    onProgress?.('初稿生成完成', GENERATE_PROGRESS.done, 0)
+    return { ok: true, draft: saved, articleTitle: parsed.title, contradictions: [] }
   }
 
   let scopeIds = resolveScopeSourceIds(task, { getSourceIdsByTag, getAllSourceIds })
@@ -930,10 +986,12 @@ export async function regenerateDraft(
   taskId: string,
   instruction: string,
   onProgress?: (stage: string, percent: number, etaSeconds?: number) => void,
-  onDelta?: (text: string) => void
+  onDelta?: (text: string) => void,
+  /** Phase 6.3：使用已确认的资料汇编作为材料（缺省走旧检索链路） */
+  compilationId?: string
 ): Promise<GenerateResult> {
   deleteDraftByVersion(taskId, 0)
-  return generateDraft(taskId, instruction, onProgress, onDelta)
+  return generateDraft(taskId, instruction, onProgress, onDelta, compilationId)
 }
 
 /** 任务当前最新一稿的正文文本（用于对话上下文；无初稿返回空串） */
@@ -1000,103 +1058,6 @@ export async function chatWithTask(
   }
   addTaskMessage(taskId, 'assistant', result.text.trim(), 'chat')
   return { ok: true, reply: result.text.trim() }
-}
-
-/**
- * 智能匹配写作规范（2026-08-14）：单独请求大模型，依据用户需求从全部部类细则中挑选匹配的 skills。
- * 找不到匹配时返回空数组（调用方按"未手动选定、生成时自动匹配"处理）。失败同样返回空数组 + 错误提示，
- * 由调用方决定是否降级为自动匹配。
- */
-export async function suggestSkillsForTask(
-  taskId: string,
-  need: string
-): Promise<{ ok: true; skillIds: string[] } | { ok: false; error: { code: string; message: string } }> {
-  const task = getTaskById(taskId)
-  if (!task) return { ok: false, error: { code: ErrorCodes.TASK_NOT_FOUND, message: '撰写任务不存在' } }
-  if (!need.trim()) return { ok: false, error: { code: ErrorCodes.INVALID_PARAM, message: '缺少用于匹配的用户需求' } }
-
-  const sections = listSectionSkills()
-  if (sections.length === 0) return { ok: true, skillIds: [] }
-
-  const prov = resolveTaskProvider(task)
-  if (!prov.ok) return prov
-
-  const catalog = sections
-    .map(
-      (s, i) =>
-        `${i + 1}. id="${s.id}" 名称="${s.name}" 关键词="${s.tags.join('、')}"\n内容摘要：${s.content.slice(0, 160)}`
-    )
-    .join('\n')
-
-  const messages: ChatMessage[] = [
-    {
-      role: 'system',
-      content: [
-        '你是一名地方志书撰稿规范匹配助手。',
-        '下面会给出一个「规范目录」（每项含 id、名称、关键词、内容摘要）和用户的「撰写需求」。',
-        '请从目录中选出与用户需求最匹配的部类细则规范（可以多项，也可以为 0 项）。',
-        '只根据名称/关键词/内容摘要与撰写需求的语义相关性判断，宁缺毋滥：不相关就不要选。',
-        '',
-        '输出要求：只输出一个 JSON 对象，不得输出 JSON 之外的任何文字、解释或代码块围栏。',
-        '输出格式：{"skillIds": ["匹配项的 id", "另一匹配项的 id"]}',
-        '无匹配输出：{"skillIds": []}'
-      ].join('\n')
-    },
-    {
-      role: 'user',
-      content: ['【规范目录】', catalog, '', '【撰写需求】', need.trim()].join('\n')
-    }
-  ]
-
-  const result = await chatCompletion(prov.provider, messages, SUGGEST_SKILLS_TIMEOUT_MS, { kind: 'suggest-skills', taskId }, { temperature: 0, maxRetries: 1 })
-  if (!result.ok) return { ok: false, error: result.error }
-
-  const parsed = parseSuggestSkillsOutput(result.text)
-  if (!parsed) {
-    return { ok: false, error: { code: ErrorCodes.LLM_FORMAT_INVALID, message: '智能匹配结果无法解析，请重试' } }
-  }
-
-  const validIds = new Set(sections.map((s) => s.id))
-  const skillIds = [...new Set(parsed.filter((id) => validIds.has(id)))]
-  return { ok: true, skillIds }
-}
-
-/** 解析智能匹配输出：`{ skillIds: [...] }` 或直接数组；无法解析返回 null */
-function parseSuggestSkillsOutput(text: string): string[] | null {
-  const trimmed = text.trim()
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/)
-  const candidate = fenced ? fenced[1].trim() : trimmed
-  let raw: unknown = null
-  try {
-    raw = JSON.parse(candidate)
-  } catch {
-    const start = candidate.indexOf('{')
-    const end = candidate.lastIndexOf('}')
-    if (start >= 0 && end > start) {
-      try {
-        raw = JSON.parse(candidate.slice(start, end + 1))
-      } catch {
-        // 再尝试解析为纯数组
-        const s = candidate.indexOf('[')
-        const e = candidate.lastIndexOf(']')
-        if (s >= 0 && e > s) {
-          try {
-            raw = JSON.parse(candidate.slice(s, e + 1))
-          } catch {
-            raw = null
-          }
-        }
-      }
-    }
-  }
-  if (Array.isArray(raw)) {
-    return raw.filter((x): x is string => typeof x === 'string')
-  }
-  if (raw && typeof raw === 'object') {
-    const ids = (raw as { skillIds?: unknown }).skillIds
-    if (Array.isArray(ids)) return ids.filter((x): x is string => typeof x === 'string')
-  }
-  return null
 }
 
 /** 任务范围内的检索预览（writing:retrieve，供界面展示与验收） */

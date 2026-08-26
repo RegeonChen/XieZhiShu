@@ -9,10 +9,6 @@ import {
   type WritingCreateTaskReq,
   type WritingRenameTaskReq,
   type WritingRenameTaskRes,
-  type WritingUpdateSkillsReq,
-  type WritingUpdateSkillsRes,
-  type WritingSuggestSkillsReq,
-  type WritingSuggestSkillsRes,
   type WritingUpdateProviderReq,
   type WritingUpdateProviderRes,
   type WritingChatReq,
@@ -45,7 +41,11 @@ import {
   type CompilationConfirmReq,
   type CompilationConfirmRes,
   type CompilationRegenerateReq,
-  type CompilationRegenerateRes
+  type CompilationRegenerateRes,
+  type CompilationRecycleBinListReq,
+  type CompilationRecycleBinListRes,
+  type CompilationRecycleBinRestoreReq,
+  type CompilationRecycleBinRestoreRes
 } from '../shared/ipc'
 import type { ApiResult, Source, Tag, LlmProviderConfig, AppSettings, WritingTask, Draft, RetrievedChunk } from '../shared/types'
 import { getDb } from './db/connection'
@@ -60,7 +60,7 @@ import { safeStorageCodec } from './llm/secret'
 import { listProviders, saveProvider, deleteProvider } from './llm/provider-store'
 import { testProviderConnection } from './llm/test'
 import { getSettings, updateSettings } from './db/settings'
-import { createTask as createWritingTask, listTasks as listWritingTasks, getTaskById, deleteTask as deleteWritingTask, updateTaskSkillIds, renameTask, updateTaskProvider } from './db/tasks'
+import { createTask as createWritingTask, listTasks as listWritingTasks, getTaskById, deleteTask as deleteWritingTask, renameTask, updateTaskProvider, updateTaskInstruction } from './db/tasks'
 import { getDraftById, getLatestDraftByTask, updateSegmentContent, replaceDraftSegments } from './db/drafts'
 import { getContradictionsByDraft, updateContradictionStatus } from './db/contradictions'
 import {
@@ -69,10 +69,13 @@ import {
   updateCompilationItem,
   deleteCompilationItem,
   updateCompilationContradictionStatus,
-  confirmCompilation
+  confirmCompilation,
+  listRecycleBinByCompilation,
+  restoreRecycleBinContradiction
 } from './db/compilations'
+import { generateCompilation } from './writing/compilation-service'
 import { listTaskMessages, addTaskMessage } from './db/task-messages'
-import { generateDraft, regenerateDraft, retrieveForTask, chatWithTask, suggestSkillsForTask } from './writing/generate'
+import { generateDraft, regenerateDraft, retrieveForTask, chatWithTask } from './writing/generate'
 import { applyContradictionEdit } from './writing/contradiction-apply'
 import { askSourceForTask } from './writing/source-query'
 import { configureEmbedModel, stopEmbedWorker } from './rag/embed'
@@ -487,9 +490,24 @@ handleLogged(IPC.COMPILATION_GET, (_event, params: CompilationGetReq): ApiResult
   }
 })
 
-// 生成资料汇编的 AI 服务将在 Phase 6.1 实现；此处先提供契约通道，明确未实现错误。
-handleLogged(IPC.COMPILATION_GENERATE, async (_event, _params: CompilationGenerateReq): Promise<ApiResult<CompilationGenerateRes>> => {
-  return { ok: false, error: { code: 'INTERNAL_ERROR', message: '资料汇编生成将在 Phase 6.1 实现' } }
+// 生成资料汇编（Phase 6.1：本地宽召回宁多勿漏 + AI 细读 + 矛盾标注；无 Provider/失败降级本地候选）
+handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerateReq): Promise<ApiResult<CompilationGenerateRes>> => {
+  // 持久化用户撰写要求（供对话历史 / 重新生成汇编使用）
+  const inst = params.title.trim()
+  if (inst) {
+    updateTaskInstruction(params.taskId, inst)
+    addTaskMessage(params.taskId, 'user', inst, 'instruction')
+  }
+  const onProgress = (p: { stage: string; percent: number; etaSeconds?: number; candidateChunks?: number; candidateSources?: number }): void => {
+    if (!event.sender.isDestroyed()) {
+      event.sender.send(IPC_EVENTS.COMPILATION_PROGRESS, { taskId: params.taskId, ...p })
+    }
+  }
+  const res = await generateCompilation(params.taskId, params.title, onProgress)
+  if (!res.ok) return { ok: false, error: res.error }
+  const compilation = getCompilationById(res.compilationId)
+  if (!compilation) return { ok: false, error: { code: 'INTERNAL_ERROR', message: '资料汇编落库失败' } }
+  return { ok: true, data: { compilation } }
 })
 
 handleLogged(IPC.COMPILATION_UPDATE_ITEM, (_event, params: CompilationUpdateItemReq): ApiResult<CompilationUpdateItemRes> => {
@@ -543,8 +561,41 @@ handleLogged(IPC.COMPILATION_CONFIRM, (_event, params: CompilationConfirmReq): A
   }
 })
 
-handleLogged(IPC.COMPILATION_REGENERATE, async (_event, _params: CompilationRegenerateReq): Promise<ApiResult<CompilationRegenerateRes>> => {
-  return { ok: false, error: { code: 'INTERNAL_ERROR', message: '资料汇编重新生成将在 Phase 6.1 实现' } }
+handleLogged(IPC.COMPILATION_REGENERATE, async (event, params: CompilationRegenerateReq): Promise<ApiResult<CompilationRegenerateRes>> => {
+  // 持久化用户撰写要求（供对话历史 / 重新生成汇编使用）
+  const inst = params.title.trim()
+  if (inst) {
+    updateTaskInstruction(params.taskId, inst)
+    addTaskMessage(params.taskId, 'user', inst, 'instruction')
+  }
+  const onProgress = (p: { stage: string; percent: number; etaSeconds?: number; candidateChunks?: number; candidateSources?: number }): void => {
+    if (!event.sender.isDestroyed()) {
+      event.sender.send(IPC_EVENTS.COMPILATION_PROGRESS, { taskId: params.taskId, ...p })
+    }
+  }
+  const res = await generateCompilation(params.taskId, params.title, onProgress)
+  if (!res.ok) return { ok: false, error: res.error }
+  const compilation = getCompilationById(res.compilationId)
+  if (!compilation) return { ok: false, error: { code: 'INTERNAL_ERROR', message: '资料汇编落库失败' } }
+  return { ok: true, data: { compilation } }
+})
+
+handleLogged(IPC.COMPILATION_RECYCLE_BIN_LIST, (_event, params: CompilationRecycleBinListReq): ApiResult<CompilationRecycleBinListRes> => {
+  try {
+    return { ok: true, data: { items: listRecycleBinByCompilation(params.compilationId) } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.COMPILATION_RECYCLE_BIN_RESTORE, (_event, params: CompilationRecycleBinRestoreReq): ApiResult<CompilationRecycleBinRestoreRes> => {
+  try {
+    const contradiction = restoreRecycleBinContradiction(params.binId)
+    if (!contradiction) return { ok: false, error: { code: 'INVALID_PARAM', message: '回收站条目不存在' } }
+    return { ok: true, data: { contradiction } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
 })
 
 // 文件选择对话框（安全：在 main 进程打开，仅返回路径给 renderer）
@@ -904,24 +955,6 @@ handleLogged(IPC.WRITING_RENAME_TASK, (_event, params: WritingRenameTaskReq): Ap
   }
 })
 
-// 2026-08-13：更新任务选定的部类细则规范 skill（null = 未手动选定，生成时自动匹配）
-handleLogged(IPC.WRITING_UPDATE_SKILLS, (_event, params: WritingUpdateSkillsReq): ApiResult<WritingUpdateSkillsRes> => {
-  try {
-    const task = updateTaskSkillIds(params.taskId, params.skillIds)
-    if (!task) return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '撰写任务不存在' } }
-    return { ok: true, data: { task } }
-  } catch (err) {
-    return { ok: false, error: { code: 'INVALID_PARAM', message: String(err) } }
-  }
-})
-
-// 2026-08-14：智能匹配写作规范（单独请求大模型，依据用户需求挑选部类细则 skills）
-handleLogged(IPC.WRITING_SUGGEST_SKILLS, async (_event, params: WritingSuggestSkillsReq): Promise<ApiResult<WritingSuggestSkillsRes>> => {
-  const result = await suggestSkillsForTask(params.taskId, params.need)
-  if (result.ok) return { ok: true, data: { skillIds: result.skillIds } }
-  return { ok: false, error: result.error }
-})
-
 // Phase 3.5：更新任务固定使用的大模型（null = 回退全局当前 Provider）
 handleLogged(IPC.WRITING_UPDATE_PROVIDER, (_event, params: WritingUpdateProviderReq): ApiResult<WritingUpdateProviderRes> => {
   try {
@@ -1000,7 +1033,7 @@ handleLogged(IPC.WRITING_GENERATE_DRAFT, async (event, params: WritingGenerateDr
       event.sender.send(IPC_EVENTS.WRITING_STREAM_DELTA, { taskId: params.taskId, text })
     }
   }
-  const result = await generateDraft(params.taskId, params.instruction, onProgress, onDelta)
+  const result = await generateDraft(params.taskId, params.instruction, onProgress, onDelta, params.compilationId)
   if (result.ok) return { ok: true, data: { draft: result.draft, articleTitle: result.articleTitle, contradictions: result.contradictions } }
   return { ok: false, error: result.error }
 })
@@ -1017,7 +1050,7 @@ handleLogged(IPC.DRAFT_REGENERATE, async (event, params: DraftRegenerateReq): Pr
       event.sender.send(IPC_EVENTS.WRITING_STREAM_DELTA, { taskId: params.taskId, text })
     }
   }
-  const result = await regenerateDraft(params.taskId, params.instruction, onProgress, onDelta)
+  const result = await regenerateDraft(params.taskId, params.instruction, onProgress, onDelta, params.compilationId)
   if (result.ok) return { ok: true, data: { draft: result.draft, articleTitle: result.articleTitle, contradictions: result.contradictions } }
   return { ok: false, error: result.error }
 })

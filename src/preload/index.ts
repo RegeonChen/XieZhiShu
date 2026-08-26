@@ -178,6 +178,14 @@ const api = {
   confirmCompilation(compilationId: string): Promise<ApiResult<{ compilation: unknown }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_CONFIRM, { compilationId })
   },
+  /** 列出某汇编的回收站条目（被采纳/忽略的矛盾，可恢复） */
+  listCompilationRecycleBin(compilationId: string): Promise<ApiResult<{ items: unknown[] }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_RECYCLE_BIN_LIST, { compilationId })
+  },
+  /** 从回收站恢复某组矛盾（回到 pending，相关卡片恢复） */
+  restoreCompilationRecycleBin(binId: string): Promise<ApiResult<{ contradiction: unknown }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_RECYCLE_BIN_RESTORE, { binId })
+  },
   /** Provider 列表（只回 apiKeySet，不回密钥） */
   listProviders(): Promise<ApiResult<{ items: unknown[] }>> {
     return ipcRenderer.invoke(IPC.LLM_LIST_PROVIDERS)
@@ -236,14 +244,6 @@ const api = {
   renameTask(taskId: string, title: string): Promise<ApiResult<{ task: unknown }>> {
     return ipcRenderer.invoke(IPC.WRITING_RENAME_TASK, { taskId, title })
   },
-  /** 更新任务选定的部类细则规范 skill（2026-08-13；skillIds 传 null 表示未手动选定、自动匹配） */
-  updateTaskSkills(taskId: string, skillIds: string[] | null): Promise<ApiResult<{ task: unknown }>> {
-    return ipcRenderer.invoke(IPC.WRITING_UPDATE_SKILLS, { taskId, skillIds })
-  },
-  /** 智能匹配写作规范（2026-08-14；单独请求大模型，返回匹配的部类细则 skill id 列表） */
-  suggestSkills(taskId: string, need: string): Promise<ApiResult<{ skillIds: string[] }>> {
-    return ipcRenderer.invoke(IPC.WRITING_SUGGEST_SKILLS, { taskId, need })
-  },
   /** 更新任务固定使用的大模型（Phase 3.5；llmProviderId 传 null 表示回退全局当前 Provider） */
   updateTaskProvider(taskId: string, llmProviderId: string | null): Promise<ApiResult<{ task: unknown }>> {
     return ipcRenderer.invoke(IPC.WRITING_UPDATE_PROVIDER, { taskId, llmProviderId })
@@ -266,6 +266,12 @@ const api = {
     ipcRenderer.on(IPC_EVENTS.DRAFT_GENERATE_PROGRESS, listener)
     return () => ipcRenderer.removeListener(IPC_EVENTS.DRAFT_GENERATE_PROGRESS, listener)
   },
+  /** 订阅资料汇编生成进度（Phase 6.1）：stage/percent/etaSeconds/candidateChunks/candidateSources */
+  onCompilationProgress(cb: (p: { taskId: string; stage: string; percent: number; etaSeconds?: number; candidateChunks?: number; candidateSources?: number }) => void): () => void {
+    const listener = (_event: Electron.IpcRendererEvent, p: { taskId: string; stage: string; percent: number; etaSeconds?: number; candidateChunks?: number; candidateSources?: number }): void => cb(p)
+    ipcRenderer.on(IPC_EVENTS.COMPILATION_PROGRESS, listener)
+    return () => ipcRenderer.removeListener(IPC_EVENTS.COMPILATION_PROGRESS, listener)
+  },
   /** 订阅生成/对话的流式增量文本（2026-08-19：正文/回复逐字推送，供聊天面板实时显示） */
   onWritingStreamDelta(cb: (p: { taskId: string; text: string }) => void): () => void {
     const listener = (_event: Electron.IpcRendererEvent, p: { taskId: string; text: string }): void => cb(p)
@@ -280,13 +286,13 @@ const api = {
   askSource(taskId: string, selection: string): Promise<ApiResult<{ reply: string; refs: { index: number; sourceId: string; title: string; position?: string }[] }>> {
     return ipcRenderer.invoke(IPC.WRITING_ASK_SOURCE, { taskId, selection })
   },
-  /** 生成初稿（第 0 稿；instruction 为用户要求，应包含标题与可能的其他要求） */
-  generateDraft(taskId: string, instruction: string): Promise<ApiResult<{ draft: unknown; articleTitle: string | null; contradictions: unknown[] }>> {
-    return ipcRenderer.invoke(IPC.WRITING_GENERATE_DRAFT, { taskId, instruction })
+  /** 生成初稿（第 0 稿；instruction 为用户要求，应包含标题与可能的其他要求；compilationId 提供时以已确认汇编为材料） */
+  generateDraft(taskId: string, instruction: string, compilationId?: string): Promise<ApiResult<{ draft: unknown; articleTitle: string | null; contradictions: unknown[] }>> {
+    return ipcRenderer.invoke(IPC.WRITING_GENERATE_DRAFT, { taskId, instruction, compilationId })
   },
-  /** 重新生成初稿（Task 3.4.5：覆盖现有第 0 稿；instruction 为用户要求） */
-  regenerateDraft(taskId: string, instruction: string): Promise<ApiResult<{ draft: unknown; articleTitle: string | null; contradictions: unknown[] }>> {
-    return ipcRenderer.invoke(IPC.DRAFT_REGENERATE, { taskId, instruction })
+  /** 重新生成初稿（覆盖现有第 0 稿；compilationId 提供时以已确认汇编为材料） */
+  regenerateDraft(taskId: string, instruction: string, compilationId?: string): Promise<ApiResult<{ draft: unknown; articleTitle: string | null; contradictions: unknown[] }>> {
+    return ipcRenderer.invoke(IPC.DRAFT_REGENERATE, { taskId, instruction, compilationId })
   },
   /** 读取志稿（含片段与来源） */
   getDraft(draftId: string): Promise<ApiResult<unknown>> {

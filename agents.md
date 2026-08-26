@@ -75,6 +75,7 @@
 - 为文档解析、信源抓取、数据库操作、AI 响应处理、初稿生成与矛盾检测编写针对性测试。
 - 面向用户的流程必须处理加载、空数据、成功、部分失败和错误状态。
 - 避免无关重构；修改共享类型或接口协议时，必须同时更新所有调用方与相关文档，不得静默修改。
+- 为任务创建的临时脚本、调试文件、预览产物等，在任务完成后必须及时删除，不留工作痕迹；确需保留的演示产物须明确归档说明。
 
 ## 单人开发与 Git 约定
 
@@ -104,8 +105,8 @@
 
 - **已完成**：Phase 1（脚手架/共享契约/数据库迁移框架）、Phase 2（文件导入/信源抓取/标签）、Phase 2.1（删除与标签重构）、Phase 2.2（工作区资料库 + 实时双向同步 + 自动同步触发源）、Phase 3.1（LLM Provider 配置）、Phase 3.2（BGE 向量嵌入 + 词法/向量混合检索 + LLM 摘要索引）、Phase 3.3（范本 → 后重构为写作规范 skills）、Phase 3.4（连续整稿显示 / 摘要粗筛 / 检索过滤式 / 重新生成）、Phase 3.5（聊天式工作台 + 对话持久化 + 进度提示）、Phase 3.6（预设大模型 + 获取 API key 指引）、Phase 3.7（矛盾预扫描 → 生成注入 → 定位审查三次调用链路、编辑器内嵌矛盾标注与弹窗、采纳本地修订 + 撤销兼容、矛盾/警告分类、文段来源询问、来源文件打开）、网页资料库（站点注册/发现/粗筛/增量抓取，任务绑定缓存文章）。
 - **产品范围**：收敛为"资料收集 → 撰写 → 初稿完成"；版本管理已删除（数据库保留旧列不动），每个任务仅保留初稿。
-- **验证基线**：typecheck 零错误；vitest 内联单测 144 项通过；生产构建成功。端到端实测（真实大模型生成/矛盾取舍/站点抓取）部分场景留待用户操作。
-- **进行中**：Phase 6.0 已完成（Migration 016 资料汇编数据模型 `compilations`/`compilation_items`/`compilation_contradictions`/`compilation_contradiction_variants` + 共享类型 + `compilation:*` IPC/preload/main CRUD 与矛盾取舍/确认通道；`generate`/`regenerate` 契约已登记、AI 服务待 Phase 6.1 实现）；`PLAN.md` 已写入 Phase 6 完整规划与验收标准；`docs/design-preview/index.html` 三套 UI 风格交互预览已产出。下一步 Phase 6.1（资料汇编生成服务：本地宽召回宁多勿漏 + AI 细读 + 矛盾标注）。
+- **验证基线**：typecheck 零错误；vitest 内联单测 149 项通过；生产构建成功。端到端实测（真实大模型生成/矛盾取舍/站点抓取）部分场景留待用户操作。
+- **进行中**：Phase 6.0/6.1/6.2/6.3 已实现——6.0 数据模型（Migration 016 + 仓储 + CRUD/取舍/确认 handler）；6.1 汇编生成服务（本地宽召回宁多勿漏 + AI 分窗细读 + 矛盾标注 + 本地降级，`compilation:progress` 进度事件，新增 5 项单测）；6.2 前端三步向导（顶部步骤条、`CompilationStep` 卡片审阅/编辑/删除/打开来源、矛盾内联取舍、未处理矛盾阻止确认）+ 三步对话框贯穿（Step 1 生成汇编 / Step 2 预留行文规范 / Step 3 生成初稿）；6.3 生成链路改造（`generateDraft`/`regenerateDraft` 接收可选 `compilationId`，仅取已确认汇编 kept 卡片、跳过检索/扫描，旧链路兼容）。验证：typecheck 零错误、149 项单测、生产构建成功。**待用户实测：真实 Provider 的 AI 细读/矛盾标注、三步端到端、基于汇编生成初稿**。
 
 ## 设计决策（要点，按时间倒序）
 
@@ -134,7 +135,23 @@
 
 > 完整的历史修改日志已整理进 `PLAN.md` 各阶段摘要；此处保留对未来开发仍有价值的根因结论。
 
-- **2026-08-25（Phase 6.0 资料汇编数据模型）**：三段式撰写重构启动——Migration 016 新增 `compilations`/`compilation_items`/`compilation_contradictions`/`compilation_contradiction_variants`；`shared/types.ts` 新增 Compilation/Item/Contradiction/Variant；`shared/ipc.ts` 新增 `compilation:list/get/generate/regenerate/updateItem/deleteItem/resolveContradiction/confirm`；新仓储 `db/compilations.ts`（创建/读取、卡片写入/编辑/删除、矛盾写入/取舍[resolve 校验卡片归属]、确认 finalize、级联删除）+ 4 项单测；主进程 CRUD/取舍/确认 handler 已实现，`generate`/`regenerate` 契约登记、AI 服务待 Phase 6.1。已确认决策固化在 `PLAN.md` Phase 6：本地宽召回+AI 细读（**宁多勿漏**）、深改 TipTap、三主题发布版可切换、三步为独立页面由向导切换、矛盾必须取舍后才能进下一步、通用规范默认注入、初稿仅汇编层溯源。UI 风格交互预览 `docs/design-preview/index.html`。验证：typecheck 零错误、144 项单测、生产构建成功。
+- **2026-08-25（任务自动改名 + 矛盾回收站）**：① 自动改名——`generateCompilation` 用大模型提取出标题后，若任务标题仍为默认“新建任务”，自动 `renameTask(taskId, extracted.title)`；用户仍可右键重命名。② 矛盾回收站——采纳/忽略某组矛盾时，除把未被采纳卡片“软删除”（`kept=0`，UI 只显示 kept=1）外，还把整组矛盾快照进新表 `compilation_recycle_bin`（Migration 017，引用 contradiction_id，随 compilation 级联删除）。右上角垃圾桶小圆钮进入回收站，可“恢复”某组矛盾：所有 variant 卡片改回 `kept=1`、矛盾状态回到 pending、删除回收站条目。**用软删除代替硬删除，恢复不重建卡片，避免重复卡片/卡片数异常**（单测验证恢复后卡片总数不变）。新增回收站 IPC（`compilation:recycleBin:list/restore`）+ preload + Repository + UI（垃圾桶圆钮 + 回收站弹窗）。验证：typecheck 零错误、160 项单测、构建通过。
+
+- **2026-08-25（对话持久化 + 矛盾稳定性 + 卡片 UI）**：用户反馈三点并修复。① **对话历史持久化**——`compilation:generate`/`regenerate` 处理器现把撰写要求写入 `task.userInstruction` + `addTaskMessage('instruction')`；前端生成/重生成后持久化助理摘要并 `reloadMessages()`；`load()` 从最新汇编 `title` 恢复 `compilationInstruction`。因此关软件/切页后对话历史保留，“重新生成汇编”按钮能取到要求。② **矛盾稳定性**——逐窗细读会漏“两个相左说法在不同窗口”的跨窗口矛盾；新增 `scanCardContradictions` 在细读产出最终卡片后对精简卡片集做一次低成本 LLM 矛盾归类（`parseCardScanGroups` + `mergeContradictionGroups`，与窗口级矛盾合并去重），提升跨来源/跨窗口矛盾召回且不牺牲效率。③ **卡片 UI**——资料卡片每张独占一行；来源/编辑/删除收进右侧“…”下拉菜单（`menuFor` 状态）。新增 2 项单测（`parseCardScanGroups`、`mergeContradictionGroups`），共 160 项全通过；typecheck / 构建通过。
+
+- **2026-08-25（Phase 6.1 三段式细节修正）**：用户逐条反馈三点，均已修改。① **段落划分**——粗筛改按原始换行划分（`retrieval.ts` 新增 `chunkParagraphs`，仅剔除标题行、不按句/字数二次切分），避免“最后一句话被截半”；AI 细读提示词改为“先判相关性、再按时间/事实/条目做更细切分、输出完整事实摘录（不截断）”，超长单段（>30000 字）在切窗时按句兜底拆分防上下文溢出（`sliceChunks`）。② **矛盾取舍**——采纳某卡后 `updateCompilationContradictionStatus` 自动删除该矛盾分组中未被采纳的卡片（级联清理 variant 行），前端重新拉取汇编同步删卡。③ **去除生成资料汇编阶段的写作规范**——移除 ChatPanel 输入框上方写作规范 UI（智能匹配/手动选择），删除 `WRITING_UPDATE_SKILLS`/`WRITING_SUGGEST_SKILLS` 通道与 handler、preload `updateTaskSkills`/`suggestSkills`、`generate.ts` 的 `suggestSkillsForTask`/`parseSuggestSkillsOutput`；`writing_skills` 数据管理（规范页）与初稿生成侧自动注入保留。新增 2 项单测（`chunkParagraphs`、采纳删卡），共 158 项全通过；typecheck / 构建通过。
+
+- **2026-08-25（Phase 6.1 大模型提取标题与粗筛关键词）**：用户指出静态 `extractTopicTerms` 只取引号内核心词，覆盖不了“包含例如：…托儿所/招生/等级/占比”等细节词，粗筛可能漏掉只含这些词、不出现“学前/幼儿园”的段（窗口偏少的主因之一）。按用户提议实现：调用大模型前**先用大模型**（配置了 Provider 时）从用户完整撰写要求中提取标题 + 近义词/上下位词/专业词（理解方志语境做扩展），返回 `{title,keywords}`；据此生成 `coarseQuery`（词法粗筛词）与 `vecQuery`（标题向量）。新增可测的 `parseKeywordExtraction`（解析 JSON）与本地兜底 `fallbackCoarseQuery`（extractTopicTerms + expandDomainHints）；大模型调用失败或无 Provider 时自动回退本地。粗筛阶段因此能保留“托儿所/招生/等级/占比”相关的段，再由模型细筛判断。新增 3 项单测（156 项全通过）；typecheck / 构建通过。
+
+- **2026-08-25（Phase 6.1 汇编相关性修正，最终形态）**：用户实测发现资料汇编混入“福州市先进教育工作者/优秀教师”等荣誉卡片（来源《长乐志》，263 卡、候选 2660 段）。根因：① AI 细读提示词未注入用户撰写要求，模型按“志书汇编”泛化标准筛选；② 词法闸门把“教育”双字对命中即算相关，荣誉记录混入候选。**最终修正（按用户要求回调后）**：a) 把 `instruction`（撰写主题与范围）注入 system/user prompt，模型按用户标题自行判断相关事实并提炼卡片，**不再显式列举“排除荣誉/党建/后勤”等类别**；b) 词法闸门**回退为宽松粗筛**——仅剔除无任何信号（score==0 且无向量命中）的“肯定无关”段，有任意词法或向量（≥0.1）信号的段都保留，交由模型细筛，既不因“教育”单字对误判而候选过多，也不因收紧而误删“公办园数量”这类相关但无字面重叠的段；c) 卡片移除“位置：第 N 段”注释。验证：typecheck 零错误、153 项单测、构建通过。
+
+- **2026-08-25（Phase 6.1 汇编候选性能优化：保守本地闸门）**：用户实测“学前教育园所设置”生成汇编时 AI 细读出现 94 个窗口、预计 31 分钟，过长且费钱。优化——在 `generateCompilation` 调用大模型前新增 `recallCompilationCandidates` 保守闸门，把提交物从“任务范围内全部段落”收敛为“与主题相关的来源及其相关段落”：①来源级：仅保留有相关信号的来源（标题含查询词 / 任一段词法 score>0 / 任一段向量余弦 ≥0.1），完全无关的来源整篇舍弃（资料库中大量无关文件是窗口数主因）；②来源内：标题含任一查询词或来源较小且词法信号强 → 整篇保留（篇内不漏）；宽口径来源（如综合年鉴）只保留有信号的分块。向量路径用低阈值（0.1）兜底“字面无关但语义相关”段落（如含地点名的数据段）。无 Provider / AI 失败时回退用全量集合（不因闸门丢材料）。为省去无意义开销，把 `embedTexts` 移到无 Provider 检查之后。新增 4 项单测（153 项全通过）；typecheck / 构建通过。
+
+- **2026-08-25（Phase 6.2/6.3 三步向导前端 + 生成链路改造）**：`WritingWorkspace.tsx` 重写为三段式向导——顶部 `writing-stepper` 步骤条（未确认汇编时锁定 Step 2/3，仅可回退）、右栏随步骤切换（Step 1 `CompilationStep` 卡片审阅 / Step 2 行文规范占位 / Step 3 初稿编辑器）、左侧 `ChatPanel` 贯穿（Step 1 主按钮「生成资料汇编」走 `onPrimaryAction`；Step 2 预留自由对话；Step 3 生成初稿），`compilation:progress` 事件驱动候选统计与进度条；`CompilationStep` 空态不再放误导性按钮（改为引导左侧输入），卡片操作/矛盾取舍回写本地状态。`generate.ts` 的 `generateDraft`/`regenerateDraft` 新增可选 `compilationId` 分支——已确认汇编时仅取 `kept` 卡片文本（按时间排序）作为材料，跳过摘要/网页/检索/矛盾扫描，未提供时保留旧检索链路；修复 `regenerateDraft` 未透传 `compilationId` 的问题。新增 CSS（`.writing-stepper`/`.writing-style-step`/`.compilation-*`）。验证：typecheck 零错误、149 项单测、生产构建成功。待用户实测三步端到端与基于汇编生成初稿。
+
+- **2026-08-25（Phase 6.1 资料汇编生成服务）**：新增 `writing/compilation-service.ts`——①本地宽召回 `recallCandidateChunks` 直接返回任务范围内全部有效分块（词法分仅用于排序，**不做任何过滤**，从机制上保证不丢相关材料）；②AI 分窗细读（≤30000 字/窗、并发 2、温度 0→0.3 重试、maxRetries 1），提示词要求逐字摘录/提取时间标签/来源编号/发现实质冲突，输出 `{items,contradictions}`；③解析/合并去重/#N 映射/按年份排序落库；④无 Provider 或 AI 未产出有效卡片时降级为「全部候选块直接成卡片（ts 取首个年份）」。`compilation:generate`/`regenerate` handler 接入服务并推送 `compilation:progress`（候选块数/来源数/窗口进度）。新增 5 项单测（宁多勿漏召回、JSON 解析、#N 映射、合并去重、空输入）。真实 Provider 的 AI 细读/矛盾标注效果待用户实测。
+
+- **2026-08-25（Phase 6.0 资料汇编数据模型）**：三段式撰写重构启动——Migration 016 新增 `compilations`/`compilation_items`/`compilation_contradictions`/`compilation_contradiction_variants`；`shared/types.ts` 新增 Compilation/Item/Contradiction/Variant；`shared/ipc.ts` 新增 `compilation:list/get/generate/regenerate/updateItem/deleteItem/resolveContradiction/confirm`；新仓储 `db/compilations.ts`（创建/读取、卡片写入/编辑/删除、矛盾写入/取舍[resolve 校验卡片归属]、确认 finalize、级联删除）+ 4 项单测；主进程 CRUD/取舍/确认 handler 已实现，`generate`/`regenerate` 契约登记、AI 服务待 Phase 6.1。已确认决策固化在 `PLAN.md` Phase 6：本地宽召回+AI 细读（**宁多勿漏**）、深改 TipTap、三主题发布版可切换、三步为独立页面由向导切换、矛盾必须取舍后才能进下一步、通用规范默认注入、初稿仅汇编层溯源。验证：typecheck 零错误、144 项单测、生产构建成功。
 
 - **2026-08-24（移除手动「同步工作区」）**：决策——手动同步按钮及其调用的 `workspace:reconcile` 通道、preload API、i18n 文案与 SourceList 相关逻辑整体删除；同步改为纯自动（启动 / 窗口聚焦 / 进入资料库 / 每分钟定时 / 设置页变更工作区 / chokidar 监听增量）。理由：自动触发已全覆盖手动按钮的功效，保留只会多一个入口与 UI 负担，删除后涉及「手动同步」的代码面归零，也消除了未来新增调用路径时绕过互斥调度的风险。清理范围：`shared/ipc.ts`（WORKSPACE_RECONCILE 通道与 WorkspaceReconcileRes 类型、IpcMapping 项）、`main/index.ts`（handler）、`preload`（方法 + 类型声明）、`SourceList.tsx`（按钮/说明气泡/handleReconcile/reconciling/manualReconcilingRef）、`zh-CN.ts`（reconcileBtn/reconciling/infoReconcile/reconcileFailed）、`docs/shared-contracts.md`、`docs/ui-architecture.md`。自动同步完成事件保留列表刷新与提示逻辑。验证：typecheck 零错误、140 项单测、生产构建成功。
 
