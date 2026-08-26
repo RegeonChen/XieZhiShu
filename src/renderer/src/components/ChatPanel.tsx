@@ -2,14 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 import { zhCN } from '../i18n/zh-CN'
 import { copyPlainText } from '../utils/clipboard'
 import { splitRefTokens } from '../utils/ref-text'
-import SkillPickerDialog, { type PickerSkillOption } from './SkillPickerDialog'
 
 export interface ChatMessageItem {
   role: 'user' | 'assistant'
   content: string
 }
 export interface ProviderOption { id: string; name: string }
-export interface SkillOption { id: string; name: string; tags?: string[] }
 /** 来源引用（Phase 3.7 Task 3.7.5：与回复中的 #N 对应，可点击打开原文） */
 export interface SourceRefItem {
   index: number
@@ -29,19 +27,15 @@ interface ChatPanelProps {
   streamText?: string | null
   /** 生成初稿进度（2026-08-11：percent 进度百分比 + etaSeconds 预计剩余秒数，供进度条显示） */
   progress?: { percent: number; etaSeconds?: number } | null
-  sectionSkills: SkillOption[] | null
-  /** 已选中的部类细则规范 id；空数组 = 未手动选定（生成时按标题自动匹配） */
-  selectedSkillIds: string[]
-  onSkillsChange: (ids: string[]) => void
-  /** 文章标题（初稿已生成时；智能匹配的兜底需求文本） */
-  articleTitle?: string
-  /** 智能匹配写作规范（上层调用大模型并写回任务） */
-  onSuggestSkills: (need: string) => Promise<void>
   providers: ProviderOption[] | null
   providerId?: string
   onProviderChange: (id: string) => void
   onGenerate: (instruction: string) => void
   onChat: (message: string) => void
+  /** 自定义主按钮文案（如「生成资料汇编」），提供时覆盖 draftExisted 判断的默认文案 */
+  primaryLabel?: string
+  /** 自定义主按钮动作：提供时点击主按钮优先走此动作（用于 Step 1 生成资料汇编） */
+  onPrimaryAction?: (text: string) => void
   /** 来源引用清单（最近一次文段来源询问），供消息内 #N 渲染为链接 */
   refs?: SourceRefItem[]
   /** 打开来源文件（系统默认软件） */
@@ -64,24 +58,18 @@ function ChatPanel({
   busyText,
   streamText = null,
   progress,
-  sectionSkills,
-  selectedSkillIds,
-  onSkillsChange,
-  articleTitle,
-  onSuggestSkills,
   providers,
   providerId,
   onProviderChange,
   onGenerate,
   onChat,
+  primaryLabel,
+  onPrimaryAction,
   refs,
   onOpenSource
 }: ChatPanelProps) {
   const [input, setInput] = useState('')
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
-  const [suggesting, setSuggesting] = useState(false)
-  const [suggestHint, setSuggestHint] = useState<string | null>(null)
-  const [pickerOpen, setPickerOpen] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
 
   // 自动滚动：用户已接近底部时才跟随（正在阅读历史时不抢滚动位置）；busy 提示始终可见
@@ -105,31 +93,9 @@ function ChatPanel({
     const v = input.trim()
     if (!v || busy) return
     setInput('')
-    if (draftExisted) onChat(v)
+    if (onPrimaryAction) onPrimaryAction(v)
+    else if (draftExisted) onChat(v)
     else onGenerate(v)
-  }
-
-  /** 智能匹配：优先用输入框中的撰写要求，其次用文章标题 */
-  const handleSuggest = async () => {
-    if (suggesting || busy) return
-    const need = input.trim() || (articleTitle ?? '').trim()
-    if (!need) {
-      setSuggestHint(zhCN.writingChat.suggestNeedEmpty)
-      return
-    }
-    setSuggesting(true)
-    setSuggestHint(null)
-    try {
-      await onSuggestSkills(need)
-    } finally {
-      setSuggesting(false)
-    }
-  }
-
-  /** 手动选择弹窗确认：写回选中的规范 id */
-  const handlePickerConfirm = (ids: string[]) => {
-    setPickerOpen(false)
-    onSkillsChange(ids)
   }
 
   /** 渲染 assistant 消息：来源编号 #N 渲染为可点击链接（来源引用），其余为纯文本 */
@@ -256,39 +222,6 @@ function ChatPanel({
       </div>
 
       <div className="chat-panel__toolbar">
-        <div className="chat-panel__field">
-          <span className="chat-panel__label">{zhCN.writingChat.skillLabel}</span>
-          <div className="chat-panel__skill-picker">
-            {selectedSkillIds.length > 0 ? (
-              <div className="chat-panel__skill-chips">
-                {(sectionSkills ?? []).filter((s) => selectedSkillIds.includes(s.id)).map((s) => (
-                  <span key={s.id} className="chat-panel__skill-chip">{s.name}</span>
-                ))}
-              </div>
-            ) : (
-              <span className="chat-panel__hint">{zhCN.writingChat.skillAuto}</span>
-            )}
-            <div className="chat-panel__skill-actions">
-              <button
-                type="button"
-                className="source-list__btn"
-                onClick={() => void handleSuggest()}
-                disabled={draftExisted || suggesting || busy}
-              >
-                {suggesting ? zhCN.writingChat.suggesting : zhCN.writingChat.suggestBtn}
-              </button>
-              <button
-                type="button"
-                className="source-list__btn"
-                onClick={() => setPickerOpen(true)}
-                disabled={draftExisted || busy}
-              >
-                {zhCN.writingChat.pickBtn}
-              </button>
-            </div>
-            {suggestHint ? <span className="chat-panel__hint">{suggestHint}</span> : null}
-          </div>
-        </div>
         <label className="chat-panel__field">
           <span className="chat-panel__label">{zhCN.writingChat.providerLabel}</span>
           <select
@@ -328,18 +261,9 @@ function ChatPanel({
           disabled={busy || !input.trim()}
           onClick={submit}
         >
-          {draftExisted ? zhCN.writingChat.sendBtn : zhCN.writingChat.generateBtn}
+          {primaryLabel ?? (draftExisted ? zhCN.writingChat.sendBtn : zhCN.writingChat.generateBtn)}
         </button>
       </div>
-
-      {pickerOpen ? (
-        <SkillPickerDialog
-          skills={(sectionSkills ?? []) as PickerSkillOption[]}
-          selectedIds={selectedSkillIds}
-          onConfirm={handlePickerConfirm}
-          onCancel={() => setPickerOpen(false)}
-        />
-      ) : null}
     </div>
   )
 }

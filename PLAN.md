@@ -117,6 +117,20 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 - **矛盾标注**：在候选集（或 AI 细读命中的卡片集）上复用/改造现有 `scanContradictions`（窗口并发、温度阶梯、低温度确定性），产出矛盾分组并挂到卡片。
 - **落库**：`insertCompilation` + `insertCompilationItems` + `insertCompilationContradictions`（事务），初始 `status='drafting'`；返回卡片列表（含来源标题/位置/时间标签）。
 
+> **Status（2026-08-25）**：后端已完成——`compilation-service.ts` 实现全量召回（宁多勿漏）、AI 分窗细读、解析/合并/映射/时间排序、本地降级；`compilation:generate`/`regenerate` handler 已接入并推送 `compilation:progress`；新增 5 项单测（149 项全通过）。**真实 Provider 的 AI 细读与矛盾标注效果待用户实测**。
+>
+> **2026-08-25 性能优化**：AI 细读前新增**保守本地闸门** `recallCompilationCandidates`——把交给大模型的材料从"任务范围内全部段落"收敛为"与主题相关的来源及其相关段落"：① 来源级：仅保留有相关信号的来源（标题含查询词 / 任一段词法 score>0 / 任一段向量余弦 ≥ 0.1），完全无关的来源整篇舍弃（多数资料库含大量无关文件，这是减少窗口数的主因）；② 来源内：标题含任一查询词或来源较小且词法信号强 → 整篇保留（篇内不漏）；宽口径来源（如综合年鉴）只保留有信号的分块，删掉无关章节。向量低阈值路径兜底"字面无关但语义相关"段落（如含地点名的数据段），避免误删。升级后窗口数从 94 个（约 31 分钟）显著下降，具体幅度取决于资料库中无关文档占比。新增 4 项单测（153 项全通过）；typecheck/构建通过。
+>
+> **2026-08-25 相关性修正（用户实测反馈；随后按用户要求回调）**：① 此前 AI 细读提示词未注入用户实际撰写要求，模型按“志书汇编”泛化标准筛选，把“先进个人/优秀教师”等荣誉卡片纳入。现把 `instruction`（撰写主题与范围）注入 system/user prompt，模型按用户标题自行判断哪些事实相关并提炼卡片（**不再显式列举“排除荣誉称号/党建/后勤”等类别**）。② 词法闸门**回退为宽松粗筛**：仅剔除与标题无任何信号（词法 score==0 且无向量命中）的“肯定无关”段；有任意词法信号或向量语义 ≥0.1 的段都保留，交由模型细筛，避免“教育”单字对误判导致无关候选过多，也不因收紧而误删“公办园数量”这类相关但无字面重叠的段。③ 卡片不再展示“位置：第 N 段”注释（来源标题 chip + 逐字摘录已足够定位；该段落序号是单一来源内原始段落编号，对人类无意义且易误导）。
+>
+> **2026-08-25 大模型提取标题与粗筛关键词（用户提议）**：静态 `extractTopicTerms` 只取引号内核心词，无法覆盖“包含例如：…托儿所/招生/等级/占比”等细节词，导致粗筛可能漏掉仅含这些词、不出现“学前/幼儿园”的段（窗口偏少的原因之一）。现改为：先生成标题与粗筛关键词时**先调用大模型**（若已配置 Provider）——把用户完整撰写要求（“标题为…等方面”）交给大模型，由其提取标题 + 近义词/上下位词/专业词（并理解方志语境做扩展），返回 `{title,keywords}`；再据此生成 `coarseQuery`（词法粗筛）与 `vecQuery`（标题做向量查询）。解析函数 `parseKeywordExtraction`、本地兜底 `fallbackCoarseQuery`（extractTopicTerms + expandDomainHints）均已导出并单测；大模型调用失败或无 Provider 时自动回退本地兜底。新增 3 项单测（156 项全通过）；typecheck/构建通过。
+>
+> **2026-08-25 三段式细节修正（用户逐条反馈）**：① **段落划分**：粗筛改为按原始换行划分（新增 `chunkParagraphs`，仅剔除标题行、不按句/字数二次切分），避免把一句话从中间截断；AI 细读改成先判断相关性、再按时间/事实/条目做更细切分并输出完整事实摘录（不截断）。超长单段（>30000 字）在切窗时按句兜底拆分以防上下文溢出。② **矛盾取舍**：采纳某张卡后，后端自动删除该矛盾分组中未被采纳的卡片（级联清理对应 variant 行），前端重新拉取汇编同步删卡。③ **去除“生成资料汇编”阶段的写作规范**：移除输入框上方写作规范 UI（智能匹配/手动选择），并删除 `WRITING_UPDATE_SKILLS`/`WRITING_SUGGEST_SKILLS` 通道、handler、preload 方法与 `suggestSkillsForTask`/`parseSuggestSkillsOutput`；`writing_skills` 数据管理（规范页）与初稿生成侧自动注入保留。新增 2 项单测（chunkParagraphs、采纳删卡），共计 158 项全通过；typecheck/构建通过。
+>
+> **2026-08-25 对话持久化 + 矛盾稳定性 + 卡片 UI**：① **对话历史持久化**——`compilation:generate`/`regenerate` 处理器现在会把用户撰写要求写入 `task.userInstruction` 并 `addTaskMessage(instruction)`；前端在生成/重新生成后持久化助理摘要消息并 `reloadMessages()`；`load()` 从最新汇编的 `title` 恢复 `compilationInstruction`，因此关闭重开/切页后对话历史保留，“重新生成汇编”按钮也能正常取到要求。② **矛盾发现稳定性**——逐窗细读会漏掉“两个相左说法落在不同窗口”的跨窗口矛盾；新增**卡片级矛盾扫描** `scanCardContradictions`：细读产出最终卡片后，对精简卡片集再做一次低成本的 LLM 矛盾归类（`parseCardScanGroups`/`mergeContradictionGroups`），与窗口级矛盾合并去重，显著提升跨来源/跨窗口矛盾召回，且输入量小、不牺牲效率。③ **卡片 UI**——资料卡片改为每张独占一行；来源/编辑/删除收进卡片右侧的“…”下拉菜单（`menuFor` 状态）。新增 2 项单测（parseCardScanGroups、mergeContradictionGroups），共计 160 项全通过；typecheck/构建通过。
+>
+> **2026-08-25 任务自动改名 + 矛盾回收站**：① **自动改名**——`generateCompilation` 用大模型提取出标题后，若任务标题仍是默认“新建任务”，自动 `renameTask(taskId, extracted.title)`（用户仍可在中栏右键重命名）。② **矛盾回收站**——采纳/忽略某组矛盾时，除把未被采纳卡片“软删除”（`kept=0`，UI 隐藏）外，还把整组矛盾快照进新表 `compilation_recycle_bin`（Migration 017，引用 contradiction_id，随 compilation 级联删除）；右上角垃圾桶小圆钮进入回收站，可“恢复”某组矛盾——所有 variant 卡片改回 `kept=1`、矛盾状态回到 pending，并删除回收站条目。用软删除代替硬删除，**恢复不会重建卡片，避免重复卡片/卡片数异常**（单测验证恢复后卡片总数不变）。新增回收站 IPC（`compilation:recycleBin:list/restore`）、preload、Repository 函数与 UI。验证：typecheck 零错误、160 项单测、构建通过。
+
 ### Phase 6.2 资料卡片审阅 UI（Step 1）
 
 - 撰写工作台顶部**步骤条**：①资料汇编 → ②行文规范 → ③生成初稿（②当前为“预留/占位”，仅提示）。
@@ -124,6 +138,8 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 - 左侧对话框贯穿：可就汇编与 AI 对话（如“仅保留 2010 年后的内容”），对话记录持久化。
 - 矛盾取舍：点击矛盾标注 → 多说法对比弹窗（复用/改造 `ContradictionDialog` 交互），用户选择保留某张卡片（或“忽略”）；**未处理完的矛盾会阻止进入下一步**（finish 时校验 `resolved/ignored`，有 `pending` 则给出明确提示）。
 - 「确认汇编」→ `status='finalized'`，锁定卡片（不可再增删/编辑，除非“重新生成汇编”）；Step 2/3 才可用。
+
+> **Status（2026-08-25）**：前端已完成——工作台顶部三步向导（`writing-stepper`，未确认汇编时锁定 Step 2/3）、`CompilationStep` 卡片审阅（时间 chip/来源徽标/摘录/位置、编辑/删除/打开来源、矛盾分组内联取舍、确认按钮被未处理矛盾阻止）、左侧对话框贯穿（Step 1 生成汇编 / Step 2 自由对话预留行文规范 / Step 3 生成初稿）、`compilation:progress` 驱动候选统计与进度条。**端到端审阅/取舍/确认待用户实测**（本阶段为 UI，沿用项目内联单测惯例，未新增组件测试）。
 
 ### Phase 6.3 生成链路改造（Step 3 只基于最终汇编）
 
@@ -133,6 +149,8 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 - 重生成：基于同一 `compilationId` 重跑；「重新生成汇编」在 Step 1 触发（重新生成会覆盖当前汇编并回到 drafting，需二次确认）。
 - 落库：初稿仍为 Draft/Segments；本次仅做“汇编卡片 → 初稿”统计，不逐段标来源。
 
+> **Status（2026-08-25）**：链路已完成——`generateDraft`/`regenerateDraft` 新增可选 `compilationId`：提供已确认汇编时仅取 `kept` 卡片文本（按时间排序）作为材料，跳过摘要/网页/检索/矛盾扫描；流式输出与进度事件复用现有机制；未提供 `compilationId` 时保持旧检索链路兼容。**真实大模型生成初稿待用户实测**（generate 既有 22 项单测通过；compilation 分支经 typecheck + 生产构建验证）。
+
 ### Phase 6.4 行文规范简化（删除部类细则，整理通用规范）
 
 - 移除非 `category='general'` 的 `writing_skills`（预设 + 自建，Migration 016 `run` 清理或备份）；规范页仅展示/管理**通用规范**。
@@ -141,7 +159,7 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 
 ### Phase 6.5 前端工作台重构（三步向导 + 商业化风格，先出预览）
 
-- **交付项：UI 预览（已完成）**——`docs/design-preview/index.html` 单页交互演示，覆盖三套风格（简洁明亮 / 明亮+深色切换 / 古典公文风）与三步向导（资料汇编卡片列表 + 矛盾弹窗 / 行文规范 / 初稿编辑器 + 顶栏/导航）。
+- **UI 风格方案（已确定）**：三套风格（简洁明亮 / 明亮+深色切换 / 古典公文风）已评审选定，交互预览已作为临时工作痕迹删除；方案要点固化在本计划中。
 - **落地为正式功能**：三套风格全保留，发布版内置**主题切换**（设置项持久化）；三个环节为**独立页面**，通过三步向导点击切换（每步含「上一步/下一步」），并非同页堆叠。
 - 选定风格细节后重构：撰写任务页顶部步骤条 + 主区域随步骤整页切换；左侧对话框 + 右侧内容区；整体配色/排版/间距/圆角/阴影统一；滚动条、动效、空态、加载态按商业软件标准；旧版“参考范本 / 部类细则 / 版本”等入口清理。
 - AI 过程可见：检索/AI 细读/矛盾扫描用进度事件 + 流式输出；Step 1 可将 AI 细读结论以卡片实时追加；Step 3 流式正文。

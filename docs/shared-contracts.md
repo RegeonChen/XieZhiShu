@@ -178,14 +178,14 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 
 ### 2.3.1 资料汇编（compilation，Phase 6.0，2026-08-25）
 
-三段式撰写第一步的资料汇编契约。当前 `compilation:generate` / `compilation:regenerate` 为已登记通道（AI 服务在 Phase 6.1 实现，暂返回稳定错误），其余 CRUD / 矛盾取舍 / 确认已实现。
+三段式撰写第一步的资料汇编契约。`compilation:generate` / `compilation:regenerate` 在 Phase 6.1 已接入生成服务（本地宽召回宁多勿漏 + AI 细读 + 矛盾标注；无 Provider / 失败降级为本地候选卡片）；生成进度经事件 `compilation:progress` 推送。CRUD / 矛盾取舍 / 确认已实现。
 
 | 通道 | 请求 → 响应 data | 说明 |
 |---|---|---|
 | `compilation:list` | `{ taskId }` → `{ compilations: Compilation[] }` | 任务的全部资料汇编（按时间倒序，含卡片与矛盾） |
 | `compilation:get` | `{ compilationId }` → `{ compilation: Compilation }` | 读取一次资料汇编 |
-| `compilation:generate` | `{ taskId, title }` → `{ compilation: Compilation }` | 生成资料汇编（本地宽召回 + AI 细读；Phase 6.1 实现） |
-| `compilation:regenerate` | `{ taskId, title }` → `{ compilation: Compilation }` | 重新生成资料汇编（Phase 6.1 实现） |
+| `compilation:generate` | `{ taskId, title }` → `{ compilation: Compilation }` | 生成资料汇编（本地宽召回 + AI 细读 + 矛盾标注；无 Provider/失败降级本地候选） |
+| `compilation:regenerate` | `{ taskId, title }` → `{ compilation: Compilation }` | 重新生成资料汇编 |
 | `compilation:updateItem` | `{ itemId, excerpt?, ts?, note?, extraTags?, kept? }` → `{ item: CompilationItem }` | 编辑资料卡片 |
 | `compilation:deleteItem` | `{ itemId }` → `{ ok: true }` | 删除资料卡片 |
 | `compilation:resolveContradiction` | `{ contradictionId, action: 'resolve'\|'ignore', chosenItemId? }` → `{ contradiction: CompilationContradiction }` | 汇编矛盾取舍：resolve 须传保留的卡片 id（属于该矛盾）；ignore 清空已选 |
@@ -206,11 +206,11 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `taskMessages:list` | `{ taskId }` → `{ items: TaskMessage[] }` | 任务对话历史（role: user/assistant；kind: chat/instruction/notice） |
 | `taskMessages:add` | `{ taskId, role, kind, content }` → `{ message: TaskMessage }` | 追加任务消息（一般由主进程自动写入） |
 | `writing:retrieve` | `{ taskId }` → `{ chunks: RetrievedChunk[] }` | 任务范围内 RAG 检索预览 |
-| `writing:generateDraft` | `{ taskId, instruction }` → `{ draft: Draft, articleTitle: string \| null, contradictions: Contradiction[] }` | 生成第 0 稿（幂等：已有初稿直接返回既有稿与矛盾清单）。阶段进度经事件 `draft:generateProgress` 推送 |
+| `writing:generateDraft` | `{ taskId, instruction, compilationId? }` → `{ draft: Draft, articleTitle: string \| null, contradictions: Contradiction[] }` | 生成第 0 稿（幂等：已有初稿直接返回既有稿与矛盾清单）。提供 `compilationId` 时仅以已确认汇编卡片为材料，跳过检索/扫描。阶段进度经事件 `draft:generateProgress` 推送 |
 | `draft:get` | `{ draftId }` → `{ draft: Draft }` | 读取某稿（含片段与来源） |
 | `draft:getLatest` | `{ taskId }` → `{ draft: Draft }` | 读取任务最新一稿（仅初稿） |
 | `draft:updateContent` | `{ draftId, markdown }` → `{ draft: Draft }` | 整稿保存（按标题行重建片段） |
-| `draft:regenerate` | `{ taskId, instruction }` → 同 generateDraft | 删除现有第 0 稿后重新生成（覆盖旧稿） |
+| `draft:regenerate` | `{ taskId, instruction, compilationId? }` → 同 generateDraft | 删除现有第 0 稿后重新生成（覆盖旧稿）；`compilationId` 语义同 generateDraft |
 | `draft:getContradictions` | `{ draftId }` → `{ contradictions: Contradiction[] }` | 读取矛盾清单 |
 | `draft:resolveContradiction` | `{ contradictionId, action: 'adopt'\|'ignore'\|'revert', variantId? }` → `{ contradiction: Contradiction }` | 矛盾取舍：adopt 须带属于该矛盾的说法 id；ignore 清空采纳；revert=撤销采纳（配合编辑器撤销回退为待处理）。仅标记状态，不修改正文 |
 | `draft:applyContradiction` | `{ draftId, contradictionId, variantId }` → `{ draft: Draft, contradiction: Contradiction }` | 采纳 → 正文本地替换（from=draftQuote → to=replacement，移除 `【矛盾#N】` 标注，整稿落库，不调用大模型，资料库只读；from 未逐字匹配则失败且状态不变） |
@@ -265,7 +265,7 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 
 ## 4. 生成初稿的契约（Phase 3.5：指令驱动 + JSON 输出）
 
-- 请求：`writing:generateDraft { taskId, instruction }`（`instruction` 为用户要求，应包含标题与可能的其他要求）。
+- 请求：`writing:generateDraft { taskId, instruction, compilationId? }`（`instruction` 为用户要求，应包含标题与可能的其他要求；`compilationId` 提供已确认汇编时，材料仅取该汇编 kept 卡片，不再实时检索/扫描）。
 - 提交物：写作规范上下文（通用规范注入 system prompt，部类细则注入 user prompt，标注"仅作写作规范"）+ 资料库检索到的全部有效材料 + 用户要求。
 - 大模型输出要求为 JSON（缺标题等必要信息时输出 error 详情）：
 

@@ -3,8 +3,10 @@ import { zhCN } from '../i18n/zh-CN'
 import DraftEditor, { type DraftEditorHandle } from './DraftEditor'
 import ConfirmDialog from './ConfirmDialog'
 import ContradictionDialog from './ContradictionDialog'
-import ChatPanel, { type ChatMessageItem, type ProviderOption, type SkillOption, type SourceRefItem } from './ChatPanel'
-import type { Contradiction } from '../../../shared/types'
+import ResizeHandle from './ResizeHandle'
+import ChatPanel, { type ChatMessageItem, type ProviderOption, type SourceRefItem } from './ChatPanel'
+import CompilationStep, { type CompilationView } from './CompilationStep'
+import type { Contradiction, CompilationRecycleBinItem } from '../../../shared/types'
 
 interface TaskItem {
   id: string
@@ -29,10 +31,10 @@ interface DraftItem {
 }
 
 type BusyState = 'generating' | 'chatting' | null
+type WizardStep = 0 | 1 | 2
 
 function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: () => void }) {
   const [task, setTask] = useState<TaskItem | null>(null)
-  const [sectionSkills, setSectionSkills] = useState<SkillOption[] | null>(null)
   const [providers, setProviders] = useState<ProviderOption[] | null>(null)
   const [draft, setDraft] = useState<DraftItem | null>(null)
   const [loading, setLoading] = useState(true)
@@ -40,38 +42,42 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
   const [messages, setMessages] = useState<ChatMessageItem[]>([])
   const [busy, setBusy] = useState<BusyState>(null)
   const [busyText, setBusyText] = useState<string | null>(null)
-  /** 流式增量文本（2026-08-19：生成/对话期间实时显示的正文/回复） */
   const [streamText, setStreamText] = useState<string | null>(null)
-  /** 生成初稿进度（2026-08-11：主进程推送 percent + etaSeconds，ChatPanel 进度条展示） */
   const [progress, setProgress] = useState<{ percent: number; etaSeconds?: number } | null>(null)
   const [confirmingRegenerate, setConfirmingRegenerate] = useState(false)
-  /** 当前稿的矛盾清单（Phase 3.7：生成响应或 draft:getContradictions 加载） */
   const [contradictions, setContradictions] = useState<Contradiction[]>([])
-  /** 矛盾弹窗状态：矛盾/警告 总览 或 单条（seq） */
   const [dialogState, setDialogState] = useState<
     | { kind: 'contradiction' | 'warning'; mode: 'overview' }
     | { kind: 'contradiction' | 'warning'; mode: 'single'; seq: number }
     | null
   >(null)
-  /** 最近一次文段来源询问的引用清单（Phase 3.7 Task 3.7.5：消息内 #N 渲染为链接） */
   const [sourceRefs, setSourceRefs] = useState<SourceRefItem[]>([])
   const messagesRef = useRef(messages)
   messagesRef.current = messages
-  /** 编辑器实例引用（2026-08-11：采纳正文修改走编辑器事务而非重挂载，以保留撤销历史） */
   const editorRef = useRef<DraftEditorHandle>(null)
-  /** 正文 Markdown 快照 → 对应矛盾状态：撤销/重做命中时恢复（2026-08-11） */
   const adoptionSnapshotsRef = useRef(new Map<string, Contradiction[]>())
   const contradictionsRef = useRef(contradictions)
   contradictionsRef.current = contradictions
+
+  // ---- Phase 6.2：三段式向导 ----
+  const [step, setStep] = useState<WizardStep>(0)
+  const [compilation, setCompilation] = useState<CompilationView | null>(null)
+  const [compilationMeta, setCompilationMeta] = useState<{ candidateChunks?: number; candidateSources?: number } | null>(null)
+  const [compilationProgress, setCompilationProgress] = useState<{ percent: number; etaSeconds?: number } | null>(null)
+  const [compilationInstruction, setCompilationInstruction] = useState('')
+  // ---- 矛盾回收站（Phase 6.1 优化） ----
+  const [showRecycleBin, setShowRecycleBin] = useState(false)
+  const [recycleBinItems, setRecycleBinItems] = useState<CompilationRecycleBinItem[]>([])
+  // ---- 左右分栏宽度（可拖拽，去除间隔） ----
+  const [chatWidth, setChatWidth] = useState(380)
+  const handleChatResize = useCallback((delta: number) => {
+    setChatWidth((prev) => Math.max(320, Math.min(820, prev + delta)))
+  }, [])
 
   const load = useCallback(async () => {
     setLoading(true)
     setErr(null)
     try {
-      window.api.listSkills().then((res) => {
-        const items = (res.ok && res.data ? res.data.items : []) as { id: string; name: string; category: string; tags?: string[] }[]
-        setSectionSkills(items.filter((s) => s.category === 'section') as SkillOption[])
-      }).catch(() => setSectionSkills([]))
       window.api.listProviders().then((res) => {
         setProviders(res.ok && res.data ? (res.data.items as ProviderOption[]) : [])
       }).catch(() => setProviders([]))
@@ -84,11 +90,11 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
       if (!found) return
 
       const vRes = await window.api.getLatestDraftByTask(taskId)
-      // 无稿时主进程返回 DRAFT_NOT_FOUND（ok:false），需同样按"空白"处理，避免旧任务初稿残留
       const latest = vRes.ok && vRes.data ? ((vRes.data as { draft: DraftItem | null }).draft ?? null) : null
+      let hasDraft = false
       if (latest) {
+        hasDraft = true
         setDraft(latest)
-        // 加载该稿的矛盾清单（Phase 3.7：编辑器标注 / 矛盾按钮）
         const cRes = await window.api.getDraftContradictions(latest.id)
         if (cRes.ok && cRes.data) {
           setContradictions(cRes.data.contradictions as unknown as Contradiction[])
@@ -100,7 +106,19 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
         setContradictions([])
       }
 
-      // 加载任务持久化的对话历史（Phase 3.5 后续）
+      let comp: CompilationView | null = null
+      const compRes = await window.api.listCompilations(taskId)
+      if (compRes.ok && compRes.data && Array.isArray(compRes.data.compilations) && compRes.data.compilations.length > 0) {
+        comp = compRes.data.compilations[0] as CompilationView
+      }
+      setCompilation(comp)
+      // 恢复汇编指令（供“重新生成汇编”使用；编译的 title 存的就是用户完整撰写要求）
+      setCompilationInstruction(comp?.title ?? '')
+
+      if (hasDraft) setStep(2)
+      else if (comp && comp.status === 'finalized') setStep(2)
+      else setStep(0)
+
       const mRes = await window.api.listTaskMessages(taskId)
       if (mRes.ok && mRes.data) {
         setMessages(mRes.data.items.map((m) => ({ role: m.role, content: m.content })))
@@ -114,7 +132,6 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
 
   useEffect(() => { load() }, [load])
 
-  // 订阅生成初稿阶段进度（整理摘要 / 检索 / 扫描窗口 / 等待大模型回应 / 定位矛盾），更新状态提示与进度条
   useEffect(() => {
     const off = window.api.onDraftGenerateProgress?.((p) => {
       if (p.taskId === taskId) {
@@ -125,7 +142,19 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
     return () => { off?.() }
   }, [taskId])
 
-  // 订阅流式增量文本（2026-08-19：生成正文 / 对话回复逐字推送）
+  useEffect(() => {
+    const off = window.api.onCompilationProgress?.((p) => {
+      if (p.taskId === taskId) {
+        setBusyText(p.stage)
+        setCompilationProgress({ percent: p.percent, etaSeconds: p.etaSeconds })
+        if (p.candidateChunks != null) {
+          setCompilationMeta({ candidateChunks: p.candidateChunks, candidateSources: p.candidateSources })
+        }
+      }
+    })
+    return () => { off?.() }
+  }, [taskId])
+
   useEffect(() => {
     const off = window.api.onWritingStreamDelta?.((p) => {
       if (p.taskId === taskId) {
@@ -139,7 +168,6 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
     setMessages((prev) => [...prev, { role: 'assistant', content: text }])
   }
 
-  /** 从主进程重新加载任务的持久化消息（对话/生成记录均由主进程写入） */
   const reloadMessages = useCallback(async () => {
     const res = await window.api.listTaskMessages(taskId)
     if (res.ok && res.data) {
@@ -147,15 +175,170 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
     }
   }, [taskId])
 
-  /** 生成初稿（初稿生成前的主按钮）：把输入作为用户要求提交 */
-  const handleGenerate = async (instruction: string) => {
+  const resetBusy = () => {
+    setBusy(null)
+    setBusyText(null)
+    setProgress(null)
+    setStreamText(null)
+    setCompilationProgress(null)
+  }
+
+  // ---- 资料汇编（Phase 6.2）----
+
+  const handleGenerateCompilation = async (instruction: string) => {
+    if (busy) return
+    const inst = instruction.trim()
+    if (!inst) return
+    setCompilationInstruction(inst)
+    setMessages((prev) => [...prev, { role: 'user', content: instruction }])
+    setBusy('generating')
+    setBusyText(zhCN.compilation.generating)
+    setStreamText(null)
+    setCompilationProgress(null)
+    try {
+      const res = await window.api.generateCompilation(taskId, inst)
+      if (res.ok && res.data) {
+        const comp = res.data.compilation as CompilationView
+        setCompilation(comp)
+        const pendingCount = comp.contradictions.filter((c) => c.status === 'pending').length
+        const summary = pendingCount > 0
+          ? '已生成资料汇编：' + comp.items.length + ' 张卡片，' + pendingCount + ' 组矛盾待处理。请审阅并处理后点击「确认汇编」。'
+          : '已生成资料汇编：' + comp.items.length + ' 张卡片，无未处理矛盾。请审阅后点击「确认汇编」。'
+        appendAssistant(summary)
+        void window.api.addTaskMessage(taskId, 'assistant', summary, 'notice')
+      } else {
+        const msg = '生成资料汇编失败：' + (res.error?.message ?? '')
+        appendAssistant(msg)
+        void window.api.addTaskMessage(taskId, 'assistant', msg, 'notice')
+      }
+    } finally {
+      resetBusy()
+      await reloadMessages()
+    }
+  }
+
+  const handleRegenerateCompilation = async () => {
+    if (busy) return
+    const inst = compilationInstruction.trim() || (task?.userInstruction ?? '').trim()
+    if (!inst) {
+      appendAssistant('没有可用的撰写要求，无法重新生成资料汇编。')
+      return
+    }
+    setBusy('generating')
+    setBusyText(zhCN.compilation.generating)
+    setCompilationProgress(null)
+    try {
+      const res = await window.api.regenerateCompilation(taskId, inst)
+      if (res.ok && res.data) {
+        const comp = res.data.compilation as CompilationView
+        setCompilation(comp)
+        const summary = zhCN.compilation.regenerated.replace('{count}', String(comp.items.length))
+        appendAssistant(summary)
+        void window.api.addTaskMessage(taskId, 'assistant', summary, 'notice')
+      } else {
+        const msg = '重新生成资料汇编失败：' + (res.error?.message ?? '')
+        appendAssistant(msg)
+        void window.api.addTaskMessage(taskId, 'assistant', msg, 'notice')
+      }
+    } finally {
+      resetBusy()
+      await reloadMessages()
+    }
+  }
+
+  const handleConfirmCompilation = async () => {
+    if (!compilation || busy) return
+    const res = await window.api.confirmCompilation(compilation.id)
+    if (res.ok && res.data) {
+      setCompilation(res.data.compilation as CompilationView)
+      appendAssistant(zhCN.compilation.confirmed)
+      setStep(1)
+    } else {
+      appendAssistant('确认汇编失败：' + (res.error?.message ?? ''))
+    }
+  }
+
+  // ---- 矛盾回收站 ----
+  const loadRecycleBin = useCallback(async (compilationId: string) => {
+    const res = await window.api.listCompilationRecycleBin(compilationId)
+    if (res.ok && res.data) {
+      setRecycleBinItems(res.data.items as CompilationRecycleBinItem[])
+    } else {
+      setRecycleBinItems([])
+    }
+  }, [])
+
+  const openRecycleBin = () => {
+    if (!compilation) return
+    setShowRecycleBin(true)
+    void loadRecycleBin(compilation.id)
+  }
+
+  const handleRestoreRecycleBin = async (binId: string) => {
+    const res = await window.api.restoreCompilationRecycleBin(binId)
+    if (res.ok && res.data) {
+      if (compilation) {
+        const getRes = await window.api.getCompilation(compilation.id)
+        if (getRes.ok && getRes.data) setCompilation(getRes.data.compilation as CompilationView)
+        await loadRecycleBin(compilation.id)
+      }
+      appendAssistant(zhCN.compilation.restored)
+    } else {
+      appendAssistant('恢复矛盾失败：' + (res.error?.message ?? ''))
+    }
+  }
+
+  const handleUpdateItem = async (itemId: string, patch: { excerpt?: string; ts?: string | null; note?: string | null }) => {
+    const res = await window.api.updateCompilationItem(itemId, patch)
+    if (res.ok && res.data) {
+      const item = res.data.item as CompilationView['items'][number]
+      setCompilation((cur) => (cur ? { ...cur, items: cur.items.map((it) => (it.id === itemId ? item : it)) } : cur))
+    } else {
+      appendAssistant('编辑资料卡片失败：' + (res.error?.message ?? ''))
+    }
+  }
+
+  const handleDeleteItem = async (itemId: string) => {
+    const res = await window.api.deleteCompilationItem(itemId)
+    if (res.ok) {
+      setCompilation((cur) => (cur ? { ...cur, items: cur.items.filter((it) => it.id !== itemId) } : cur))
+    } else {
+      appendAssistant('删除资料卡片失败：' + (res.error?.message ?? ''))
+    }
+  }
+
+  const handleResolveContradiction = async (contradictionId: string, action: 'resolve' | 'ignore', chosenItemId?: string) => {
+    const res = await window.api.resolveCompilationContradiction(contradictionId, action, chosenItemId)
+    if (res.ok && res.data) {
+      // 采纳后后端会删除该矛盾分组中未被采纳的卡片；重新拉取汇编以同步被删除的卡片
+      if (compilation) {
+        const getRes = await window.api.getCompilation(compilation.id)
+        if (getRes.ok && getRes.data) {
+          setCompilation(getRes.data.compilation as CompilationView)
+        } else {
+          const c = res.data.contradiction as CompilationView['contradictions'][number]
+          setCompilation((cur) =>
+            cur ? { ...cur, contradictions: cur.contradictions.map((g) => (g.id === contradictionId ? c : g)) } : cur
+          )
+        }
+      }
+    } else {
+      appendAssistant('处理矛盾失败：' + (res.error?.message ?? ''))
+    }
+  }
+
+  // ---- 初稿生成（Phase 6.3）----
+
+  const handleGenerateDraft = async (instruction: string) => {
     if (busy) return
     setMessages((prev) => [...prev, { role: 'user', content: instruction }])
     setBusy('generating')
     setBusyText(zhCN.writingChat.generating)
     setStreamText(null)
+    setProgress(null)
     try {
-      const res = await window.api.generateDraft(taskId, instruction)
+      const compilationId = compilation?.status === 'finalized' ? compilation.id : undefined
+      const res = await window.api.generateDraft(taskId, instruction, compilationId)
       if (res.ok && res.data) {
         const data = res.data as { draft: DraftItem; articleTitle: string | null; contradictions?: Contradiction[] }
         setDraft(data.draft)
@@ -165,14 +348,10 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
       }
       await reloadMessages()
     } finally {
-      setBusy(null)
-      setBusyText(null)
-      setProgress(null)
-      setStreamText(null)
+      resetBusy()
     }
   }
 
-  /** 自由对话（初稿生成后）：history 为当前消息列表（不含本条） */
   const handleChat = async (message: string) => {
     if (busy) return
     const history = messagesRef.current.map((m) => ({ role: m.role, content: m.content }))
@@ -182,62 +361,22 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
     setStreamText(null)
     try {
       await window.api.chatWithTask(taskId, message, history)
-      // 用户消息与回复（或失败提示）均由主进程写入，成功后统一重新加载
       await reloadMessages()
     } finally {
-      setBusy(null)
-      setBusyText(null)
-      setProgress(null)
-      setStreamText(null)
+      resetBusy()
     }
   }
 
-  /** 更新任务选定的部类细则规范（空数组 = 未手动选定、自动匹配；初稿已生成后禁用） */
-  const handleSkillsChange = async (skillIds: string[]) => {
-    if (!task || busy) return
-    const res = await window.api.updateTaskSkills(task.id, skillIds.length > 0 ? skillIds : null)
-    if (res.ok) {
-      setTask((cur) => (cur ? { ...cur, skillIds: skillIds.length > 0 ? skillIds : undefined } : cur))
-    } else {
-      appendAssistant(`更新写作规范失败：${res.error?.message ?? ''}`)
-    }
-  }
-
-  /** 智能匹配写作规范（2026-08-14）：单独请求大模型，把匹配结果写回任务 skillIds */
-  const handleSuggestSkills = async (need: string) => {
-    if (!task || busy) return
-    const res = await window.api.suggestSkills(task.id, need)
-    if (!res.ok) {
-      appendAssistant(`智能匹配写作规范失败：${res.error?.message ?? ''}`)
-      return
-    }
-    const ids = res.data?.skillIds ?? []
-    const writeRes = await window.api.updateTaskSkills(task.id, ids.length > 0 ? ids : null)
-    if (!writeRes.ok) {
-      appendAssistant(`更新写作规范失败：${writeRes.error?.message ?? ''}`)
-      return
-    }
-    setTask((cur) => (cur ? { ...cur, skillIds: ids.length > 0 ? ids : undefined } : cur))
-    const names = (sectionSkills ?? []).filter((s) => ids.includes(s.id)).map((s) => s.name)
-    appendAssistant(
-      names.length > 0
-        ? `已智能匹配到写作规范：${names.join('、')}`
-        : '未匹配到合适的部类细则规范，生成时将按标题自动匹配。'
-    )
-  }
-
-  /** 更换任务固定使用的大模型（'' 表示跟随全局设置） */
   const handleProviderChange = async (llmProviderId: string) => {
     if (!task || busy) return
     const res = await window.api.updateTaskProvider(task.id, llmProviderId === '' ? null : llmProviderId)
     if (res.ok) {
       setTask((cur) => (cur ? { ...cur, llmProviderId: llmProviderId === '' ? undefined : llmProviderId } : cur))
     } else {
-      appendAssistant(`切换大模型失败：${res.error?.message ?? ''}`)
+      appendAssistant('切换大模型失败：' + (res.error?.message ?? ''))
     }
   }
 
-  /** 重新生成初稿：用上次生成时保存的要求（无则取最后一条用户消息） */
   const handleRegenerate = async () => {
     setConfirmingRegenerate(false)
     if (busy) return
@@ -251,7 +390,8 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
     setBusyText(zhCN.writingChat.regenerating)
     setStreamText(null)
     try {
-      const res = await window.api.regenerateDraft(taskId, instruction)
+      const compilationId = compilation?.status === 'finalized' ? compilation.id : undefined
+      const res = await window.api.regenerateDraft(taskId, instruction, compilationId)
       if (res.ok && res.data) {
         const data = res.data as { draft: DraftItem; articleTitle: string | null; contradictions?: Contradiction[] }
         setDraft(data.draft)
@@ -261,14 +401,10 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
       }
       await reloadMessages()
     } finally {
-      setBusy(null)
-      setBusyText(null)
-      setProgress(null)
-      setStreamText(null)
+      resetBusy()
     }
   }
 
-  /** 编辑器 undo/redo 引起正文变化：命中采纳快照时回退/恢复矛盾状态，并同步主进程数据库 */
   const handleEditorHistoryChange = useCallback((markdown: string): void => {
     const snapshot = adoptionSnapshotsRef.current.get(markdown)
     if (!snapshot) return
@@ -297,16 +433,10 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
   if (err) return <p className="source-list__error">{err}</p>
   if (!task) return <p className="source-list__error">{zhCN.writingWorkspace.loadFailed.replace('{message}', '任务不存在')}</p>
 
-  /** 矛盾取舍成功：用返回的矛盾替换列表中的对应项（Phase 3.7） */
   const handleContradictionResolved = (updated: Contradiction): void => {
     setContradictions((prev) => prev.map((c) => (c.id === updated.id ? updated : c)))
   }
 
-  /**
-   * 矛盾采纳 → 正文同步修订（2026-08-11，兼容"撤销"）：
-   * 通过编辑器事务应用新整稿（setContent 进入 ProseMirror undo 历史，内置"撤销"一次即可恢复），
-   * 不再重挂载销毁编辑器实例；同时记录"采纳前/后正文 → 矛盾状态"快照，供撤销/重做命中时回退。
-   */
   const handleContradictionApplied = (updated: Contradiction, draft: unknown): void => {
     const newDraft = draft as DraftItem
     const nextContradictions = contradictionsRef.current.map((c) => (c.id === updated.id ? updated : c))
@@ -320,28 +450,153 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
     setContradictions(nextContradictions)
   }
 
-  // 分类：在正文（含定位未知）→ 矛盾；定位审查确认不在正文 → 警告（仅查看/忽略，不影响正文）
   const inDraftContradictions = contradictions.filter((c) => c.inDraft !== false)
   const warningContradictions = contradictions.filter((c) => c.inDraft === false)
 
-  /** 打开矛盾来源文件（系统默认软件）；失败在对话区提示（Phase 3.7 Task 3.7.6） */
   const handleOpenSource = async (sourceId: string): Promise<void> => {
     const res = await window.api.openSourcePath(sourceId)
     if (!res.ok) {
-      appendAssistant(`打开来源文件失败：${res.error?.message ?? ''}`)
+      appendAssistant('打开来源文件失败：' + (res.error?.message ?? ''))
     }
   }
 
-  /** 文段来源询问（Phase 3.7 Task 3.7.5）：调用主进程（本地匹配/检索/LLM 兜底），消息已持久化，刷新对话区 */
   const handleAskSource = async (selection: string): Promise<void> => {
     if (busy) return
     const res = await window.api.askSource(taskId, selection)
     if (res.ok && res.data) {
       setSourceRefs(res.data.refs as SourceRefItem[])
     } else {
-      appendAssistant(`来源询问失败：${res.error?.message ?? ''}`)
+      appendAssistant('来源询问失败：' + (res.error?.message ?? ''))
     }
     await reloadMessages()
+  }
+
+  const compilationFinalized = compilation?.status === 'finalized'
+
+  const goToStep = (target: WizardStep): void => {
+    if (target === 0) {
+      setStep(0)
+      return
+    }
+    if (compilationFinalized) setStep(target)
+  }
+
+  const renderChat = () => {
+    if (step === 0) {
+      return (
+        <ChatPanel
+          messages={messages}
+          draftExisted={false}
+          busy={busy !== null}
+          busyText={busyText}
+          streamText={streamText}
+          progress={compilationProgress}
+          providers={providers}
+          providerId={task.llmProviderId}
+          onProviderChange={(id) => void handleProviderChange(id)}
+          onGenerate={() => undefined}
+          onChat={(message) => void handleChat(message)}
+          primaryLabel={zhCN.compilation.generateBtn}
+          onPrimaryAction={(text) => void handleGenerateCompilation(text)}
+          refs={sourceRefs}
+          onOpenSource={(sourceId) => void handleOpenSource(sourceId)}
+        />
+      )
+    }
+    if (step === 1) {
+      return (
+        <ChatPanel
+          messages={messages}
+          draftExisted={false}
+          busy={busy !== null}
+          busyText={busyText}
+          streamText={streamText}
+          progress={null}
+          providers={providers}
+          providerId={task.llmProviderId}
+          onProviderChange={(id) => void handleProviderChange(id)}
+          onGenerate={() => undefined}
+          onChat={(message) => void handleChat(message)}
+          primaryLabel={zhCN.writingChat.sendBtn}
+          onPrimaryAction={(text) => void handleChat(text)}
+          refs={sourceRefs}
+          onOpenSource={(sourceId) => void handleOpenSource(sourceId)}
+        />
+      )
+    }
+    return (
+      <ChatPanel
+        messages={messages}
+        draftExisted={!!draft}
+        busy={busy !== null}
+        busyText={busyText}
+        streamText={streamText}
+        progress={progress}
+        providers={providers}
+        providerId={task.llmProviderId}
+        onProviderChange={(id) => void handleProviderChange(id)}
+        onGenerate={(instruction) => void handleGenerateDraft(instruction)}
+        onChat={(message) => void handleChat(message)}
+        refs={sourceRefs}
+        onOpenSource={(sourceId) => void handleOpenSource(sourceId)}
+      />
+    )
+  }
+
+  const renderContent = () => {
+    if (step === 0) {
+      return (
+        <CompilationStep
+          compilation={compilation}
+          busy={busy !== null}
+          candidateChunks={compilationMeta?.candidateChunks}
+          onRegenerate={() => void handleRegenerateCompilation()}
+          onConfirm={() => void handleConfirmCompilation()}
+          onOpenSource={(sourceId) => void handleOpenSource(sourceId)}
+          onUpdateItem={handleUpdateItem}
+          onDeleteItem={(itemId) => void handleDeleteItem(itemId)}
+          onResolve={handleResolveContradiction}
+        />
+      )
+    }
+    if (step === 1) {
+      return (
+        <div className="writing-workspace__editor-placeholder">
+          <div className="writing-style-step">
+            <span className="writing-style-step__icon" aria-hidden="true">📐</span>
+            <p>{zhCN.writingWorkspace.styleHint}</p>
+          </div>
+        </div>
+      )
+    }
+    if (draft) {
+      return (
+        <DraftEditor
+          key={draft.id}
+          ref={editorRef}
+          draft={draft}
+          contradictions={contradictions}
+          onContradictionClick={(seq) => setDialogState({ kind: 'contradiction', mode: 'single', seq })}
+          onOpenContradictions={() => setDialogState({ kind: 'contradiction', mode: 'overview' })}
+          onOpenWarnings={() => setDialogState({ kind: 'warning', mode: 'overview' })}
+          onAskSource={(selection) => void handleAskSource(selection)}
+          onHistoryChanged={handleEditorHistoryChange}
+        />
+      )
+    }
+    return (
+      <div className="writing-workspace__editor-placeholder">
+        <p>{zhCN.writingChat.noDraftHint}</p>
+      </div>
+    )
+  }
+
+  const stepClass = (i: WizardStep): string => {
+    const parts = ['writing-stepper__step']
+    if (i === step) parts.push('is-active')
+    else if (i < step) parts.push('is-done')
+    else if (!compilationFinalized) parts.push('is-locked')
+    return parts.join(' ')
   }
 
   return (
@@ -355,62 +610,79 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
             </p>
           ) : null}
         </div>
-        {draft ? (
-          <button
-            type="button"
-            className="source-list__btn source-list__btn--danger"
-            disabled={busy !== null}
-            onClick={() => setConfirmingRegenerate(true)}
-          >
-            {zhCN.writingChat.regenerateBtn}
-          </button>
-        ) : null}
+        <div className="writing-workspace__header-actions">
+          {compilation ? (
+            <button
+              type="button"
+              className="recycle-bin-btn"
+              title={zhCN.compilation.recycleBin}
+              aria-label={zhCN.compilation.recycleBin}
+              onClick={openRecycleBin}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M3 6h18" />
+                <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                <path d="M10 11v6M14 11v6" />
+              </svg>
+            </button>
+          ) : null}
+          {draft && step === 2 ? (
+            <button
+              type="button"
+              className="source-list__btn source-list__btn--danger"
+              disabled={busy !== null}
+              onClick={() => setConfirmingRegenerate(true)}
+            >
+              {zhCN.writingChat.regenerateBtn}
+            </button>
+          ) : null}
+        </div>
       </header>
 
-      <div className="writing-workspace__body">
-        <section className="writing-workspace__chat">
-          <ChatPanel
-            messages={messages}
-            draftExisted={!!draft}
-            busy={busy !== null}
-            busyText={busyText}
-            streamText={streamText}
-            progress={progress}
-            sectionSkills={sectionSkills}
-            selectedSkillIds={task.skillIds ?? []}
-            onSkillsChange={(ids) => void handleSkillsChange(ids)}
-            articleTitle={task.articleTitle}
-            onSuggestSkills={handleSuggestSkills}
-            providers={providers}
-            providerId={task.llmProviderId}
-            onProviderChange={(id) => void handleProviderChange(id)}
-            onGenerate={(instruction) => void handleGenerate(instruction)}
-            onChat={(message) => void handleChat(message)}
-            refs={sourceRefs}
-            onOpenSource={(sourceId) => void handleOpenSource(sourceId)}
-          />
-        </section>
+      <nav className="writing-stepper" aria-label="撰写步骤">
+        {zhCN.writingWorkspace.steps.map((label, i) => (
+          <button
+            key={i}
+            type="button"
+            className={stepClass(i as WizardStep)}
+            disabled={i > step && !compilationFinalized}
+            onClick={() => goToStep(i as WizardStep)}
+          >
+            <span className="writing-stepper__index">{i + 1}</span>
+            <span className="writing-stepper__label">{label}</span>
+          </button>
+        ))}
+      </nav>
 
-        <section className="writing-workspace__editor">
-          {draft ? (
-            <DraftEditor
-              key={draft.id}
-              ref={editorRef}
-              draft={draft}
-              contradictions={contradictions}
-              onContradictionClick={(seq) => setDialogState({ kind: 'contradiction', mode: 'single', seq })}
-              onOpenContradictions={() => setDialogState({ kind: 'contradiction', mode: 'overview' })}
-              onOpenWarnings={() => setDialogState({ kind: 'warning', mode: 'overview' })}
-              onAskSource={(selection) => void handleAskSource(selection)}
-              onHistoryChanged={handleEditorHistoryChange}
-            />
-          ) : (
-            <div className="writing-workspace__editor-placeholder">
-              <p>{zhCN.writingChat.noDraftHint}</p>
-            </div>
-          )}
-        </section>
+      <div className="writing-workspace__body">
+        <section className="writing-workspace__chat" style={{ width: chatWidth }}>{renderChat()}</section>
+        <ResizeHandle onResize={handleChatResize} direction="horizontal" />
+        <section className="writing-workspace__editor">{renderContent()}</section>
       </div>
+
+      {step > 0 ? (
+        <footer className="writing-workspace__footer">
+          <button
+            type="button"
+            className="source-list__btn"
+            disabled={busy !== null}
+            onClick={() => setStep((step - 1) as WizardStep)}
+          >
+            {zhCN.writingWorkspace.prev}
+          </button>
+          {step === 1 ? (
+            <button
+              type="button"
+              className="source-list__btn source-list__btn--primary"
+              disabled={busy !== null}
+              onClick={() => setStep(2)}
+            >
+              {zhCN.writingWorkspace.next}
+            </button>
+          ) : null}
+        </footer>
+      ) : null}
 
       {dialogState ? (
         <ContradictionDialog
@@ -434,6 +706,41 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
           onConfirm={() => void handleRegenerate()}
           onCancel={() => setConfirmingRegenerate(false)}
         />
+      ) : null}
+
+      {showRecycleBin ? (
+        <div className="skills-manager__modal-backdrop" onMouseDown={() => setShowRecycleBin(false)}>
+          <div className="skills-manager__modal recycle-bin-modal" onMouseDown={(e) => e.stopPropagation()}>
+            <h4 className="skills-manager__modal-title">{zhCN.compilation.recycleBinTitle}</h4>
+            {recycleBinItems.length === 0 ? (
+              <p className="recycle-bin-empty">{zhCN.compilation.recycleBinEmpty}</p>
+            ) : (
+              <div className="recycle-bin-list">
+                {recycleBinItems.map((item) => (
+                  <div key={item.id} className="recycle-bin-item">
+                    <div className="recycle-bin-item-head">
+                      <b>⚠ {item.topic}</b>
+                      <span>{item.status === 'resolved' ? zhCN.compilation.resolved : zhCN.compilation.ignored}</span>
+                    </div>
+                    <div className="recycle-bin-item-variants">
+                      {item.contradiction.variants.map((v) => (
+                        <div key={v.id} className="recycle-bin-variant">《{v.sourceTitle ?? v.sourceId}》 {v.variantText}</div>
+                      ))}
+                    </div>
+                    <div className="recycle-bin-item-actions">
+                      <button type="button" className="source-list__btn source-list__btn--primary" onClick={() => void handleRestoreRecycleBin(item.id)}>
+                        {zhCN.compilation.restore}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="skills-manager__modal-actions">
+              <button type="button" className="source-list__btn" onClick={() => setShowRecycleBin(false)}>{zhCN.compilation.close}</button>
+            </div>
+          </div>
+        </div>
       ) : null}
     </div>
   )

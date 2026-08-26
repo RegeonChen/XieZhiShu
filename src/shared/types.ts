@@ -268,6 +268,19 @@ export interface Compilation {
   contradictions: CompilationContradiction[]
 }
 
+/** 回收站中的一条被采纳/忽略的矛盾（可恢复后重新取舍） */
+export interface CompilationRecycleBinItem {
+  id: string
+  compilationId: string
+  contradictionId: string
+  topic: string
+  kind: CompilationContradiction['kind']
+  status: 'resolved' | 'ignored'
+  createdAt: string
+  /** 恢复后重新展示的矛盾（含全部 variant 与所选卡片 id） */
+  contradiction: CompilationContradiction
+}
+
 // ============================================================
 // LLM Provider
 // ============================================================

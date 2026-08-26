@@ -446,6 +446,25 @@ CREATE TABLE IF NOT EXISTS compilation_contradiction_variants (
 );
 CREATE INDEX IF NOT EXISTS idx_compilation_cv_contradiction ON compilation_contradiction_variants(contradiction_id);
 `
+  },
+  {
+    // 汇编矛盾的回收站：采纳/忽略某组矛盾时，把该矛盾“原封不动”快照进回收站，
+    // 用户可恢复后重新取舍。引用 contradiction_id（矛盾行保留，卡片用 kept 软删除便于恢复），
+    // 随 compilation 级联删除。
+    version: 17,
+    sql: `
+CREATE TABLE IF NOT EXISTS compilation_recycle_bin (
+  id TEXT PRIMARY KEY,
+  compilation_id TEXT NOT NULL REFERENCES compilations(id) ON DELETE CASCADE,
+  contradiction_id TEXT NOT NULL REFERENCES compilation_contradictions(id) ON DELETE CASCADE,
+  topic TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'other',
+  status TEXT NOT NULL CHECK (status IN ('resolved','ignored')),
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compilation_recycle_bin_comp ON compilation_recycle_bin(compilation_id);
+CREATE INDEX IF NOT EXISTS idx_compilation_recycle_bin_contra ON compilation_recycle_bin(contradiction_id);
+`
   }
 ]
 
