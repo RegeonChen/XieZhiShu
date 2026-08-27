@@ -8,6 +8,8 @@ interface ConfirmDialogProps {
   cancelText?: string
   danger?: boolean
   busy?: boolean
+  busyText?: string
+  error?: string
   onConfirm: () => void
   onCancel: () => void
 }
@@ -20,6 +22,8 @@ function ConfirmDialog({
   cancelText,
   danger,
   busy,
+  busyText,
+  error,
   onConfirm,
   onCancel
 }: ConfirmDialogProps) {
@@ -37,6 +41,7 @@ function ConfirmDialog({
       <div className="confirm-dialog" role="dialog" aria-modal="true" aria-label={title}>
         <h4 className="confirm-dialog__title">{title}</h4>
         <p className="confirm-dialog__message">{message}</p>
+        {error ? <p className="confirm-dialog__error">{error}</p> : null}
         <div className="confirm-dialog__actions">
           <button type="button" className="source-list__btn" onClick={onCancel} disabled={busy} autoFocus>
             {cancelText ?? zhCN.common.cancel}
@@ -47,7 +52,7 @@ function ConfirmDialog({
             onClick={onConfirm}
             disabled={busy}
           >
-            {busy ? zhCN.common.deleting : confirmText}
+            {busy ? (busyText ?? zhCN.common.deleting) : confirmText}
           </button>
         </div>
       </div>

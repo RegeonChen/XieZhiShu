@@ -58,7 +58,7 @@ export interface AppApi {
   deleteProvider(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   testProvider(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   getSettings(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
-  updateSettings(patch: { currentLlmProviderId?: string; dataDir?: string; workspaceDir?: string }): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
+  updateSettings(patch: { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string }): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   getWorkspaceStatus(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   workspaceNavSync(): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   migrateLegacyWorkspace(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>

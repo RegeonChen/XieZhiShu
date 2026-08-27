@@ -102,7 +102,12 @@ export function getProviderSecret(id: string, codec: SecretCodec): { config: Llm
   if (!row) return null
   const config = rowToConfig(row)
   if (!row.api_key) return { config, apiKey: '' }
-  return { config, apiKey: codec.decrypt(row.api_key) }
+  try {
+    return { config, apiKey: codec.decrypt(row.api_key) }
+  } catch {
+    // 密钥解密失败（存储被破坏 / 编码不匹配）：返回 null，调用方按「Provider 不存在」降级，避免抛错导致界面无反馈
+    return null
+  }
 }
 
 // ---- vitest inline test ----

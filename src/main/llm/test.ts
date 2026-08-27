@@ -28,30 +28,45 @@ function extractErrorMessage(raw: string): string | null {
 }
 
 export async function testProviderConnection(id: string, codec: SecretCodec): Promise<ConnectionTestResult> {
-  const provider = getProviderSecret(id, codec)
-  if (!provider) return { ok: false, error: { code: ErrorCodes.INVALID_PARAM, message: 'Provider 不存在' } }
+  let provider: ReturnType<typeof getProviderSecret>
+  try {
+    provider = getProviderSecret(id, codec)
+  } catch {
+    provider = null
+  }
+  if (!provider) return { ok: false, error: { code: ErrorCodes.INVALID_PARAM, message: 'Provider 不存在（或密钥无法读取）' } }
   if (!provider.apiKey) {
     return { ok: false, error: { code: ErrorCodes.LLM_UNAUTHORIZED, message: '未设置 API 密钥' } }
   }
 
   const endpoint = `${provider.config.apiBase}/chat/completions`
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS)
+  // 保证到 TEST_TIMEOUT_MS 一定返回（即使 net.fetch 未按预期响应 abort），避免「测试连接」无限挂起
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const hardTimeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort()
+      reject(new DOMException('timeout', 'AbortError'))
+    }, TEST_TIMEOUT_MS)
+  })
   try {
-    const res = await net.fetch(endpoint, {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${provider.apiKey}`
-      },
-      body: JSON.stringify({
-        model: provider.config.model,
-        messages: [{ role: 'user', content: 'ping' }],
-        max_tokens: 1,
-        stream: false
-      })
-    })
+    const res = await Promise.race([
+      net.fetch(endpoint, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${provider.apiKey}`
+        },
+        body: JSON.stringify({
+          model: provider.config.model,
+          messages: [{ role: 'user', content: 'ping' }],
+          max_tokens: 1,
+          stream: false
+        })
+      }),
+      hardTimeout
+    ])
 
     if (res.ok) return { ok: true }
 
@@ -82,6 +97,6 @@ export async function testProviderConnection(id: string, codec: SecretCodec): Pr
     }
     return { ok: false, error: { code: ErrorCodes.LLM_NETWORK, message: '网络连接失败，请检查 API 地址与网络' } }
   } finally {
-    clearTimeout(timer)
+    if (timer) clearTimeout(timer)
   }
 }

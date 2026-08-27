@@ -77,6 +77,38 @@ export const LLM_PRESETS: LlmPreset[] = [
       { title: '复制 API Key', text: '复制生成的 API Key 并立即保存（仅显示一次）。' },
       { title: '填入软件', text: '回到软件设置页，点「使用此模型」→ 粘贴 Key → 保存 → 「测试连接」。GLM-4-Flash 永久免费，无需充值。' }
     ]
+  },
+  {
+    id: 'qwen3-max',
+    vendor: '阿里云百炼（通义千问）',
+    name: '通义千问 Qwen3-Max',
+    model: 'qwen3-max',
+    apiBase: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    pricing: '付费（按量）',
+    signupUrl: 'https://bailian.console.aliyun.com',
+    guide: [
+      { title: '注册阿里云账号', text: '打开阿里云百炼控制台 bailian.console.aliyun.com，用阿里云账号登录；无账号先按指引注册阿里云账号并完成个人/企业实名认证。' },
+      { title: '开通百炼服务', text: '首次进入「大模型服务平台百炼」控制台，按提示免费开通服务（按实际调用量计费；新用户通常有一定免费额度）。' },
+      { title: '创建 API-KEY', text: '在控制台左侧「API-KEY」页面（或右上角「获取 API-KEY」），点击「创建我的 API-KEY」，选择主账号或 RAM 用户授权并生成。' },
+      { title: '复制并保存', text: '复制生成的以 sk- 开头的 API-KEY（DASHSCOPE Key），它只会完整显示一次，请立即保存到安全位置。' },
+      { title: '填入软件', text: '回到本软件设置页，点该预设的「使用此模型」，模型名已自动填 qwen3-max；在「API 密钥」粘贴 Key → 保存 → 「测试连接」。' }
+    ]
+  },
+  {
+    id: 'zhipu-glm-4-6',
+    vendor: '智谱 AI',
+    name: '智谱 GLM-4.6',
+    model: 'glm-4.6',
+    apiBase: 'https://open.bigmodel.cn/api/paas/v4',
+    pricing: '付费（按量）',
+    signupUrl: 'https://open.bigmodel.cn',
+    guide: [
+      { title: '注册账号', text: '打开智谱 AI 开放平台 open.bigmodel.cn，使用手机号注册并登录。' },
+      { title: '完成实名认证', text: '进入「控制台 → 账户管理 → 实名认证」，完成个人/企业实名认证（手机号验证即可，个别场景需补充证件）。' },
+      { title: '创建 API Key', text: '进入「控制台 → API Key」，点击右上角「新建 API Key」，填写名称后生成。' },
+      { title: '复制 API Key', text: '复制生成的 API Key 并立即保存（仅完整显示一次）。' },
+      { title: '填入软件', text: '回到本软件设置页，点该预设的「使用此模型」，模型名已自动填 glm-4.6；在「API 密钥」粘贴 Key → 保存 → 「测试连接」。GLM-4.6 为按量付费，需确保账户有可用余额。' }
+    ]
   }
 ]
 
@@ -108,10 +140,12 @@ if (import.meta.vitest) {
       }
     })
 
-    it('covers the required three presets with expected models', () => {
+    it('covers the required presets with expected models', () => {
       expect(findLlmPreset('deepseek-v4-flash')?.model).toBe('deepseek-v4-flash')
       expect(findLlmPreset('deepseek-v4-pro')?.model).toBe('deepseek-v4-pro')
       expect(findLlmPreset('zhipu-glm-4-flash')?.model).toBe('glm-4-flash')
+      expect(findLlmPreset('qwen3-max')?.model).toBe('qwen3-max')
+      expect(findLlmPreset('zhipu-glm-4-6')?.model).toBe('glm-4.6')
     })
 
     it('return undefined for unknown id', () => {

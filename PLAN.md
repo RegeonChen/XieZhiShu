@@ -185,11 +185,24 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 - 选定风格细节后重构：撰写任务页顶部步骤条 + 主区域随步骤整页切换；左侧对话框 + 右侧内容区；整体配色/排版/间距/圆角/阴影统一；滚动条、动效、空态、加载态按商业软件标准；旧版“参考范本 / 部类细则 / 版本”等入口清理。
 - AI 过程可见：检索/AI 细读/矛盾扫描用进度事件 + 流式输出；Step 1 可将 AI 细读结论以卡片实时追加；Step 3 流式正文。
 
+> **Status（2026-08-25）**：已完成——三套主题落地并可在**设置页「外观（主题）」区块三选一**（简洁明亮 / 明亮+深色 / 古典公文风），通过 data-theme 注入 html 切换 CSS 变量并 localStorage 持久化记忆；三步向导 + 左右分栏 + 顶部步骤条已按商业风格落地（配色/间距/圆角/阴影统一、动效/滚动条/空态/加载态完善）。验证：typecheck 零错误、165 项单测、生产构建通过。
+
 ### Phase 6.6 初稿编辑器升级（深改 TipTap）
 
 - 目标观感接近成熟文档软件：正文衬线（宋体）排版、最大阅读宽度、标题层级、页边距、目录/页脚字数统计、撤销重做、打印友好工具栏。
 - 保留：Markdown 存储、800ms 防抖整稿保存、`draft:updateContent`、右键菜单（复制/粘贴/全选等）。
 - 由于“仅汇编层溯源”，正文不再需矛盾/来源节点，可移除矛盾标注相关扩展（按需保留旧数据兼容）。
+
+> **Status（2026-08-25）**：已完成——初稿编辑器深改：正文衬线（宋体/Noto Serif SC）排版、760px 最大阅读宽度、标题层级、页边距与 @media print 打印友好、页脚字数统计、撤销重做工具栏、保存状态；保留 Markdown 存储/800ms 防抖整稿保存/draft:updateContent/右键菜单。矛盾标注扩展保留（兼容旧稿，不阻断）。验证：typecheck 零错误、165 项单测、生产构建通过。
+
+### Phase 6.8 按步骤分别指定大模型（2026-08-25，已完成）
+
+> 用户澄清：本功能是**设置界面**为「第 1 步（资料汇编）」与「第 3 步（生成初稿）」各设一个**默认大模型**（从已配置的 Provider 中选取），而非按任务、也非在撰写工作台内切换。第 2 步（规范/范本编辑）无 LLM 调用。
+
+- **数据**：`AppSettings` 新增 `compilationProviderId` / `draftProviderId`，对应 `settings` 表 key `compilation_provider_id` / `draft_provider_id`（key-value，无需迁移；保存/清空时校验 Provider 存在）。
+- **Provider 解析**：`resolveTaskProvider(task, step)` 优先级为——`task.llmProviderId`（任务固定）→ 步骤默认（第 1 步用 settings.compilationProviderId、第 3 步用 settings.draftProviderId）→ 全局当前 Provider；`generateCompilation`（第 1 步）、`generateDraft`（第 3 步）分别按各自默认解析，对话维持现有回退。
+- **UI**：设置页新增「**步骤默认模型**」区块（中栏导航新增「步骤默认模型」），两个下拉分别选第 1/3 步默认模型，选项为已配置 Provider + 「未设置（回退任务/全局）」；保存即时生效。
+- **验收**：第 1/3 步可分别选不同默认模型并真实生效（生成汇编 / 生成初稿分别用所设 Provider）；未设置或任务已固定时按「任务 → 步骤默认 → 全局」回退；typecheck 零错误、166 项单测、构建通过。
 
 ### Phase 6.7 测试、文档与发布
 

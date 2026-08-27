@@ -37,10 +37,12 @@ export function getSettings(): AppSettings {
   const settings: AppSettings = {}
   const dataDir = getSetting('data_dir')
   if (dataDir) settings.dataDir = dataDir
-  const currentLlmProviderId = getSetting('current_llm_provider_id')
-  if (currentLlmProviderId) settings.currentLlmProviderId = currentLlmProviderId
   const workspaceDir = getSetting('workspace_dir')
   if (workspaceDir) settings.workspaceDir = workspaceDir
+  const compilationProviderId = getSetting('compilation_provider_id')
+  if (compilationProviderId) settings.compilationProviderId = compilationProviderId
+  const draftProviderId = getSetting('draft_provider_id')
+  if (draftProviderId) settings.draftProviderId = draftProviderId
   return settings
 }
 
@@ -54,17 +56,6 @@ export function updateSettings(patch: Partial<AppSettings>): AppSettings {
     else deleteSetting('data_dir')
   }
 
-  if ('currentLlmProviderId' in patch) {
-    const v = patch.currentLlmProviderId?.trim()
-    if (v) {
-      const exists = db.prepare('SELECT id FROM llm_providers WHERE id = ?').get(v)
-      if (!exists) throw new Error('指定的 Provider 不存在')
-      setSetting('current_llm_provider_id', v)
-    } else {
-      deleteSetting('current_llm_provider_id')
-    }
-  }
-
   if ('workspaceDir' in patch) {
     const v = patch.workspaceDir?.trim()
     if (v) {
@@ -75,6 +66,28 @@ export function updateSettings(patch: Partial<AppSettings>): AppSettings {
       setSetting('workspace_dir', v)
     } else {
       deleteSetting('workspace_dir')
+    }
+  }
+
+  if ('compilationProviderId' in patch) {
+    const v = patch.compilationProviderId?.trim()
+    if (v) {
+      const exists = db.prepare('SELECT id FROM llm_providers WHERE id = ?').get(v)
+      if (!exists) throw new Error('指定的 Provider 不存在')
+      setSetting('compilation_provider_id', v)
+    } else {
+      deleteSetting('compilation_provider_id')
+    }
+  }
+
+  if ('draftProviderId' in patch) {
+    const v = patch.draftProviderId?.trim()
+    if (v) {
+      const exists = db.prepare('SELECT id FROM llm_providers WHERE id = ?').get(v)
+      if (!exists) throw new Error('指定的 Provider 不存在')
+      setSetting('draft_provider_id', v)
+    } else {
+      deleteSetting('draft_provider_id')
     }
   }
 
@@ -95,27 +108,42 @@ if (import.meta.vitest) {
 
   describe('settings store (Task 3.1)', () => {
     it('saves and reads settings, persists across sessions', () => {
-      const pid = 'provider-1'
-      db.prepare('INSERT INTO llm_providers (id, name, api_base, model) VALUES (?, ?, ?, ?)').run(pid, 'P', 'https://x/v1', 'm')
-
-      const saved = updateSettings({ currentLlmProviderId: pid, dataDir: 'C:\\xie-zhishu-data' })
-      expect(saved.currentLlmProviderId).toBe(pid)
-      expect(saved.dataDir).toBe('C:\\xie-zhishu-data')
+      const saved = updateSettings({ dataDir: '/tmp/xie-zhishu-data' })
+      expect(saved.dataDir).toBe('/tmp/xie-zhishu-data')
 
       // 模拟重启：重新读取
       const again = getSettings()
-      expect(again.currentLlmProviderId).toBe(pid)
-      expect(again.dataDir).toBe('C:\\xie-zhishu-data')
+      expect(again.dataDir).toBe('/tmp/xie-zhishu-data')
     })
 
     it('clears settings when set to undefined', () => {
-      const cleared = updateSettings({ currentLlmProviderId: undefined, dataDir: undefined })
-      expect(cleared.currentLlmProviderId).toBeUndefined()
+      const cleared = updateSettings({ dataDir: undefined })
       expect(cleared.dataDir).toBeUndefined()
     })
 
     it('rejects unknown provider id', () => {
-      expect(() => updateSettings({ currentLlmProviderId: 'no-such-id' })).toThrow('不存在')
+      expect(() => updateSettings({ compilationProviderId: 'no-such-id' })).toThrow('不存在')
+    })
+
+    it('persists per-step default provider ids (Phase 6.8)', () => {
+      const p1 = 'provider-a'
+      const p2 = 'provider-b'
+      db.prepare('INSERT INTO llm_providers (id, name, api_base, model) VALUES (?, ?, ?, ?)').run(p1, 'A', 'https://a/v1', 'm')
+      db.prepare('INSERT INTO llm_providers (id, name, api_base, model) VALUES (?, ?, ?, ?)').run(p2, 'B', 'https://b/v1', 'm')
+
+      const saved = updateSettings({ compilationProviderId: p1, draftProviderId: p2 })
+      expect(saved.compilationProviderId).toBe(p1)
+      expect(saved.draftProviderId).toBe(p2)
+
+      const again = getSettings()
+      expect(again.compilationProviderId).toBe(p1)
+      expect(again.draftProviderId).toBe(p2)
+
+      const cleared = updateSettings({ compilationProviderId: undefined, draftProviderId: undefined })
+      expect(cleared.compilationProviderId).toBeUndefined()
+      expect(cleared.draftProviderId).toBeUndefined()
+
+      expect(() => updateSettings({ draftProviderId: 'no-such-id' })).toThrow('不存在')
     })
   })
 }

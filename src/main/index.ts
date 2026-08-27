@@ -842,10 +842,6 @@ handleLogged(IPC.LLM_SAVE_PROVIDER, (_event, params: LlmSaveProviderReq): ApiRes
 handleLogged(IPC.LLM_DELETE_PROVIDER, (_event, params: { id: string }): ApiResult<void> => {
   try {
     deleteProvider(params.id)
-    // 若删除的是当前 Provider，同步清除设置
-    if (getSettings().currentLlmProviderId === params.id) {
-      updateSettings({ currentLlmProviderId: undefined })
-    }
     return { ok: true, data: undefined }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }

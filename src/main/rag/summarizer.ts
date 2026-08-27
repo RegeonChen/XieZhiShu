@@ -107,10 +107,10 @@ export async function summarizeSource(sourceId: string): Promise<SummarizeResult
   if (!text) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料无正文内容' } }
 
   const settings = getSettings()
-  if (!settings.currentLlmProviderId) {
-    return { ok: false, error: { code: ErrorCodes.TASK_NO_PROVIDER, message: '请先在设置中配置并选择 LLM Provider' } }
+  if (!settings.compilationProviderId) {
+    return { ok: false, error: { code: ErrorCodes.TASK_NO_PROVIDER, message: '请先在设置中为「第 1 步」指定默认大模型' } }
   }
-  const provider = getProviderSecret(settings.currentLlmProviderId, safeStorageCodec)
+  const provider = getProviderSecret(settings.compilationProviderId, safeStorageCodec)
   if (!provider) return { ok: false, error: { code: ErrorCodes.TASK_NO_PROVIDER, message: '所选的 LLM Provider 不存在' } }
   if (!provider.apiKey) return { ok: false, error: { code: ErrorCodes.LLM_UNAUTHORIZED, message: '所选的 LLM Provider 未设置 API 密钥' } }
 
@@ -242,7 +242,7 @@ if (import.meta.vitest) {
       // 无 provider 配置 → 明确错误
       const res = await summarizeSource('ss1')
       expect(res.ok).toBe(false)
-      if (!res.ok) expect(res.error.message).toContain('Provider')
+      if (!res.ok) expect(res.error.message).toContain('第 1 步')
     })
 
     it('pendingSummarySourceIds only returns sources without summary (idempotent, Task 3.4.9)', () => {

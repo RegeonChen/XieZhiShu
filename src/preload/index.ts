@@ -203,7 +203,7 @@ const api = {
     return ipcRenderer.invoke(IPC.SETTINGS_GET)
   },
   /** 更新本地设置 */
-  updateSettings(patch: { currentLlmProviderId?: string; dataDir?: string; workspaceDir?: string }): Promise<ApiResult<unknown>> {
+  updateSettings(patch: { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string }): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.SETTINGS_UPDATE, { patch })
   },
   /** 工作区状态（目录 + 资料统计） */

@@ -143,7 +143,14 @@ async function requestOnce(
 ): Promise<{ result: ChatResult; status: number | null }> {
   const endpoint = `${provider.apiBase}/chat/completions`
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  // 保证到 timeoutMs 一定返回（即使 net.fetch 未按预期响应 abort），避免无限挂起
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const hardTimeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort()
+      reject(new DOMException('timeout', 'AbortError'))
+    }, timeoutMs)
+  })
   try {
     const body: Record<string, unknown> = {
       model: provider.model,
@@ -151,15 +158,18 @@ async function requestOnce(
       stream: opts?.onDelta ? true : false
     }
     if (typeof opts?.temperature === 'number') body.temperature = opts.temperature
-    const res = await net.fetch(endpoint, {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${provider.apiKey}`
-      },
-      body: JSON.stringify(body)
-    })
+    const res = await Promise.race([
+      net.fetch(endpoint, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${provider.apiKey}`
+        },
+        body: JSON.stringify(body)
+      }),
+      hardTimeout
+    ])
 
     if (!res.ok) {
       const bodyText = await res.text().catch(() => '')
@@ -193,7 +203,7 @@ async function requestOnce(
     }
     return { result: { ok: false, error: { code: ErrorCodes.LLM_NETWORK, message: '网络连接失败，请检查网络与 API 地址' } }, status: null }
   } finally {
-    clearTimeout(timer)
+    if (timer) clearTimeout(timer)
   }
 }
 

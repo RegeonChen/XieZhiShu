@@ -14,8 +14,9 @@ interface ProviderItem {
 }
 
 interface AppSettingsShape {
-  currentLlmProviderId?: string
   workspaceDir?: string
+  compilationProviderId?: string
+  draftProviderId?: string
 }
 
 interface ProviderForm {
@@ -32,16 +33,19 @@ interface SettingsProps {
   onOpenOnboarding?: () => void
   /** 滚动定位（scroll-spy）回调：当前视口内最靠上的设置区块 id（供中栏导航高亮） */
   onActiveChange?: (id: string) => void
+  /** 当前主题（由 App 注入） */
+  theme?: 'light' | 'dark' | 'classic'
+  /** 切换主题回调（由 App 注入） */
+  onThemeChange?: (theme: 'light' | 'dark' | 'classic') => void
 }
 
 /** 设置页区块顺序（与中栏导航一致；scroll-spy 观察对象） */
-const SETTING_SECTIONS = ['overview', 'workspace', 'preset', 'provider'] as const
+const SETTING_SECTIONS = ['overview', 'appearance', 'workspace', 'preset', 'stepModels', 'provider'] as const
 
-function Settings({ onOpenOnboarding, onActiveChange }: SettingsProps) {
+function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange }: SettingsProps) {
   const [providers, setProviders] = useState<ProviderItem[] | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadErr, setLoadErr] = useState<string | null>(null)
-  const [currentId, setCurrentId] = useState<string | null>(null)
 
   const [editing, setEditing] = useState<ProviderItem | 'new' | null>(null)
   const [form, setForm] = useState<ProviderForm>(EMPTY_FORM)
@@ -56,6 +60,11 @@ function Settings({ onOpenOnboarding, onActiveChange }: SettingsProps) {
 
   // Phase 3.6 预设大模型
   const [guidePreset, setGuidePreset] = useState<LlmPreset | null>(null)
+
+  // Phase 6.8 步骤默认模型（第 1 步汇编 / 第 3 步初稿）
+  const [step1Id, setStep1Id] = useState<string | null>(null)
+  const [step3Id, setStep3Id] = useState<string | null>(null)
+  const [stepModelsMsg, setStepModelsMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
   // 诊断日志导出（2026-08-14）
   const [exporting, setExporting] = useState(false)
@@ -83,8 +92,9 @@ function Settings({ onOpenOnboarding, onActiveChange }: SettingsProps) {
         setLoadErr(zhCN.settingsPage.provider.loadFailed.replace('{message}', pRes.error?.message ?? ''))
       }
       if (sRes.ok && sRes.data) {
-        setCurrentId((sRes.data as AppSettingsShape).currentLlmProviderId ?? null)
         setWorkspaceDir((sRes.data as AppSettingsShape).workspaceDir ?? null)
+        setStep1Id((sRes.data as AppSettingsShape).compilationProviderId ?? null)
+        setStep3Id((sRes.data as AppSettingsShape).draftProviderId ?? null)
       }
       if (wsRes.ok && wsRes.data) {
         setLegacySources((wsRes.data as { legacySources?: number }).legacySources ?? 0)
@@ -170,7 +180,6 @@ function Settings({ onOpenOnboarding, onActiveChange }: SettingsProps) {
     const res = await window.api.deleteProvider(p.id)
     if (res.ok) {
       setPendingDelete(null)
-      if (currentId === p.id) setCurrentId(null)
       await load()
     } else {
       setActionErr(zhCN.settingsPage.provider.deleteFailed.replace('{message}', res.error?.message ?? ''))
@@ -189,18 +198,10 @@ function Settings({ onOpenOnboarding, onActiveChange }: SettingsProps) {
           ? { id: p.id, ok: true, text: zhCN.settingsPage.provider.testSuccess }
           : { id: p.id, ok: false, text: zhCN.settingsPage.provider.testFailed.replace('{message}', res.error?.message ?? '') }
       )
+    } catch (e) {
+      setTestMsg({ id: p.id, ok: false, text: zhCN.settingsPage.provider.testFailed.replace('{message}', String(e)) })
     } finally {
       setTestingId(null)
-    }
-  }
-
-  const handleSetCurrent = async (p: ProviderItem) => {
-    const res = await window.api.updateSettings({ currentLlmProviderId: p.id })
-    if (res.ok && res.data) {
-      setCurrentId(p.id)
-      setActionErr(null)
-    } else {
-      setActionErr(zhCN.settingsPage.provider.setCurrentFailed.replace('{message}', res.error?.message ?? ''))
     }
   }
 
@@ -288,7 +289,21 @@ function Settings({ onOpenOnboarding, onActiveChange }: SettingsProps) {
     }
   }
 
-  const currentProviderName = providers?.find((p) => p.id === currentId)?.name ?? null
+  // Phase 6.8：设置第 1/3 步默认大模型（从已配置 Provider 中选取；空 = 回退任务/全局）
+  const handleStepModelChange = async (step: 1 | 3, id: string): Promise<void> => {
+    const value = id ? id : null
+    if (step === 1) setStep1Id(value)
+    else setStep3Id(value)
+    setStepModelsMsg(null)
+    const res = await window.api.updateSettings(
+      step === 1 ? { compilationProviderId: value ?? undefined } : { draftProviderId: value ?? undefined }
+    )
+    if (res.ok) {
+      setStepModelsMsg({ ok: true, text: zhCN.settingsPage.stepModels.saved })
+    } else {
+      setStepModelsMsg({ ok: false, text: zhCN.settingsPage.stepModels.failed.replace('{message}', res.error?.message ?? '') })
+    }
+  }
 
   return (
     <div className="settings">
@@ -308,9 +323,6 @@ function Settings({ onOpenOnboarding, onActiveChange }: SettingsProps) {
         </div>
         <div className="settings__overview-chips">
           <span className="settings__overview-chip">
-            {zhCN.settingsPage.overview.providerLabel}：{currentProviderName ?? zhCN.settingsPage.overview.providerNone}
-          </span>
-          <span className="settings__overview-chip">
             {zhCN.settingsPage.overview.workspaceLabel}：{workspaceDir ?? zhCN.settingsPage.overview.workspaceNone}
           </span>
         </div>
@@ -323,6 +335,27 @@ function Settings({ onOpenOnboarding, onActiveChange }: SettingsProps) {
           <button type="button" className="source-list__btn" onClick={handleExportLog} disabled={exporting}>
             {exporting ? zhCN.settingsPage.exportLog.exporting : zhCN.settingsPage.exportLog.btn}
           </button>
+        </div>
+      </section>
+
+      {/* Phase 6.5: 外观主题 */}
+      <section className="settings__section" id="settings-appearance">
+        <div className="settings__section-header">
+          <span className="settings__section-icon settings__section-icon--appearance" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z" />
+              <path d="M12 6a6 6 0 0 0 0 12" />
+            </svg>
+          </span>
+          <h4 className="settings__section-title">{zhCN.settingsPage.appearance.title}</h4>
+        </div>
+        <p className="settings__hint">{zhCN.settingsPage.appearance.hint}</p>
+        <div className="settings__theme-row">
+          {([['light', zhCN.settingsPage.appearance.light], ['dark', zhCN.settingsPage.appearance.dark], ['classic', zhCN.settingsPage.appearance.classic]] as const).map(([id, label]) => (
+            <button key={id} type="button" className={'settings__theme-option' + (theme === id ? ' is-active' : '')} onClick={() => onThemeChange?.(id)}>
+              {label}
+            </button>
+          ))}
         </div>
       </section>
 
@@ -419,6 +452,40 @@ function Settings({ onOpenOnboarding, onActiveChange }: SettingsProps) {
         </ul>
       </section>
 
+      {/* Phase 6.8：步骤默认模型（第 1 步汇编 / 第 3 步初稿） */}
+      <section className="settings__section" id="settings-step-models">
+        <div className="settings__section-header">
+          <span className="settings__section-icon settings__section-icon--stepmodels" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 7.7l5.4-.8L12 2z" />
+            </svg>
+          </span>
+          <h4 className="settings__section-title">{zhCN.settingsPage.stepModels.title}</h4>
+        </div>
+        <p className="settings__hint">{zhCN.settingsPage.stepModels.hint}</p>
+        <label className="settings__field">
+          <span className="settings__field-label">{zhCN.settingsPage.stepModels.step1Label}</span>
+          <select className="settings__input" value={step1Id ?? ''} onChange={(e) => void handleStepModelChange(1, e.target.value)}>
+            <option value="">{zhCN.settingsPage.stepModels.none}</option>
+            {(providers ?? []).map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+        </label>
+        <label className="settings__field">
+          <span className="settings__field-label">{zhCN.settingsPage.stepModels.step3Label}</span>
+          <select className="settings__input" value={step3Id ?? ''} onChange={(e) => void handleStepModelChange(3, e.target.value)}>
+            <option value="">{zhCN.settingsPage.stepModels.none}</option>
+            {(providers ?? []).map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+        </label>
+        {stepModelsMsg ? (
+          <p className={`settings__hint ${stepModelsMsg.ok ? 'settings__hint--ok' : 'settings__hint--err'}`}>{stepModelsMsg.text}</p>
+        ) : null}
+      </section>
+
       <section className="settings__section" id="settings-provider" data-onboarding="settings-provider">
         <div className="settings__section-header">
           <span className="settings__section-icon settings__section-icon--provider" aria-hidden="true">
@@ -502,12 +569,11 @@ function Settings({ onOpenOnboarding, onActiveChange }: SettingsProps) {
         ) : (
           <ul className="settings__provider-list">
             {providers.map((p) => (
-              <li key={p.id} className={`settings__provider-item${currentId === p.id ? ' settings__provider-item--current' : ''}`}>
+              <li key={p.id} className="settings__provider-item">
                 <div className="settings__provider-info">
                   <span className="settings__provider-name">
                     <span className="settings__provider-avatar" aria-hidden="true">{p.name.charAt(0)}</span>
                     {p.name}
-                    {currentId === p.id ? <span className="settings__badge">{zhCN.settingsPage.provider.currentBadge}</span> : null}
                   </span>
                   <span className="settings__provider-meta">
                     <span className="settings__provider-model">{p.model}</span>
@@ -519,11 +585,6 @@ function Settings({ onOpenOnboarding, onActiveChange }: SettingsProps) {
                   </span>
                 </div>
                 <div className="settings__provider-actions">
-                  {currentId !== p.id ? (
-                    <button type="button" className="source-list__btn" onClick={() => handleSetCurrent(p)}>
-                      {zhCN.settingsPage.provider.currentAction}
-                    </button>
-                  ) : null}
                   <button type="button" className="source-list__btn" onClick={() => handleTest(p)} disabled={testingId === p.id}>
                     {testingId === p.id ? zhCN.settingsPage.provider.testing : zhCN.settingsPage.provider.testBtn}
                   </button>

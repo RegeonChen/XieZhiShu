@@ -65,11 +65,11 @@ function fail(code: string, message: string): GenerateCompilationResult {
   return { ok: false, error: { code, message } }
 }
 
-/** 任务使用的大模型：优先任务固定 provider，回退全局当前 Provider */
-function resolveProvider(task: { llmProviderId?: string }): { ok: true; provider: ProviderInfo } | { ok: false; error: { code: string; message: string } } {
+/** 第 1 步资料汇编使用的大模型（Phase 6.8）：一律以设置中的「步骤默认模型」第 1 步为准 */
+function resolveProvider(): { ok: true; provider: ProviderInfo } | { ok: false; error: { code: string; message: string } } {
   const settings = getSettings()
-  const providerId = task.llmProviderId ?? settings.currentLlmProviderId
-  if (!providerId) return { ok: false, error: { code: ErrorCodes.TASK_NO_PROVIDER, message: '请先在设置中配置并选择 LLM Provider' } }
+  const providerId = settings.compilationProviderId
+  if (!providerId) return { ok: false, error: { code: ErrorCodes.TASK_NO_PROVIDER, message: '请先在设置中为「第 1 步」指定默认大模型' } }
   const provider = getProviderSecret(providerId, safeStorageCodec)
   if (!provider) return { ok: false, error: { code: ErrorCodes.TASK_NO_PROVIDER, message: '所选的 LLM Provider 不存在' } }
   if (!provider.apiKey) return { ok: false, error: { code: ErrorCodes.LLM_UNAUTHORIZED, message: '所选的 LLM Provider 未设置 API 密钥' } }
@@ -533,7 +533,7 @@ export async function generateCompilation(
   const t = title.trim()
   if (!t) return fail(ErrorCodes.INVALID_PARAM, '请填写本次撰写的标题')
 
-  const prov = resolveProvider(task)
+  const prov = resolveProvider()
 
   let scopeIds = resolveScopeSourceIds(task, { getSourceIdsByTag, getAllSourceIds })
   if (scopeIds.length === 0) return fail(ErrorCodes.TASK_NO_SCOPE, '资料库中没有可用资料')

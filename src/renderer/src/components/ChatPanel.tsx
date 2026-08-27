@@ -27,9 +27,6 @@ interface ChatPanelProps {
   streamText?: string | null
   /** 生成初稿进度（2026-08-11：percent 进度百分比 + etaSeconds 预计剩余秒数，供进度条显示） */
   progress?: { percent: number; etaSeconds?: number } | null
-  providers: ProviderOption[] | null
-  providerId?: string
-  onProviderChange: (id: string) => void
   onGenerate: (instruction: string) => void
   onChat: (message: string) => void
   /** 自定义主按钮文案（如「生成资料汇编」），提供时覆盖 draftExisted 判断的默认文案 */
@@ -58,9 +55,6 @@ function ChatPanel({
   busyText,
   streamText = null,
   progress,
-  providers,
-  providerId,
-  onProviderChange,
   onGenerate,
   onChat,
   primaryLabel,
@@ -218,25 +212,6 @@ function ChatPanel({
               ) : null}
             </div>
           </div>
-        ) : null}
-      </div>
-
-      <div className="chat-panel__toolbar">
-        <label className="chat-panel__field">
-          <span className="chat-panel__label">{zhCN.writingChat.providerLabel}</span>
-          <select
-            className="writing-form__input writing-form__select"
-            value={providerId ?? ''}
-            onChange={(e) => onProviderChange(e.target.value)}
-          >
-            <option value="">{zhCN.writingChat.providerNone}</option>
-            {(providers ?? []).map((p) => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
-        </label>
-        {providers !== null && providers.length === 0 ? (
-          <span className="chat-panel__hint">{zhCN.writingChat.providerLockHint}</span>
         ) : null}
       </div>
 
