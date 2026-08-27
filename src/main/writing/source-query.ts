@@ -85,13 +85,12 @@ export function buildContextTracePrompt(selection: string, topChunks: RetrievedC
  */
 async function traceByGenerationContext(
   taskId: string,
-  task: { llmProviderId?: string },
   selection: string,
   contextChunks: RetrievedChunk[]
 ): Promise<AskSourceResult | null> {
   const top = rankChunksByOverlap(selection, contextChunks)
   if (top.length === 0) return null
-  const prov = resolveTaskProvider(task)
+  const prov = resolveTaskProvider()
   if (!prov.ok) return null
 
   const messages = buildContextTracePrompt(selection, top)
@@ -182,13 +181,13 @@ export function buildChunkReply(chunks: RetrievedChunk[]): { reply: string; refs
   return { reply: `未找到逐字匹配，以下为检索到的最相关片段：\n${lines.join('\n')}`, refs }
 }
 
-/** 任务使用的大模型（任务固定 provider 优先，回退全局当前） */
-function resolveTaskProvider(task: { llmProviderId?: string }):
+/** 来源询问使用的大模型（Phase 6.8）：一律以设置中的「第 3 步」默认大模型为准 */
+function resolveTaskProvider():
   | { ok: true; provider: { apiBase: string; model: string; apiKey: string } }
   | { ok: false; error: { code: string; message: string } } {
   const settings = getSettings()
-  const providerId = task.llmProviderId ?? settings.currentLlmProviderId
-  if (!providerId) return { ok: false, error: { code: ErrorCodes.TASK_NO_PROVIDER, message: '请先在设置中配置并选择 LLM Provider' } }
+  const providerId = settings.draftProviderId
+  if (!providerId) return { ok: false, error: { code: ErrorCodes.TASK_NO_PROVIDER, message: '请先在设置中为「第 3 步」指定默认大模型' } }
   const provider = getProviderSecret(providerId, safeStorageCodec)
   if (!provider) return { ok: false, error: { code: ErrorCodes.TASK_NO_PROVIDER, message: '所选的 LLM Provider 不存在' } }
   if (!provider.apiKey) return { ok: false, error: { code: ErrorCodes.LLM_UNAUTHORIZED, message: '所选的 LLM Provider 未设置 API 密钥' } }
@@ -199,7 +198,7 @@ function resolveTaskProvider(task: { llmProviderId?: string }):
 async function llmFallback(taskId: string, selection: string, refList: SourceRef[]): Promise<string> {
   const task = getTaskById(taskId)
   if (!task) throw new Error('撰写任务不存在')
-  const prov = resolveTaskProvider(task)
+  const prov = resolveTaskProvider()
   if (!prov.ok) throw new Error(prov.error.message)
 
   const fileList = refList.map((r) => `${r.index}. 《${r.title}》`).join('\n')
@@ -250,7 +249,7 @@ export async function askSourceForTask(taskId: string, selection: string): Promi
   if (latestDraftId) {
     const contextChunks = getDraftGenerationContext(latestDraftId)
     if (contextChunks.length > 0) {
-      const traced = await traceByGenerationContext(taskId, task, sel, contextChunks)
+      const traced = await traceByGenerationContext(taskId, sel, contextChunks)
       if (traced && traced.ok) return traced
     }
   }

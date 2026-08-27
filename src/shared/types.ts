@@ -299,9 +299,12 @@ export interface LlmProviderConfig {
 // ============================================================
 export interface AppSettings {
   dataDir?: string
-  currentLlmProviderId?: string
   /** Phase 2.2 工作区根目录（用户指定；资料直接引用该文件夹内文件） */
   workspaceDir?: string
+  /** Phase 6.8：第 1 步（资料汇编）默认使用的大模型 Provider id；未设置回退任务/全局 */
+  compilationProviderId?: string
+  /** Phase 6.8：第 3 步（生成初稿）默认使用的大模型 Provider id；未设置回退任务/全局 */
+  draftProviderId?: string
 }
 
 // ============================================================

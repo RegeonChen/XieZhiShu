@@ -2272,7 +2272,6 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  max-width: 860px;
 }
 
 .draft-editor__toolbar {
@@ -2463,6 +2462,12 @@ body {
   color: var(--fg-soft);
   line-height: 1.6;
   font-size: 13px;
+}
+.confirm-dialog__error {
+  margin: -8px 0 12px;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.6;
 }
 .confirm-dialog__actions {
   display: flex;
@@ -4374,6 +4379,11 @@ textarea:focus-visible {
   justify-content: space-between;
   gap: 8px;
 }
+.style-guide-editor__footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .style-guide-editor__count {
   font-size: 12px;
   color: var(--fg-faint);
@@ -4533,5 +4543,100 @@ textarea:focus-visible {
   gap: 6px;
   max-height: 60vh;
   overflow-y: auto;
+}
+
+/* ============================================================
+   Phase 6.5：三套主题（默认简洁明亮 / 明亮+深色 / 古典公文风）
+   ============================================================ */
+:root[data-theme='dark'] {
+  --bg-primary: #1e222a;
+  --bg-panel: #262b34;
+  --bg-soft: #2e3540;
+  --bg: #1a1e26;
+  --bg-elevated: rgba(255, 255, 255, 0.07);
+  --border: #3a414d;
+  --fg: #e6e9ee;
+  --fg-soft: #a7aeb9;
+  --fg-faint: #7a818c;
+  --accent: #6ea8ff;
+  --accent-soft: #233249;
+  --danger: #f0655f;
+  --danger-soft: #3a2426;
+  --success: #3fae6a;
+  --warning: #d18a3d;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 8px 28px rgba(0, 0, 0, 0.55);
+}
+:root[data-theme='classic'] {
+  --bg-primary: #f6f1e7;
+  --bg-panel: #fdf9f0;
+  --bg-soft: #efe7d8;
+  --bg: #f8f3ea;
+  --bg-elevated: rgba(120, 90, 40, 0.06);
+  --border: #d8cbb4;
+  --fg: #3a2f22;
+  --fg-soft: #6f6354;
+  --fg-faint: #9b8f7c;
+  --accent: #8c3b2e;
+  --accent-soft: #f3e2dc;
+  --danger: #b3322a;
+  --danger-soft: #f7e2e0;
+  --success: #5f7d4a;
+  --warning: #a96b1f;
+  --shadow-sm: 0 1px 2px rgba(90, 70, 40, 0.12);
+  --shadow-md: 0 4px 16px rgba(90, 70, 40, 0.18);
+  --shadow-lg: 0 8px 28px rgba(90, 70, 40, 0.24);
+}
+
+/* 设置页主题选择（Phase 6.5） */
+.settings__theme-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.settings__theme-option {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--fg);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+.settings__theme-option:hover { background: var(--accent-soft); }
+.settings__theme-option.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.settings__section-icon--appearance { color: var(--accent); }
+.settings__section-icon--stepmodels { color: var(--accent); }
+
+/* ============================================================
+   Phase 6.6：初稿编辑器深改（打印级观感）
+   ============================================================ */
+.draft-editor__doc .tiptap {
+  font-family: 'Songti SC', 'SimSun', 'Noto Serif SC', 'Georgia', serif;
+  font-size: 16px;
+  line-height: 1.9;
+  color: var(--fg);
+  padding: 24px 28px;
+  min-height: 420px;
+}
+.draft-editor__doc .tiptap p { margin: 0 0 10px; }
+.draft-editor__doc .tiptap h1,
+.draft-editor__doc .tiptap h2,
+.draft-editor__doc .tiptap h3 {
+  font-family: inherit;
+  font-weight: 600;
+}
+@media print {
+  body { background: #fff !important; }
+  .topbar, .side-nav, .center-pane, .writing-workspace__chat, .writing-stepper, .draft-editor__toolbar, .writing-workspace__header, .writing-workspace__footer { display: none !important; }
+  .work-pane, .writing-workspace, .writing-workspace__body, .writing-workspace__editor, .draft-editor, .draft-editor__doc { max-width: none !important; border: none; box-shadow: none; padding: 0; }
+  .draft-editor__doc .tiptap { max-width: none; padding: 0; }
 }
 

@@ -4,6 +4,7 @@ export const zhCN = {
   common: {
     cancel: '取消',
     deleting: '删除中...',
+    saving: '保存中...',
     loading: '加载中...',
     confirm: '确认操作'
   },
@@ -174,9 +175,27 @@ export const zhCN = {
       title: '设置导航',
       hint: '点击条目快速跳转到对应设置区块',
       overview: '总览',
+      appearance: '外观',
       workspace: '工作区资料库',
       preset: '预设大模型',
+      stepModels: '步骤默认模型',
       provider: '模型服务（Provider）'
+    },
+    appearance: {
+      title: '外观（主题）',
+      hint: '选择界面主题，切换后立即生效并记忆。',
+      light: '简洁明亮',
+      dark: '明亮+深色',
+      classic: '古典公文风'
+    },
+    stepModels: {
+      title: '步骤默认模型',
+      hint: '为第 1 步（生成资料汇编）与第 3 步（生成志书初稿）分别指定默认大模型；未设置时依次回退到任务已固定模型、全局当前模型。',
+      step1Label: '第 1 步：生成资料汇编',
+      step3Label: '第 3 步：生成志书初稿',
+      none: '未设置（回退任务/全局）',
+      saved: '已保存',
+      failed: '保存失败：{message}'
     },
     overview: {
       title: '欢迎使用志书撰写工具',
@@ -334,6 +353,9 @@ export const zhCN = {
     backToList: '← 返回列表',
     importDraft: '导入已有规范作为底稿',
     addFanben: '添加范本',
+    nextUnsavedTitle: '进入下一步',
+    nextUnsavedMessage: '当前规范文本有未保存的修改，直接进入第三步将使用上次保存的规范，未保存的修改会被丢弃。确定要进入下一步吗？',
+    nextUnsavedConfirm: '仍要进入下一步',
     fanbenLabel: '范本',
     fanbenHint: '可选：粘贴你想要的志书示例正文，生成初稿时作为体例与行文风格参考',
     fanbenPlaceholder: '在此粘贴或撰写你的范本正文（可选，第三步生成初稿时会作为参考提交）…',

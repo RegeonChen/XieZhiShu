@@ -714,13 +714,23 @@ export function parseGenerateOutput(text: string): { title: string; content: str
 
 type ProviderInfo = { apiBase: string; model: string; apiKey: string }
 
-/** 解析任务使用的大模型：优先任务固定 provider，未设置则回退全局当前 Provider */
-function resolveTaskProvider(task: { llmProviderId?: string }):
+/** 解析各步骤使用的大模型（Phase 6.8）：一律以设置中的「步骤默认模型」为准；第 1 步用 compilation、第 3 步/对话用 draft */
+function resolveTaskProvider(step?: 'compilation' | 'draft' | 'chat'):
   | { ok: true; provider: ProviderInfo }
   | { ok: false; error: { code: string; message: string } } {
   const settings = getSettings()
-  const providerId = task.llmProviderId ?? settings.currentLlmProviderId
-  if (!providerId) return { ok: false, error: { code: ErrorCodes.TASK_NO_PROVIDER, message: '请先在设置中配置并选择 LLM Provider' } }
+  const providerId = step === 'compilation'
+    ? settings.compilationProviderId
+    : settings.draftProviderId
+  if (!providerId) {
+    return {
+      ok: false,
+      error: {
+        code: ErrorCodes.TASK_NO_PROVIDER,
+        message: step === 'compilation' ? '请先在设置中为「第 1 步」指定默认大模型' : '请先在设置中为「第 3 步」指定默认大模型'
+      }
+    }
+  }
   const provider = getProviderSecret(providerId, safeStorageCodec)
   if (!provider) return { ok: false, error: { code: ErrorCodes.TASK_NO_PROVIDER, message: '所选的 LLM Provider 不存在' } }
   if (!provider.apiKey) return { ok: false, error: { code: ErrorCodes.LLM_UNAUTHORIZED, message: '所选的 LLM Provider 未设置 API 密钥' } }
@@ -762,7 +772,7 @@ export async function generateDraft(
   const inst = instruction.trim()
   if (!inst) return fail(ErrorCodes.INVALID_PARAM, '请填写本次撰写的标题与要求')
 
-  const prov = resolveTaskProvider(task)
+  const prov = resolveTaskProvider('draft')
   if (!prov.ok) return prov
 
   // 幂等：第 0 稿已存在则直接返回（含既有矛盾清单）。
@@ -1004,7 +1014,7 @@ export async function chatWithTask(
   if (!task) return { ok: false, error: { code: ErrorCodes.TASK_NOT_FOUND, message: '撰写任务不存在' } }
   if (!message.trim()) return { ok: false, error: { code: ErrorCodes.INVALID_PARAM, message: '消息不能为空' } }
 
-  const prov = resolveTaskProvider(task)
+  const prov = resolveTaskProvider('chat')
   if (!prov.ok) return prov
 
   const draftText = getLatestDraftText(taskId)

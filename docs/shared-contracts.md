@@ -108,7 +108,7 @@ interface Contradiction {
 /** LLM Provider 配置（密钥不回传，只回 apiKeySet） */
 interface LlmProviderConfig { id: string; name: string; apiBase: string; model: string; apiKeySet: boolean; }
 
-interface AppSettings { dataDir?: string; currentLlmProviderId?: string; workspaceDir?: string; }
+interface AppSettings { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string; }
 
 /** 统一错误返回 */
 interface ApiError { code: string; message: string; details?: unknown; }

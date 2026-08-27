@@ -6,7 +6,7 @@ import PromptDialog from './PromptDialog'
 /** 规范文档库（Phase 6.4.1：第二步「指定行文规范」） */
 interface StyleGuideItem { id: string; name: string; content: string; isDefault: boolean; createdAt: string; updatedAt: string }
 
-function StyleGuideEditor({ startInList = false, taskId }: { startInList?: boolean; taskId?: string }) {
+function StyleGuideEditor({ startInList = false, taskId, onNext }: { startInList?: boolean; taskId?: string; onNext?: () => void }) {
   const t = zhCN.styleGuide
   const [mode, setMode] = useState<'list' | 'editor'>(startInList ? 'list' : 'editor')
   const [guides, setGuides] = useState<StyleGuideItem[] | null>(null)
@@ -19,6 +19,10 @@ function StyleGuideEditor({ startInList = false, taskId }: { startInList?: boole
   const [pendingName, setPendingName] = useState<{ kind: 'new' | 'rename'; id?: string; name: string } | null>(null)
   const [saving, setSaving] = useState(false)
   const [saveErr, setSaveErr] = useState<string | null>(null)
+  // 当前编辑的规范 id 与其已保存内容（用于「有未保存修改」判定）
+  const [currentId, setCurrentId] = useState<string | null>(null)
+  const [savedContent, setSavedContent] = useState('')
+  const [showNextConfirm, setShowNextConfirm] = useState(false)
 
   // ---- 范本（Phase 6.4.2：第二步「添加范本」，任务级、可选，生成初稿时作为参考提交） ----
   const [fanbenOpen, setFanbenOpen] = useState(false)
@@ -41,7 +45,7 @@ function StyleGuideEditor({ startInList = false, taskId }: { startInList?: boole
       const list = await reload()
       if (mode === 'editor') {
         const def = list.find((g) => g.isDefault) ?? list[0]
-        if (def) { setName(def.name); setContent(def.content) }
+        if (def) { setName(def.name); setContent(def.content); setCurrentId(def.id); setSavedContent(def.content) }
       }
     })()
   }, [reload, mode])
@@ -70,6 +74,8 @@ function StyleGuideEditor({ startInList = false, taskId }: { startInList?: boole
   const openGuide = (g: StyleGuideItem): void => {
     setName(g.name)
     setContent(g.content)
+    setCurrentId(g.id)
+    setSavedContent(g.content)
     setMode('editor')
   }
 
@@ -82,6 +88,9 @@ function StyleGuideEditor({ startInList = false, taskId }: { startInList?: boole
       if (res.ok && res.data) {
         const saved = res.data.styleGuide as StyleGuideItem
         setName(saved.name)
+        setCurrentId(saved.id)
+        setSavedContent(saved.content)
+        setSaveTarget(null)
         setShowSave(false); setPendingName(null)
         void reload()
       } else {
@@ -99,7 +108,13 @@ function StyleGuideEditor({ startInList = false, taskId }: { startInList?: boole
     await window.api.deleteStyleGuide(guide.id)
     const list = await reload()
     const def = list.find((g) => g.isDefault) ?? list[0]
-    if (def) { setName(def.name); setContent(def.content) }
+    if (def) { setName(def.name); setContent(def.content); setCurrentId(def.id); setSavedContent(def.content) }
+  }
+
+  /** 第二步「下一步」：有未保存修改时先二次确认，否则直接进入第三步 */
+  const handleNext = (): void => {
+    if (currentId !== null && content !== savedContent) setShowNextConfirm(true)
+    else onNext?.()
   }
 
   if (mode === 'list') {
@@ -176,7 +191,12 @@ function StyleGuideEditor({ startInList = false, taskId }: { startInList?: boole
       />
       <div className="style-guide-editor__footer">
         <span className="style-guide-editor__count">{content.length} 字</span>
-        <button type="button" className="source-list__btn source-list__btn--primary" onClick={() => setShowSave(true)}>{t.save}</button>
+        <div className="style-guide-editor__footer-actions">
+          <button type="button" className="source-list__btn source-list__btn--primary" onClick={() => setShowSave(true)}>{t.save}</button>
+          {taskId && onNext ? (
+            <button type="button" className="source-list__btn" onClick={() => handleNext()}>{zhCN.writingWorkspace.next}</button>
+          ) : null}
+        </div>
       </div>
 
       {showImport ? (
@@ -246,8 +266,22 @@ function StyleGuideEditor({ startInList = false, taskId }: { startInList?: boole
           confirmText={t.overwriteBtn}
           danger
           busy={saving}
+          busyText={zhCN.common.saving}
+          error={saveErr ?? undefined}
           onConfirm={() => void doSave({ id: saveTarget.id, n: saveTarget.name })}
-          onCancel={() => setSaveTarget(null)}
+          onCancel={() => { setSaveTarget(null); setSaveErr(null) }}
+        />
+      ) : null}
+
+      {showNextConfirm ? (
+        <ConfirmDialog
+          title={t.nextUnsavedTitle}
+          message={t.nextUnsavedMessage}
+          confirmText={t.nextUnsavedConfirm}
+          danger
+          busy={false}
+          onConfirm={() => { setShowNextConfirm(false); onNext?.() }}
+          onCancel={() => setShowNextConfirm(false)}
         />
       ) : null}
 

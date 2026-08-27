@@ -5,7 +5,7 @@ import ConfirmDialog from './ConfirmDialog'
 import ContradictionDialog from './ContradictionDialog'
 import ResizeHandle from './ResizeHandle'
 import StyleGuideEditor from './StyleGuideEditor'
-import ChatPanel, { type ChatMessageItem, type ProviderOption, type SourceRefItem } from './ChatPanel'
+import ChatPanel, { type ChatMessageItem, type SourceRefItem } from './ChatPanel'
 import CompilationStep, { type CompilationView } from './CompilationStep'
 import type { Contradiction, CompilationRecycleBinItem } from '../../../shared/types'
 
@@ -36,7 +36,6 @@ type WizardStep = 0 | 1 | 2
 
 function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: () => void }) {
   const [task, setTask] = useState<TaskItem | null>(null)
-  const [providers, setProviders] = useState<ProviderOption[] | null>(null)
   const [draft, setDraft] = useState<DraftItem | null>(null)
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
@@ -81,10 +80,6 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
     setLoading(true)
     setErr(null)
     try {
-      window.api.listProviders().then((res) => {
-        setProviders(res.ok && res.data ? (res.data.items as ProviderOption[]) : [])
-      }).catch(() => setProviders([]))
-
       const tRes = await window.api.listTasks()
       const found = tRes.ok && tRes.data
         ? (tRes.data.items as TaskItem[]).find((t) => t.id === taskId) ?? null
@@ -348,10 +343,23 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
         setContradictions(data.contradictions ?? [])
         setTask((cur) => (cur ? { ...cur, articleTitle: data.articleTitle ?? undefined } : cur))
         onChanged()
+      } else if (!res.ok) {
+        appendAssistant(zhCN.writingChat.generateFailed.replace('{message}', res.error?.message ?? ''))
       }
       await reloadMessages()
+    } catch (e) {
+      appendAssistant(zhCN.writingChat.generateFailed.replace('{message}', String(e)))
     } finally {
       resetBusy()
+    }
+  }
+
+  /** 第二步「下一步」：进入第三步并自动基于已确认汇编生成初稿（进度在左侧对话框体现） */
+  const handleNextToStep3 = (): void => {
+    setStep(2)
+    const instruction = (compilationInstruction || task?.userInstruction || '').trim()
+    if (instruction && !draft) {
+      void handleGenerateDraft(instruction)
     }
   }
 
@@ -365,18 +373,10 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
     try {
       await window.api.chatWithTask(taskId, message, history)
       await reloadMessages()
+    } catch (e) {
+      appendAssistant(zhCN.writingChat.generateFailed.replace('{message}', String(e)))
     } finally {
       resetBusy()
-    }
-  }
-
-  const handleProviderChange = async (llmProviderId: string) => {
-    if (!task || busy) return
-    const res = await window.api.updateTaskProvider(task.id, llmProviderId === '' ? null : llmProviderId)
-    if (res.ok) {
-      setTask((cur) => (cur ? { ...cur, llmProviderId: llmProviderId === '' ? undefined : llmProviderId } : cur))
-    } else {
-      appendAssistant('切换大模型失败：' + (res.error?.message ?? ''))
     }
   }
 
@@ -401,8 +401,12 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
         setContradictions(data.contradictions ?? [])
         setTask((cur) => (cur ? { ...cur, articleTitle: data.articleTitle ?? undefined } : cur))
         onChanged()
+      } else if (!res.ok) {
+        appendAssistant(zhCN.writingChat.generateFailed.replace('{message}', res.error?.message ?? ''))
       }
       await reloadMessages()
+    } catch (e) {
+      appendAssistant(zhCN.writingChat.generateFailed.replace('{message}', String(e)))
     } finally {
       resetBusy()
     }
@@ -494,9 +498,6 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
           busyText={busyText}
           streamText={streamText}
           progress={compilationProgress}
-          providers={providers}
-          providerId={task.llmProviderId}
-          onProviderChange={(id) => void handleProviderChange(id)}
           onGenerate={() => undefined}
           onChat={(message) => void handleChat(message)}
           primaryLabel={zhCN.compilation.generateBtn}
@@ -515,9 +516,6 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
           busyText={busyText}
           streamText={streamText}
           progress={null}
-          providers={providers}
-          providerId={task.llmProviderId}
-          onProviderChange={(id) => void handleProviderChange(id)}
           onGenerate={() => undefined}
           onChat={(message) => void handleChat(message)}
           primaryLabel={zhCN.writingChat.sendBtn}
@@ -535,9 +533,6 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
         busyText={busyText}
         streamText={streamText}
         progress={progress}
-        providers={providers}
-        providerId={task.llmProviderId}
-        onProviderChange={(id) => void handleProviderChange(id)}
         onGenerate={(instruction) => void handleGenerateDraft(instruction)}
         onChat={(message) => void handleChat(message)}
         refs={sourceRefs}
@@ -563,7 +558,7 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
       )
     }
     if (step === 1) {
-      return <StyleGuideEditor taskId={taskId} />
+      return <StyleGuideEditor taskId={taskId} onNext={handleNextToStep3} />
     }
     if (draft) {
       return (
