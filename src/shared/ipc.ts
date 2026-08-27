@@ -10,6 +10,7 @@ import type {
   CompilationItem,
   CompilationRecycleBinItem,
   Contradiction,
+  StyleGuide,
   Draft,
   LlmProviderConfig,
   RetrievedChunk,
@@ -17,7 +18,6 @@ import type {
   Source,
   Tag,
   WebSite,
-  WritingSkill,
   WritingTask
 } from './types'
 
@@ -51,10 +51,6 @@ export const IPC = {
   TAGS_SOURCES_BY_TAG: 'tags:sourcesByTag',
 
   /* 写作规范 skills */
-  SKILLS_LIST: 'skills:list',
-  SKILLS_CREATE: 'skills:create',
-  SKILLS_UPDATE: 'skills:update',
-  SKILLS_DELETE: 'skills:delete',
 
   /* 资料汇编（Phase 6：三段式撰写重构） */
   COMPILATION_LIST: 'compilation:list',
@@ -68,12 +64,20 @@ export const IPC = {
   COMPILATION_RECYCLE_BIN_LIST: 'compilation:recycleBin:list',
   COMPILATION_RECYCLE_BIN_RESTORE: 'compilation:recycleBin:restore',
 
+  /* 规范文档库（Phase 6.4.1：第二步「指定行文规范」） */
+  STYLE_GUIDE_LIST: 'styleGuide:list',
+  STYLE_GUIDE_SAVE: 'styleGuide:save',
+  STYLE_GUIDE_SET_DEFAULT: 'styleGuide:setDefault',
+  STYLE_GUIDE_DELETE: 'styleGuide:delete',
+
   /* 撰写与初稿 */
   WRITING_CREATE_TASK: 'writing:createTask',
   WRITING_LIST_TASKS: 'writing:listTasks',
   WRITING_DELETE_TASK: 'writing:deleteTask',
   WRITING_RENAME_TASK: 'writing:renameTask',
   WRITING_UPDATE_PROVIDER: 'writing:updateProvider',
+  WRITING_GET_MODEL_TEXT: 'writing:getModelText',
+  WRITING_SET_MODEL_TEXT: 'writing:setModelText',
   WRITING_CHAT: 'writing:chat',
   WRITING_RETRIEVE: 'writing:retrieve',
   WRITING_ASK_SOURCE: 'writing:askSource',
@@ -248,22 +252,6 @@ export interface TagSourcesByTagReq {
 }
 export type TagSourcesByTagRes = { sourceIds: string[] }
 
-// -- 写作规范 skills --
-export type SkillListRes = { items: WritingSkill[] }
-
-export interface SkillSaveReq {
-  id?: string // 缺省 = 新建；提供 = 修改
-  name: string
-  category: 'general' | 'section'
-  tags: string[]
-  content: string
-}
-export type SkillSaveRes = { skill: WritingSkill }
-
-export interface SkillDeleteReq {
-  id: string
-}
-
 // -- 资料汇编（Phase 6：三段式撰写重构） --
 export interface CompilationListReq {
   taskId: string
@@ -320,6 +308,32 @@ export interface CompilationRecycleBinRestoreReq {
 }
 export type CompilationRecycleBinRestoreRes = { contradiction: CompilationContradiction }
 
+export interface StyleGuideListRes { items: StyleGuide[] }
+
+export interface StyleGuideSaveReq {
+  id?: string // 缺省 = 新建；提供 = 覆盖
+  name: string
+  content: string
+}
+export type StyleGuideSaveRes = { styleGuide: StyleGuide }
+
+export interface StyleGuideSetDefaultReq {
+  id: string
+}
+export type StyleGuideSetDefaultRes = { styleGuide: StyleGuide }
+
+export interface StyleGuideDeleteReq {
+  id: string
+}
+
+export type StyleGuideGetRes = { styleGuide: StyleGuide }
+
+export interface StyleGuideGetReq {
+  id: string
+}
+
+export interface StyleGuideDefaultRes { styleGuide: StyleGuide | null }
+
 // -- 撰写与初稿 --
 export interface WritingCreateTaskReq {
   /** 中栏显示的任务标题；缺省为"新建任务"（Phase 3.5 起点击"新建任务"立即创建） */
@@ -348,6 +362,17 @@ export interface WritingUpdateProviderReq {
   llmProviderId: string | null  // null = 回退全局当前 Provider
 }
 export type WritingUpdateProviderRes = { task: WritingTask }
+
+export interface WritingGetModelTextReq {
+  taskId: string
+}
+export type WritingGetModelTextRes = { text: string }
+
+export interface WritingSetModelTextReq {
+  taskId: string
+  text: string
+}
+export type WritingSetModelTextRes = { text: string }
 
 /** 与大模型自由对话（Phase 3.5；history 为前端维护的最近对话上下文） */
 export interface WritingChatReq {
@@ -564,10 +589,6 @@ export interface IpcMapping {
   [IPC.TAGS_BATCH_ADD]: { _req: TagBatchAddReq; _res: ApiResult<void> }
   [IPC.TAGS_SOURCES_BY_TAG]: { _req: TagSourcesByTagReq; _res: ApiResult<TagSourcesByTagRes> }
   // 写作规范 skills
-  [IPC.SKILLS_LIST]: { _req: void; _res: ApiResult<SkillListRes> }
-  [IPC.SKILLS_CREATE]: { _req: SkillSaveReq; _res: ApiResult<SkillSaveRes> }
-  [IPC.SKILLS_UPDATE]: { _req: SkillSaveReq; _res: ApiResult<SkillSaveRes> }
-  [IPC.SKILLS_DELETE]: { _req: SkillDeleteReq; _res: ApiResult<void> }
   // 资料汇编（Phase 6）
   [IPC.COMPILATION_LIST]: { _req: CompilationListReq; _res: ApiResult<CompilationListRes> }
   [IPC.COMPILATION_GET]: { _req: CompilationGetReq; _res: ApiResult<CompilationGetRes> }
@@ -579,12 +600,18 @@ export interface IpcMapping {
   [IPC.COMPILATION_REGENERATE]: { _req: CompilationRegenerateReq; _res: ApiResult<CompilationRegenerateRes> }
   [IPC.COMPILATION_RECYCLE_BIN_LIST]: { _req: CompilationRecycleBinListReq; _res: ApiResult<CompilationRecycleBinListRes> }
   [IPC.COMPILATION_RECYCLE_BIN_RESTORE]: { _req: CompilationRecycleBinRestoreReq; _res: ApiResult<CompilationRecycleBinRestoreRes> }
+  [IPC.STYLE_GUIDE_LIST]: { _req: void; _res: ApiResult<StyleGuideListRes> }
+  [IPC.STYLE_GUIDE_SAVE]: { _req: StyleGuideSaveReq; _res: ApiResult<StyleGuideSaveRes> }
+  [IPC.STYLE_GUIDE_SET_DEFAULT]: { _req: StyleGuideSetDefaultReq; _res: ApiResult<StyleGuideSetDefaultRes> }
+  [IPC.STYLE_GUIDE_DELETE]: { _req: StyleGuideDeleteReq; _res: ApiResult<void> }
   // 撰写
   [IPC.WRITING_CREATE_TASK]: { _req: WritingCreateTaskReq; _res: ApiResult<WritingCreateTaskRes> }
   [IPC.WRITING_LIST_TASKS]: { _req: void; _res: ApiResult<WritingListTasksRes> }
   [IPC.WRITING_DELETE_TASK]: { _req: WritingDeleteTaskReq; _res: ApiResult<void> }
   [IPC.WRITING_RENAME_TASK]: { _req: WritingRenameTaskReq; _res: ApiResult<WritingRenameTaskRes> }
   [IPC.WRITING_UPDATE_PROVIDER]: { _req: WritingUpdateProviderReq; _res: ApiResult<WritingUpdateProviderRes> }
+  [IPC.WRITING_GET_MODEL_TEXT]: { _req: WritingGetModelTextReq; _res: ApiResult<WritingGetModelTextRes> }
+  [IPC.WRITING_SET_MODEL_TEXT]: { _req: WritingSetModelTextReq; _res: ApiResult<WritingSetModelTextRes> }
   [IPC.WRITING_CHAT]: { _req: WritingChatReq; _res: ApiResult<WritingChatRes> }
   [IPC.TASK_MESSAGES_LIST]: { _req: TaskMessagesListReq; _res: ApiResult<TaskMessagesListRes> }
   [IPC.TASK_MESSAGES_ADD]: { _req: TaskMessagesAddReq; _res: ApiResult<TaskMessagesAddRes> }

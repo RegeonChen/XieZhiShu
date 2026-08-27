@@ -3953,9 +3953,9 @@ textarea:focus-visible {
 
 /* 第 2 步：指定行文规范占位 */
 .writing-style-step {
-  max-width: 420px;
+  max-width: 720px;
   margin: auto;
-  text-align: center;
+  text-align: left;
   line-height: 1.9;
   color: var(--fg-soft);
 }
@@ -3963,6 +3963,28 @@ textarea:focus-visible {
   display: block;
   font-size: 30px;
   margin-bottom: 8px;
+  text-align: center;
+}
+.writing-style-step__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg);
+  text-align: center;
+  margin-bottom: 8px;
+}
+.writing-style-step__guide {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--fg);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  max-height: 55vh;
+  overflow-y: auto;
 }
 
 /* 资料汇编：空状态 */
@@ -4022,10 +4044,22 @@ textarea:focus-visible {
 .compilation-contradictions {
   flex-shrink: 0;
   max-height: 40%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.compilation-contradictions__list {
+  min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.compilation-contradictions__footer {
+  display: flex;
+  justify-content: center;
+  flex-shrink: 0;
 }
 .compilation-contradiction {
   padding: 10px;
@@ -4047,6 +4081,32 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.compilation-collapse-btn {
+  align-self: center;
+  margin-top: 2px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  color: var(--fg-soft);
+  font-size: 12px;
+  cursor: pointer;
+}
+.compilation-collapse-btn:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.compilation-collapse-btn--bar {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 .compilation-variant {
   display: flex;
@@ -4256,5 +4316,222 @@ textarea:focus-visible {
   margin-top: 8px;
   display: flex;
   gap: 8px;
+}
+
+/* --- 规范文档库（Phase 6.4.1） --- */
+.style-guide-btn {
+  color: var(--accent);
+}
+.style-guide-editor {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px;
+}
+.style-guide-editor__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.style-guide-editor__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.style-guide-editor__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.style-guide-editor__textarea {
+  flex: 1;
+  min-height: 0;
+  resize: none;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.8;
+}
+.style-guide-editor__textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.style-guide-editor__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.style-guide-editor__count {
+  font-size: 12px;
+  color: var(--fg-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- 第二步「添加范本」面板（Phase 6.4.2，展开/收起参考第一步矛盾窗口） --- */
+.fanben-panel {
+  flex-shrink: 0;
+  height: 40%;
+  max-height: 40%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-soft);
+}
+.fanben-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.fanben-panel__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.fanben-panel__hint {
+  font-size: 12px;
+  color: var(--fg-faint);
+}
+.fanben-panel__textarea {
+  flex: 1;
+  min-height: 0;
+  resize: none;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.8;
+  overflow-y: auto;
+}
+.fanben-panel__textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.fanben-panel__footer {
+  display: flex;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.fanben-collapse-bar {
+  flex-shrink: 0;
+}
+.style-guide-modal {
+  width: 720px;
+  height: 80vh;
+  max-height: 80vh;
+}
+.style-guide-modal__body {
+  min-height: 0;
+  overflow: hidden;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.style-guide-dialog {
+  width: 560px;
+}
+.style-guide-dialog__hint {
+  font-size: 12px;
+  color: var(--fg-soft);
+  margin-bottom: 8px;
+}
+.style-guide-dialog__list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.style-guide-dialog__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+}
+.style-guide-dialog__main {
+  flex: 1;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.style-guide-dialog__main:hover {
+  background: var(--accent-soft);
+}
+.style-guide-dialog__badge {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  line-height: 1.6;
+}
+.style-guide-dialog__action {
+  padding: 3px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.style-guide-dialog__action:hover {
+  background: var(--accent-soft);
+}
+.style-guide-dialog__action.is-danger {
+  color: var(--danger);
+}
+.style-guide-dialog__action.is-danger:hover {
+  background: var(--danger-soft);
+}
+.style-guide-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.style-guide-list__header {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.style-guide-list__items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 60vh;
+  overflow-y: auto;
 }
 

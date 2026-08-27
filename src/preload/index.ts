@@ -128,23 +128,6 @@ const api = {
   getSourceSummary(id: string): Promise<ApiResult<{ summary?: unknown }>> {
     return ipcRenderer.invoke(IPC.SOURCES_GET_SUMMARY, { id })
   },
-  /** 写作规范 skills 列表 */
-  listSkills(): Promise<ApiResult<{ items: unknown[] }>> {
-    return ipcRenderer.invoke(IPC.SKILLS_LIST)
-  },
-  /** 新建规范 skill */
-  createSkill(input: { name: string; category: 'general' | 'section'; tags: string[]; content: string }): Promise<ApiResult<{ skill: unknown }>> {
-    return ipcRenderer.invoke(IPC.SKILLS_CREATE, input)
-  },
-  /** 修改规范 skill */
-  updateSkill(id: string, input: { name: string; category: 'general' | 'section'; tags: string[]; content: string }): Promise<ApiResult<{ skill: unknown }>> {
-    return ipcRenderer.invoke(IPC.SKILLS_UPDATE, { ...input, id })
-  },
-  /** 删除规范 skill */
-  deleteSkill(id: string): Promise<ApiResult<void>> {
-    return ipcRenderer.invoke(IPC.SKILLS_DELETE, { id })
-  },
-
   // ---- 资料汇编（Phase 6.0）----
   /** 任务的全部资料汇编（按时间倒序） */
   listCompilations(taskId: string): Promise<ApiResult<{ compilations: unknown[] }>> {
@@ -185,6 +168,19 @@ const api = {
   /** 从回收站恢复某组矛盾（回到 pending，相关卡片恢复） */
   restoreCompilationRecycleBin(binId: string): Promise<ApiResult<{ contradiction: unknown }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_RECYCLE_BIN_RESTORE, { binId })
+  },
+  // ---- 规范文档库（Phase 6.4.1）----
+  listStyleGuides(): Promise<ApiResult<{ items: unknown[] }>> {
+    return ipcRenderer.invoke(IPC.STYLE_GUIDE_LIST)
+  },
+  saveStyleGuide(input: { id?: string; name: string; content: string }): Promise<ApiResult<{ styleGuide: unknown }>> {
+    return ipcRenderer.invoke(IPC.STYLE_GUIDE_SAVE, input)
+  },
+  setDefaultStyleGuide(id: string): Promise<ApiResult<{ styleGuide: unknown }>> {
+    return ipcRenderer.invoke(IPC.STYLE_GUIDE_SET_DEFAULT, { id })
+  },
+  deleteStyleGuide(id: string): Promise<ApiResult<void>> {
+    return ipcRenderer.invoke(IPC.STYLE_GUIDE_DELETE, { id })
   },
   /** Provider 列表（只回 apiKeySet，不回密钥） */
   listProviders(): Promise<ApiResult<{ items: unknown[] }>> {
@@ -247,6 +243,14 @@ const api = {
   /** 更新任务固定使用的大模型（Phase 3.5；llmProviderId 传 null 表示回退全局当前 Provider） */
   updateTaskProvider(taskId: string, llmProviderId: string | null): Promise<ApiResult<{ task: unknown }>> {
     return ipcRenderer.invoke(IPC.WRITING_UPDATE_PROVIDER, { taskId, llmProviderId })
+  },
+  /** 读取任务级范本正文（第二步「添加范本」，Phase 6.4.2） */
+  getModelText(taskId: string): Promise<ApiResult<{ text: string }>> {
+    return ipcRenderer.invoke(IPC.WRITING_GET_MODEL_TEXT, { taskId })
+  },
+  /** 保存任务级范本正文（第二步「添加范本」，Phase 6.4.2） */
+  setModelText(taskId: string, text: string): Promise<ApiResult<{ text: string }>> {
+    return ipcRenderer.invoke(IPC.WRITING_SET_MODEL_TEXT, { taskId, text })
   },
   /** 与大模型自由对话（Phase 3.5；history 为最近对话上下文） */
   chatWithTask(taskId: string, message: string, history?: { role: 'user' | 'assistant'; content: string }[]): Promise<ApiResult<{ reply: string }>> {

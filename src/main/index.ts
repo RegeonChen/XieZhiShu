@@ -11,6 +11,10 @@ import {
   type WritingRenameTaskRes,
   type WritingUpdateProviderReq,
   type WritingUpdateProviderRes,
+  type WritingGetModelTextReq,
+  type WritingGetModelTextRes,
+  type WritingSetModelTextReq,
+  type WritingSetModelTextRes,
   type WritingChatReq,
   type WritingChatRes,
   type TaskMessagesListReq,
@@ -55,12 +59,11 @@ import { importFiles, importUrl } from './import'
 import { addWebSite, listWebSites, removeWebSite } from './db/web-sites'
 import { syncSite } from './web-source/site-crawler'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { listSkills, createSkill, updateSkill, deleteSkill, seedPresetSkills } from './db/writing-skills'
 import { safeStorageCodec } from './llm/secret'
 import { listProviders, saveProvider, deleteProvider } from './llm/provider-store'
 import { testProviderConnection } from './llm/test'
 import { getSettings, updateSettings } from './db/settings'
-import { createTask as createWritingTask, listTasks as listWritingTasks, getTaskById, deleteTask as deleteWritingTask, renameTask, updateTaskProvider, updateTaskInstruction } from './db/tasks'
+import { createTask as createWritingTask, listTasks as listWritingTasks, getTaskById, deleteTask as deleteWritingTask, renameTask, updateTaskProvider, updateTaskInstruction, updateTaskModelText } from './db/tasks'
 import { getDraftById, getLatestDraftByTask, updateSegmentContent, replaceDraftSegments } from './db/drafts'
 import { getContradictionsByDraft, updateContradictionStatus } from './db/contradictions'
 import {
@@ -73,6 +76,13 @@ import {
   listRecycleBinByCompilation,
   restoreRecycleBinContradiction
 } from './db/compilations'
+import {
+  listStyleGuides,
+  saveStyleGuide,
+  setDefaultStyleGuide,
+  deleteStyleGuide,
+  ensureDefaultStyleGuide
+} from './db/style-guides'
 import { generateCompilation } from './writing/compilation-service'
 import { listTaskMessages, addTaskMessage } from './db/task-messages'
 import { generateDraft, regenerateDraft, retrieveForTask, chatWithTask } from './writing/generate'
@@ -87,7 +97,7 @@ import { requestWorkspaceSync, runWorkspaceSync, startAutoSyncTimer, stopAutoSyn
 import { trashSourceFile, renameSourceFile, resolveSourceFilePath } from './workspace/sync'
 import { migrateLegacyToWorkspace } from './workspace/migrate'
 import { loadWindowState, trackWindowState } from './window-state'
-import type { WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceSyncReq, WebSourceSyncRes, SkillListRes, SkillSaveReq, SkillSaveRes, SkillDeleteReq, LogAppendReq, LogExportRes } from '../shared/ipc'
+import type { WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceSyncReq, WebSourceSyncRes, LogAppendReq, LogExportRes, StyleGuideListRes, StyleGuideSaveReq, StyleGuideSaveRes, StyleGuideSetDefaultReq, StyleGuideSetDefaultRes, StyleGuideDeleteReq } from '../shared/ipc'
 import { logMain, logIpc, logRenderer, exportLogsText } from './logger'
 
 const APP_PROTOCOL_WHITELIST = /^https?:\/\//i
@@ -428,44 +438,7 @@ handleLogged(IPC.TAGS_REMOVE_FROM_SOURCE, (_event, params: { sourceId: string; t
   }
 })
 
-// 写作规范 skills 管理（2026-08-13 由「范本」重构）
-handleLogged(IPC.SKILLS_LIST, (): ApiResult<SkillListRes> => {
-  try {
-    const items = listSkills()
-    return { ok: true, data: { items } }
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-})
 
-handleLogged(IPC.SKILLS_CREATE, (_event, params: SkillSaveReq): ApiResult<SkillSaveRes> => {
-  try {
-    const skill = createSkill({ name: params.name, category: params.category, tags: params.tags, content: params.content })
-    return { ok: true, data: { skill } }
-  } catch (err) {
-    return { ok: false, error: { code: 'INVALID_PARAM', message: String(err) } }
-  }
-})
-
-handleLogged(IPC.SKILLS_UPDATE, (_event, params: SkillSaveReq): ApiResult<SkillSaveRes> => {
-  try {
-    if (!params.id) return { ok: false, error: { code: 'INVALID_PARAM', message: '缺少规范 id' } }
-    const skill = updateSkill(params.id, { name: params.name, category: params.category, tags: params.tags, content: params.content })
-    if (!skill) return { ok: false, error: { code: 'INVALID_PARAM', message: '规范不存在' } }
-    return { ok: true, data: { skill } }
-  } catch (err) {
-    return { ok: false, error: { code: 'INVALID_PARAM', message: String(err) } }
-  }
-})
-
-handleLogged(IPC.SKILLS_DELETE, (_event, params: SkillDeleteReq): ApiResult<void> => {
-  try {
-    deleteSkill(params.id)
-    return { ok: true, data: undefined }
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-})
 
 // ===== Phase 6.0：资料汇编（compilations）=====
 
@@ -593,6 +566,46 @@ handleLogged(IPC.COMPILATION_RECYCLE_BIN_RESTORE, (_event, params: CompilationRe
     const contradiction = restoreRecycleBinContradiction(params.binId)
     if (!contradiction) return { ok: false, error: { code: 'INVALID_PARAM', message: '回收站条目不存在' } }
     return { ok: true, data: { contradiction } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+
+// ===== Phase 6.4.1：规范文档库 ======
+handleLogged(IPC.STYLE_GUIDE_LIST, (): ApiResult<StyleGuideListRes> => {
+  try {
+    return { ok: true, data: { items: listStyleGuides() } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.STYLE_GUIDE_SAVE, (_event, params: StyleGuideSaveReq): ApiResult<StyleGuideSaveRes> => {
+  try {
+    if (!params.name.trim()) return { ok: false, error: { code: 'INVALID_PARAM', message: '规范名称不能为空' } }
+    if (!params.content.trim()) return { ok: false, error: { code: 'INVALID_PARAM', message: '规范内容不能为空' } }
+    const styleGuide = saveStyleGuide({ id: params.id, name: params.name, content: params.content })
+    return { ok: true, data: { styleGuide } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INVALID_PARAM', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.STYLE_GUIDE_SET_DEFAULT, (_event, params: StyleGuideSetDefaultReq): ApiResult<StyleGuideSetDefaultRes> => {
+  try {
+    const styleGuide = setDefaultStyleGuide(params.id)
+    if (!styleGuide) return { ok: false, error: { code: 'INVALID_PARAM', message: '规范不存在' } }
+    return { ok: true, data: { styleGuide } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.STYLE_GUIDE_DELETE, (_event, params: StyleGuideDeleteReq): ApiResult<void> => {
+  try {
+    deleteStyleGuide(params.id)
+    return { ok: true, data: undefined }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
@@ -966,6 +979,27 @@ handleLogged(IPC.WRITING_UPDATE_PROVIDER, (_event, params: WritingUpdateProvider
   }
 })
 
+// Phase 6.4.2：第二步「添加范本」——读写任务级范本正文
+handleLogged(IPC.WRITING_GET_MODEL_TEXT, (_event, params: WritingGetModelTextReq): ApiResult<WritingGetModelTextRes> => {
+  try {
+    const task = getTaskById(params.taskId)
+    if (!task) return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '撰写任务不存在' } }
+    return { ok: true, data: { text: task.modelText ?? '' } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.WRITING_SET_MODEL_TEXT, (_event, params: WritingSetModelTextReq): ApiResult<WritingSetModelTextRes> => {
+  try {
+    const task = updateTaskModelText(params.taskId, params.text)
+    if (!task) return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '撰写任务不存在' } }
+    return { ok: true, data: { text: task.modelText ?? '' } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
 // Phase 3.5：与大模型自由对话（用任务大模型，注入当前初稿作为上下文）
 handleLogged(IPC.WRITING_CHAT, async (event, params: WritingChatReq): Promise<ApiResult<WritingChatRes>> => {
   // 对话回复流式增量推送（2026-08-19）
@@ -1176,8 +1210,8 @@ app.whenReady().then(() => {
   // 初始化数据库（触发迁移）
   getDb()
 
-  // 写入预设写作规范 skills（幂等：仅首次启动表为空时插入）
-  seedPresetSkills()
+  // 规范文档库：表为空时写入默认规范（合并后的「志书文体文风与行文规则」）
+  ensureDefaultStyleGuide()
 
   // 配置本地向量嵌入模型目录。
   // 开发环境模型位于项目根 resources/models；打包后经 electron-builder extraResources 复制到

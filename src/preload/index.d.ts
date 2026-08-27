@@ -31,10 +31,6 @@ export interface AppApi {
   searchTags(query: string, limit?: number): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   batchAddTags(tagIds: string[], sourceIds: string[]): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   getTagSourceIds(tagId: string): Promise<{ ok: boolean; data?: { sourceIds: string[] }; error?: { code: string; message: string } }>
-  listSkills(): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
-  createSkill(input: { name: string; category: 'general' | 'section'; tags: string[]; content: string }): Promise<{ ok: boolean; data?: { skill: unknown }; error?: { code: string; message: string } }>
-  updateSkill(id: string, input: { name: string; category: 'general' | 'section'; tags: string[]; content: string }): Promise<{ ok: boolean; data?: { skill: unknown }; error?: { code: string; message: string } }>
-  deleteSkill(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   listCompilations(taskId: string): Promise<{ ok: boolean; data?: { compilations: unknown[] }; error?: { code: string; message: string } }>
   getCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
   generateCompilation(taskId: string, title: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
@@ -45,6 +41,10 @@ export interface AppApi {
   confirmCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
   listCompilationRecycleBin(compilationId: string): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   restoreCompilationRecycleBin(binId: string): Promise<{ ok: boolean; data?: { contradiction: unknown }; error?: { code: string; message: string } }>
+  listStyleGuides(): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
+  saveStyleGuide(input: { id?: string; name: string; content: string }): Promise<{ ok: boolean; data?: { styleGuide: unknown }; error?: { code: string; message: string } }>
+  setDefaultStyleGuide(id: string): Promise<{ ok: boolean; data?: { styleGuide: unknown }; error?: { code: string; message: string } }>
+  deleteStyleGuide(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   getSource(id: string): Promise<{ ok: boolean; data?: { source: unknown; tags: unknown[] }; error?: { code: string; message: string } }>
   renderSourceHtml(id: string): Promise<{ ok: boolean; data?: { html: string }; error?: { code: string; message: string } }>
   getSourceFileUrl(id: string): Promise<{ ok: boolean; data?: { url: string }; error?: { code: string; message: string } }>
@@ -68,6 +68,8 @@ export interface AppApi {
   deleteTask(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   renameTask(taskId: string, title: string): Promise<{ ok: boolean; data?: { task: unknown }; error?: { code: string; message: string } }>
   updateTaskProvider(taskId: string, llmProviderId: string | null): Promise<{ ok: boolean; data?: { task: unknown }; error?: { code: string; message: string } }>
+  getModelText(taskId: string): Promise<{ ok: boolean; data?: { text: string }; error?: { code: string; message: string } }>
+  setModelText(taskId: string, text: string): Promise<{ ok: boolean; data?: { text: string }; error?: { code: string; message: string } }>
   chatWithTask(taskId: string, message: string, history?: { role: 'user' | 'assistant'; content: string }[]): Promise<{ ok: boolean; data?: { reply: string }; error?: { code: string; message: string } }>
   listTaskMessages(taskId: string): Promise<{ ok: boolean; data?: { items: { id: string; taskId: string; role: 'user' | 'assistant'; kind: 'chat' | 'instruction' | 'notice'; content: string; createdAt: string }[] }; error?: { code: string; message: string } }>
   addTaskMessage(taskId: string, role: 'user' | 'assistant', content: string, kind: 'chat' | 'instruction' | 'notice'): Promise<{ ok: boolean; data?: { message: unknown }; error?: { code: string; message: string } }>

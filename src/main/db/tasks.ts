@@ -15,6 +15,7 @@ interface TaskRow {
   article_title: string | null
   user_instruction: string | null
   skill_ids: string | null
+  model_text: string | null
   current_version: number
   created_at: string
   updated_at: string
@@ -46,6 +47,7 @@ function rowToTask(row: TaskRow): WritingTask {
     llmProviderId: row.llm_provider_id ?? undefined,
     articleTitle: row.article_title ?? undefined,
     userInstruction: row.user_instruction ?? undefined,
+    modelText: row.model_text ?? undefined,
     currentVersion: row.current_version,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -127,18 +129,15 @@ export function updateTaskInstruction(taskId: string, instruction: string): Writ
   return rowToTask(row!)
 }
 
-/** 保存任务选定的部类细则规范 skill id 列表（null = 未手动选定，生成时按标题自动匹配） */
-export function updateTaskSkillIds(taskId: string, skillIds: string[] | null): WritingTask | null {
+/** 保存第二步「添加范本」的任务级范本正文（生成初稿时作为参考提交） */
+export function updateTaskModelText(taskId: string, modelText: string): WritingTask | null {
   const db = getDb()
   if (!getTaskRowById(taskId)) return null
-  db.prepare('UPDATE writing_tasks SET skill_ids = ?, updated_at = ? WHERE id = ?').run(
-    skillIds == null ? null : JSON.stringify(skillIds),
-    new Date().toISOString(),
-    taskId
-  )
+  db.prepare('UPDATE writing_tasks SET model_text = ?, updated_at = ? WHERE id = ?').run(modelText.trim() ? modelText : null, new Date().toISOString(), taskId)
   const row = getTaskRowById(taskId)
   return rowToTask(row!)
 }
+
 
 export function listTasks(): WritingTask[] {
   const db = getDb()
@@ -248,19 +247,6 @@ if (import.meta.vitest) {
         { getSourceIdsByTag: () => [], getAllSourceIds: () => ['a1', 'b2'] }
       )
       expect(resolved).toEqual(['a1', 'b2'])
-    })
-
-    it('updates task skill ids (2026-08-13)', () => {
-      const t = createTask({ title: '规范任务', scope: { sourceIds: ['s1'] } })
-      expect(t.skillIds).toBeUndefined()
-
-      const updated = updateTaskSkillIds(t.id, ['sk1', 'sk2'])
-      expect(updated?.skillIds).toEqual(['sk1', 'sk2'])
-
-      const cleared = updateTaskSkillIds(t.id, null)
-      expect(cleared?.skillIds).toBeUndefined()
-
-      expect(updateTaskSkillIds('no-such-task', ['sk1'])).toBeNull()
     })
 
     it('deletes task and cascades drafts/segments', () => {

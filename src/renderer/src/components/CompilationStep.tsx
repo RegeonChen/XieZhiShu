@@ -79,6 +79,8 @@ function CompilationStep({
   const [ts, setTs] = useState('')
   /** 当前展开“…”菜单的卡片 id（一次只展开一张） */
   const [menuFor, setMenuFor] = useState<string | null>(null)
+  /** 矛盾窗口是否展开（默认展开，可收起） */
+  const [contradictionsOpen, setContradictionsOpen] = useState(true)
 
   const pending = compilation?.contradictions.filter((c) => c.status === 'pending') ?? []
   // 只展示未被软删除（采纳后未恢复）的卡片
@@ -130,8 +132,9 @@ function CompilationStep({
         </div>
       </div>
 
-      {pending.length > 0 ? (
+      {pending.length > 0 && contradictionsOpen ? (
         <div className="compilation-contradictions">
+          <div className="compilation-contradictions__list">
           {pending.map((g) => (
             <div key={g.id} className="compilation-contradiction">
               <div className="compilation-contradiction-head">
@@ -159,7 +162,29 @@ function CompilationStep({
               </div>
             </div>
           ))}
+          </div>
+          <div className="compilation-contradictions__footer">
+            <button
+              type="button"
+              className="compilation-collapse-btn"
+              title={t.collapse}
+              onClick={() => setContradictionsOpen(false)}
+            >
+              <span aria-hidden="true">▲</span> {t.collapse}
+            </button>
+          </div>
         </div>
+      ) : null}
+
+      {pending.length > 0 && !contradictionsOpen ? (
+        <button
+          type="button"
+          className="compilation-collapse-btn compilation-collapse-btn--bar"
+          onClick={() => setContradictionsOpen(true)}
+        >
+          <span>⚠ {t.pendingContradictions.replace('{count}', String(pending.length))}</span>
+          <span aria-hidden="true">▼</span>
+        </button>
       ) : null}
 
       <div className="compilation-cards">

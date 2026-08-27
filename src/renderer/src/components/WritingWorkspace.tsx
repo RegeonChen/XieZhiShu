@@ -4,6 +4,7 @@ import DraftEditor, { type DraftEditorHandle } from './DraftEditor'
 import ConfirmDialog from './ConfirmDialog'
 import ContradictionDialog from './ContradictionDialog'
 import ResizeHandle from './ResizeHandle'
+import StyleGuideEditor from './StyleGuideEditor'
 import ChatPanel, { type ChatMessageItem, type ProviderOption, type SourceRefItem } from './ChatPanel'
 import CompilationStep, { type CompilationView } from './CompilationStep'
 import type { Contradiction, CompilationRecycleBinItem } from '../../../shared/types'
@@ -68,6 +69,8 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
   // ---- 矛盾回收站（Phase 6.1 优化） ----
   const [showRecycleBin, setShowRecycleBin] = useState(false)
   const [recycleBinItems, setRecycleBinItems] = useState<CompilationRecycleBinItem[]>([])
+  // ---- 规范文档库入口（Phase 6.4.1） ----
+  const [showStyleGuide, setShowStyleGuide] = useState(false)
   // ---- 左右分栏宽度（可拖拽，去除间隔） ----
   const [chatWidth, setChatWidth] = useState(380)
   const handleChatResize = useCallback((delta: number) => {
@@ -560,14 +563,7 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
       )
     }
     if (step === 1) {
-      return (
-        <div className="writing-workspace__editor-placeholder">
-          <div className="writing-style-step">
-            <span className="writing-style-step__icon" aria-hidden="true">📐</span>
-            <p>{zhCN.writingWorkspace.styleHint}</p>
-          </div>
-        </div>
-      )
+      return <StyleGuideEditor taskId={taskId} />
     }
     if (draft) {
       return (
@@ -611,6 +607,18 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
           ) : null}
         </div>
         <div className="writing-workspace__header-actions">
+          <button
+            type="button"
+            className="recycle-bin-btn style-guide-btn"
+            title={zhCN.styleGuide.entry}
+            aria-label={zhCN.styleGuide.entry}
+            onClick={() => setShowStyleGuide(true)}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M5 5h14l-14 14z" />
+              <path d="M9 5v3M13 5v3M5 9h3M5 13h3" />
+            </svg>
+          </button>
           {compilation ? (
             <button
               type="button"
@@ -660,29 +668,6 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
         <ResizeHandle onResize={handleChatResize} direction="horizontal" />
         <section className="writing-workspace__editor">{renderContent()}</section>
       </div>
-
-      {step > 0 ? (
-        <footer className="writing-workspace__footer">
-          <button
-            type="button"
-            className="source-list__btn"
-            disabled={busy !== null}
-            onClick={() => setStep((step - 1) as WizardStep)}
-          >
-            {zhCN.writingWorkspace.prev}
-          </button>
-          {step === 1 ? (
-            <button
-              type="button"
-              className="source-list__btn source-list__btn--primary"
-              disabled={busy !== null}
-              onClick={() => setStep(2)}
-            >
-              {zhCN.writingWorkspace.next}
-            </button>
-          ) : null}
-        </footer>
-      ) : null}
 
       {dialogState ? (
         <ContradictionDialog
@@ -738,6 +723,18 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
             )}
             <div className="skills-manager__modal-actions">
               <button type="button" className="source-list__btn" onClick={() => setShowRecycleBin(false)}>{zhCN.compilation.close}</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showStyleGuide ? (
+        <div className="skills-manager__modal-backdrop" onMouseDown={() => setShowStyleGuide(false)}>
+          <div className="skills-manager__modal style-guide-modal" onMouseDown={(e) => e.stopPropagation()}>
+            <h4 className="skills-manager__modal-title">{zhCN.styleGuide.entry}</h4>
+            <div className="style-guide-modal__body"><StyleGuideEditor startInList /></div>
+            <div className="skills-manager__modal-actions">
+              <button type="button" className="source-list__btn" onClick={() => setShowStyleGuide(false)}>{zhCN.styleGuide.close}</button>
             </div>
           </div>
         </div>
