@@ -5,7 +5,6 @@ import EmptyState from './components/EmptyState'
 import SourceList from './components/SourceList'
 import TagManager from './components/TagManager'
 import SourceViewer from './components/SourceViewer'
-import SkillsManager from './components/SkillsManager'
 import Settings from './components/Settings'
 import SectionNav, { type SectionNavItem } from './components/SectionNav'
 import WritingTaskList from './components/WritingTaskList'
@@ -22,7 +21,6 @@ interface AppInfo { version: string; platform: string }
 const NAV_ITEMS: { key: PageKey; label: string }[] = [
   { key: 'sources', label: zhCN.nav.sources },
   { key: 'writing', label: zhCN.nav.writing },
-  { key: 'templates', label: zhCN.nav.skills },
   { key: 'settings', label: zhCN.nav.settings }
 ]
 
@@ -48,15 +46,6 @@ const SETTINGS_SECTIONS: SectionNavItem[] = [
   { id: 'provider', label: zhCN.settingsPage.nav.provider, icon: navIcon(['M8 9l-4 4 4 4', 'M16 9l4 4-4 4', 'M13 5l-2 14']) }
 ]
 
-const SKILLS_SECTIONS: SectionNavItem[] = [
-  {
-    id: 'overview',
-    label: zhCN.skills.nav.overview,
-    icon: navIcon(['M3 3h7v9H3z', 'M14 3h7v5h-7z', 'M14 12h7v9h-7z', 'M3 16h7v5H3z'])
-  },
-  { id: 'general', label: zhCN.skills.nav.general, icon: navIcon(['M4 19.5A2.5 2.5 0 0 1 6.5 17H20', 'M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z']) },
-  { id: 'section', label: zhCN.skills.nav.section, icon: navIcon(['M8 6h13', 'M8 12h13', 'M8 18h13', 'M3 6h.01', 'M3 12h.01', 'M3 18h.01']) }
-]
 
 const MIN_SIDEBAR = 64
 const MIN_CENTER = 200
@@ -105,17 +94,11 @@ export default function App() {
   })
   /** 设置页中栏导航当前激活的区块（scroll-spy 由 Settings 上报） */
   const [settingsActive, setSettingsActive] = useState<string | null>(null)
-  /** 规范页中栏导航当前激活的区块（scroll-spy 由 SkillsManager 上报） */
-  const [skillsActive, setSkillsActive] = useState<string | null>(null)
 
   /** 区块导航跳转：平滑滚动到对应区块并即时高亮 */
   const handleSettingsNavigate = useCallback((id: string) => {
     setSettingsActive(id)
     document.getElementById('settings-' + id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  }, [])
-  const handleSkillsNavigate = useCallback((id: string) => {
-    setSkillsActive(id)
-    document.getElementById('skills-' + id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }, [])
 
   // 三栏宽度变化时持久化（下次启动恢复）
@@ -276,20 +259,6 @@ export default function App() {
             />
           </section>
         )
-      case 'templates':
-        return (
-          <section className="center-pane" style={{ width: centerW, flexShrink: 0 }}>
-            <div className="center-pane__header">
-              <h3 className="center-pane__title">{zhCN.skills.nav.title}</h3>
-            </div>
-            <SectionNav
-              hint={zhCN.skills.nav.hint}
-              items={SKILLS_SECTIONS}
-              activeId={skillsActive}
-              onNavigate={handleSkillsNavigate}
-            />
-          </section>
-        )
     }
   }
 
@@ -316,12 +285,6 @@ export default function App() {
       case 'writing':
         // 撰写工作台改为常驻挂载（见 app-body 中的常驻容器），此处不渲染，避免切换页面时卸载丢失对话/进度状态
         return null
-      case 'templates':
-        return (
-          <main className="work-pane">
-            <SkillsManager onActiveChange={(id) => setSkillsActive(id)} />
-          </main>
-        )
       case 'settings':
         return (
           <main className="work-pane">

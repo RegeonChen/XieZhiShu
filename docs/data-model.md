@@ -113,7 +113,8 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 | llm_provider_id | TEXT NULL | 任务固定大模型（Migration 007；未设置回退全局当前 Provider） |
 | article_title | TEXT NULL | 大模型从用户要求中抓取的文章标题（Migration 007） |
 | user_instruction | TEXT NULL | 生成初稿时用户的最新要求，重新生成复用（Migration 007） |
-| skill_ids | TEXT NULL | 任务选定的部类细则规范 id（JSON 数组，Migration 014；NULL/空 = 未手动选定，生成时按标题自动匹配） |
+| model_text | TEXT NULL | （Phase 6.4.2）第二步「添加范本」的任务级示例正文，生成初稿时作为【参考范本】注入（Migration 020） |
+| skill_ids | TEXT NULL | （Phase 6.4 已废弃清空）写作规范 skills 移除后不再使用，Migration 018 置 NULL；列保留兼容 |
 | current_version | INTEGER NOT NULL DEFAULT 0 | 当前稿号（恒为 0 = 初稿；版本管理已删除，列保留兼容） |
 | created_at / updated_at | TEXT NOT NULL | |
 
@@ -261,19 +262,21 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 - `task_messages`：id PK、task_id（FK CASCADE）、role CHECK('user','assistant')、kind CHECK('chat','instruction','notice')、content、created_at；索引 (task_id, created_at)。
 - `llm_call_logs`：id PK、task_id、kind、model、input_chars/output_chars、elapsed_ms、status CHECK('ok','error')、error_code、error_message、created_at；**只存元数据与字符数/耗时，不存密钥与正文**，用于诊断"生成慢/超时"与剩余时间预估。
 
-### 2.19 writing_skills（写作规范，Migration 014，2026-08-13 由「范本」重构）
+### 2.19 writing_skills（写作规范 skills，Migration 014；Phase 6.4 已删除）
+
+> **Phase 6.4：整个「写作规范 skills」模块移除**——`writing_skills` 表由 Migration 018 `DROP TABLE` 删除；`seedPresetSkills`、`skills:*` CPU/UI 一并清除；生成初稿改用共享的 `DEFAULT_STYLE_GUIDE`（合并「志书文体文风」+「志书行文规则」）作为默认行文规范。
+
+### 2.19.1 style_guides（规范文档库，Migration 019，Phase 6.4.1）
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | id | TEXT PK | |
-| name | TEXT NOT NULL | 规范名（如「学前教育」「志书文体文风与行文规则」） |
-| category | TEXT NOT NULL CHECK('general','section') | general=通用规范（默认注入）；section=部类细则（按标题匹配/智能匹配/手动选择） |
-| tags | TEXT NOT NULL DEFAULT '[]' | 匹配关键词（JSON 数组） |
-| content | TEXT NOT NULL | 蒸馏后的规范要点（Markdown） |
-| is_preset | INTEGER NOT NULL DEFAULT 0 | 预设（内置，可修改）或用户自建 |
+| name | TEXT NOT NULL | 规范名称 |
+| content | TEXT NOT NULL | 行文规范正文（Markdown） |
+| is_default | INTEGER NOT NULL DEFAULT 0 CHECK(0,1) | 全局唯一默认注入规范（1=是） |
 | created_at / updated_at | TEXT NOT NULL | |
 
-> 首次启动幂等写入预设规范（`seedPresetSkills`，仅当表为空时）。
+> 启动时若表为空自动写入 `DEFAULT_STYLE_GUIDE`（合并「志书文体文风」+「志书行文规则」）作为默认规范；生成初稿读取默认规范注入，无则回退该常量。
 
 ### 2.20 web_sites 与 web_site_articles（网页资料库，Migration 012，2026-08-11）
 

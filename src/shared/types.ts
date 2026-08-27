@@ -45,19 +45,6 @@ export interface Tag {
   createdAt: string
 }
 
-// ============================================================
-// 写作规范 skills（2026-08-13：由「范本」重构而来）
-// ============================================================
-export interface WritingSkill {
-  id: string
-  name: string // 如「学前教育」「大事记」「志书文体文风与行文规则」
-  category: 'general' | 'section' // general=通用规范（默认注入）；section=部类细则（按标题匹配）
-  tags: string[] // 匹配关键词（如 ['学前教育','幼儿园','保育']）
-  content: string // 蒸馏后的规范要点（Markdown）
-  isPreset: boolean // 预设（内置）或用户自建
-  createdAt: string
-  updatedAt: string
-}
 
 // ============================================================
 // 范本（已废弃，2026-08-13 由「规范 skills」替代；保留类型定义待清理）
@@ -91,6 +78,8 @@ export interface WritingTask {
   articleTitle?: string
   /** 生成初稿时用户的最新要求（重新生成复用） */
   userInstruction?: string
+  /** 第二步「添加范本」：用户提供的示例正文（可选，生成初稿时作为参考提交） */
+  modelText?: string
   currentVersion: number
   createdAt: string
   updatedAt: string
@@ -279,6 +268,19 @@ export interface CompilationRecycleBinItem {
   createdAt: string
   /** 恢复后重新展示的矛盾（含全部 variant 与所选卡片 id） */
   contradiction: CompilationContradiction
+}
+
+// ============================================================
+// 规范文档库（Phase 6.4.1：第二步「指定行文规范」）
+// ============================================================
+export interface StyleGuide {
+  id: string
+  name: string
+  content: string
+  /** 全局唯一默认注入规范（1 = 是） */
+  isDefault: boolean
+  createdAt: string
+  updatedAt: string
 }
 
 // ============================================================

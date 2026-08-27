@@ -465,6 +465,36 @@ CREATE TABLE IF NOT EXISTS compilation_recycle_bin (
 CREATE INDEX IF NOT EXISTS idx_compilation_recycle_bin_comp ON compilation_recycle_bin(compilation_id);
 CREATE INDEX IF NOT EXISTS idx_compilation_recycle_bin_contra ON compilation_recycle_bin(contradiction_id);
 `
+  },
+  {
+    // Phase 6.4：删除「写作规范 skills」模块——移除 writing_skills 表并清空任务已选的 skill_ids。
+    version: 18,
+    sql: `
+DROP TABLE IF EXISTS writing_skills;
+UPDATE writing_tasks SET skill_ids = NULL;
+`
+  },
+  {
+    // Phase 6.4.1：规范文档库——第二步「指定行文规范」的多篇规范持久化 + 默认注入指定。
+    version: 19,
+    sql: `
+CREATE TABLE IF NOT EXISTS style_guides (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  content TEXT NOT NULL,
+  is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_style_guides_default ON style_guides(is_default);
+`
+  },
+  {
+    // Phase 6.4.2：第二步「添加范本」——任务级范本（用户提供的示例正文，生成初稿时作为参考提交）。
+    version: 20,
+    sql: `
+ALTER TABLE writing_tasks ADD COLUMN model_text TEXT;
+`
   }
 ]
 

@@ -4,7 +4,7 @@
  * 篇幅由材料中实际可用的有效内容自然决定，不做人为的片段切分与字数限定。
  */
 import type { Contradiction, ContradictionInput, ContradictionKind } from '../../shared/types'
-import type { Draft, RetrievedChunk, WritingSkill, WritingTask } from '../../shared/types'
+import type { Draft, RetrievedChunk } from '../../shared/types'
 import { ErrorCodes } from '../../shared/types'
 import { getTaskById, resolveScopeSourceIds, getAllSourceIds, updateTaskArticleTitle, updateTaskInstruction } from '../db/tasks'
 import { getDraftRowByVersion, createDraft, addSegment, getDraftById, deleteDraftByVersion } from '../db/drafts'
@@ -15,7 +15,8 @@ import { getDb } from '../db/connection'
 import { addTaskMessage } from '../db/task-messages'
 import { getSettings } from '../db/settings'
 import { getSourceIdsByTag } from '../db/tags'
-import { listGeneralSkills, matchSectionSkills, getSkillById } from '../db/writing-skills'
+import { DEFAULT_STYLE_GUIDE } from '../../shared/style-guide'
+import { getDefaultStyleGuide } from '../db/style-guides'
 import { getProviderSecret } from '../llm/provider-store'
 import { safeStorageCodec } from '../llm/secret'
 import { chatCompletion, createJsonFieldStreamer, type ChatMessage } from '../llm/chat'
@@ -75,31 +76,7 @@ function fail(code: string, message: string): GenerateResult {
   return { ok: false, error: { code, message } }
 }
 
-/**
- * 解析任务生效的写作规范 skills（2026-08-13 由「范本」重构）：
- * - 通用规范（general）：所有生成默认注入；
- * - 部类细则（section）：任务已手动选定（skillIds 非空）则用之，否则按标题自动匹配。
- */
-function resolveTaskSkills(task: WritingTask): { general: WritingSkill[]; section: WritingSkill[] } {
-  const general = listGeneralSkills()
-  let section: WritingSkill[] = []
-  if (task.skillIds && task.skillIds.length > 0) {
-    section = task.skillIds
-      .map((id) => getSkillById(id))
-      .filter((s): s is WritingSkill => s != null && s.category === 'section')
-  } else {
-    const title = task.articleTitle?.trim() || extractTopicTerms(task.userInstruction ?? task.title)[0] || ''
-    section = matchSectionSkills(title)
-  }
-  return { general, section }
-}
-
-/** 把一组 skill 格式化为可注入 prompt 的规范文本（无则返回空串） */
-function formatSkillsText(skills: WritingSkill[]): string {
-  return skills.map((s) => `【${s.name}】\n${s.content}`).join('\n\n')
-}
-
-function buildSystemPrompt(contradictionBlock?: string, generalSkills?: WritingSkill[]): string {
+function buildSystemPrompt(contradictionBlock?: string, styleGuide: string = DEFAULT_STYLE_GUIDE): string {
   const lines = [
     '你是一名资深的地方志书撰稿专家，遵循"实事求是、述而不作、横排门类、纵述史实"的志书体例。',
     '现在用户需要生成一篇初稿，以下是用户的要求（应该包含标题和可能的其他要求）。',
@@ -107,10 +84,8 @@ function buildSystemPrompt(contradictionBlock?: string, generalSkills?: WritingS
     '你只能依据下面【参考材料】中的本地资料撰写，严禁编造材料中没有的史实、数据、人名、机构或时间。',
     ''
   ]
-  // 通用规范（2026-08-13）：志书写作的强制规则，注入 system prompt 作为全局约束
-  if (generalSkills && generalSkills.length > 0) {
-    lines.push('【志书写作规范（必须遵守）】', formatSkillsText(generalSkills), '')
-  }
+  // Phase 6.4：默认行文规范（合并「志书文体文风」与「志书行文规则」）作为全局写作约束注入
+  lines.push('【志书写作规范（必须遵守）】', styleGuide, '')
   lines.push(
     '输出要求：只输出一个 JSON 对象，不得输出 JSON 之外的任何文字、解释或代码块围栏。',
     '正常输出：{"title": "抓取的文章标题", "content": "完整连贯的志书小节正文（Markdown）", "error": null}',
@@ -130,27 +105,32 @@ function buildSystemPrompt(contradictionBlock?: string, generalSkills?: WritingS
   return lines.join('\n')
 }
 
-function buildUserPrompt(instruction: string, chunks: RetrievedChunk[], sectionSkills: WritingSkill[]): string {
+function buildUserPrompt(instruction: string, chunks: RetrievedChunk[], styleGuide: string = DEFAULT_STYLE_GUIDE, modelText?: string, materialsOrigin?: string): string {
   // Task 3.4.7：材料不再截断、不设块数上限——把过滤后保留的全部有效段落完整提交，
   // 篇幅由资料中实际有多少有效、有关联的内容自然决定
   const materials = chunks
     .map((c, i) => `[${i + 1}]（sourceId: ${c.sourceId}，标题：《${c.sourceTitle}》，位置：${c.position}）\n${c.text}`)
     .join('\n\n')
 
-  const skillsText = sectionSkills.length > 0 ? formatSkillsText(sectionSkills) : '（未匹配到本小节的部类细则规范）'
-
-  return [
+  // Phase 6.4.2：有任务级范本时注入【参考范本】作为行文体例/风格参照
+  const parts = [
     '【用户要求】',
     instruction,
     '',
     '【写作规范】',
-    skillsText,
-    '',
-    '【参考材料】',
-    materials,
-    '',
-    '请严格遵守【写作规范】中的部类细则要求，依据以上材料撰写这一小节的连贯志书正文。'
-  ].join('\n')
+    styleGuide,
+    ''
+  ]
+  if (modelText && modelText.trim()) {
+    parts.push('【参考范本】', modelText, '')
+  }
+  parts.push(materialsOrigin ?? '【参考材料】', materials, '')
+  parts.push(
+    modelText && modelText.trim()
+      ? '请严格遵循上述【写作规范】，参考【参考范本】的体例与行文风格，仅依据【参考材料】撰写这一小节的连贯志书正文。'
+      : '请严格遵循上述【写作规范】，仅依据【参考材料】撰写这一小节的连贯志书正文。'
+  )
+  return parts.join('\n')
 }
 
 // ============================================================
@@ -813,10 +793,11 @@ export async function generateDraft(
       }))
     if (chunks.length === 0) return fail(ErrorCodes.LLM_NO_CANDIDATES, '资料汇编中没有可用的资料卡片')
 
-    const { general: generalSkills, section: sectionSkills } = resolveTaskSkills(task)
+    const styleGuide = getDefaultStyleGuide()?.content ?? DEFAULT_STYLE_GUIDE
+    const materialsOrigin = '【参考材料】（来自你已确认的资料汇编，已剔除矛盾取舍中被排除的卡片）'
     const messages: ChatMessage[] = [
-      { role: 'system', content: buildSystemPrompt(undefined, generalSkills) },
-      { role: 'user', content: buildUserPrompt(inst, chunks, sectionSkills) }
+      { role: 'system', content: buildSystemPrompt(undefined, styleGuide) },
+      { role: 'user', content: buildUserPrompt(inst, chunks, styleGuide, task.modelText, materialsOrigin) }
     ]
 
     onProgress?.('正在基于已确认汇编生成初稿…', GENERATE_PROGRESS.generateFrom, estimateLlmSeconds('generate', 180))
@@ -890,8 +871,6 @@ export async function generateDraft(
   // 使矛盾扫描输入在"同一主题、不同措辞"的两次任务间保持一致；scanQuery 与 inst 相同时复用 chunks，不额外检索。
   const scanChunks = scanQuery === inst ? chunks : await retrieveChunksHybrid(scopeIds, scanQuery)
 
-  const { general: generalSkills, section: sectionSkills } = resolveTaskSkills(task)
-
   // ---- 矛盾预扫描（Phase 3.7 Task 3.7.2）：失败不阻断生成，仅提示 ----
   // 2026-08-11 决策演进：扫描视野收敛为"粗筛/检索后、撰写初稿实际用到的文段"，替代早期"任务范围内全部资料分块"方案。
   // 2026-08-14 解耦：扫描输入改为 scanChunks（稳定主题词检索结果），不再直接复用生成正文的 chunks，
@@ -905,9 +884,10 @@ export async function generateDraft(
   }
   const contradictionBlock = contradictions.length > 0 ? formatContradictionBlock(contradictions, refList) : undefined
 
+  const styleGuide = getDefaultStyleGuide()?.content ?? DEFAULT_STYLE_GUIDE
   const messages: ChatMessage[] = [
-    { role: 'system', content: buildSystemPrompt(contradictionBlock, generalSkills) },
-    { role: 'user', content: buildUserPrompt(inst, chunks, sectionSkills) }
+    { role: 'system', content: buildSystemPrompt(contradictionBlock, styleGuide) },
+    { role: 'user', content: buildUserPrompt(inst, chunks, styleGuide, task.modelText) }
   ]
 
   onProgress?.('正在等待大模型回应，预计需要 1~5 分钟（资料较多时可能更久）…', GENERATE_PROGRESS.generateFrom, generateEta)
@@ -1157,29 +1137,40 @@ if (import.meta.vitest) {
     })
   })
 
-  describe('writing skills injection (2026-08-13 由范本重构)', () => {
-    const general = [{ id: 'g1', name: '志书文体文风', category: 'general', tags: [], content: '述而不作', isPreset: true, createdAt: '', updatedAt: '' }] as WritingSkill[]
-    const section = [{ id: 's1', name: '学前教育', category: 'section', tags: ['学前教育'], content: '机构设置、保育与教育', isPreset: true, createdAt: '', updatedAt: '' }] as WritingSkill[]
-
-    it('injects general skills into system prompt and section skills into user prompt', () => {
-      const sys = buildSystemPrompt(undefined, general)
+  describe('default style guide injection (Phase 6.4 移除 skills 后)', () => {
+    it('injects default style guide into system prompt', () => {
+      const sys = buildSystemPrompt()
       expect(sys).toContain('【志书写作规范（必须遵守）】')
-      expect(sys).toContain('【志书文体文风】')
+      expect(sys).toContain('文体')
+      expect(sys).toContain('行文规则')
       expect(sys).toContain('述而不作')
-
-      const chunks: RetrievedChunk[] = [{ sourceId: 's1', sourceTitle: '某报告', position: '第1段', text: '正文。', score: 1 }]
-      const user = buildUserPrompt('标题为学前教育', chunks, section)
-      expect(user).toContain('【写作规范】')
-      expect(user).toContain('【学前教育】')
-      expect(user).toContain('机构设置、保育与教育')
-      expect(user).not.toContain('【参考范本】')
     })
 
-    it('falls back when no section skills matched', () => {
+    it('injects default style guide into user prompt (no 部类细则)', () => {
       const chunks: RetrievedChunk[] = [{ sourceId: 's1', sourceTitle: '某报告', position: '第1段', text: '正文。', score: 1 }]
-      const user = buildUserPrompt('标题为某小节', chunks, [])
+      const user = buildUserPrompt('标题为学前教育', chunks)
       expect(user).toContain('【写作规范】')
-      expect(user).toContain('未匹配到本小节的部类细则规范')
+      expect(user).toContain('文体')
+      expect(user).not.toContain('【参考范本】')
+      expect(user).not.toContain('部类细则')
+      expect(user).not.toContain('【学前教育】')
+    })
+
+    it('injects task-level 范本 into user prompt when modelText provided (Phase 6.4.2)', () => {
+      const chunks: RetrievedChunk[] = [{ sourceId: 's1', sourceTitle: '某报告', position: '第1段', text: '正文。', score: 1 }]
+      const user = buildUserPrompt('标题为学前教育', chunks, DEFAULT_STYLE_GUIDE, '这是一段范本示例正文。')
+      expect(user).toContain('【参考范本】')
+      expect(user).toContain('这是一段范本示例正文。')
+      expect(user).toContain('参考【参考范本】的体例与行文风格')
+    })
+
+    it('marks materials as from the confirmed compilation (Step 3, materialsOrigin)', () => {
+      const chunks: RetrievedChunk[] = [{ sourceId: 's1', sourceTitle: '某报告', position: '第1段', text: '正文。', score: 1 }]
+      const origin = '【参考材料】（来自你已确认的资料汇编，已剔除矛盾取舍中被排除的卡片）'
+      const user = buildUserPrompt('标题为学前教育', chunks, DEFAULT_STYLE_GUIDE, undefined, origin)
+      expect(user).toContain('来自你已确认的资料汇编')
+      expect(user).toContain('已剔除矛盾取舍中被排除的卡片')
+      expect(user).not.toContain('【参考范本】')
     })
   })
 
@@ -1192,14 +1183,14 @@ if (import.meta.vitest) {
       expect(sys).toContain('缺少标题等必要信息')
       expect(sys).toContain('"error"')
       expect(sys).not.toContain('segments')
-      expect(sys).not.toContain('字数')
+      expect(sys).not.toContain('字数上限')
     })
 
     it('user prompt carries the user instruction (requirements with title)', () => {
       const chunks: RetrievedChunk[] = [
         { sourceId: 's1', sourceTitle: '某报告', position: '第1段', text: '正文内容。', score: 10 }
       ]
-      const prompt = buildUserPrompt('这次撰写任务的标题为教育事业，要求突出近年发展', chunks, [])
+      const prompt = buildUserPrompt('这次撰写任务的标题为教育事业，要求突出近年发展', chunks)
       expect(prompt).toContain('【用户要求】')
       expect(prompt).toContain('这次撰写任务的标题为教育事业')
       expect(prompt).toContain('连贯志书正文')

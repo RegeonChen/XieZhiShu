@@ -33,28 +33,15 @@ interface Tag { id: string; name: string; createdAt: string; }
 /** 网页资料库站点（2026-08-11） */
 interface WebSite { id: string; rootUrl: string; title: string; createdAt: string; updatedAt: string; lastSyncedAt?: string; }
 
-/** 写作规范（2026-08-13 由「范本」重构） */
-interface WritingSkill {
-  id: string;
-  name: string;
-  category: 'general' | 'section';  // general=通用规范（默认注入）；section=部类细则（按标题匹配）
-  tags: string[];                     // 匹配关键词
-  content: string;                    // 蒸馏后的规范要点（Markdown）
-  isPreset: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
 /** 撰写任务 */
 interface WritingTask {
   id: string;
   title: string;
   scope: { all: true } | { sourceIds: string[] } | { tagIds: string[] };  // Phase 3.5 起固定 { all: true }，旧任务兼容保留
-  templateBookId?: string;  // 已废弃（2026-08-13 由 skillIds 替代）
-  skillIds?: string[];      // 任务选定的部类细则规范 id；空 = 生成时按标题自动匹配
   llmProviderId?: string;   // 任务固定大模型；未设置回退全局当前 Provider
   articleTitle?: string;    // 大模型从用户要求中抓取的文章标题
   userInstruction?: string; // 生成初稿时用户的最新要求（重新生成复用）
+  modelText?: string;       // （Phase 6.4.2）第二步「添加范本」的任务级示例正文，生成初稿时作为【参考范本】注入
   currentVersion: number;
   createdAt: string;
   updatedAt: string;
@@ -165,16 +152,7 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `tags:batchAdd` | `{ tagIds, sourceIds }` → `{ ok: true }` | 批量打标 |
 | `tags:sourcesByTag` | `{ tagId }` → `{ sourceIds: string[] }` | 该标签下的资料 id |
 
-### 2.3 写作规范（skills，2026-08-13 由「范本」重构）
-
-| 通道 | 请求 → 响应 data | 说明 |
-|---|---|---|
-| `skills:list` | `{}` → `{ items: WritingSkill[] }` | 规范列表（预设 + 自建） |
-| `skills:create` | `{ name, category, tags, content }` → `{ skill: WritingSkill }` | 新建 |
-| `skills:update` | `{ id, name, category, tags, content }` → `{ skill: WritingSkill }` | 修改（预设规范也可改） |
-| `skills:delete` | `{ id }` → `{ ok: true }` | 删除 |
-
-> 原 `templates:*` 通道随范本重构移除（`template_books` 表保留不删，避免迁移风险）。
+> Phase 6.4：**「写作规范 skills」模块整体移除**——`skills:*` 通道、`WritingSkill` 类型、`writing_skills` 表（Migration 018 删除）与任务 `skill_ids` 选择均不再存在；生成初稿时改用共享的 `DEFAULT_STYLE_GUIDE`（合并「志书文体文风」+「志书行文规则」）作为默认行文规范注入。原 `templates:*`/`template_books` 亦已随范本重构移除/保留不删。
 
 ### 2.3.1 资料汇编（compilation，Phase 6.0，2026-08-25）
 
@@ -191,6 +169,20 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `compilation:resolveContradiction` | `{ contradictionId, action: 'resolve'\|'ignore', chosenItemId? }` → `{ contradiction: CompilationContradiction }` | 汇编矛盾取舍：resolve 须传保留的卡片 id（属于该矛盾）；ignore 清空已选 |
 | `compilation:confirm` | `{ compilationId }` → `{ compilation: Compilation }` | 确认汇编（finalize），进入下一步 |
 
+
+### 2.3.2 规范文档库（styleGuide，Phase 6.4.1）
+
+第二步「指定行文规范」的多篇规范文档持久化 + 全局唯一默认注入指定。初始默认 = 合并后的「志书文体文风与行文规则」。
+
+| 通道 | 请求 → 响应 data | 说明 |
+|---|---|---|
+| `styleGuide:list` | `{}` → `{ items: StyleGuide[] }` | 全部规范（默认排前） |
+| `styleGuide:save` | `{ id?, name, content }` → `{ styleGuide: StyleGuide }` | 新建（无 id；首个自动设为默认）或覆盖（有 id） |
+| `styleGuide:setDefault` | `{ id }` → `{ styleGuide: StyleGuide }` | 设为默认注入（全局唯一） |
+| `styleGuide:delete` | `{ id }` → `{ ok: true }` | 删除；若删的是默认则回退到剩余第一篇 |
+
+> `StyleGuide = { id, name, content, isDefault, createdAt, updatedAt }`。生成初稿时读取 `getDefaultStyleGuide()?.content`（无则回退 `DEFAULT_STYLE_GUIDE`）注入 prompt。
+
 ### 2.4 撰写与初稿（writing / draft）
 
 | 通道 | 请求 → 响应 data | 说明 |
@@ -199,9 +191,9 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `writing:listTasks` | `{}` → `{ items: WritingTask[] }` | |
 | `writing:deleteTask` | `{ id }` → `{ ok: true }` | 删除任务（级联清理 drafts/segments/messages/矛盾，并清理任务绑定的网页缓存文章） |
 | `writing:renameTask` | `{ taskId, title }` → `{ task: WritingTask }` | 右键重命名任务标题（仅中栏显示；与文章标题无关） |
-| `writing:updateSkills` | `{ taskId, skillIds: string[] \| null }` → `{ task: WritingTask }` | 更新任务选定的部类细则规范（null=自动匹配） |
-| `writing:suggestSkills` | `{ taskId, need }` → `{ skillIds: string[] }` | 智能匹配写作规范（单独请求大模型，temperature 0，找不到匹配返回空） |
 | `writing:updateProvider` | `{ taskId, llmProviderId: string \| null }` → `{ task: WritingTask }` | 更新任务固定大模型（null=回退全局当前 Provider；校验存在） |
+| `writing:getModelText` | `{ taskId }` → `{ text: string }` | 读取任务级范本正文（Phase 6.4.2） |
+| `writing:setModelText` | `{ taskId, text }` → `{ text: string }` | 保存任务级范本正文（Phase 6.4.2；生成初稿时注入【参考范本】） |
 | `writing:chat` | `{ taskId, message, history? }` → `{ reply: string }` | 自由对话（任务大模型 + 注入当前初稿 ≤12000 字；超时 5 分钟；消息由主进程持久化） |
 | `taskMessages:list` | `{ taskId }` → `{ items: TaskMessage[] }` | 任务对话历史（role: user/assistant；kind: chat/instruction/notice） |
 | `taskMessages:add` | `{ taskId, role, kind, content }` → `{ message: TaskMessage }` | 追加任务消息（一般由主进程自动写入） |
@@ -266,7 +258,7 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 ## 4. 生成初稿的契约（Phase 3.5：指令驱动 + JSON 输出）
 
 - 请求：`writing:generateDraft { taskId, instruction, compilationId? }`（`instruction` 为用户要求，应包含标题与可能的其他要求；`compilationId` 提供已确认汇编时，材料仅取该汇编 kept 卡片，不再实时检索/扫描）。
-- 提交物：写作规范上下文（通用规范注入 system prompt，部类细则注入 user prompt，标注"仅作写作规范"）+ 资料库检索到的全部有效材料 + 用户要求。
+- 提交物：默认行文规范（`DEFAULT_STYLE_GUIDE`，合并「志书文体文风」+「志书行文规则」，注入 system/user prompt）+ 资料库检索到的全部有效材料 + 用户要求。
 - 大模型输出要求为 JSON（缺标题等必要信息时输出 error 详情）：
 
 ```json

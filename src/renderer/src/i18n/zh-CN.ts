@@ -16,7 +16,6 @@ export const zhCN = {
   nav: {
     sources: '资料库',
     writing: '撰写',
-    skills: '规范',
     settings: '设置'
   },
   panes: {
@@ -105,56 +104,6 @@ export const zhCN = {
     syncedAt: '上次同步：{time}',
     neverSynced: '尚未同步',
     operationFailed: '操作失败：{message}'
-  },
-  skills: {
-    title: '写作规范',
-    hint: '固化志书写作规范：通用规范默认注入所有生成，部类细则按小节标题匹配注入。预设规范可修改，也可自建。',
-    nav: {
-      title: '规范导航',
-      hint: '点击条目快速跳转到对应规范区块',
-      overview: '总览',
-      general: '通用规范',
-      section: '部类细则'
-    },
-    overview: {
-      title: '写作规范库',
-      hint: '通用规范默认注入所有生成任务；部类细则按撰写标题自动匹配，也可智能匹配或手动选择。预设规范可修改，也可自建。',
-      generalCount: '通用规范 {count} 条',
-      sectionCount: '部类细则 {count} 条',
-      presetCount: '预设 {count} 条'
-    },
-    generalHint: '默认注入所有生成任务（文体文风与行文规则等）',
-    sectionHint: '按撰写标题匹配 / 智能匹配 / 手动选择',
-    noGeneral: '暂无通用规范',
-    noSection: '暂无部类细则规范',
-    searchClear: '清空搜索',
-    newBtn: '新建规范',
-    loading: '加载中...',
-    empty: '暂无规范',
-    searchPlaceholder: '搜索规范（名称/关键词，支持模糊匹配）',
-    noMatch: '无匹配的规范',
-    general: '通用规范',
-    section: '部类细则',
-    preset: '预设',
-    edit: '编辑',
-    remove: '删除',
-    removeConfirm: '确定删除规范「{name}」吗？',
-    newTitle: '新建写作规范',
-    editTitle: '编辑写作规范',
-    nameLabel: '名称',
-    namePlaceholder: '如：学前教育',
-    categoryLabel: '类型',
-    tagsLabel: '匹配关键词（逗号分隔）',
-    tagsPlaceholder: '如：学前教育,幼儿园,保育',
-    contentLabel: '规范内容',
-    contentPlaceholder: '蒸馏后的写作规范要点（该小节记什么、按什么结构、避免什么）',
-    cancel: '取消',
-    save: '保存',
-    saving: '保存中...',
-    loadFailed: '加载失败',
-    emptyFields: '请填写名称与规范内容',
-    saveFailed: '保存失败',
-    deleteFailed: '删除失败'
   },
   sourceViewer: {
     summaryTitle: '资料摘要',
@@ -364,15 +313,7 @@ export const zhCN = {
     openSourceHint: '打开来源文件：《{title}》',
     thinking: '正在思考',
     emptyHintTitle: '开始你的第一篇志稿',
-    emptyHintSteps: '1. 在下方输入本次撰写的标题与要求\n2. 可先「智能匹配」或「手动选择」写作规范\n3. 点击「生成初稿」，等待初稿完成'
-  },
-  skillPicker: {
-    title: '手动选择写作规范',
-    searchPlaceholder: '搜索规范（名称/关键词，支持模糊匹配）',
-    noMatch: '无匹配的规范',
-    selected: '已选 {count} 项',
-    confirm: '确定',
-    cancel: '取消'
+    emptyHintSteps: '1. 在下方输入本次撰写的标题与要求\n2. 点击「生成初稿」，等待初稿完成'
   },
   writingWorkspace: {
     taskTitle: '撰写任务：{title}',
@@ -382,7 +323,41 @@ export const zhCN = {
     steps: ['生成资料汇编', '指定行文规范', '生成志书初稿'],
     prev: '上一步',
     next: '下一步',
-    styleHint: '本环节为预留：默认注入「志书通用行文规范」，也可在左侧对话框中直接提出行文要求。'
+    styleHint: '本环节为预留：默认注入「志书通用行文规范」，也可在左侧对话框中直接提出行文要求。',
+    styleTitle: '指定行文规范（默认注入）',
+    styleGuideLabel: '以下为默认注入的「志书文体文风与行文规则」规范，后续可在左侧对话中补充行文要求。'
+  },
+  styleGuide: {
+    entry: '规范',
+    untitled: '未命名规范',
+    listTitle: '选择要编辑的规范',
+    backToList: '← 返回列表',
+    importDraft: '导入已有规范作为底稿',
+    addFanben: '添加范本',
+    fanbenLabel: '范本',
+    fanbenHint: '可选：粘贴你想要的志书示例正文，生成初稿时作为体例与行文风格参考',
+    fanbenPlaceholder: '在此粘贴或撰写你的范本正文（可选，第三步生成初稿时会作为参考提交）…',
+    contentPlaceholder: '在此编辑行文规范内容…',
+    save: '保存规范',
+    close: '关闭',
+    importTitle: '选择要导入的规范',
+    importConfirmTitle: '导入已有规范作为底稿',
+    importConfirmMessage: '导入「{name}」会直接替换文本编辑器中现有的全部文本，若当前有未保存的修改将被丢弃。确定继续？',
+    importConfirmBtn: '确定导入',
+    saveTitle: '选择保存方式',
+    saveHint: '选择要覆盖的现有规范，或选择空白「+」另存为新规范。',
+    saveAsNew: '另存为新规范',
+    overwriteTitle: '覆盖现有规范',
+    overwriteMessage: '确定要用编辑器当前内容覆盖规范「{name}」吗？该规范的旧内容将被替换。',
+    overwriteBtn: '覆盖',
+    newTitle: '另存为新规范',
+    renameTitle: '重命名规范',
+    nameLabel: '规范名称',
+    saveBtn: '保存',
+    renameBtn: '重命名',
+    setDefault: '设为默认',
+    delete: '删除',
+    defaultBadge: '默认'
   },
   compilation: {
     empty: '尚未生成资料汇编。请在左侧输入本次撰写的标题与要求，点击「生成资料汇编」。',
@@ -407,6 +382,7 @@ export const zhCN = {
     ignored: '已忽略',
     pending: '待处理',
     more: '更多操作',
+    collapse: '收起',
     editTitle: '编辑资料卡片',
     contradict: '矛盾',
     generating: '正在生成资料汇编（本地宽召回 + AI 细读，资料较多时可能需要数分钟）...',

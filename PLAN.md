@@ -149,13 +149,34 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 - 重生成：基于同一 `compilationId` 重跑；「重新生成汇编」在 Step 1 触发（重新生成会覆盖当前汇编并回到 drafting，需二次确认）。
 - 落库：初稿仍为 Draft/Segments；本次仅做“汇编卡片 → 初稿”统计，不逐段标来源。
 
-> **Status（2026-08-25）**：链路已完成——`generateDraft`/`regenerateDraft` 新增可选 `compilationId`：提供已确认汇编时仅取 `kept` 卡片文本（按时间排序）作为材料，跳过摘要/网页/检索/矛盾扫描；流式输出与进度事件复用现有机制；未提供 `compilationId` 时保持旧检索链路兼容。**真实大模型生成初稿待用户实测**（generate 既有 22 项单测通过；compilation 分支经 typecheck + 生产构建验证）。
+> **Status（2026-08-25）**：链路已完成——`generateDraft`/`regenerateDraft` 新增可选 `compilationId`：提供已确认汇编时仅取 `kept` 卡片文本（按时间排序）作为材料，跳过摘要/网页/检索/矛盾扫描；流式输出与进度事件复用现有机制；未提供 `compilationId` 时保持旧检索链路兼容。**2026-08-25 第三步落地**：① 移除工作区底部「上一步 / 下一步」按钮，导航只通过顶部三步向导；② Step 3 提交物固定为「已确认汇编的 kept 卡片（已剔除矛盾取舍排除的卡片）＋ 第二步默认行文规范 ＋ 可选参考范本」，`buildUserPrompt` 按「用户要求 → 写作规范 → 参考范本（可选）→ 参考材料（来自已确认汇编）」组织，并提示严格遵循规范、仅依据材料撰写；材料区标注其来源为已确认汇编、已剔除矛盾排除卡片。新增 2 项单测（参考范本注入、材料来源标注）。验证：typecheck 零错误、165 项单测、生产构建通过。**真实大模型生成初稿待用户实测**。
 
-### Phase 6.4 行文规范简化（删除部类细则，整理通用规范）
+### Phase 6.4 行文规范简化（删除部类细则 + 合并通用规范为默认规范）（已完成）
 
-- 移除非 `category='general'` 的 `writing_skills`（预设 + 自建，Migration 016 `run` 清理或备份）；规范页仅展示/管理**通用规范**。
-- 移除撰写任务**部类细则**相关 UI 与逻辑：`WRITING_UPDATE_SKILLS`/`WRITING_SUGGEST_SKILLS` 通道与 `matchSectionSkills`、智能匹配/手动选择弹窗、`skillIds` 注入；保留“通用规范默认注入”。
-- `docs/{shared-contracts,data-model,ui-architecture}.md` 同步；`agents.md` 记录本决策。
+- **删除整个「写作规范 skills」模块**前后端：删除 `SkillsManager`/`SkillPickerDialog`、`writing-skills.ts` 仓储、`skills:*` IPC（list/create/update/delete）、preload 方法与 `WritingSkill` 类型；移除「规范」页导航；Migration 018 `DROP TABLE writing_skills` 并清空 `writing_tasks.skill_ids`。[^既有 `skill_ids` 列保留，仅清空]
+- **仅保留两篇通用规范（志书文体文风 + 志书行文规则）**，合并为**一篇默认规范** `DEFAULT_STYLE_GUIDE`（`src/shared/style-guide.ts`），作为默认规范**注入第二步（行文规范）显示**，并在生成初稿时作为全局写作约束注入 system/user prompt；`resolveTaskSkills`/`listSectionSkills`/`matchSectionSkills`/`formatSkillsText` 移除，生成侧不再按部类细则注入。
+- 验证：typecheck 零错误、159 项单测、构建成功。
+
+### Phase 6.4.1 规范文档库与第二步文本编辑器（2026-08-25 构思）
+
+> 把「指定行文规范」做成真正的**规范文档库**：多篇规范文档可持久化、重命名、修改，并可指定其中一篇为**默认注入规范**（初始为合并后的「志书文体文风与行文规则」）。风格参考设置页。
+
+- **数据模型**（Migration 019）：`style_guides` 表——`id TEXT PK`、`name TEXT NOT NULL`、`content TEXT NOT NULL`（Markdown）、`is_default INTEGER CHECK(0,1)`（全局唯一默认）、`created_at/updated_at`；启动时若表为空自动写入 `DEFAULT_STYLE_GUIDE` 作为默认规范。
+- **IPC**：`styleGuide:list/get/save/setDefault/delete`（save：给出 `id` 为覆盖、不给为新建；`setDefault` 指定默认注入的规范；`delete` 删除，若删的是默认则回退到剩余第一篇，无则生成侧回退 `DEFAULT_STYLE_GUIDE`）。
+- **第二步界面（StyleGuideEditor）**：右侧为文本编辑器（textarea）展示当前（默认）规范内容；右上角按钮「**导入已有规范作为底稿**」——选择已保存的某篇规范 → **二次确认**（提示会替换编辑器全部文本）→ 载入作为底稿；右下角按钮「**保存规范**」——弹出「选择保存方式」：已有规范列表 + 空白「+」项；点已有项 → 提示「**选择覆盖现有规范**」→ 覆盖；点「+」→ 提示「**另存为新规范**」→ 输入新名称另存。保存后刷新列表；每篇规范可「设为默认」；列表支持重命名。
+- **入口按钮**：撰写工作台头部、回收站按钮**左侧并列一个“规范”入口**，进入/退出第二步的规范编辑视图。
+- **生成侧**：`generateDraft` 生成初稿时读取当前默认规范（`getDefaultStyleGuide()?.content`，无则回退 `DEFAULT_STYLE_GUIDE`）注入 prompt，不再使用硬编码常量。
+- **验收**：可新建/覆盖/重命名/删除多篇规范；默认规范可切换并真正注入生成；导入底稿有二次确认；保存流程符合「覆盖 / 另存」二选一；typecheck/单测/构建通过。
+
+### Phase 6.4.2 第二步「添加范本」（2026-08-25 构思）
+
+> 在第二步「指定行文规范」中增加一个**可选的「添加范本」**：用户可录入一段自己的志书示例正文，作为第三步生成初稿时的**体例与行文风格参考**，与行文规范、资料汇编一并作为提交物。
+
+- **数据模型**（Migration 020）：writing_tasks 增加 model_text TEXT NULL 列，保存任务级范本正文（可选）。
+- **IPC**：writing:getModelText（{ taskId } → { text }）与 writing:setModelText（{ taskId, text } → { text }），preload 暴露 getModelText / setModelText。
+- **UI（StyleGuideEditor 增加 taskId 时显示）**：工具栏「**添加范本**」按钮置于「导入已有规范作为底稿」**左侧并列**；点击展开**范本窗口**（可折叠，展开/收起逻辑参考第一步矛盾窗口——展开显示文本框 + 固定在底部的「▲ 收起」；收起时若有内容显示「范本 ▼」条）。录入自动防抖保存到任务；头部「规范」弹窗（无 taskId）不显示该按钮。
+- **生成侧**：generateDraft 读取 task.modelText，非空时在 buildUserPrompt 中注入【参考范本】区块（与【写作规范】【参考材料】并列），并提示模型参考其体例与行文风格。
+- **验收**：范本可录入/折叠/展开/自动保存；生成初稿时 prompt 含【参考范本】与范本内容；不填范本时 prompt 不含【参考范本】；modal 文本编辑区高度拉大（80vh）；typecheck/单测/构建通过。
 
 ### Phase 6.5 前端工作台重构（三步向导 + 商业化风格，先出预览）
 
