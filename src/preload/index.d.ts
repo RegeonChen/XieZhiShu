@@ -40,7 +40,10 @@ export interface AppApi {
   resolveCompilationContradiction(contradictionId: string, action: 'resolve' | 'ignore', chosenItemId?: string): Promise<{ ok: boolean; data?: { contradiction: unknown }; error?: { code: string; message: string } }>
   confirmCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
   listCompilationRecycleBin(compilationId: string): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
-  restoreCompilationRecycleBin(binId: string): Promise<{ ok: boolean; data?: { contradiction: unknown }; error?: { code: string; message: string } }>
+  restoreCompilationRecycleBin(binId: string): Promise<{ ok: boolean; data?: { contradiction?: unknown; repair?: unknown; item?: unknown }; error?: { code: string; message: string } }>
+  scanCompilationRepairs(compilationId: string): Promise<{ ok: boolean; data?: { repairs: unknown[] }; error?: { code: string; message: string } }>
+  listCompilationRepairs(compilationId: string): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
+  decideCompilationRepair(repairId: string, action: 'accept' | 'reject'): Promise<{ ok: boolean; data?: { item: unknown; repair: unknown }; error?: { code: string; message: string } }>
   listStyleGuides(): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   saveStyleGuide(input: { id?: string; name: string; content: string }): Promise<{ ok: boolean; data?: { styleGuide: unknown }; error?: { code: string; message: string } }>
   setDefaultStyleGuide(id: string): Promise<{ ok: boolean; data?: { styleGuide: unknown }; error?: { code: string; message: string } }>

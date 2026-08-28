@@ -43,7 +43,9 @@ function StyleGuideEditor({ startInList = false, taskId, onNext }: { startInList
   useEffect(() => {
     void (async () => {
       const list = await reload()
-      if (mode === 'editor') {
+      // 仅在没有明确选中某篇规范时（首次进入编辑器）自动载入默认规范；
+      // 从列表点击 openGuide 会先设置 currentId，因此不会覆盖用户选中的那篇。
+      if (mode === 'editor' && currentId === null) {
         const def = list.find((g) => g.isDefault) ?? list[0]
         if (def) { setName(def.name); setContent(def.content); setCurrentId(def.id); setSavedContent(def.content) }
       }

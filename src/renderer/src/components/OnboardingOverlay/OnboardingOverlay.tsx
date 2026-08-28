@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { ONBOARDING_COPY, ONBOARDING_STEPS } from './onboarding-copy'
 import { useTargetRect, type TargetRect } from './useTargetRect'
 import './OnboardingOverlay.css'
@@ -55,8 +55,19 @@ interface OnboardingOverlayProps {
 export default function OnboardingOverlay({ open, onDismiss, onStepChange }: OnboardingOverlayProps) {
   const [stepIndex, setStepIndex] = useState(0)
   const [transitioning, setTransitioning] = useState(false)
+  const [cardSize, setCardSize] = useState({ w: 380, h: 270 })
   const cardRef = useRef<HTMLDivElement>(null)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // 用卡片的真实尺寸做定位与越界钳制：文案较长时卡片高度会超过默认 270px，
+  // 按硬编码高度定位会导致说明框超出视口。
+  useLayoutEffect(() => {
+    if (!open) return
+    const el = cardRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    if (rect.width > 0 && rect.height > 0) setCardSize({ w: rect.width, h: rect.height })
+  }, [open, stepIndex])
 
   const step = ONBOARDING_STEPS[stepIndex]
   const stepCopy = ONBOARDING_COPY.steps[step.id]
@@ -99,11 +110,11 @@ export default function OnboardingOverlay({ open, onDismiss, onStepChange }: Onb
     else moveToStep(stepIndex + 1)
   }
 
-  const targetRect = useTargetRect(open ? step.target : null, step.padding, advanceMissingTarget)
+  const { rects, union } = useTargetRect(open ? step.targets : null, step.padding, advanceMissingTarget)
 
   const position = useMemo(
-    () => getCoachmarkPosition(targetRect, window.innerWidth, window.innerHeight),
-    [targetRect]
+    () => getCoachmarkPosition(union, window.innerWidth, window.innerHeight, cardSize.w, cardSize.h),
+    [union, cardSize]
   )
 
   if (!open) return null
@@ -134,31 +145,33 @@ export default function OnboardingOverlay({ open, onDismiss, onStepChange }: Onb
         <defs>
           <mask id="ob-spotlight-mask">
             <rect width="100%" height="100%" fill="white" />
-            {targetRect ? (
+            {rects.map((r, i) => (
               <rect
-                x={targetRect.left}
-                y={targetRect.top}
-                width={targetRect.width}
-                height={targetRect.height}
+                key={i}
+                x={r.left}
+                y={r.top}
+                width={r.width}
+                height={r.height}
                 rx="7"
                 fill="black"
               />
-            ) : null}
+            ))}
           </mask>
         </defs>
         <rect width="100%" height="100%" fill="rgba(8, 11, 18, 0.72)" mask="url(#ob-spotlight-mask)" />
       </svg>
-      {targetRect ? (
+      {rects.map((r, i) => (
         <div
+          key={i}
           className="onboarding-overlay__spotlight"
           style={{
-            left: targetRect.left,
-            top: targetRect.top,
-            width: targetRect.width,
-            height: targetRect.height
+            left: r.left,
+            top: r.top,
+            width: r.width,
+            height: r.height
           }}
         />
-      ) : null}
+      ))}
       <div
         className="onboarding-card-positioner"
         data-placement={position.placement}
@@ -191,7 +204,7 @@ export default function OnboardingOverlay({ open, onDismiss, onStepChange }: Onb
             <div>
               <h2 className="onboarding-card__title">{stepCopy.title}</h2>
               <p className="onboarding-card__description">{stepCopy.description}</p>
-              {!targetRect ? <p className="onboarding-card__locating">{ONBOARDING_COPY.locating}</p> : null}
+              {!union ? <p className="onboarding-card__locating">{ONBOARDING_COPY.locating}</p> : null}
             </div>
           </main>
 

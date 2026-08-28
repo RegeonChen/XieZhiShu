@@ -404,7 +404,7 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange }: Se
         ) : null}
       </section>
 
-      <section className="settings__section" id="settings-preset">
+      <section className="settings__section" id="settings-preset" data-onboarding="settings-preset">
         <div className="settings__section-header">
           <span className="settings__section-icon settings__section-icon--preset" aria-hidden="true">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -453,7 +453,7 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange }: Se
       </section>
 
       {/* Phase 6.8：步骤默认模型（第 1 步汇编 / 第 3 步初稿） */}
-      <section className="settings__section" id="settings-step-models">
+      <section className="settings__section" id="settings-step-models" data-onboarding="settings-step-models">
         <div className="settings__section-header">
           <span className="settings__section-icon settings__section-icon--stepmodels" aria-hidden="true">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">

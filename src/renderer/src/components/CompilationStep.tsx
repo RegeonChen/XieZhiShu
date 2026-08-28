@@ -15,6 +15,18 @@ export interface CompilationItemView {
   createdAt: string
 }
 
+export interface CompilationRepairView {
+  id: string
+  compilationId: string
+  itemId: string
+  originalText: string
+  revisedText: string
+  reason: string
+  status: 'pending' | 'accepted' | 'rejected'
+  createdAt: string
+  updatedAt: string
+}
+
 export interface CompilationVariantView {
   id: string
   contradictionId: string
@@ -45,6 +57,7 @@ export interface CompilationView {
   updatedAt: string
   items: CompilationItemView[]
   contradictions: CompilationContradictionView[]
+  repairs?: CompilationRepairView[]
 }
 
 interface Props {
@@ -57,6 +70,7 @@ interface Props {
   onUpdateItem: (itemId: string, patch: { excerpt?: string; ts?: string | null; note?: string | null }) => void
   onDeleteItem: (itemId: string) => void
   onResolve: (contradictionId: string, action: 'resolve' | 'ignore', chosenItemId?: string) => void
+  onDecideRepair: (repairId: string, action: 'accept' | 'reject') => void
 }
 
 const cls = (...parts: Array<string | false | null | undefined>): string => parts.filter(Boolean).join(' ')
@@ -71,7 +85,8 @@ function CompilationStep({
   onOpenSource,
   onUpdateItem,
   onDeleteItem,
-  onResolve
+  onResolve,
+  onDecideRepair
 }: Props) {
   const t = zhCN.compilation
   const [editing, setEditing] = useState<CompilationItemView | null>(null)
@@ -100,6 +115,11 @@ function CompilationStep({
 
   const conflictForItem = (itemId: string): boolean => pending.some((g) => g.variants.some((v) => v.itemId === itemId))
 
+  /** 待语义补全/已采纳的修订（已拒绝的不再展示比较/按钮） */
+  const pendingRepairs = (compilation?.repairs ?? []).filter((r) => r.status === 'pending')
+  const repairForItem = (itemId: string): CompilationRepairView | undefined =>
+    (compilation?.repairs ?? []).find((r) => r.itemId === itemId && r.status !== 'rejected')
+
   if (!compilation) {
     return (
       <div className="compilation-empty">
@@ -113,6 +133,7 @@ function CompilationStep({
       <div className="compilation-toolbar">
         <span className="compilation-stat">{t.cards.replace('{count}', String(keptItems.length))}</span>
         {candidateChunks ? <span className="compilation-stat">{t.candidate.replace('{chunks}', String(candidateChunks))}</span> : null}
+        {pendingRepairs.length > 0 ? <span className="compilation-stat">{t.repairPending.replace('{count}', String(pendingRepairs.length))}</span> : null}
         <span className={cls('compilation-badge', pending.length ? 'danger' : 'ok')}>
           {pending.length ? t.pendingContradictions.replace('{count}', String(pending.length)) : t.noContradictions}
         </span>
@@ -188,36 +209,56 @@ function CompilationStep({
       ) : null}
 
       <div className="compilation-cards">
-        {keptItems.map((it) => (
-          <div key={it.id} className={cls('compilation-card', conflictForItem(it.id) ? 'has-conflict' : '')}>
-            <div className="compilation-card-head">
-              <div className="compilation-card-meta">
-                <span className="compilation-chip">{it.ts ?? '无时间'}</span>
-                <span className="compilation-chip">《{it.sourceTitle ?? it.sourceId}》</span>
-                {conflictForItem(it.id) ? <span className="compilation-chip conflict">⚠ {t.contradict}</span> : null}
-              </div>
-              <div className="compilation-card-menu">
-                <button
-                  type="button"
-                  className="compilation-card-menu-btn"
-                  aria-label={t.more}
+        {keptItems.map((it) => {
+          const repair = repairForItem(it.id)
+          return (
+            <div key={it.id} className={cls('compilation-card', conflictForItem(it.id) ? 'has-conflict' : '', repair ? 'is-repair' : '')}>
+              <div className="compilation-card-head">
+                <div className="compilation-card-meta">
+                  <span className="compilation-chip">{it.ts ?? '无时间'}</span>
+                  <span className="compilation-chip">《{it.sourceTitle ?? it.sourceId}》</span>
+                  {conflictForItem(it.id) ? <span className="compilation-chip conflict">⚠ {t.contradict}</span> : null}
+                  {repair ? <span className="compilation-chip">{t.repairTitle}</span> : null}
+                </div>
+                <div className="compilation-card-menu">
+                  <button
+                    type="button"
+                    className="compilation-card-menu-btn"
+                    aria-label={t.more}
 
-                  onClick={() => setMenuFor((cur) => (cur === it.id ? null : it.id))}
-                >
-                  …
-                </button>
-                {menuFor === it.id ? (
-                  <div className="compilation-card-menu-dropdown">
-                    <button type="button" onClick={() => { onOpenSource(it.sourceId); setMenuFor(null) }}>{t.openSource}</button>
-                    <button type="button" onClick={() => { startEdit(it); setMenuFor(null) }}>{t.edit}</button>
-                    <button type="button" className="is-danger" onClick={() => { onDeleteItem(it.id); setMenuFor(null) }}>{t.delete}</button>
-                  </div>
-                ) : null}
+                    onClick={() => setMenuFor((cur) => (cur === it.id ? null : it.id))}
+                  >
+                    …
+                  </button>
+                  {menuFor === it.id ? (
+                    <div className="compilation-card-menu-dropdown">
+                      <button type="button" onClick={() => { onOpenSource(it.sourceId); setMenuFor(null) }}>{t.openSource}</button>
+                      <button type="button" onClick={() => { startEdit(it); setMenuFor(null) }}>{t.edit}</button>
+                      <button type="button" className="is-danger" onClick={() => { onDeleteItem(it.id); setMenuFor(null) }}>{t.delete}</button>
+                    </div>
+                  ) : null}
+                </div>
               </div>
+              <div className="compilation-card-text">{it.excerpt}</div>
+              {repair ? (
+                <div className="compilation-repair">
+                  <div className="compilation-repair__label">{t.repairTitle}</div>
+                  <div className="compilation-repair__original">{t.repairOriginal}：{repair.originalText}</div>
+                  <div className="compilation-repair__revised">{t.repairRevised}：{repair.revisedText}</div>
+                  {repair.reason ? <div className="compilation-repair__reason">{t.repairReason}{repair.reason}</div> : null}
+                  {repair.status === 'pending' ? (
+                    <div className="compilation-repair__actions">
+                      <button type="button" className="source-list__btn source-list__btn--primary" disabled={busy} onClick={() => onDecideRepair(repair.id, 'accept')}>{t.repairAdopt}</button>
+                      <button type="button" className="source-list__btn" disabled={busy} onClick={() => onDecideRepair(repair.id, 'reject')}>{t.repairReject}</button>
+                    </div>
+                  ) : repair.status === 'accepted' ? (
+                    <div className="compilation-repair__label">{t.repairAccepted}</div>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
-            <div className="compilation-card-text">{it.excerpt}</div>
-          </div>
-        ))}
+          )
+        })}
       </div>
 
       {editing ? (

@@ -100,6 +100,9 @@
   display: flex;
   gap: 12px;
   min-height: 92px;
+  /* 文案较长时限制正文高度并内部滚动，避免卡片整体超出视口（配合按实测高度钳制定位） */
+  overflow-y: auto;
+  max-height: calc(100vh - 220px);
 }
 .onboarding-card__body.is-transitioning {
   opacity: 0.4;

@@ -168,6 +168,12 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `compilation:deleteItem` | `{ itemId }` → `{ ok: true }` | 删除资料卡片 |
 | `compilation:resolveContradiction` | `{ contradictionId, action: 'resolve'\|'ignore', chosenItemId? }` → `{ contradiction: CompilationContradiction }` | 汇编矛盾取舍：resolve 须传保留的卡片 id（属于该矛盾）；ignore 清空已选 |
 | `compilation:confirm` | `{ compilationId }` → `{ compilation: Compilation }` | 确认汇编（finalize），进入下一步 |
+| `compilation:recycleBin:list` | `{ compilationId }` → `{ items: CompilationRecycleBinItem[] }` | 回收站条目（矛盾 + 语义补全/修订，按时间倒序） |
+| `compilation:recycleBin:restore` | `{ binId }` → `{ contradiction?, repair?, item? }` | 恢复条目：矛盾回到 pending；语义补全回退 pending + 原文摘录 |
+| `compilation:repairScan` | `{ compilationId }` → `{ repairs: CompilationRepair[] }` | 扫描表意不明的卡片并生成语义补全/修订（additive，无 Provider/失败返回空，绝不阻断） |
+| `compilation:repairs:list` | `{ compilationId }` → `{ items: CompilationRepair[] }` | 列出某汇编的语义补全/修订 |
+| `compilation:repairs:decide` | `{ repairId, action: 'accept'\|'reject' }` → `{ item, repair }` | 采纳/拒绝修订；accept 改写卡片摘录为修订文本并快照进回收站，reject 不改写 |
+
 
 
 ### 2.3.2 规范文档库（styleGuide，Phase 6.4.1）

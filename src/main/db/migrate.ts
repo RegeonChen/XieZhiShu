@@ -495,6 +495,37 @@ CREATE INDEX IF NOT EXISTS idx_style_guides_default ON style_guides(is_default);
     sql: `
 ALTER TABLE writing_tasks ADD COLUMN model_text TEXT;
 `
+  },
+  {
+    // 资料卡片二次加工（语义补全/修订）：对表意不明的卡片读取原文上下文后由大模型提出补全/修订，
+    // 落库为 compilation_repairs（pending/accepted/rejected）；采纳/拒绝后快照进 compilation_repair_recycle_bin 供恢复。
+    version: 21,
+    sql: `
+CREATE TABLE IF NOT EXISTS compilation_repairs (
+  id TEXT PRIMARY KEY,
+  compilation_id TEXT NOT NULL REFERENCES compilations(id) ON DELETE CASCADE,
+  item_id TEXT NOT NULL REFERENCES compilation_items(id) ON DELETE CASCADE,
+  original_text TEXT NOT NULL,
+  revised_text TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted','rejected')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compilation_repairs_comp ON compilation_repairs(compilation_id);
+CREATE INDEX IF NOT EXISTS idx_compilation_repairs_item ON compilation_repairs(item_id);
+CREATE TABLE IF NOT EXISTS compilation_repair_recycle_bin (
+  id TEXT PRIMARY KEY,
+  compilation_id TEXT NOT NULL REFERENCES compilations(id) ON DELETE CASCADE,
+  repair_id TEXT NOT NULL,
+  item_id TEXT NOT NULL,
+  original_text TEXT NOT NULL,
+  revised_text TEXT NOT NULL,
+  chosen TEXT NOT NULL CHECK (chosen IN ('accepted','rejected')),
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compilation_repair_bin_comp ON compilation_repair_recycle_bin(compilation_id);
+`
   }
 ]
 

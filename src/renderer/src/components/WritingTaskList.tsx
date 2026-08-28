@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { zhCN } from '../i18n/zh-CN'
+import { DEMO_TASK_TITLE } from '../../../shared/demo'
 import ConfirmDialog from './ConfirmDialog'
 import PromptDialog from './PromptDialog'
 
@@ -125,6 +126,7 @@ function WritingTaskList({ selectedId, onSelect, reloadKey }: {
             <li
               key={t.id}
               className={`source-list__item${selectedId === t.id ? ' source-list__item--active' : ''}`}
+              data-onboarding={t.title === DEMO_TASK_TITLE ? 'writing-demo-task' : undefined}
               onClick={() => onSelect(selectedId === t.id ? null : t.id)}
               onContextMenu={(e) => {
                 e.preventDefault()

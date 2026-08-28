@@ -14,6 +14,7 @@ import type {
 } from '../../shared/types'
 import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
+import { listRepairRecycleBinByCompilation, listRepairsByCompilation } from './compilation-repairs'
 
 interface CompilationRow {
   id: string
@@ -166,7 +167,8 @@ export function getCompilationById(id: string): Compilation | null {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     items: getItemsByCompilation(row.id),
-    contradictions: getContradictionsByCompilation(row.id)
+    contradictions: getContradictionsByCompilation(row.id),
+    repairs: listRepairsByCompilation(row.id)
   }
 }
 
@@ -185,7 +187,8 @@ export function listCompilationsByTask(taskId: string): Compilation[] {
       createdAt: r.created_at,
       updatedAt: r.updated_at,
       items: [],
-      contradictions: []
+      contradictions: [],
+      repairs: []
     }
   })
 }
@@ -380,28 +383,30 @@ export function confirmCompilation(compilationId: string): Compilation | null {
   return getCompilationById(compilationId)
 }
 
-/** 某汇编的回收站条目（按时间倒序） */
+/** 某汇编的回收站条目（矛盾 + 语义补全/修订，按时间倒序） */
 export function listRecycleBinByCompilation(compilationId: string): CompilationRecycleBinItem[] {
   const db = getDb()
   const rows = db
     .prepare('SELECT * FROM compilation_recycle_bin WHERE compilation_id = ? ORDER BY created_at DESC')
     .all(compilationId) as { id: string; contradiction_id: string; topic: string; kind: string; status: string; created_at: string }[]
-  const out: CompilationRecycleBinItem[] = []
+  const contradictions: CompilationRecycleBinItem[] = []
   for (const r of rows) {
     const contradiction = getContradictionById(r.contradiction_id)
     if (!contradiction) continue
-    out.push({
+    contradictions.push({
       id: r.id,
       compilationId,
+      kind: 'contradiction',
       contradictionId: r.contradiction_id,
       topic: r.topic,
-      kind: contradiction.kind,
       status: r.status === 'resolved' ? 'resolved' : 'ignored',
       createdAt: r.created_at,
       contradiction
     })
   }
-  return out
+  const repairs = listRepairRecycleBinByCompilation(compilationId)
+  const all: CompilationRecycleBinItem[] = [...contradictions, ...repairs]
+  return all.sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
 }
 
 /** 从回收站恢复某组矛盾：所有 variant 卡片改回 kept=1，矛盾状态回到 pending，并删除回收站条目 */
@@ -534,7 +539,7 @@ if (import.meta.vitest) {
       expect(getContradictionById(g.id)!.variants).toHaveLength(2)
       const bin = listRecycleBinByCompilation(c.id)
       expect(bin).toHaveLength(1)
-      expect(bin[0].topic).toBe('2021 年公办园数量')
+      expect(bin[0].kind === 'contradiction' ? bin[0].topic : '').toBe('2021 年公办园数量')
       const restored = restoreRecycleBinContradiction(bin[0].id)!
       expect(restored.status).toBe('pending')
       expect(restored.chosenItemId).toBeUndefined()
