@@ -66,6 +66,7 @@
     "appId": "com.regeonchen.xiezhishu",
     "productName": "志书撰写工具",
     "asar": true,
+    "npmRebuild": false,
     "asarUnpack": [
       "node_modules/onnxruntime-web/dist/*.wasm"
     ],
