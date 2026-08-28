@@ -571,6 +571,8 @@ body {
   border: 1px solid var(--border);
   border-radius: 5px;
   font-size: 13px;
+  color: var(--fg);
+  background: var(--bg);
   outline: none;
 }
 .source-list__url-input:focus { border-color: var(--accent); }
@@ -690,6 +692,8 @@ body {
   border: 1px solid var(--border);
   border-radius: 5px;
   font-size: 13px;
+  color: var(--fg);
+  background: var(--bg);
   outline: none;
 }
 .tag-manager__input:focus { border-color: var(--accent); }
@@ -1392,6 +1396,7 @@ body {
   border: 1px solid var(--border);
   border-radius: 5px;
   font-size: 13px;
+  color: var(--fg);
   outline: none;
   background: var(--bg);
 }
@@ -1685,12 +1690,14 @@ body {
   border: 1px solid var(--border);
   border-radius: 5px;
   font-size: 13px;
+  color: var(--fg);
   outline: none;
   background: var(--bg);
 }
 .writing-form__input:focus { border-color: var(--accent); }
 
 .writing-form__select {
+  color: var(--fg);
   cursor: pointer;
 }
 
@@ -2089,6 +2096,7 @@ body {
   border-radius: 6px;
   font-size: 13px;
   font-family: inherit;
+  color: var(--fg);
   outline: none;
   line-height: 1.5;
   background: var(--bg-panel);
@@ -2334,6 +2342,7 @@ body {
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--bg);
+  color: var(--fg);
   font-size: 12px;
   cursor: pointer;
 }
@@ -3190,8 +3199,9 @@ textarea:focus-visible {
   box-shadow: var(--shadow-sm);
 }
 .chat-panel__msg--assistant .chat-panel__bubble {
-  background: #fff;
-  border-color: #e7e9ee;
+  background: var(--bg-panel);
+  border-color: var(--border);
+  color: var(--fg);
 }
 .chat-panel__empty {
   display: flex;
@@ -3317,8 +3327,8 @@ textarea:focus-visible {
 
 /* --- 流式输出气泡（2026-08-19） --- */
 .chat-panel__bubble--streaming {
-  background: #fff;
-  border: 1px solid #cfe0fb;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
   box-shadow: var(--shadow-sm);
 }
 .stream-cursor {
@@ -3405,7 +3415,7 @@ textarea:focus-visible {
   flex-wrap: wrap;
 }
 .settings__overview-actions .source-list__btn {
-  background: #fff;
+  background: var(--bg-panel);
   border-color: transparent;
   color: var(--accent);
   font-weight: 600;
@@ -3681,7 +3691,7 @@ textarea:focus-visible {
   flex-wrap: wrap;
 }
 .skills-overview__actions .source-list__btn {
-  background: #fff;
+  background: var(--bg-panel);
   border-color: transparent;
   color: #0f9d6e;
   font-weight: 600;
@@ -4181,6 +4191,40 @@ textarea:focus-visible {
 .compilation-card-pos {
   font-size: 12px;
   color: var(--fg-soft);
+}
+
+/* 资料卡片二次加工（语义补全/修订） */
+.compilation-card.is-repair {
+  border-color: var(--success);
+  border-left-color: var(--success);
+}
+.compilation-repair {
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-soft);
+}
+.compilation-repair__label {
+  font-size: 11px;
+  color: var(--fg-soft);
+}
+.compilation-repair__original {
+  color: var(--fg-faint);
+  text-decoration: line-through;
+}
+.compilation-repair__revised {
+  color: var(--success);
+}
+.compilation-repair__reason {
+  font-size: 12px;
+  color: var(--fg-soft);
+  margin-top: 4px;
+}
+.compilation-repair__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
 }
 .compilation-card-head {
   display: flex;

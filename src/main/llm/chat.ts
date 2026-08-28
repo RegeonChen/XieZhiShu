@@ -28,6 +28,8 @@ export const DEFAULT_CHAT_TIMEOUT_MS = 60000
 /** 调用附加选项（2026-08-11）：temperature 覆盖默认采样——矛盾扫描/定位等需要确定性的调用传低值 */
 export interface ChatCallOptions {
   temperature?: number
+  /** 种子（部分 OpenAI-compatible Provider 支持）：固定后同一输入/参数下结果更可复现 */
+  seed?: number
   /** 瞬时故障自动重试次数（HTTP 429 / 5xx / 网络错误，指数退避）；默认 0 = 不重试。成功路径零成本 */
   maxRetries?: number
   /** 提供时启用流式输出（SSE）：每收到一段增量文本回调一次；仍以完整结果返回 */
@@ -158,6 +160,7 @@ async function requestOnce(
       stream: opts?.onDelta ? true : false
     }
     if (typeof opts?.temperature === 'number') body.temperature = opts.temperature
+    if (typeof opts?.seed === 'number') body.seed = opts.seed
     const res = await Promise.race([
       net.fetch(endpoint, {
         method: 'POST',

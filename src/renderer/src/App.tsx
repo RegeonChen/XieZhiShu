@@ -14,6 +14,7 @@ import ResizeHandle from './components/ResizeHandle'
 import ErrorBoundary from './components/ErrorBoundary'
 import OnboardingOverlay from './components/OnboardingOverlay/OnboardingOverlay'
 import TextContextMenu from './components/TextContextMenu'
+import { DEMO_TASK_TITLE } from '../../shared/demo'
 import { zhCN } from './i18n/zh-CN'
 
 interface AppInfo { version: string; platform: string }
@@ -191,13 +192,26 @@ export default function App() {
   // 新手引导：步骤切换时联动切换功能区页面，使目标元素渲染出来
   const handleOnboardingStepChange = useCallback((page: string) => {
     setPage(page as PageKey)
+    // 引导切到「撰写」页时自动打开演示任务，使三步工作台与顶部步骤条可见
+    if (page === 'writing') {
+      window.api.listTasks().then((res) => {
+        if (!(res.ok && res.data)) return
+        const items = (res.data.items as { id: string; title: string }[])
+        const demo = items.find((t) => t.title === DEMO_TASK_TITLE)
+        const target = demo ?? items[0]
+        if (target) {
+          setSelectedTaskId(target.id)
+          setWritingReload((v) => v + 1)
+        }
+      }).catch(() => { /* 忽略 */ })
+    }
   }, [])
 
   const renderCenterPane = () => {
     switch (page) {
       case 'sources':
         return (
-          <section className="center-pane" style={{ width: centerW, flexShrink: 0 }}>
+          <section className="center-pane" data-onboarding="sources-library" style={{ width: centerW, flexShrink: 0 }}>
             <div className="center-pane__header">
               <h3 className="center-pane__title">{zhCN.panes.sources.listTitle}</h3>
               <div className="center-pane__menu">

@@ -34,6 +34,16 @@ interface DraftItem {
 type BusyState = 'generating' | 'chatting' | null
 type WizardStep = 0 | 1 | 2
 
+/** 撰写工作台的「生成中」临时状态（跨任务切换用模块级 Map 快照恢复） */
+interface WritingTransient {
+  busy: BusyState
+  busyText: string | null
+  progress: { percent: number; etaSeconds?: number } | null
+  compilationProgress: { percent: number; etaSeconds?: number } | null
+  streamText: string | null
+}
+const transientByTask = new Map<string, WritingTransient>()
+
 function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: () => void }) {
   const [task, setTask] = useState<TaskItem | null>(null)
   const [draft, setDraft] = useState<DraftItem | null>(null)
@@ -75,6 +85,22 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
   const handleChatResize = useCallback((delta: number) => {
     setChatWidth((prev) => Math.max(320, Math.min(820, prev + delta)))
   }, [])
+
+  // 跨任务切换保留「生成中」临时状态（busy / busyText / progress / compilationProgress / streamText）：
+  // 用模块级 Map 按 taskId 快照——挂载时恢复、卸载时保存，避免切走再切回时进度条消息消失（组件仍按任务 key 挂载）。
+  const liveTransientRef = useRef<WritingTransient>({ busy: null, busyText: null, progress: null, compilationProgress: null, streamText: null })
+  liveTransientRef.current = { busy, busyText, progress, compilationProgress, streamText }
+  useEffect(() => {
+    const snap = transientByTask.get(taskId)
+    if (snap) {
+      setBusy(snap.busy ?? null)
+      setBusyText(snap.busyText ?? null)
+      setProgress(snap.progress ?? null)
+      setCompilationProgress(snap.compilationProgress ?? null)
+      setStreamText(snap.streamText ?? null)
+    }
+    return () => { transientByTask.set(taskId, liveTransientRef.current) }
+  }, [taskId])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -173,6 +199,21 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
     }
   }, [taskId])
 
+  const refreshCompilation = useCallback(async (compilationId: string) => {
+    const getRes = await window.api.getCompilation(compilationId)
+    if (getRes.ok && getRes.data) setCompilation(getRes.data.compilation as CompilationView)
+  }, [])
+
+  /** 生成/重新生成汇编后：扫描语义补全/修订（additive）并重载汇编，让修订出现在卡片上 */
+  const scanRepairsAndReload = useCallback(async (compilationId: string) => {
+    try {
+      await window.api.scanCompilationRepairs(compilationId)
+    } catch {
+      // 扫描失败是 additive，不阻断（忽略）
+    }
+    await refreshCompilation(compilationId)
+  }, [refreshCompilation])
+
   const resetBusy = () => {
     setBusy(null)
     setBusyText(null)
@@ -204,6 +245,7 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
           : '已生成资料汇编：' + comp.items.length + ' 张卡片，无未处理矛盾。请审阅后点击「确认汇编」。'
         appendAssistant(summary)
         void window.api.addTaskMessage(taskId, 'assistant', summary, 'notice')
+        void scanRepairsAndReload(comp.id)
       } else {
         const msg = '生成资料汇编失败：' + (res.error?.message ?? '')
         appendAssistant(msg)
@@ -233,6 +275,7 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
         const summary = zhCN.compilation.regenerated.replace('{count}', String(comp.items.length))
         appendAssistant(summary)
         void window.api.addTaskMessage(taskId, 'assistant', summary, 'notice')
+        void scanRepairsAndReload(comp.id)
       } else {
         const msg = '重新生成资料汇编失败：' + (res.error?.message ?? '')
         appendAssistant(msg)
@@ -282,7 +325,7 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
       }
       appendAssistant(zhCN.compilation.restored)
     } else {
-      appendAssistant('恢复矛盾失败：' + (res.error?.message ?? ''))
+      appendAssistant('恢复回收站条目失败：' + (res.error?.message ?? ''))
     }
   }
 
@@ -322,6 +365,19 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
       }
     } else {
       appendAssistant('处理矛盾失败：' + (res.error?.message ?? ''))
+    }
+  }
+
+  // ---- 语义补全/修订（Phase 6.4.3）----
+
+  const handleDecideRepair = async (repairId: string, action: 'accept' | 'reject') => {
+    const res = await window.api.decideCompilationRepair(repairId, action)
+    if (res.ok && res.data) {
+      if (compilation) {
+        await refreshCompilation(compilation.id)
+      }
+    } else {
+      appendAssistant('处理语义补全失败：' + (res.error?.message ?? ''))
     }
   }
 
@@ -554,6 +610,7 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
           onUpdateItem={handleUpdateItem}
           onDeleteItem={(itemId) => void handleDeleteItem(itemId)}
           onResolve={handleResolveContradiction}
+          onDecideRepair={(repairId, action) => void handleDecideRepair(repairId, action)}
         />
       )
     }
@@ -643,7 +700,7 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
         </div>
       </header>
 
-      <nav className="writing-stepper" aria-label="撰写步骤">
+      <nav className="writing-stepper" data-onboarding="writing-stepper" aria-label="撰写步骤">
         {zhCN.writingWorkspace.steps.map((label, i) => (
           <button
             key={i}
@@ -699,13 +756,28 @@ function WritingWorkspace({ taskId, onChanged }: { taskId: string; onChanged: ()
                 {recycleBinItems.map((item) => (
                   <div key={item.id} className="recycle-bin-item">
                     <div className="recycle-bin-item-head">
-                      <b>⚠ {item.topic}</b>
-                      <span>{item.status === 'resolved' ? zhCN.compilation.resolved : zhCN.compilation.ignored}</span>
+                      {item.kind === 'contradiction' ? (
+                        <b>⚠ {item.topic}</b>
+                      ) : (
+                        <b>✎ {zhCN.compilation.recycleBinRepair}</b>
+                      )}
+                      <span>
+                        {item.kind === 'contradiction'
+                          ? (item.status === 'resolved' ? zhCN.compilation.resolved : zhCN.compilation.ignored)
+                          : (item.chosen === 'accepted' ? zhCN.compilation.repairAccepted : zhCN.compilation.repairReject)}
+                      </span>
                     </div>
                     <div className="recycle-bin-item-variants">
-                      {item.contradiction.variants.map((v) => (
-                        <div key={v.id} className="recycle-bin-variant">《{v.sourceTitle ?? v.sourceId}》 {v.variantText}</div>
-                      ))}
+                      {item.kind === 'contradiction' ? (
+                        item.contradiction.variants.map((v) => (
+                          <div key={v.id} className="recycle-bin-variant">《{v.sourceTitle ?? v.sourceId}》 {v.variantText}</div>
+                        ))
+                      ) : (
+                        <div className="recycle-bin-variant">
+                          <div className="compilation-repair__original">{zhCN.compilation.repairOriginal}：{item.originalText}</div>
+                          <div className="compilation-repair__revised">{zhCN.compilation.repairRevised}：{item.revisedText}</div>
+                        </div>
+                      )}
                     </div>
                     <div className="recycle-bin-item-actions">
                       <button type="button" className="source-list__btn source-list__btn--primary" onClick={() => void handleRestoreRecycleBin(item.id)}>

@@ -49,7 +49,13 @@ import {
   type CompilationRecycleBinListReq,
   type CompilationRecycleBinListRes,
   type CompilationRecycleBinRestoreReq,
-  type CompilationRecycleBinRestoreRes
+  type CompilationRecycleBinRestoreRes,
+  type CompilationRepairScanReq,
+  type CompilationRepairScanRes,
+  type CompilationRepairsListReq,
+  type CompilationRepairsListRes,
+  type CompilationRepairDecideReq,
+  type CompilationRepairDecideRes
 } from '../shared/ipc'
 import type { ApiResult, Source, Tag, LlmProviderConfig, AppSettings, WritingTask, Draft, RetrievedChunk } from '../shared/types'
 import { getDb } from './db/connection'
@@ -76,6 +82,7 @@ import {
   listRecycleBinByCompilation,
   restoreRecycleBinContradiction
 } from './db/compilations'
+import { decideRepair, listRepairsByCompilation, restoreRepairRecycleBin } from './db/compilation-repairs'
 import {
   listStyleGuides,
   saveStyleGuide,
@@ -83,7 +90,9 @@ import {
   deleteStyleGuide,
   ensureDefaultStyleGuide
 } from './db/style-guides'
+import { ensureDemoTask } from './db/demo-task'
 import { generateCompilation } from './writing/compilation-service'
+import { scanCompilationRepairs } from './writing/repair-service'
 import { listTaskMessages, addTaskMessage } from './db/task-messages'
 import { generateDraft, regenerateDraft, retrieveForTask, chatWithTask } from './writing/generate'
 import { applyContradictionEdit } from './writing/contradiction-apply'
@@ -564,8 +573,39 @@ handleLogged(IPC.COMPILATION_RECYCLE_BIN_LIST, (_event, params: CompilationRecyc
 handleLogged(IPC.COMPILATION_RECYCLE_BIN_RESTORE, (_event, params: CompilationRecycleBinRestoreReq): ApiResult<CompilationRecycleBinRestoreRes> => {
   try {
     const contradiction = restoreRecycleBinContradiction(params.binId)
-    if (!contradiction) return { ok: false, error: { code: 'INVALID_PARAM', message: '回收站条目不存在' } }
-    return { ok: true, data: { contradiction } }
+    if (contradiction) return { ok: true, data: { contradiction } }
+    const repair = restoreRepairRecycleBin(params.binId)
+    if (repair) {
+      const compilation = getCompilationById(repair.compilationId)
+      const item = compilation?.items.find((i) => i.id === repair.itemId)
+      return { ok: true, data: { repair, item } }
+    }
+    return { ok: false, error: { code: 'INVALID_PARAM', message: '回收站条目不存在' } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 资料卡片二次加工（语义补全/修订，Phase 6.4.3）
+handleLogged(IPC.COMPILATION_REPAIR_SCAN, (_event, params: CompilationRepairScanReq): Promise<ApiResult<CompilationRepairScanRes>> => {
+  return scanCompilationRepairs(params.compilationId).then((res) =>
+    res.ok ? { ok: true, data: { repairs: res.repairs } } : { ok: false, error: res.error }
+  )
+})
+
+handleLogged(IPC.COMPILATION_REPAIRS_LIST, (_event, params: CompilationRepairsListReq): ApiResult<CompilationRepairsListRes> => {
+  try {
+    return { ok: true, data: { items: listRepairsByCompilation(params.compilationId) } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.COMPILATION_REPAIR_DECIDE, (_event, params: CompilationRepairDecideReq): ApiResult<CompilationRepairDecideRes> => {
+  try {
+    const res = decideRepair(params.repairId, params.action)
+    if (!res) return { ok: false, error: { code: 'INVALID_PARAM', message: '语义补全/修订不存在' } }
+    return { ok: true, data: { item: res.item, repair: res.repair } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
@@ -1208,6 +1248,9 @@ app.whenReady().then(() => {
 
   // 规范文档库：表为空时写入默认规范（合并后的「志书文体文风与行文规则」）
   ensureDefaultStyleGuide()
+
+  // 演示任务（仅作为演示）：用于新手教程展示三段式撰写闭环（对话/汇编/初稿），幂等
+  ensureDemoTask()
 
   // 配置本地向量嵌入模型目录。
   // 开发环境模型位于项目根 resources/models；打包后经 electron-builder extraResources 复制到

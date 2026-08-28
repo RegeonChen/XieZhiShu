@@ -165,9 +165,21 @@ const api = {
   listCompilationRecycleBin(compilationId: string): Promise<ApiResult<{ items: unknown[] }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_RECYCLE_BIN_LIST, { compilationId })
   },
-  /** 从回收站恢复某组矛盾（回到 pending，相关卡片恢复） */
-  restoreCompilationRecycleBin(binId: string): Promise<ApiResult<{ contradiction: unknown }>> {
+  /** 从回收站恢复某条条目（矛盾或语义补全/修订；矛盾回到 pending，修订回退原文） */
+  restoreCompilationRecycleBin(binId: string): Promise<ApiResult<{ contradiction?: unknown; repair?: unknown; item?: unknown }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_RECYCLE_BIN_RESTORE, { binId })
+  },
+  /** 扫描资料卡片二次加工（语义补全/修订）：读取卡片与原文上下文，由大模型提出补全/修订 */
+  scanCompilationRepairs(compilationId: string): Promise<ApiResult<{ repairs: unknown[] }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_REPAIR_SCAN, { compilationId })
+  },
+  /** 列出某汇编的语义补全/修订 */
+  listCompilationRepairs(compilationId: string): Promise<ApiResult<{ items: unknown[] }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_REPAIRS_LIST, { compilationId })
+  },
+  /** 采纳/拒绝一条语义补全/修订（accept 会改写卡片摘录为修订文本） */
+  decideCompilationRepair(repairId: string, action: 'accept' | 'reject'): Promise<ApiResult<{ item: unknown; repair: unknown }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_REPAIR_DECIDE, { repairId, action })
   },
   // ---- 规范文档库（Phase 6.4.1）----
   listStyleGuides(): Promise<ApiResult<{ items: unknown[] }>> {

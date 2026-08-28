@@ -8,6 +8,7 @@ import type {
   Compilation,
   CompilationContradiction,
   CompilationItem,
+  CompilationRepair,
   CompilationRecycleBinItem,
   Contradiction,
   StyleGuide,
@@ -63,6 +64,9 @@ export const IPC = {
   COMPILATION_REGENERATE: 'compilation:regenerate',
   COMPILATION_RECYCLE_BIN_LIST: 'compilation:recycleBin:list',
   COMPILATION_RECYCLE_BIN_RESTORE: 'compilation:recycleBin:restore',
+  COMPILATION_REPAIR_SCAN: 'compilation:repairScan',
+  COMPILATION_REPAIRS_LIST: 'compilation:repairs:list',
+  COMPILATION_REPAIR_DECIDE: 'compilation:repairs:decide',
 
   /* 规范文档库（Phase 6.4.1：第二步「指定行文规范」） */
   STYLE_GUIDE_LIST: 'styleGuide:list',
@@ -306,7 +310,22 @@ export type CompilationRecycleBinListRes = { items: CompilationRecycleBinItem[] 
 export interface CompilationRecycleBinRestoreReq {
   binId: string
 }
-export type CompilationRecycleBinRestoreRes = { contradiction: CompilationContradiction }
+export type CompilationRecycleBinRestoreRes = { contradiction?: CompilationContradiction; repair?: CompilationRepair; item?: CompilationItem }
+
+/** 资料卡片二次加工（语义补全/修订）：对表意不明的卡片做扫描并生成 pending 修订 */
+export interface CompilationRepairScanReq {
+  compilationId: string
+}
+export type CompilationRepairScanRes = { repairs: CompilationRepair[] }
+export interface CompilationRepairsListReq {
+  compilationId: string
+}
+export type CompilationRepairsListRes = { items: CompilationRepair[] }
+export interface CompilationRepairDecideReq {
+  repairId: string
+  action: 'accept' | 'reject'
+}
+export type CompilationRepairDecideRes = { item: CompilationItem; repair: CompilationRepair }
 
 export interface StyleGuideListRes { items: StyleGuide[] }
 
@@ -600,6 +619,9 @@ export interface IpcMapping {
   [IPC.COMPILATION_REGENERATE]: { _req: CompilationRegenerateReq; _res: ApiResult<CompilationRegenerateRes> }
   [IPC.COMPILATION_RECYCLE_BIN_LIST]: { _req: CompilationRecycleBinListReq; _res: ApiResult<CompilationRecycleBinListRes> }
   [IPC.COMPILATION_RECYCLE_BIN_RESTORE]: { _req: CompilationRecycleBinRestoreReq; _res: ApiResult<CompilationRecycleBinRestoreRes> }
+  [IPC.COMPILATION_REPAIR_SCAN]: { _req: CompilationRepairScanReq; _res: ApiResult<CompilationRepairScanRes> }
+  [IPC.COMPILATION_REPAIRS_LIST]: { _req: CompilationRepairsListReq; _res: ApiResult<CompilationRepairsListRes> }
+  [IPC.COMPILATION_REPAIR_DECIDE]: { _req: CompilationRepairDecideReq; _res: ApiResult<CompilationRepairDecideRes> }
   [IPC.STYLE_GUIDE_LIST]: { _req: void; _res: ApiResult<StyleGuideListRes> }
   [IPC.STYLE_GUIDE_SAVE]: { _req: StyleGuideSaveReq; _res: ApiResult<StyleGuideSaveRes> }
   [IPC.STYLE_GUIDE_SET_DEFAULT]: { _req: StyleGuideSetDefaultReq; _res: ApiResult<StyleGuideSetDefaultRes> }

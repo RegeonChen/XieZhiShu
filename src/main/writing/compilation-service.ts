@@ -32,6 +32,12 @@ const KEYWORD_EXTRACT_TIMEOUT_MS = 60000
 const CARD_SCAN_TIMEOUT_MS = 120000
 /** 卡片级矛盾扫描单次最多扫描的卡片数（卡片集通常远小于原始材料，一次扫描成本低） */
 const CARD_SCAN_MAX = 200
+/** 可复现种子：传给支持 seed 的 Provider，让关键帧提取/细读/矛盾扫描在相同输入下更确定 */
+const REPRODUCIBILITY_SEED = 42
+/** 卡片级矛盾扫描的温度阶梯（低温度 + 稍高温度各扫一次后按主题并集，提升召回且成本低） */
+const CARD_SCAN_TEMPERATURES = [0, 0.3]
+/** 关键帧提取结果按「撰写要求」缓存，保证同一指令的两轮任务用同一套粗筛关键词（B：消除第一层漂移） */
+const keywordExtractionCache = new Map<string, KeywordExtraction>()
 
 // 调用大模型前的保守本地闸门（2026-08-25 优化：显著减少提交窗口数，同时尽量不漏可能相关的段落）
 // 词法相关：scoreChunk > 0（与标题/主题有任何字面或字符对关联）即保留；
@@ -129,7 +135,8 @@ async function extractKeywordSet(
   ]
   const result = await chatCompletion(provider, messages, KEYWORD_EXTRACT_TIMEOUT_MS, { kind: 'compilation-keywords', taskId }, {
     maxRetries: 1,
-    temperature: 0
+    temperature: 0,
+    seed: REPRODUCIBILITY_SEED
   })
   if (!result.ok) return null
   return parseKeywordExtraction(result.text)
@@ -140,6 +147,11 @@ async function extractKeywordSet(
  * 每条附带词法相关分（仅用于排序，不作为过滤依据）。
  * 导出以便单测。
  */
+/** 确定性稳定排序（by sourceId + position），保证同一候选集两轮顺序一致（C：稳定窗口切分） */
+function sortChunksStable(chunks: RetrievedChunk[]): RetrievedChunk[] {
+  return [...chunks].sort((a, b) => a.sourceId.localeCompare(b.sourceId) || a.position.localeCompare(b.position))
+}
+
 export function recallCandidateChunks(scopeIds: string[], query: string): RetrievedChunk[] {
   const q = query.trim()
   if (!q || scopeIds.length === 0) return []
@@ -158,7 +170,7 @@ export function recallCandidateChunks(scopeIds: string[], query: string): Retrie
       })
     }
   }
-  return out
+  return sortChunksStable(out)
 }
 
 export interface CompilationRecallResult {
@@ -238,7 +250,7 @@ export function recallCompilationCandidates(
       out.push({ sourceId: it.sourceId, sourceTitle: it.sourceTitle, position: it.position, text: it.text, score: it.score })
     }
   }
-  return { chunks: out, candidateSources: relevantSources.size }
+  return { chunks: sortChunksStable(out), candidateSources: relevantSources.size }
 }
 
 export interface SourceRefEntry {
@@ -435,24 +447,38 @@ async function scanCardContradictions(
     { role: 'system', content: sys },
     { role: 'user', content: user }
   ]
-  const result = await chatCompletion(provider, messages, CARD_SCAN_TIMEOUT_MS, { kind: 'compilation-contradiction-scan', taskId }, {
-    maxRetries: 1,
-    temperature: 0
-  })
-  if (!result.ok) return []
-  const groups = parseCardScanGroups(result.text)
-  if (!groups) return []
-  const out: CompilationOutputGroup[] = []
-  for (const g of groups) {
-    const variants: CompilationOutputVariant[] = []
-    for (const ci of g.cardIndices) {
-      const it = batch[ci - 1]
-      if (!it) continue
-      variants.push({ excerpt: it.excerpt, sourceRefs: [it.sourceRef] })
+  // D（低成本提升召回）：对同一卡片集用 0 与 0.3 各扫一次，按「主题」并集去重（说法并集），
+  // 一次低温度一次稍高温度，抵消单次采样的"该发现却没发现"；卡片集很小，2 次调用成本可忽略。
+  const merged = new Map<string, CompilationOutputGroup>()
+  for (const temperature of CARD_SCAN_TEMPERATURES) {
+    const result = await chatCompletion(provider, messages, CARD_SCAN_TIMEOUT_MS, { kind: 'compilation-contradiction-scan', taskId }, {
+      maxRetries: 1,
+      temperature,
+      seed: REPRODUCIBILITY_SEED
+    })
+    if (!result.ok) continue
+    const groups = parseCardScanGroups(result.text)
+    if (!groups) continue
+    for (const g of groups) {
+      const variants: CompilationOutputVariant[] = []
+      for (const ci of g.cardIndices) {
+        const it = batch[ci - 1]
+        if (!it) continue
+        variants.push({ excerpt: it.excerpt, sourceRefs: [it.sourceRef] })
+      }
+      if (variants.length < 2) continue
+      const key = g.topic.trim()
+      const existing = merged.get(key)
+      if (!existing) {
+        merged.set(key, { topic: g.topic, kind: g.kind, variants })
+      } else {
+        // 并集：补充本次扫出而上次未有的说法（按摘录去重）
+        const seen = new Set(existing.variants.map((v) => v.excerpt))
+        for (const v of variants) if (!seen.has(v.excerpt)) existing.variants.push(v)
+      }
     }
-    if (variants.length >= 2) out.push({ topic: g.topic, kind: g.kind, variants })
   }
-  return out
+  return [...merged.values()]
 }
 
 /** 解析卡片级矛盾扫描输出（纯函数，可测试） */
@@ -543,19 +569,19 @@ export async function generateCompilation(
   onProgress?.({ stage: '正在理解撰写任务并提取粗筛关键词…', percent: 6, etaSeconds: 20 })
   let coarseQuery: string
   let vecQuery: string
-  if (prov.ok) {
-    const extracted = await extractKeywordSet(prov.provider, t, taskId).catch(() => null)
-    if (extracted) {
-      coarseQuery = [...new Set([extracted.title, ...extracted.keywords])].filter(Boolean).join(' ') || fallbackCoarseQuery(t)
-      vecQuery = extracted.title || coarseQuery
-      onProgress?.({ stage: '已提取标题：' + extracted.title + '；提取粗筛关键词 ' + extracted.keywords.length + ' 个', percent: 7, etaSeconds: 20 })
-      // 首次由大模型提取出标题后，自动把任务标题从默认值改为该标题（用户仍可后续重命名）
-      if (task.title === '新建任务' && extracted.title) {
-        try { renameTask(taskId, extracted.title) } catch { /* 重命名失败不影响汇编生成 */ }
-      }
-    } else {
-      coarseQuery = fallbackCoarseQuery(t)
-      vecQuery = coarseQuery
+  // B（稳定关键帧）：同一「撰写要求」复用已提取的关键词，避免两轮任务因 LLM 采样差异产生不同粗筛关键词
+  let extracted: KeywordExtraction | null = keywordExtractionCache.get(t) ?? null
+  if (!extracted && prov.ok) {
+    extracted = await extractKeywordSet(prov.provider, t, taskId).catch(() => null)
+    if (extracted) keywordExtractionCache.set(t, extracted)
+  }
+  if (extracted) {
+    coarseQuery = [...new Set([extracted.title, ...extracted.keywords])].filter(Boolean).join(' ') || fallbackCoarseQuery(t)
+    vecQuery = extracted.title || coarseQuery
+    onProgress?.({ stage: '已提取标题：' + extracted.title + '；提取粗筛关键词 ' + extracted.keywords.length + ' 个', percent: 7, etaSeconds: 20 })
+    // 首次由大模型提取出标题后，自动把任务标题从默认值改为该标题（用户仍可后续重命名）
+    if (task.title === '新建任务' && extracted.title) {
+      try { renameTask(taskId, extracted.title) } catch { /* 重命名失败不影响汇编生成 */ }
     }
   } else {
     coarseQuery = fallbackCoarseQuery(t)
@@ -680,7 +706,8 @@ async function readWindow(
   for (let attempt = 0; attempt < TEMPERATURES.length; attempt++) {
     const result = await chatCompletion(provider, messages, COMPILATION_TIMEOUT_MS, { kind: 'compilation-read', taskId }, {
       maxRetries: 1,
-      temperature: TEMPERATURES[attempt]
+      temperature: TEMPERATURES[attempt],
+      seed: REPRODUCIBILITY_SEED
     })
     if (!result.ok) continue
     const parsed = parseCompilationOutput(result.text)

@@ -246,6 +246,21 @@ export interface CompilationContradiction {
 }
 
 /** 一次资料汇编（生成后待用户审阅，确认后 finalize） */
+export type CompilationRepairStatus = 'pending' | 'accepted' | 'rejected'
+
+/** 资料卡片二次加工（语义补全/修订）：对表意不明的卡片，读取原文上下文后由大模型提出补全/修订文本 */
+export interface CompilationRepair {
+  id: string
+  compilationId: string
+  itemId: string
+  originalText: string
+  revisedText: string
+  reason: string
+  status: CompilationRepairStatus
+  createdAt: string
+  updatedAt: string
+}
+
 export interface Compilation {
   id: string
   taskId: string
@@ -255,20 +270,35 @@ export interface Compilation {
   updatedAt: string
   items: CompilationItem[]
   contradictions: CompilationContradiction[]
+  /** 资料卡片二次加工（语义补全/修订）的待处理/已采纳/已拒绝修订 */
+  repairs?: CompilationRepair[]
 }
 
-/** 回收站中的一条被采纳/忽略的矛盾（可恢复后重新取舍） */
-export interface CompilationRecycleBinItem {
+/** 回收站条目基类（按 created_at 倒序展示） */
+export interface CompilationRecycleBinBase {
   id: string
   compilationId: string
+  createdAt: string
+}
+/** 回收站中的一条被采纳/忽略的矛盾（可恢复后重新取舍） */
+export interface CompilationRecycleBinContradiction extends CompilationRecycleBinBase {
+  kind: 'contradiction'
   contradictionId: string
   topic: string
-  kind: CompilationContradiction['kind']
   status: 'resolved' | 'ignored'
-  createdAt: string
-  /** 恢复后重新展示的矛盾（含全部 variant 与所选卡片 id） */
   contradiction: CompilationContradiction
 }
+/** 回收站中的一条语义补全/修订（可恢复后重新取舍） */
+export interface CompilationRecycleBinRepair extends CompilationRecycleBinBase {
+  kind: 'repair'
+  repairId: string
+  itemId: string
+  originalText: string
+  revisedText: string
+  chosen: 'accepted' | 'rejected'
+  repair: CompilationRepair
+}
+export type CompilationRecycleBinItem = CompilationRecycleBinContradiction | CompilationRecycleBinRepair
 
 // ============================================================
 // 规范文档库（Phase 6.4.1：第二步「指定行文规范」）

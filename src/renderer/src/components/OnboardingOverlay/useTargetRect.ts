@@ -2,8 +2,9 @@ import { useLayoutEffect, useRef, useState } from 'react'
 
 /**
  * 引导目标定位 hook（2026-08-14，借鉴聚合拾遗 useTargetRect）：
- * 通过 CSS 选择器定位界面元素，返回其高亮区域（含 padding 留白），并监听 DOM 变化 / 窗口缩放 / 滚动实时更新。
- * 目标元素缺失时延迟回调 onMissing，供引导自动跳到下一步。
+ * 通过一组 CSS 选择器定位界面元素，返回每个目标的矩形（用于挖洞高亮）与联合矩形（用于定位提示卡片）。
+ * 支持一个步骤同时高亮多个模块（如第 1 步同时框选「LLM Provider」与「步骤默认模型」）。
+ * 监听 DOM 变化 / 窗口缩放 / 滚动实时更新；全部目标缺失时延迟回调 onMissing，供引导自动跳到下一步。
  */
 export interface TargetRect {
   top: number
@@ -12,6 +13,13 @@ export interface TargetRect {
   left: number
   width: number
   height: number
+}
+
+export interface TargetRects {
+  /** 各目标的高亮矩形（已含 padding 留白、对视口钳制） */
+  rects: TargetRect[]
+  /** 所有目标的联合外接矩形（用于放置提示卡片） */
+  union: TargetRect | null
 }
 
 function readRect(element: Element, padding: number): TargetRect {
@@ -43,48 +51,94 @@ function rectsMatch(a: TargetRect | null, b: TargetRect | null): boolean {
   )
 }
 
+function targetRectsEqual(a: TargetRects, b: TargetRects): boolean {
+  if (a.rects.length !== b.rects.length) return false
+  for (let i = 0; i < a.rects.length; i++) if (!rectsMatch(a.rects[i], b.rects[i])) return false
+  return rectsMatch(a.union, b.union)
+}
+
 export function useTargetRect(
-  selector: string | null,
+  selectors: string[] | null,
   padding: number,
   onMissing: () => void
-): TargetRect | null {
-  const [rect, setRect] = useState<TargetRect | null>(null)
-  const rectRef = useRef<TargetRect | null>(null)
+): TargetRects {
+  const [state, setState] = useState<TargetRects>({ rects: [], union: null })
+  const stateRef = useRef<TargetRects>({ rects: [], union: null })
   const onMissingRef = useRef(onMissing)
   onMissingRef.current = onMissing
 
   useLayoutEffect(() => {
-    if (!selector) {
-      rectRef.current = null
-      setRect(null)
+    if (!selectors || selectors.length === 0) {
+      stateRef.current = { rects: [], union: null }
+      setState({ rects: [], union: null })
       return
     }
 
     let frame = 0
     let missingTimer: ReturnType<typeof setTimeout> | null = null
-    let observedElement: Element | null = null
+    const observedElements = new Map<string, Element | null>()
     const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => schedule())
 
-    const commit = (next: TargetRect | null): void => {
-      if (rectsMatch(rectRef.current, next)) return
-      rectRef.current = next
-      setRect(next)
+    const compute = (): TargetRects => {
+      const rects: TargetRect[] = []
+      for (const sel of selectors) {
+        const el = observedElements.get(sel)
+        if (el) rects.push(readRect(el, padding))
+      }
+      let union: TargetRect | null = null
+      if (rects.length > 0) {
+        let top = Infinity
+        let left = Infinity
+        let right = -Infinity
+        let bottom = -Infinity
+        for (const r of rects) {
+          top = Math.min(top, r.top)
+          left = Math.min(left, r.left)
+          right = Math.max(right, r.right)
+          bottom = Math.max(bottom, r.bottom)
+        }
+        union = { top, right, bottom, left, width: Math.max(0, right - left), height: Math.max(0, bottom - top) }
+      }
+      return { rects, union }
+    }
+
+    const commit = (next: TargetRects): void => {
+      if (targetRectsEqual(stateRef.current, next)) return
+      stateRef.current = next
+      setState(next)
     }
 
     const update = (): void => {
       frame = 0
-      const element = document.querySelector(selector)
-      if (element !== observedElement) {
-        resizeObserver?.disconnect()
-        observedElement = element
-        if (element) resizeObserver?.observe(element)
+      let anyFound = false
+      let firstEl: Element | null = null
+      let firstTop = Infinity
+      for (const sel of selectors) {
+        const el = document.querySelector(sel)
+        const prev = observedElements.get(sel)
+        if (el !== prev) {
+          if (prev) resizeObserver?.unobserve(prev)
+          observedElements.set(sel, el)
+          if (el) resizeObserver?.observe(el)
+        }
+        if (el) {
+          anyFound = true
+          const top = el.getBoundingClientRect().top
+          if (top < firstTop) {
+            firstTop = top
+            firstEl = el
+          }
+        }
       }
-      if (!element) {
-        commit(null)
+      // 只把最靠上的目标滚入视野（相邻目标会随之可见），避免多目标之间来回滚动
+      if (firstEl) firstEl.scrollIntoView({ block: 'center', inline: 'nearest' })
+
+      if (!anyFound) {
+        commit({ rects: [], union: null })
         if (missingTimer === null) {
           missingTimer = setTimeout(() => {
             missingTimer = null
-            if (!document.querySelector(selector)) onMissingRef.current()
+            if (!selectors.some((s) => document.querySelector(s))) onMissingRef.current()
           }, 1500)
         }
         return
@@ -93,7 +147,7 @@ export function useTargetRect(
         clearTimeout(missingTimer)
         missingTimer = null
       }
-      commit(readRect(element, padding))
+      commit(compute())
     }
 
     const schedule = (): void => {
@@ -127,7 +181,7 @@ export function useTargetRect(
       window.removeEventListener('resize', schedule)
       window.removeEventListener('scroll', schedule, true)
     }
-  }, [padding, selector])
+  }, [padding, selectors])
 
-  return rect
+  return state
 }
