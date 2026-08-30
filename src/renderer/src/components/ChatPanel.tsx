@@ -33,6 +33,8 @@ interface ChatPanelProps {
   primaryLabel?: string
   /** 自定义主按钮动作：提供时点击主按钮优先走此动作（用于 Step 1 生成资料汇编） */
   onPrimaryAction?: (text: string) => void
+  /** 展示「预设提示词」按钮 + 菜单（批量删除/增补内容，点击填出模板） */
+  showPresetButton?: boolean
   /** 来源引用清单（最近一次文段来源询问），供消息内 #N 渲染为链接 */
   refs?: SourceRefItem[]
   /** 打开来源文件（系统默认软件） */
@@ -59,11 +61,13 @@ function ChatPanel({
   onChat,
   primaryLabel,
   onPrimaryAction,
+  showPresetButton,
   refs,
   onOpenSource
 }: ChatPanelProps) {
   const [input, setInput] = useState('')
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
+  const [presetOpen, setPresetOpen] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
 
   // 自动滚动：用户已接近底部时才跟随（正在阅读历史时不抢滚动位置）；busy 提示始终可见
@@ -214,6 +218,24 @@ function ChatPanel({
           </div>
         ) : null}
       </div>
+
+      {showPresetButton ? (
+        <div className="chat-panel__presets">
+          <button type="button" className="chat-panel__preset-btn" onClick={() => setPresetOpen((o) => !o)} disabled={busy}>
+            {zhCN.compilation.presetButton}
+          </button>
+          {presetOpen ? (
+            <div className="chat-panel__preset-menu">
+              <button type="button" onClick={() => { setInput(zhCN.compilation.presetBatchDelete); setPresetOpen(false) }}>
+                {zhCN.compilation.presetBatchDeleteLabel}
+              </button>
+              <button type="button" onClick={() => { setInput(zhCN.compilation.presetAddContent); setPresetOpen(false) }}>
+                {zhCN.compilation.presetAddContentLabel}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="chat-panel__input-row">
         <textarea

@@ -108,12 +108,12 @@ const api = {
   getSourceFileUrl(id: string): Promise<ApiResult<{ url: string }>> {
     return ipcRenderer.invoke(IPC.SOURCES_GET_FILE_URL, { id })
   },
-  /** 删除单个资料 */
-  deleteSource(id: string): Promise<ApiResult<void>> {
+  /** 删除单个资料（若被资料汇编引用，返回 pendingCascade=true，进入级联清理确认流程，来源暂未删除） */
+  deleteSource(id: string): Promise<ApiResult<{ pendingCascade: boolean }>> {
     return ipcRenderer.invoke(IPC.SOURCES_DELETE, { id })
   },
-  /** 批量删除资料 */
-  deleteSources(ids: string[]): Promise<ApiResult<void>> {
+  /** 批量删除资料（若有来源被汇编引用，返回 pendingCascade=true，进入级联清理确认流程，这些来源暂未删除） */
+  deleteSources(ids: string[]): Promise<ApiResult<{ pendingCascade: boolean }>> {
     return ipcRenderer.invoke(IPC.SOURCES_DELETE_MANY, { ids })
   },
   /** 修改资料标题（工作区文件同步重命名） */
@@ -142,8 +142,24 @@ const api = {
     return ipcRenderer.invoke(IPC.COMPILATION_GENERATE, { taskId, title })
   },
   /** 重新生成资料汇编（AI 服务 Phase 6.1 实现） */
-  regenerateCompilation(taskId: string, title: string): Promise<ApiResult<{ compilation: unknown }>> {
-    return ipcRenderer.invoke(IPC.COMPILATION_REGENERATE, { taskId, title })
+  adjustCompilation(taskId: string, compilationId: string, instruction: string): Promise<ApiResult<{ compilation: unknown; explain?: string; removedCards?: number; addedCards?: number; updatedCards?: number }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_ADJUST, { taskId, compilationId, instruction })
+  },
+  /** 资料汇编卡片重新按时间排序（asc 正序 / desc 反序） */
+  reorderCompilation(compilationId: string, direction: 'asc' | 'desc'): Promise<ApiResult<{ compilation: unknown }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_REORDER, { compilationId, direction })
+  },
+  /** 撤销上一次资料汇编操作 */
+  undoCompilation(compilationId: string): Promise<ApiResult<{ compilation: unknown; undoAvailable: number; redoAvailable: number }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_UNDO, { compilationId })
+  },
+  /** 恢复被撤销的资料汇编操作 */
+  redoCompilation(compilationId: string): Promise<ApiResult<{ compilation: unknown; undoAvailable: number; redoAvailable: number }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_REDO, { compilationId })
+  },
+  /** 查询当前汇编可撤销/可恢复的步数 */
+  getCompilationUndoState(compilationId: string): Promise<ApiResult<{ undoAvailable: number; redoAvailable: number }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_UNDO_STATE, { compilationId })
   },
   /** 编辑资料卡片 */
   updateCompilationItem(itemId: string, patch: { excerpt?: string; ts?: string | null; note?: string | null; extraTags?: string[]; kept?: boolean }): Promise<ApiResult<{ item: unknown }>> {
@@ -180,6 +196,18 @@ const api = {
   /** 采纳/拒绝一条语义补全/修订（accept 会改写卡片摘录为修订文本） */
   decideCompilationRepair(repairId: string, action: 'accept' | 'reject'): Promise<ApiResult<{ item: unknown; repair: unknown }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_REPAIR_DECIDE, { repairId, action })
+  },
+  // ---- 来源移除确认（2026-08-28：来源被删除且已被资料汇编引用；来源=工作区文件删除或资料库直接删除） ----
+  listSourceRemovals(): Promise<ApiResult<{ items: { sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' }[] }>> {
+    return ipcRenderer.invoke(IPC.WORKSPACE_SOURCE_REMOVAL_LIST)
+  },
+  decideSourceRemoval(sourceId: string, action: 'delete' | 'keep'): Promise<ApiResult<{ deletedItems: number; deletedContradictions: number; deletedRepairs: number }>> {
+    return ipcRenderer.invoke(IPC.WORKSPACE_SOURCE_REMOVAL_DECIDE, { sourceId, action })
+  },
+  onSourceRemoved(cb: (p: { sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' }) => void): () => void {
+    const listener = (_e: unknown, p: { sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' }) => cb(p)
+    ipcRenderer.on(IPC_EVENTS.WORKSPACE_SOURCE_REMOVED, listener)
+    return () => ipcRenderer.removeListener(IPC_EVENTS.WORKSPACE_SOURCE_REMOVED, listener)
   },
   // ---- 规范文档库（Phase 6.4.1）----
   listStyleGuides(): Promise<ApiResult<{ items: unknown[] }>> {

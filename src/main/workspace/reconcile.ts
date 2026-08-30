@@ -21,6 +21,7 @@ import { getSettings, updateSettings } from '../db/settings'
 import { parseFile } from '../import/file-parser'
 import { enqueueIndex } from '../rag/indexer'
 import { scanWorkspaceAsync } from './scanner'
+import { registerSourceRemoval, isPendingSourceRemoval } from './source-removal'
 import { fingerprintFileAsync, statFingerprintAsync } from './fingerprint'
 import { mkdtempSync, writeFileSync, rmSync, renameSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -87,6 +88,17 @@ function findWorkspaceSourceByPath(rel: string): { id: string; content_hash: str
     .prepare("SELECT id, content_hash, file_mtime, file_size FROM sources WHERE workspace = 1 AND kind = 'file' AND file_path = ? LIMIT 1")
     .get(rel) as { id: string; content_hash: string | null; file_mtime: string | null; file_size: number | null } | undefined
   return row ?? null
+}
+
+/** 读取来源标题（对账移除时弹确认框用） */
+function sourceTitleById(id: string): string {
+  const row = getDb().prepare('SELECT title FROM sources WHERE id = ?').get(id) as { title: string } | undefined
+  return row?.title ?? '未知资料'
+}
+
+/** 某来源被多少资料汇编卡片引用（>0 时才需要确认清理） */
+function compilationCardCountBySource(id: string): number {
+  return (getDb().prepare('SELECT COUNT(*) AS c FROM compilation_items WHERE source_id = ?').get(id) as { c: number }).c
 }
 
 /** 解析工作区文件入库/更新（供全量与增量对账复用） */
@@ -234,10 +246,17 @@ export async function reconcileWorkspace(onProgress?: (p: ReconcileProgress) => 
     await yieldLoop()
   }
 
-  // 消失文件：直接从资料库删除（含标签绑定等所有关联信息；moved 的记录已在上方更新路径，此处查不到即跳过，不会误删）
+  // 消失文件：直接从资料库删除（含标签绑定等所有关联信息；moved 的记录已在上方更新路径，此处查不到即跳过，不会误删）。
+  // 若该来源已被资料汇编引用（2026-08-28），登记为待确认删除，由渲染层确认后再清理卡片。
   for (const rel of diff.removed) {
     const row = findWorkspaceSourceByPath(rel)
     if (!row) continue
+    if (isPendingSourceRemoval(row.id)) continue
+    if (compilationCardCountBySource(row.id) > 0) {
+      registerSourceRemoval(row.id, sourceTitleById(row.id))
+      await yieldLoop()
+      continue
+    }
     deleteSources([row.id])
     result.removed += 1
     await yieldLoop()
@@ -274,7 +293,8 @@ export async function reconcilePaths(
   }
 
   // 阶段二：处理已消失的文件（Task 2.2.4：工作区删除文件 → 资料库直接删除，
-  // 连同标签等所有绑定信息一并清除；同内容哈希仍被其它路径记录占用则视为重命名，不删）
+  // 连同标签等所有绑定信息一并清除；同内容哈希仍被其它路径记录占用则视为重命名，不删）。
+  // 若该来源已被资料汇编引用（2026-08-28），登记为待确认删除而非直接删来源。
   for (const rel of relPaths) {
     const abs = join(workspaceDir, rel)
     if (existsSync(abs)) continue
@@ -288,6 +308,12 @@ export async function reconcilePaths(
         result.moved += 1
         continue
       }
+    }
+    if (isPendingSourceRemoval(row.id)) continue
+    if (compilationCardCountBySource(row.id) > 0) {
+      registerSourceRemoval(row.id, sourceTitleById(row.id))
+      await yieldLoop()
+      continue
     }
     deleteSources([row.id])
     result.removed += 1

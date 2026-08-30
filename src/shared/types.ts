@@ -298,7 +298,16 @@ export interface CompilationRecycleBinRepair extends CompilationRecycleBinBase {
   chosen: 'accepted' | 'rejected'
   repair: CompilationRepair
 }
-export type CompilationRecycleBinItem = CompilationRecycleBinContradiction | CompilationRecycleBinRepair
+/** 回收站中的一条被删除的资料卡片（可恢复，含其矛盾变异/语义补全修订） */
+export interface CompilationRecycleBinCard extends CompilationRecycleBinBase {
+  kind: 'card'
+  itemId: string
+  excerpt: string
+  ts?: string
+  sourceTitle?: string
+  item: CompilationItem
+}
+export type CompilationRecycleBinItem = CompilationRecycleBinContradiction | CompilationRecycleBinRepair | CompilationRecycleBinCard
 
 // ============================================================
 // 规范文档库（Phase 6.4.1：第二步「指定行文规范」）

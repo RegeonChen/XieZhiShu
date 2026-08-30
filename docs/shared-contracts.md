@@ -129,7 +129,7 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `sources:get` | `{ id: string }` → `{ source: Source, tags: Tag[] }` | 详情（含原文与标签） |
 | `sources:renderHtml` | `{ id: string }` → `{ html: string }` | .docx 转 HTML（mammoth） |
 | `sources:getFileUrl` | `{ id: string }` → `{ url: string }` | 内嵌 HTTP 文件服务 URL（PDF/图片渲染） |
-| `sources:delete` / `sources:deleteMany` | `{ id }` / `{ ids }` → `{ ok: true }` | 删除资料；工作区文件先移入系统回收站再删库（级联清理） |
+| `sources:delete` / `sources:deleteMany` | `{ id }` / `{ ids }` → `{ ok: true, data?: { pendingCascade?: boolean } }` | 删除资料；工作区文件先移入系统回收站再删库。若该资料已被资料汇编引用，暂不删库，登记级联清理待确认（`pendingCascade: true`），由 `workspace:sourceRemoval:decide` 处理（单删与批量删除均触发；批量会逐个来源弹确认框） |
 | `sources:updateTitle` | `{ id, title }` → `{ source: Source }` | 修改标题（工作区文件同步重命名） |
 | `sources:summarizeAll` | `void` → `{ processed, ok, failed }` | 整理资料库：对尚无摘要的资料逐篇调用 LLM 生成摘要 |
 | `sources:getSummary` | `{ id: string }` → `{ summary?: {...} }` | 读取单篇资料的 LLM 摘要（摘要/主题词/关键实体） |
@@ -168,8 +168,11 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `compilation:deleteItem` | `{ itemId }` → `{ ok: true }` | 删除资料卡片 |
 | `compilation:resolveContradiction` | `{ contradictionId, action: 'resolve'\|'ignore', chosenItemId? }` → `{ contradiction: CompilationContradiction }` | 汇编矛盾取舍：resolve 须传保留的卡片 id（属于该矛盾）；ignore 清空已选 |
 | `compilation:confirm` | `{ compilationId }` → `{ compilation: Compilation }` | 确认汇编（finalize），进入下一步 |
-| `compilation:recycleBin:list` | `{ compilationId }` → `{ items: CompilationRecycleBinItem[] }` | 回收站条目（矛盾 + 语义补全/修订，按时间倒序） |
-| `compilation:recycleBin:restore` | `{ binId }` → `{ contradiction?, repair?, item? }` | 恢复条目：矛盾回到 pending；语义补全回退 pending + 原文摘录 |
+| `compilation:reorder` | `{ compilationId, direction: 'asc'|'desc' }` → `{ compilation: Compilation }` | 资料汇编卡片按时间标签重新排序并重写 position（asc 正序 / desc 反序；无时间戳排最后），返回最新汇编 |
+| `compilation:undo` / `compilation:redo` | `{ compilationId }` → `{ compilation, undoAvailable, redoAvailable }` | 撤销/恢复资料汇编操作（快照机制：编辑/删除/调整/矛盾取舍/二次修改/回收站恢复/排序/确认等，会话内） |
+| `compilation:undoState` | `{ compilationId }` → `{ undoAvailable, redoAvailable }` | 查询当前汇编可撤销/可恢复步数 |
+| `compilation:recycleBin:list` | `{ compilationId }` → `{ items: CompilationRecycleBinItem[] }` | 回收站条目（资料卡片 + 语义补全/修订 + 矛盾，按删除时间倒序 = 最近删除在前） |
+| `compilation:recycleBin:restore` | `{ binId }` → `{ contradiction?, repair?, item?, card? }` | 恢复条目：矛盾回到 pending；语义补全回退 pending + 原文摘录；资料卡片还原（含其矛盾变异/语义补全修订，映射为 card 返回） |
 | `compilation:repairScan` | `{ compilationId }` → `{ repairs: CompilationRepair[] }` | 扫描表意不明的卡片并生成语义补全/修订（additive，无 Provider/失败返回空，绝不阻断） |
 | `compilation:repairs:list` | `{ compilationId }` → `{ items: CompilationRepair[] }` | 列出某汇编的语义补全/修订 |
 | `compilation:repairs:decide` | `{ repairId, action: 'accept'\|'reject' }` → `{ item, repair }` | 采纳/拒绝修订；accept 改写卡片摘录为修订文本并快照进回收站，reject 不改写 |
@@ -234,6 +237,9 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `workspace:progress`（主进程推送事件） | `{ done, total, newFiles?, added?, changed?, removed?, moved?, errors?, finished? }` | 自动同步进度推送（含 finished 完成事件与最终计数；手动「同步工作区」按钮已于 2026-08-24 移除，由聚焦/进资料库/每分钟/设置变更/监听增量自动触发） |
 | `workspace:navSync` | `{}` → `{}` | 进入"资料库"功能区时自动触发一次同步 |
 | `workspace:migrate` | `{}` → `{ migrated, failed, skipped }` | 一次性迁移存量导入资料到工作区 |
+| `workspace:sourceRemoval:list` | `{}` → `{ items: WorkspaceSourceRemovalPending[] }` | 列出待确认的来源移除（来源=工作区文件被删除或资料库直接删除，且已被资料汇编引用） |
+| `workspace:sourceRemoval:decide` | `{ sourceId, action: 'delete'|'keep' }` → `{ deletedItems, deletedContradictions, deletedRepairs }` | 处理来源移除确认：`delete` 删除该来源在全部资料汇编中的卡片（含矛盾/二次改动，不入回收站）再删来源；`keep` 仅删来源、保留卡片（source_id 置空） |
+| `workspace:sourceRemoved`（主进程推送事件） | `WorkspaceSourceRemovalPending` | 推送新增的来源移除待确认项（渲染层弹确认框） |
 | `app:openFileDialog` | `{}` → `{ paths: string[] }` | 系统文件选择对话框（主进程打开，仅回传路径） |
 | `app:openDirectoryDialog` | `{}` → `{ path: string \| null }` | 系统目录选择对话框（工作区选择） |
 | `app:getInfo` | `{}` → `{ version, platform }` | 应用版本与平台 |

@@ -6,13 +6,14 @@
  */
 import type { CompilationRepair, CompilationItem } from '../../shared/types'
 import { ErrorCodes } from '../../shared/types'
-import { getCompilationById } from '../db/compilations'
+import { getCompilationById, updateCompilationItem, reorderCompilationItemsByTs } from '../db/compilations'
 import { insertRepairs, type InsertRepairInput } from '../db/compilation-repairs'
 import { getSourceById } from '../db/sources'
 import { getSettings } from '../db/settings'
 import { getProviderSecret } from '../llm/provider-store'
 import { safeStorageCodec } from '../llm/secret'
 import { chatCompletion, type ChatMessage } from '../llm/chat'
+import { logMain } from '../logger'
 
 const REPAIR_TIMEOUT_MS = 300000
 const CONTEXT_WINDOW_CHARS = 120
@@ -60,7 +61,7 @@ function buildContextWindow(item: CompilationItem): string {
 }
 
 /** 解析 AI 语义补全/修订输出（纯函数，可测试） */
-export function parseRepairScanOutput(text: string): { itemId: string; revised: string; reason: string }[] | null {
+export function parseRepairScanOutput(text: string): { itemId: string; revised: string; reason: string; ts: string }[] | null {
   const trimmed = text.trim()
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/)
   const candidate = fenced ? fenced[1].trim() : trimmed
@@ -83,14 +84,16 @@ export function parseRepairScanOutput(text: string): { itemId: string; revised: 
   if (!raw || typeof raw !== 'object') return null
   const arr = (raw as { repairs?: unknown }).repairs
   if (!Array.isArray(arr)) return null
-  const out: { itemId: string; revised: string; reason: string }[] = []
+  const out: { itemId: string; revised: string; reason: string; ts: string }[] = []
   for (const r of arr) {
     if (!r || typeof r !== 'object') continue
-    const o = r as { itemId?: unknown; revised?: unknown; reason?: unknown }
+    const o = r as { itemId?: unknown; revised?: unknown; reason?: unknown; ts?: unknown }
     const itemId = typeof o.itemId === 'string' ? o.itemId.trim() : ''
     const revised = typeof o.revised === 'string' ? o.revised.trim() : ''
-    if (!itemId || !revised) continue
-    out.push({ itemId, revised, reason: typeof o.reason === 'string' ? o.reason.trim() : '' })
+    const ts = typeof o.ts === 'string' ? o.ts.trim() : ''
+    if (!itemId) continue
+    if (!revised && !ts) continue
+    out.push({ itemId, revised, reason: typeof o.reason === 'string' ? o.reason.trim() : '', ts })
   }
   return out.length > 0 ? out : null
 }
@@ -101,14 +104,16 @@ function buildPrompt(items: CompilationItem[]): ChatMessage[] {
     .join('\n\n')
   const sys = [
     '你是一名地方志资料整理专家。下面给出一批已筛选出的【资料卡片】（每条含 itemId、来源、摘录、原文上下文）。',
-    '请通读这些卡片，找出其中「表意不明」或「疑似残缺」的卡片——例如表格单元格被切片后丢失列名/行名含义、孤立的短语、缺少主谓宾的残缺句。',
-    '对每个这样的卡片，请结合【原文上下文】给出一个**语义补全/修订后的完整文本**（revised），并简要说明原因（reason）。',
-    '已经表意清晰、完整的卡片不要输出。',
+    '请先通读所有卡片，然后：',
+    '1. 对缺少时间戳（卡片无 ts 或 ts 为空）的卡片，结合【原文上下文】推断其年份/时间（如项目完工年份、资料所属年份），并给出 ts 字段（如 "2005 年"）；若上下文确无年份依据，则不给 ts。',
+    '2. 对「表意不明」或「疑似残缺」的卡片（例如表格单元格被切片后丢失列名/行名含义、孤立的短语、缺少主谓宾的残缺句），结合【原文上下文】给出一个语义补全/修订后的完整文本（revised），并简要说明原因（reason）。',
+    '同一张卡片可以同时给出 ts 和 revised（补齐时间戳 + 补充文本）。',
+    '已经表意清晰、完整且已有时间戳的卡片不要输出。',
     '',
     '只输出一个 JSON 对象，不要输出其他文字或代码块围栏，且保持在一行：',
-    '{"repairs":[{"itemId":"...","revised":"...","reason":"..."}]}'
+    '{"repairs":[{"itemId":"...","ts":"2005 年","revised":"...","reason":"..."}]}'
   ].join('\n')
-  const user = '【资料卡片】\n' + cardList + '\n\n请按要求输出需要语义补全/修订的卡片。'
+  const user = '【资料卡片】\n' + cardList + '\n\n请按上述要求输出需要补齐时间戳或语义补全/修订的卡片；ts 字段仅在能依据原文推断出年份/时间时给出。'
   return [
     { role: 'system', content: sys },
     { role: 'user', content: user }
@@ -147,15 +152,24 @@ export async function scanCompilationRepairs(
 
     const itemById = new Map(items.map((it) => [it.id, it]))
     const inputs: InsertRepairInput[] = []
+    let tsFilled = 0
     for (const p of parsed) {
       const it = itemById.get(p.itemId)
       if (!it) continue
-      if (!p.revised) continue
-      if (p.revised === it.excerpt) continue
+      // 仅对缺少时间戳的卡片自动补齐（无需用户采纳，直接修改卡片 ts 字段；已有 ts 的卡片不覆盖）
+      if (p.ts && !it.ts) {
+        updateCompilationItem(it.id, { ts: p.ts })
+        tsFilled += 1
+      }
+      // 语义补全/修订仍为 pending，由用户采纳/不用
+      if (!p.revised || p.revised === it.excerpt) continue
       inputs.push({ itemId: it.id, originalText: it.excerpt, revisedText: p.revised, reason: p.reason })
     }
-    if (inputs.length === 0) return { ok: true, repairs: [] }
-    const repairs = insertRepairs(compilationId, inputs)
+    // 补齐时间戳后重排汇编卡片顺序（原先生成时缺失时间戳的卡片被排到末尾，需按新时间戳归位）
+    if (tsFilled > 0) reorderCompilationItemsByTs(compilationId)
+    if (inputs.length === 0 && tsFilled === 0) return { ok: true, repairs: [] }
+    const repairs = inputs.length > 0 ? insertRepairs(compilationId, inputs) : []
+    logMain('repair', '二次修改扫描：自动补齐时间戳 ' + tsFilled + ' 条，生成待采纳修订 ' + repairs.length + ' 条')
     return { ok: true, repairs }
   } catch {
     return { ok: true, repairs: [] }
@@ -171,6 +185,19 @@ if (import.meta.vitest) {
       expect(out).toHaveLength(1)
       expect(out[0].itemId).toBe('i1')
       expect(out[0].revised).toBe('补全后文本')
+      expect(out[0].ts).toBe('')
+    })
+    it('parses a ts field for timestamp-fill repairs', () => {
+      const out = parseRepairScanOutput('{"repairs":[{"itemId":"i2","ts":"2005 年","revised":"","reason":"缺少时间戳"}]}')!
+      expect(out).toHaveLength(1)
+      expect(out[0].itemId).toBe('i2')
+      expect(out[0].ts).toBe('2005 年')
+      expect(out[0].revised).toBe('')
+    })
+    it('keeps ts-only entries (no revised) when parsing', () => {
+      const out = parseRepairScanOutput('{"repairs":[{"itemId":"i3","ts":"2008 年"}]}')!
+      expect(out).toHaveLength(1)
+      expect(out[0].ts).toBe('2008 年')
     })
     it('parses bare json with surrounding text', () => {
       const out = parseRepairScanOutput('好的，下面是结果：{"repairs":[{"itemId":"i1","revised":"补全文本","reason":"疑似残缺"}]} 以上。')!

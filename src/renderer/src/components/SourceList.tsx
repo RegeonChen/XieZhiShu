@@ -181,6 +181,10 @@ function SourceList({ onSelect, activeId = null, bulkMode, onExitBulk, onSources
       if (res.ok) {
         setPendingDelete(null)
         setContextMenu(null)
+        if (res.data?.pendingCascade) {
+          // 该资料被资料汇编引用：进入级联清理确认流程（App 弹窗），来源暂未删除，本次不刷新资料库
+          return
+        }
         await loadSources(activeTagId)
         onSourcesChanged?.([id])
       } else {
@@ -199,6 +203,10 @@ function SourceList({ onSelect, activeId = null, bulkMode, onExitBulk, onSources
       if (res.ok) {
         setPendingDelete(null)
         setSelectedIds(new Set())
+        if (res.data?.pendingCascade) {
+          // 部分来源被资料汇编引用：进入级联清理确认流程（App 逐个弹窗），这些来源暂未删除，本次不刷新资料库
+          return
+        }
         await loadSources(activeTagId)
         onSourcesChanged?.(ids)
       } else {
