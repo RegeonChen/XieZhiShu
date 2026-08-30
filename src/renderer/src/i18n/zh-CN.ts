@@ -382,10 +382,15 @@ export const zhCN = {
     defaultBadge: '默认'
   },
   compilation: {
-    empty: '尚未生成资料汇编。请在左侧输入本次撰写的标题与要求，点击「生成资料汇编」。',
-    generateBtn: '生成资料汇编',
+    empty: '尚未生成资料汇编。请在左侧输入本次撰写的标题与要求，点击「生成汇编」。',
+    generateBtn: '生成汇编',
     regenerateBtn: '重新生成汇编',
     confirmBtn: '确认汇编，进入下一步',
+    sortBtn: '按时间排序',
+    sortAsc: '按时间正序',
+    sortDesc: '按时间反序',
+    undo: '撤销操作',
+    redo: '恢复操作',
     confirmedBadge: '已确认',
     candidate: '候选 {chunks} 段',
     cards: '卡片 {count} 张',
@@ -410,6 +415,12 @@ export const zhCN = {
     generating: '正在生成资料汇编（本地宽召回 + AI 细读，资料较多时可能需要数分钟）...',
     confirmed: '资料汇编已确认，可进入下一步指定行文规范。',
     regenerated: '已重新生成资料汇编：{count} 张卡片。',
+    adjusting: '正在调整资料汇编…',
+    presetButton: '预设提示词',
+    presetBatchDeleteLabel: '批量删除',
+    presetBatchDelete: '请删除与「……」高度相似的资料卡片。',
+    presetAddContentLabel: '增补内容',
+    presetAddContent: '目前的资料汇编中缺失了「……」方面的信息，请你从资料库中再次检索相关片段并加入资料汇编。\n详细描述：……',
     repairTitle: '语义补全',
     repairPending: '{count} 条待语义补全',
     repairOriginal: '原摘录',
@@ -423,9 +434,17 @@ export const zhCN = {
     recycleBinTitle: '回收站',
     recycleBinEmpty: '回收站为空。',
     recycleBinRepair: '语义补全',
+    recycleBinCard: '资料卡片',
     restore: '恢复',
     close: '关闭',
     restored: '已从回收站恢复该条目，请重新选择。'
+  },
+  sourceRemoval: {
+    title: '来源已删除',
+    messageWorkspace: '检测到您刚刚从工作区中删除了一个文件《{title}》，请问是否需要删除资料汇编中所有来源于该文件的条目？（{summary}）',
+    messageManual: '您正在删除资料《{title}》，该资料已被资料汇编引用（{summary}），请问是否需要一并删除资料汇编中所有来源于该资料的条目？',
+    confirm: '是，删除资料汇编条目',
+    cancel: '否，保留'
   },
   draftEditor: {
     saving: '保存中...',

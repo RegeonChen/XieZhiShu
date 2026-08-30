@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, type ReactNode } from 'react'
+import { useEffect, useState, useCallback, useRef, type ReactNode } from 'react'
 import TopBar from './components/TopBar'
 import SideNav, { type PageKey } from './components/SideNav'
 import EmptyState from './components/EmptyState'
@@ -14,6 +14,7 @@ import ResizeHandle from './components/ResizeHandle'
 import ErrorBoundary from './components/ErrorBoundary'
 import OnboardingOverlay from './components/OnboardingOverlay/OnboardingOverlay'
 import TextContextMenu from './components/TextContextMenu'
+import ConfirmDialog from './components/ConfirmDialog'
 import { DEMO_TASK_TITLE } from '../../shared/demo'
 import { zhCN } from './i18n/zh-CN'
 
@@ -82,8 +83,17 @@ export default function App() {
   const [bulkMode, setBulkMode] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [sourcesVersion, setSourcesVersion] = useState(0)
+  // 工作区来源移除确认（2026-08-28）：文件被删除且已被资料汇编引用时，弹框决定是否清理该来源的卡片
+  const [sourceRemoval, setSourceRemoval] = useState<{ sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' } | null>(null)
+  const sourceRemovalQueueRef = useRef<{ sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' }[]>([])
+  // 已登记（排队或正在展示）的来源 id，避免同一来源被多次登记/对账重复弹框（2026-08-28）
+  const enqueuedSourceRemovalIdsRef = useRef<Set<string>>(new Set())
+  // 当前正在展示的确认框（同步镜像 sourceRemoval 状态）；当前项不放入队列，避免确认后又被 shift 回来重复弹框
+  const sourceRemovalRef = useRef<{ sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' } | null>(null)
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const [writingReload, setWritingReload] = useState(0)
+  // 来源移除确认完毕后，让常驻的撰写工作台重新加载（否则已删除的来源卡片会以空白来源形式残留在界面状态里）
+  const [sourceRemovalReloadKey, setSourceRemovalReloadKey] = useState(0)
   /** 撰写任务总数（用于右栏空状态判断；null = 尚未加载） */
   const [writingTaskCount, setWritingTaskCount] = useState<number | null>(null)
   const [sidebarW, setSidebarW] = useState(() => readLayout(LS_SIDEBAR_W, DEFAULT_SIDEBAR))
@@ -182,6 +192,44 @@ export default function App() {
   const handleResizeCenter = useCallback((delta: number) => {
     setCenterW((w) => Math.max(MIN_CENTER, Math.min(w + delta, 600)))
   }, [])
+
+  // 工作区来源移除确认（2026-08-28）：登记待确认、依次弹框；决定后刷新资料库列表
+  const showSourceRemoval = useCallback((item: { sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' }) => {
+    sourceRemovalRef.current = item
+    setSourceRemoval(item)
+  }, [])
+  const handleDecideSourceRemoval = useCallback(async (sourceId: string, action: 'delete' | 'keep') => {
+    sourceRemovalRef.current = null
+    setSourceRemoval(null)
+    try {
+      await window.api.decideSourceRemoval(sourceId, action)
+    } catch {
+      /* 忽略：来源记录已由主进程清理，此处仅刷新列表 */
+    }
+    setSourcesVersion((v) => v + 1)
+    setSourceRemovalReloadKey((v) => v + 1)
+    enqueuedSourceRemovalIdsRef.current.delete(sourceId)
+    const next = sourceRemovalQueueRef.current.shift()
+    if (next) showSourceRemoval(next)
+  }, [showSourceRemoval])
+  const enqueueSourceRemoval = useCallback((item: { sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' }) => {
+    // 对同一来源去重：主进程可能因手动删除 + 工作区对账等多条路径重复登记，避免弹出多个相同确认框
+    if (enqueuedSourceRemovalIdsRef.current.has(item.sourceId)) return
+    enqueuedSourceRemovalIdsRef.current.add(item.sourceId)
+    // 当前无确认框则直接展示（不入队）；已有其它确认框则排队，避免当前项被 shift 回来重复弹框
+    if (!sourceRemovalRef.current) {
+      showSourceRemoval(item)
+    } else {
+      sourceRemovalQueueRef.current.push(item)
+    }
+  }, [showSourceRemoval])
+  useEffect(() => {
+    window.api.listSourceRemovals().then((res) => {
+      if (res.ok && res.data) for (const it of res.data.items) enqueueSourceRemoval(it)
+    }).catch(() => {})
+    const off = window.api.onSourceRemoved((item) => enqueueSourceRemoval(item))
+    return () => { off() }
+  }, [enqueueSourceRemoval])
 
   // 新手引导：结束/跳过时写入完成标记并关闭
   const handleOnboardingDismiss = useCallback((_reason: 'completed' | 'skipped') => {
@@ -349,6 +397,7 @@ export default function App() {
                 key={selectedTaskId}
                 taskId={selectedTaskId}
                 onChanged={() => setWritingReload((v) => v + 1)}
+                reloadKey={sourceRemovalReloadKey}
               />
             ) : writingTaskCount === 0 ? (
               <WritingEmptyState
@@ -360,6 +409,26 @@ export default function App() {
           </ErrorBoundary>
         </main>
       </div>
+      {sourceRemoval ? (
+        <ConfirmDialog
+          title={zhCN.sourceRemoval.title}
+          message={
+            (sourceRemoval.origin === 'manual' ? zhCN.sourceRemoval.messageManual : zhCN.sourceRemoval.messageWorkspace)
+              .replace('{title}', sourceRemoval.title)
+              .replace('{summary}', [
+                `${sourceRemoval.cardCount} 张卡片`,
+                sourceRemoval.contradictionCount > 0 ? `${sourceRemoval.contradictionCount} 组矛盾` : null,
+                sourceRemoval.repairCount > 0 ? `${sourceRemoval.repairCount} 条二次改动` : null
+              ].filter(Boolean).join('，'))
+          }
+          confirmText={zhCN.sourceRemoval.confirm}
+          cancelText={zhCN.sourceRemoval.cancel}
+          danger
+          busy={false}
+          onConfirm={() => void handleDecideSourceRemoval(sourceRemoval.sourceId, 'delete')}
+          onCancel={() => void handleDecideSourceRemoval(sourceRemoval.sourceId, 'keep')}
+        />
+      ) : null}
       {/* 新手引导聚光覆盖层（首次启动自动展示，可从设置页重新打开） */}
       <OnboardingOverlay
         open={onboardingOpen}

@@ -526,6 +526,68 @@ CREATE TABLE IF NOT EXISTS compilation_repair_recycle_bin (
 );
 CREATE INDEX IF NOT EXISTS idx_compilation_repair_bin_comp ON compilation_repair_recycle_bin(compilation_id);
 `
+  },
+    {
+    // 2026-08-28：工作区文件被删除时，应经「来源删除确认」后再清理资料汇编，删除来源不应自动级联删除汇编卡片。
+    // 将 compilation_items / compilation_contradiction_variants 的 source_id 外键改为 ON DELETE SET NULL（可空），
+    // 这样删除来源时卡片保留（source_id 置空），由确认流程决定是否删除对应卡片（含矛盾/二次改动，不入回收站）。
+    version: 22,
+    sql: `
+CREATE TABLE IF NOT EXISTS compilation_items_new (
+  id TEXT PRIMARY KEY,
+  compilation_id TEXT NOT NULL REFERENCES compilations(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  source_id TEXT REFERENCES sources(id) ON DELETE SET NULL,
+  excerpt TEXT NOT NULL,
+  ts TEXT,
+  note TEXT,
+  extra_tags TEXT NOT NULL DEFAULT '[]',
+  kept INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+INSERT INTO compilation_items_new (id, compilation_id, position, source_id, excerpt, ts, note, extra_tags, kept, created_at)
+  SELECT id, compilation_id, position, source_id, excerpt, ts, note, extra_tags, kept, created_at FROM compilation_items;
+DROP TABLE compilation_items;
+ALTER TABLE compilation_items_new RENAME TO compilation_items;
+CREATE INDEX IF NOT EXISTS idx_compilation_items_comp ON compilation_items(compilation_id);
+
+CREATE TABLE IF NOT EXISTS compilation_contradiction_variants_new (
+  id TEXT PRIMARY KEY,
+  contradiction_id TEXT NOT NULL REFERENCES compilation_contradictions(id) ON DELETE CASCADE,
+  item_id TEXT NOT NULL REFERENCES compilation_items(id) ON DELETE CASCADE,
+  variant_text TEXT NOT NULL,
+  source_id TEXT REFERENCES sources(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL
+);
+INSERT INTO compilation_contradiction_variants_new (id, contradiction_id, item_id, variant_text, source_id, created_at)
+  SELECT id, contradiction_id, item_id, variant_text, source_id, created_at FROM compilation_contradiction_variants;
+DROP TABLE compilation_contradiction_variants;
+ALTER TABLE compilation_contradiction_variants_new RENAME TO compilation_contradiction_variants;
+CREATE INDEX IF NOT EXISTS idx_compilation_cv_contradiction ON compilation_contradiction_variants(contradiction_id);
+`
+  },
+  {
+    // 2026-08-28：被删除的资料卡片也进入回收站（第三类：卡片），可恢复（含其矛盾变异/语义补全修订，存于 extra JSON）。
+    // 单卡删除与汇编调整批量删除会入该表；来源级联清理仍为“硬删除不入回收站”（来源已删，恢复无意义且会外键悬空）。
+    version: 23,
+    sql: `
+CREATE TABLE IF NOT EXISTS compilation_card_recycle_bin (
+  id TEXT PRIMARY KEY,
+  compilation_id TEXT NOT NULL REFERENCES compilations(id) ON DELETE CASCADE,
+  item_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  source_id TEXT,
+  excerpt TEXT NOT NULL,
+  ts TEXT,
+  note TEXT,
+  extra_tags TEXT NOT NULL DEFAULT '[]',
+  kept INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  deleted_at TEXT NOT NULL,
+  extra TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_compilation_card_bin_comp ON compilation_card_recycle_bin(compilation_id);
+`
   }
 ]
 
@@ -548,6 +610,9 @@ export function runMigrations(db: Database.Database): void {
 
   const insert = db.prepare('INSERT INTO schema_migrations (version) VALUES (?)')
 
+  // 迁移批次期间关闭外键：部分迁移需要重建被其它表引用的父表（如 compilation_items 的 source_id 外键），
+  // PRAGMA foreign_keys 无法在事务内修改，故须在事务开始前关闭、结束后开启。
+  db.pragma('foreign_keys = OFF')
   const runOne = db.transaction(() => {
     for (const m of pending) {
       if (m.run) {
@@ -558,6 +623,6 @@ export function runMigrations(db: Database.Database): void {
       insert.run(m.version)
     }
   })
-
   runOne()
+  db.pragma('foreign_keys = ON')
 }

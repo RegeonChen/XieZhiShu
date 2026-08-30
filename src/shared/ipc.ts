@@ -61,7 +61,11 @@ export const IPC = {
   COMPILATION_DELETE_ITEM: 'compilation:deleteItem',
   COMPILATION_RESOLVE_CONTRADICTION: 'compilation:resolveContradiction',
   COMPILATION_CONFIRM: 'compilation:confirm',
-  COMPILATION_REGENERATE: 'compilation:regenerate',
+  COMPILATION_ADJUST: 'compilation:adjust',
+  COMPILATION_REORDER: 'compilation:reorder',
+  COMPILATION_UNDO: 'compilation:undo',
+  COMPILATION_REDO: 'compilation:redo',
+  COMPILATION_UNDO_STATE: 'compilation:undoState',
   COMPILATION_RECYCLE_BIN_LIST: 'compilation:recycleBin:list',
   COMPILATION_RECYCLE_BIN_RESTORE: 'compilation:recycleBin:restore',
   COMPILATION_REPAIR_SCAN: 'compilation:repairScan',
@@ -112,6 +116,8 @@ export const IPC = {
   WORKSPACE_STATUS: 'workspace:status',
   WORKSPACE_MIGRATE: 'workspace:migrate',
   WORKSPACE_NAV_SYNC: 'workspace:navSync',
+  WORKSPACE_SOURCE_REMOVAL_LIST: 'workspace:sourceRemoval:list',
+  WORKSPACE_SOURCE_REMOVAL_DECIDE: 'workspace:sourceRemoval:decide',
 
   /* 应用元数据（Task 1.1 已实现） */
   APP_GET_INFO: 'app:getInfo',
@@ -150,7 +156,9 @@ export const IPC_EVENTS = {
   /** 生成初稿/自由对话的流式增量文本：{ taskId, text }（2026-08-19，供聊天面板实时显示） */
   WRITING_STREAM_DELTA: 'writing:streamDelta',
   /** 资料汇编生成进度：{ taskId, stage, percent, etaSeconds?, candidateChunks?, candidateSources? }（Phase 6.1） */
-  COMPILATION_PROGRESS: 'compilation:progress'
+  COMPILATION_PROGRESS: 'compilation:progress',
+  /** 工作区文件被移除且已被资料汇编引用：需用户确认是否删除该来源的卡片（2026-08-28） */
+  WORKSPACE_SOURCE_REMOVED: 'workspace:sourceRemoved'
 } as const
 
 // ============================================================
@@ -203,6 +211,10 @@ export interface SourceDeleteManyReq {
 export type SourceRenderHtmlReq = SourceGetReq
 export type SourceRenderHtmlRes = { html: string }
 export type SourceGetFileUrlRes = { url: string }
+/** 删除单个资料的结果：pendingCascade=true 表示该来源被资料汇编引用，已进入级联清理确认流程（来源尚未删除） */
+export type SourceDeleteRes = { pendingCascade: boolean }
+/** 批量删除资料的结果：pendingCascade=true 表示至少一个来源被资料汇编引用，已进入级联清理确认流程（这些来源尚未删除） */
+export type SourceDeleteManyRes = { pendingCascade: boolean }
 export interface SourceUpdateTitleReq {
   id: string
   title: string
@@ -272,8 +284,35 @@ export interface CompilationGenerateReq {
   title: string
 }
 export type CompilationGenerateRes = { compilation: Compilation }
-export type CompilationRegenerateReq = CompilationGenerateReq
-export type CompilationRegenerateRes = CompilationGenerateRes
+/** 资料汇编调整（2026-08-28，Phase 6.4.4）：首条消息生成汇编后续每条消息都是对汇编的调整（批量删除/增补/自定义编辑） */
+export interface CompilationAdjustReq {
+  taskId: string
+  compilationId: string
+  instruction: string
+}
+export interface CompilationAdjustRes {
+  compilation: Compilation
+  explain?: string
+  removedCards?: number
+  addedCards?: number
+  updatedCards?: number
+}
+/** 资料汇编卡片重新按时间排序（2026-08-28）：asc = 正序（旧→新），desc = 反序（新→旧） */
+export interface CompilationReorderReq {
+  compilationId: string
+  direction: 'asc' | 'desc'
+}
+export type CompilationReorderRes = { compilation: Compilation }
+/** 资料汇编操作撤销/恢复（2026-08-28）：undo/redo 返回最新汇编与各自可用步数 */
+export interface CompilationUndoReq {
+  compilationId: string
+}
+export interface CompilationUndoRes {
+  compilation: Compilation
+  undoAvailable: number
+  redoAvailable: number
+}
+export type CompilationUndoStateRes = { undoAvailable: number; redoAvailable: number }
 
 export interface CompilationUpdateItemReq {
   itemId: string
@@ -310,7 +349,7 @@ export type CompilationRecycleBinListRes = { items: CompilationRecycleBinItem[] 
 export interface CompilationRecycleBinRestoreReq {
   binId: string
 }
-export type CompilationRecycleBinRestoreRes = { contradiction?: CompilationContradiction; repair?: CompilationRepair; item?: CompilationItem }
+export type CompilationRecycleBinRestoreRes = { contradiction?: CompilationContradiction; repair?: CompilationRepair; item?: CompilationItem; card?: CompilationItem }
 
 /** 资料卡片二次加工（语义补全/修订）：对表意不明的卡片做扫描并生成 pending 修订 */
 export interface CompilationRepairScanReq {
@@ -326,6 +365,24 @@ export interface CompilationRepairDecideReq {
   action: 'accept' | 'reject'
 }
 export type CompilationRepairDecideRes = { item: CompilationItem; repair: CompilationRepair }
+
+/** 工作区来源移除待确认（2026-08-28）：文件被删除且已被资料汇编引用 */
+export interface WorkspaceSourceRemovalPending {
+  sourceId: string
+  title: string
+  cardCount: number
+  contradictionCount: number
+  repairCount: number
+  /** workspace = 检测到工作区文件被删除；manual = 用户在资料库中直接删除该资料 */
+  origin: 'workspace' | 'manual'
+}
+export type WorkspaceSourceRemovalListRes = { items: WorkspaceSourceRemovalPending[] }
+export interface WorkspaceSourceRemovalDecideReq {
+  sourceId: string
+  /** delete = 删除该来源在全部资料汇编中的卡片（含矛盾/二次改动，不入回收站）；keep = 仅删来源、保留卡片 */
+  action: 'delete' | 'keep'
+}
+export type WorkspaceSourceRemovalDecideRes = { deletedItems: number; deletedContradictions: number; deletedRepairs: number }
 
 export interface StyleGuideListRes { items: StyleGuide[] }
 
@@ -592,8 +649,8 @@ export interface IpcMapping {
   [IPC.SOURCES_GET]: { _req: SourceGetReq; _res: ApiResult<{ source: Source; tags: Tag[] }> }
   [IPC.SOURCES_RENDER_HTML]: { _req: SourceRenderHtmlReq; _res: ApiResult<SourceRenderHtmlRes> }
   [IPC.SOURCES_GET_FILE_URL]: { _req: SourceGetReq; _res: ApiResult<SourceGetFileUrlRes> }
-  [IPC.SOURCES_DELETE]: { _req: SourceGetReq; _res: ApiResult<void> }
-  [IPC.SOURCES_DELETE_MANY]: { _req: SourceDeleteManyReq; _res: ApiResult<void> }
+  [IPC.SOURCES_DELETE]: { _req: SourceGetReq; _res: ApiResult<SourceDeleteRes> }
+  [IPC.SOURCES_DELETE_MANY]: { _req: SourceDeleteManyReq; _res: ApiResult<SourceDeleteManyRes> }
   [IPC.SOURCES_UPDATE_TITLE]: { _req: SourceUpdateTitleReq; _res: ApiResult<Source> }
   [IPC.SOURCES_SUMMARIZE_ALL]: { _req: void; _res: ApiResult<SourceSummarizeAllRes> }
   [IPC.SOURCES_GET_SUMMARY]: { _req: SourceGetSummaryReq; _res: ApiResult<SourceGetSummaryRes> }
@@ -616,7 +673,11 @@ export interface IpcMapping {
   [IPC.COMPILATION_DELETE_ITEM]: { _req: CompilationDeleteItemReq; _res: ApiResult<void> }
   [IPC.COMPILATION_RESOLVE_CONTRADICTION]: { _req: CompilationResolveContradictionReq; _res: ApiResult<CompilationResolveContradictionRes> }
   [IPC.COMPILATION_CONFIRM]: { _req: CompilationConfirmReq; _res: ApiResult<CompilationConfirmRes> }
-  [IPC.COMPILATION_REGENERATE]: { _req: CompilationRegenerateReq; _res: ApiResult<CompilationRegenerateRes> }
+  [IPC.COMPILATION_ADJUST]: { _req: CompilationAdjustReq; _res: ApiResult<CompilationAdjustRes> }
+  [IPC.COMPILATION_REORDER]: { _req: CompilationReorderReq; _res: ApiResult<CompilationReorderRes> }
+  [IPC.COMPILATION_UNDO]: { _req: CompilationUndoReq; _res: ApiResult<CompilationUndoRes> }
+  [IPC.COMPILATION_REDO]: { _req: CompilationUndoReq; _res: ApiResult<CompilationUndoRes> }
+  [IPC.COMPILATION_UNDO_STATE]: { _req: CompilationUndoReq; _res: ApiResult<CompilationUndoStateRes> }
   [IPC.COMPILATION_RECYCLE_BIN_LIST]: { _req: CompilationRecycleBinListReq; _res: ApiResult<CompilationRecycleBinListRes> }
   [IPC.COMPILATION_RECYCLE_BIN_RESTORE]: { _req: CompilationRecycleBinRestoreReq; _res: ApiResult<CompilationRecycleBinRestoreRes> }
   [IPC.COMPILATION_REPAIR_SCAN]: { _req: CompilationRepairScanReq; _res: ApiResult<CompilationRepairScanRes> }
@@ -661,4 +722,6 @@ export interface IpcMapping {
   [IPC.WORKSPACE_STATUS]: { _req: void; _res: ApiResult<WorkspaceStatusRes> }
   [IPC.WORKSPACE_MIGRATE]: { _req: void; _res: ApiResult<WorkspaceMigrateRes> }
   [IPC.WORKSPACE_NAV_SYNC]: { _req: void; _res: ApiResult<void> }
+  [IPC.WORKSPACE_SOURCE_REMOVAL_LIST]: { _req: void; _res: ApiResult<WorkspaceSourceRemovalListRes> }
+  [IPC.WORKSPACE_SOURCE_REMOVAL_DECIDE]: { _req: WorkspaceSourceRemovalDecideReq; _res: ApiResult<WorkspaceSourceRemovalDecideRes> }
 }

@@ -34,16 +34,23 @@ export interface AppApi {
   listCompilations(taskId: string): Promise<{ ok: boolean; data?: { compilations: unknown[] }; error?: { code: string; message: string } }>
   getCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
   generateCompilation(taskId: string, title: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
-  regenerateCompilation(taskId: string, title: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
+  adjustCompilation(taskId: string, compilationId: string, instruction: string): Promise<{ ok: boolean; data?: { compilation: unknown; explain?: string; removedCards?: number; addedCards?: number; updatedCards?: number }; error?: { code: string; message: string } }>
+  reorderCompilation(compilationId: string, direction: 'asc' | 'desc'): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
+  undoCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown; undoAvailable: number; redoAvailable: number }; error?: { code: string; message: string } }>
+  redoCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown; undoAvailable: number; redoAvailable: number }; error?: { code: string; message: string } }>
+  getCompilationUndoState(compilationId: string): Promise<{ ok: boolean; data?: { undoAvailable: number; redoAvailable: number }; error?: { code: string; message: string } }>
   updateCompilationItem(itemId: string, patch: { excerpt?: string; ts?: string | null; note?: string | null; extraTags?: string[]; kept?: boolean }): Promise<{ ok: boolean; data?: { item: unknown }; error?: { code: string; message: string } }>
   deleteCompilationItem(itemId: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   resolveCompilationContradiction(contradictionId: string, action: 'resolve' | 'ignore', chosenItemId?: string): Promise<{ ok: boolean; data?: { contradiction: unknown }; error?: { code: string; message: string } }>
   confirmCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
   listCompilationRecycleBin(compilationId: string): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
-  restoreCompilationRecycleBin(binId: string): Promise<{ ok: boolean; data?: { contradiction?: unknown; repair?: unknown; item?: unknown }; error?: { code: string; message: string } }>
+  restoreCompilationRecycleBin(binId: string): Promise<{ ok: boolean; data?: { contradiction?: unknown; repair?: unknown; item?: unknown; card?: unknown }; error?: { code: string; message: string } }>
   scanCompilationRepairs(compilationId: string): Promise<{ ok: boolean; data?: { repairs: unknown[] }; error?: { code: string; message: string } }>
   listCompilationRepairs(compilationId: string): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   decideCompilationRepair(repairId: string, action: 'accept' | 'reject'): Promise<{ ok: boolean; data?: { item: unknown; repair: unknown }; error?: { code: string; message: string } }>
+  listSourceRemovals(): Promise<{ ok: boolean; data?: { items: { sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' }[] }; error?: { code: string; message: string } }>
+  decideSourceRemoval(sourceId: string, action: 'delete' | 'keep'): Promise<{ ok: boolean; data?: { deletedItems: number; deletedContradictions: number; deletedRepairs: number }; error?: { code: string; message: string } }>
+  onSourceRemoved(cb: (p: { sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' }) => void): () => void
   listStyleGuides(): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   saveStyleGuide(input: { id?: string; name: string; content: string }): Promise<{ ok: boolean; data?: { styleGuide: unknown }; error?: { code: string; message: string } }>
   setDefaultStyleGuide(id: string): Promise<{ ok: boolean; data?: { styleGuide: unknown }; error?: { code: string; message: string } }>
@@ -51,8 +58,8 @@ export interface AppApi {
   getSource(id: string): Promise<{ ok: boolean; data?: { source: unknown; tags: unknown[] }; error?: { code: string; message: string } }>
   renderSourceHtml(id: string): Promise<{ ok: boolean; data?: { html: string }; error?: { code: string; message: string } }>
   getSourceFileUrl(id: string): Promise<{ ok: boolean; data?: { url: string }; error?: { code: string; message: string } }>
-  deleteSource(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
-  deleteSources(ids: string[]): Promise<{ ok: boolean; error?: { code: string; message: string } }>
+  deleteSource(id: string): Promise<{ ok: boolean; data?: { pendingCascade: boolean }; error?: { code: string; message: string } }>
+  deleteSources(ids: string[]): Promise<{ ok: boolean; data?: { pendingCascade: boolean }; error?: { code: string; message: string } }>
   updateSourceTitle(id: string, title: string): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   summarizeAll(): Promise<{ ok: boolean; data?: { processed: number; ok: number; failed: number }; error?: { code: string; message: string } }>
   getSourceSummary(id: string): Promise<{ ok: boolean; data?: { summary?: unknown }; error?: { code: string; message: string } }>

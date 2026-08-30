@@ -64,13 +64,17 @@ interface Props {
   compilation: CompilationView | null
   busy: boolean
   candidateChunks?: number
-  onRegenerate: () => void
   onConfirm: () => void
   onOpenSource: (sourceId: string) => void
   onUpdateItem: (itemId: string, patch: { excerpt?: string; ts?: string | null; note?: string | null }) => void
   onDeleteItem: (itemId: string) => void
   onResolve: (contradictionId: string, action: 'resolve' | 'ignore', chosenItemId?: string) => void
   onDecideRepair: (repairId: string, action: 'accept' | 'reject') => void
+  onReorderItems: (direction: 'asc' | 'desc') => void
+  onUndo: () => void
+  onRedo: () => void
+  undoAvailable: number
+  redoAvailable: number
 }
 
 const cls = (...parts: Array<string | false | null | undefined>): string => parts.filter(Boolean).join(' ')
@@ -80,16 +84,21 @@ function CompilationStep({
   compilation,
   busy,
   candidateChunks,
-  onRegenerate,
   onConfirm,
   onOpenSource,
   onUpdateItem,
   onDeleteItem,
   onResolve,
-  onDecideRepair
+  onDecideRepair,
+  onReorderItems,
+  onUndo,
+  onRedo,
+  undoAvailable,
+  redoAvailable
 }: Props) {
   const t = zhCN.compilation
   const [editing, setEditing] = useState<CompilationItemView | null>(null)
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
   const [excerpt, setExcerpt] = useState('')
   const [ts, setTs] = useState('')
   /** 当前展开“…”菜单的卡片 id（一次只展开一张） */
@@ -138,8 +147,38 @@ function CompilationStep({
           {pending.length ? t.pendingContradictions.replace('{count}', String(pending.length)) : t.noContradictions}
         </span>
         <div className="compilation-actions">
-          <button type="button" className="source-list__btn" onClick={onRegenerate} disabled={busy}>
-            {t.regenerateBtn}
+          <button
+            type="button"
+            className="compilation-round-btn"
+            disabled={busy || undoAvailable <= 0}
+            title={t.undo}
+            aria-label={t.undo}
+            onClick={onUndo}
+          >
+            &#8630;
+          </button>
+          <button
+            type="button"
+            className="compilation-round-btn"
+            disabled={busy || redoAvailable <= 0}
+            title={t.redo}
+            aria-label={t.redo}
+            onClick={onRedo}
+          >
+            &#8631;
+          </button>
+          <button
+            type="button"
+            className="compilation-round-btn"
+            disabled={busy}
+            title={sortOrder === 'asc' ? t.sortAsc : t.sortDesc}
+            aria-label={sortOrder === 'asc' ? t.sortAsc : t.sortDesc}
+            onClick={() => {
+              onReorderItems(sortOrder)
+              setSortOrder((cur) => (cur === 'asc' ? 'desc' : 'asc'))
+            }}
+          >
+            {sortOrder === 'asc' ? '↑' : '↓'}
           </button>
           <button
             type="button"

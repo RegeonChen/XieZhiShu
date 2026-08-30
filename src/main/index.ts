@@ -44,8 +44,13 @@ import {
   type CompilationResolveContradictionRes,
   type CompilationConfirmReq,
   type CompilationConfirmRes,
-  type CompilationRegenerateReq,
-  type CompilationRegenerateRes,
+  type CompilationAdjustReq,
+  type CompilationAdjustRes,
+  type CompilationReorderReq,
+  type CompilationReorderRes,
+  type CompilationUndoReq,
+  type CompilationUndoRes,
+  type CompilationUndoStateRes,
   type CompilationRecycleBinListReq,
   type CompilationRecycleBinListRes,
   type CompilationRecycleBinRestoreReq,
@@ -55,7 +60,12 @@ import {
   type CompilationRepairsListReq,
   type CompilationRepairsListRes,
   type CompilationRepairDecideReq,
-  type CompilationRepairDecideRes
+  type CompilationRepairDecideRes,
+  type WorkspaceSourceRemovalListRes,
+  type WorkspaceSourceRemovalDecideReq,
+  type WorkspaceSourceRemovalDecideRes,
+  type SourceDeleteRes,
+  type SourceDeleteManyRes
 } from '../shared/ipc'
 import type { ApiResult, Source, Tag, LlmProviderConfig, AppSettings, WritingTask, Draft, RetrievedChunk } from '../shared/types'
 import { getDb } from './db/connection'
@@ -80,7 +90,9 @@ import {
   updateCompilationContradictionStatus,
   confirmCompilation,
   listRecycleBinByCompilation,
-  restoreRecycleBinContradiction
+  restoreRecycleBinContradiction,
+  reorderCompilationItemsByTs,
+  restoreCompilationCardRecycleBin
 } from './db/compilations'
 import { decideRepair, listRepairsByCompilation, restoreRepairRecycleBin } from './db/compilation-repairs'
 import {
@@ -92,7 +104,19 @@ import {
 } from './db/style-guides'
 import { ensureDemoTask } from './db/demo-task'
 import { generateCompilation } from './writing/compilation-service'
+import { adjustCompilation } from './writing/compilation-adjust'
 import { scanCompilationRepairs } from './writing/repair-service'
+import {
+  pushUndo,
+  undoCompilation,
+  redoCompilation,
+  getUndoCount,
+  getRedoCount,
+  compilationIdOfItem,
+  compilationIdOfContradiction,
+  compilationIdOfRepair,
+  compilationIdOfBin
+} from './writing/compilation-undo'
 import { listTaskMessages, addTaskMessage } from './db/task-messages'
 import { generateDraft, regenerateDraft, retrieveForTask, chatWithTask } from './writing/generate'
 import { applyContradictionEdit } from './writing/contradiction-apply'
@@ -103,6 +127,7 @@ import { summarizeAllPending, getSourceSummary } from './rag/summarizer'
 import { getWorkspaceDir, type ReconcileProgress } from './workspace/reconcile'
 import { startWorkspaceWatcher, restartWorkspaceWatcher, stopWorkspaceWatcher } from './workspace/watcher'
 import { requestWorkspaceSync, runWorkspaceSync, startAutoSyncTimer, stopAutoSyncTimer } from './workspace/auto-sync'
+import { setSourceRemovalNotify, listPendingSourceRemovals, decideSourceRemoval, registerSourceRemoval, isSourceUsedInCompilation } from './workspace/source-removal'
 import { trashSourceFile, renameSourceFile, resolveSourceFilePath } from './workspace/sync'
 import { migrateLegacyToWorkspace } from './workspace/migrate'
 import { loadWindowState, trackWindowState } from './window-state'
@@ -494,6 +519,8 @@ handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerate
 
 handleLogged(IPC.COMPILATION_UPDATE_ITEM, (_event, params: CompilationUpdateItemReq): ApiResult<CompilationUpdateItemRes> => {
   try {
+    const undoCid = compilationIdOfItem(params.itemId)
+    if (undoCid) pushUndo(undoCid)
     const item = updateCompilationItem(params.itemId, {
       excerpt: params.excerpt,
       ts: params.ts,
@@ -510,6 +537,8 @@ handleLogged(IPC.COMPILATION_UPDATE_ITEM, (_event, params: CompilationUpdateItem
 
 handleLogged(IPC.COMPILATION_DELETE_ITEM, (_event, params: CompilationDeleteItemReq): ApiResult<void> => {
   try {
+    const undoCid = compilationIdOfItem(params.itemId)
+    if (undoCid) pushUndo(undoCid)
     deleteCompilationItem(params.itemId)
     return { ok: true, data: undefined }
   } catch (err) {
@@ -522,6 +551,8 @@ handleLogged(
   (_event, params: CompilationResolveContradictionReq): ApiResult<CompilationResolveContradictionRes> => {
     try {
       const status = params.action === 'resolve' ? 'resolved' : 'ignored'
+      const undoCid = compilationIdOfContradiction(params.contradictionId)
+      if (undoCid) pushUndo(undoCid)
       const contradiction = updateCompilationContradictionStatus(params.contradictionId, status, params.chosenItemId)
       if (!contradiction) {
         return { ok: false, error: { code: 'INVALID_PARAM', message: '矛盾不存在，或保留的卡片不属于该矛盾' } }
@@ -535,6 +566,7 @@ handleLogged(
 
 handleLogged(IPC.COMPILATION_CONFIRM, (_event, params: CompilationConfirmReq): ApiResult<CompilationConfirmRes> => {
   try {
+    pushUndo(params.compilationId)
     const compilation = confirmCompilation(params.compilationId)
     if (!compilation) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料汇编不存在' } }
     return { ok: true, data: { compilation } }
@@ -543,23 +575,78 @@ handleLogged(IPC.COMPILATION_CONFIRM, (_event, params: CompilationConfirmReq): A
   }
 })
 
-handleLogged(IPC.COMPILATION_REGENERATE, async (event, params: CompilationRegenerateReq): Promise<ApiResult<CompilationRegenerateRes>> => {
-  // 持久化用户撰写要求（供对话历史 / 重新生成汇编使用）
-  const inst = params.title.trim()
-  if (inst) {
-    updateTaskInstruction(params.taskId, inst)
-    addTaskMessage(params.taskId, 'user', inst, 'instruction')
-  }
-  const onProgress = (p: { stage: string; percent: number; etaSeconds?: number; candidateChunks?: number; candidateSources?: number }): void => {
-    if (!event.sender.isDestroyed()) {
-      event.sender.send(IPC_EVENTS.COMPILATION_PROGRESS, { taskId: params.taskId, ...p })
+handleLogged(IPC.COMPILATION_ADJUST, async (_event, params: CompilationAdjustReq): Promise<ApiResult<CompilationAdjustRes>> => {
+  try {
+    pushUndo(params.compilationId)
+    // 用户对资料汇编的调整消息持久化到对话历史
+    const inst = params.instruction.trim()
+    if (inst) addTaskMessage(params.taskId, 'user', inst, 'chat')
+    const res = await adjustCompilation(params.compilationId, inst)
+    if (!res.ok) return { ok: false, error: res.error }
+    return {
+      ok: true,
+      data: {
+        compilation: res.compilation,
+        explain: res.explain,
+        removedCards: res.removedCards,
+        addedCards: res.addedCards,
+        updatedCards: res.updatedCards
+      }
     }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
-  const res = await generateCompilation(params.taskId, params.title, onProgress)
-  if (!res.ok) return { ok: false, error: res.error }
-  const compilation = getCompilationById(res.compilationId)
-  if (!compilation) return { ok: false, error: { code: 'INTERNAL_ERROR', message: '资料汇编落库失败' } }
-  return { ok: true, data: { compilation } }
+})
+
+// 资料汇编卡片重新按时间排序（2026-08-28）：asc 正序 / desc 反序，重写 position 并返回最新汇编
+handleLogged(IPC.COMPILATION_REORDER, (_event, params: CompilationReorderReq): ApiResult<CompilationReorderRes> => {
+  try {
+    if (!params.compilationId || (params.direction !== 'asc' && params.direction !== 'desc')) {
+      return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
+    }
+    pushUndo(params.compilationId)
+    reorderCompilationItemsByTs(params.compilationId, params.direction)
+    const compilation = getCompilationById(params.compilationId)
+    if (!compilation) return { ok: false, error: { code: 'COMPILATION_NOT_FOUND', message: '资料汇编不存在' } }
+    return { ok: true, data: { compilation } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 资料汇编操作撤销/恢复（2026-08-28）
+handleLogged(IPC.COMPILATION_UNDO, (_event, params: CompilationUndoReq): ApiResult<CompilationUndoRes> => {
+  try {
+    if (!params.compilationId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
+    const restored = undoCompilation(params.compilationId)
+    if (!restored) return { ok: false, error: { code: 'NO_HISTORY', message: '没有可撤销的操作' } }
+    const compilation = getCompilationById(params.compilationId)
+    if (!compilation) return { ok: false, error: { code: 'COMPILATION_NOT_FOUND', message: '资料汇编不存在' } }
+    return { ok: true, data: { compilation, undoAvailable: getUndoCount(params.compilationId), redoAvailable: getRedoCount(params.compilationId) } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.COMPILATION_REDO, (_event, params: CompilationUndoReq): ApiResult<CompilationUndoRes> => {
+  try {
+    if (!params.compilationId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
+    const restored = redoCompilation(params.compilationId)
+    if (!restored) return { ok: false, error: { code: 'NO_HISTORY', message: '没有可恢复的操作' } }
+    const compilation = getCompilationById(params.compilationId)
+    if (!compilation) return { ok: false, error: { code: 'COMPILATION_NOT_FOUND', message: '资料汇编不存在' } }
+    return { ok: true, data: { compilation, undoAvailable: getUndoCount(params.compilationId), redoAvailable: getRedoCount(params.compilationId) } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.COMPILATION_UNDO_STATE, (_event, params: CompilationUndoReq): ApiResult<CompilationUndoStateRes> => {
+  try {
+    return { ok: true, data: { undoAvailable: getUndoCount(params.compilationId), redoAvailable: getRedoCount(params.compilationId) } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
 })
 
 handleLogged(IPC.COMPILATION_RECYCLE_BIN_LIST, (_event, params: CompilationRecycleBinListReq): ApiResult<CompilationRecycleBinListRes> => {
@@ -572,6 +659,8 @@ handleLogged(IPC.COMPILATION_RECYCLE_BIN_LIST, (_event, params: CompilationRecyc
 
 handleLogged(IPC.COMPILATION_RECYCLE_BIN_RESTORE, (_event, params: CompilationRecycleBinRestoreReq): ApiResult<CompilationRecycleBinRestoreRes> => {
   try {
+    const undoCid = compilationIdOfBin(params.binId)
+    if (undoCid) pushUndo(undoCid)
     const contradiction = restoreRecycleBinContradiction(params.binId)
     if (contradiction) return { ok: true, data: { contradiction } }
     const repair = restoreRepairRecycleBin(params.binId)
@@ -580,6 +669,8 @@ handleLogged(IPC.COMPILATION_RECYCLE_BIN_RESTORE, (_event, params: CompilationRe
       const item = compilation?.items.find((i) => i.id === repair.itemId)
       return { ok: true, data: { repair, item } }
     }
+    const card = restoreCompilationCardRecycleBin(params.binId)
+    if (card) return { ok: true, data: { card } }
     return { ok: false, error: { code: 'INVALID_PARAM', message: '回收站条目不存在' } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
@@ -588,6 +679,7 @@ handleLogged(IPC.COMPILATION_RECYCLE_BIN_RESTORE, (_event, params: CompilationRe
 
 // 资料卡片二次加工（语义补全/修订，Phase 6.4.3）
 handleLogged(IPC.COMPILATION_REPAIR_SCAN, (_event, params: CompilationRepairScanReq): Promise<ApiResult<CompilationRepairScanRes>> => {
+  pushUndo(params.compilationId)
   return scanCompilationRepairs(params.compilationId).then((res) =>
     res.ok ? { ok: true, data: { repairs: res.repairs } } : { ok: false, error: res.error }
   )
@@ -603,6 +695,8 @@ handleLogged(IPC.COMPILATION_REPAIRS_LIST, (_event, params: CompilationRepairsLi
 
 handleLogged(IPC.COMPILATION_REPAIR_DECIDE, (_event, params: CompilationRepairDecideReq): ApiResult<CompilationRepairDecideRes> => {
   try {
+    const undoCid = compilationIdOfRepair(params.repairId)
+    if (undoCid) pushUndo(undoCid)
     const res = decideRepair(params.repairId, params.action)
     if (!res) return { ok: false, error: { code: 'INVALID_PARAM', message: '语义补全/修订不存在' } }
     return { ok: true, data: { item: res.item, repair: res.repair } }
@@ -744,32 +838,57 @@ handleLogged(IPC.SOURCES_GET_FILE_URL, (_event, params: { id: string }): ApiResu
 })
 
 // 删除单个资料（Phase 2.2：工作区文件先移入回收站，再删库）
-handleLogged(IPC.SOURCES_DELETE, async (_event, params: { id: string }): Promise<ApiResult<void>> => {
+// 若该资料已被资料汇编引用，先移入回收站并登记级联清理待确认（pendingCascade=true），不立即删库；
+// 渲染层确认后由 decideSourceRemoval 删除来源（+可选卡片），并刷新资料库。
+handleLogged(IPC.SOURCES_DELETE, async (_event, params: { id: string }): Promise<ApiResult<SourceDeleteRes>> => {
   try {
     const source = getSourceById(params.id)
     if (!source) return { ok: false, error: { code: 'SOURCE_NOT_FOUND', message: '资料不存在' } }
+    const usedInCompilation = isSourceUsedInCompilation(params.id)
+    if (usedInCompilation) {
+      // 先登记待确认，再移入回收站：这样随后由「回收站触发的工作区对账」看到已 pending 而跳过，
+      // 避免对账再次登记同一来源导致重复弹确认框。
+      registerSourceRemoval(params.id, source.title, 'manual')
+      if (source.workspace) {
+        await trashSourceFile(source) // 移入系统回收站；失败会抛错中止，保持库/文件一致
+      }
+      return { ok: true, data: { pendingCascade: true } }
+    }
     if (source.workspace) {
       await trashSourceFile(source) // 移入系统回收站；失败会抛错中止，保持库/文件一致
     }
     deleteSource(params.id)
-    return { ok: true, data: undefined }
+    return { ok: true, data: { pendingCascade: false } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
 })
 
-// 批量删除资料（Phase 2.2：逐个先移入回收站，再统一删库）
-handleLogged(IPC.SOURCES_DELETE_MANY, async (_event, params: { ids: string[] }): Promise<ApiResult<void>> => {
+// 批量删除资料（Phase 2.2：逐个先移入回收站，再统一删库；被汇编引用的来源进入级联清理确认流程）
+// 被汇编引用的来源：先移入回收站并登记待确认（pendingCascade=true，暂不删库），渲染层经确认后由 decideSourceRemoval 删除；
+// 未被引用的来源：立即删除。批量删除可能多个来源先后弹确认框（逐个处理）。
+handleLogged(IPC.SOURCES_DELETE_MANY, async (_event, params: { ids: string[] }): Promise<ApiResult<SourceDeleteManyRes>> => {
   try {
     if (!Array.isArray(params.ids) || params.ids.length === 0) {
       return { ok: false, error: { code: 'INVALID_PARAM', message: '未指定要删除的资料' } }
     }
+    const toDeleteNow: string[] = []
+    let pendingCascade = false
     for (const id of params.ids) {
       const source = getSourceById(id)
-      if (source?.workspace) await trashSourceFile(source)
+      if (!source) continue
+      if (isSourceUsedInCompilation(id)) {
+        // 先登记待确认，再移入回收站，避免对账重复登记
+        registerSourceRemoval(id, source.title, 'manual')
+        pendingCascade = true
+        if (source.workspace) await trashSourceFile(source)
+      } else {
+        if (source.workspace) await trashSourceFile(source)
+        toDeleteNow.push(id)
+      }
     }
-    deleteSources(params.ids)
-    return { ok: true, data: undefined }
+    if (toDeleteNow.length > 0) deleteSources(toDeleteNow)
+    return { ok: true, data: { pendingCascade } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
@@ -947,6 +1066,22 @@ function pushWorkspaceProgress(p: ReconcileProgress): void {
 handleLogged(IPC.WORKSPACE_NAV_SYNC, (): ApiResult<void> => {
   requestWorkspaceSync(pushWorkspaceProgress)
   return { ok: true, data: undefined }
+})
+
+// 工作区来源移除（2026-08-28）：文件被删除且已被资料汇编引用时，登记 pending 并让渲染层确认是否清理卡片
+handleLogged(IPC.WORKSPACE_SOURCE_REMOVAL_LIST, (): ApiResult<WorkspaceSourceRemovalListRes> => {
+  try {
+    return { ok: true, data: { items: listPendingSourceRemovals() } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+handleLogged(IPC.WORKSPACE_SOURCE_REMOVAL_DECIDE, (_event, params: WorkspaceSourceRemovalDecideReq): ApiResult<WorkspaceSourceRemovalDecideRes> => {
+  try {
+    return { ok: true, data: decideSourceRemoval(params.sourceId, params.action) }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
 })
 
 // 一次性迁移存量导入资料到工作区（Task 2.2.3）
@@ -1257,6 +1392,13 @@ app.whenReady().then(() => {
   // <安装目录>/resources/models，需改用 process.resourcesPath 定位（app.getAppPath 打包后指向 app.asar）。
   configureEmbedModel({
     modelPath: app.isPackaged ? join(process.resourcesPath, 'models') : join(app.getAppPath(), 'resources', 'models')
+  })
+
+  // 工作区来源移除：登记新 pending 时向所有渲染窗口推送事件（渲染层弹确认框）
+  setSourceRemovalNotify((item) => {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) w.webContents.send(IPC_EVENTS.WORKSPACE_SOURCE_REMOVED, item)
+    }
   })
 
   // 启动内嵌文件服务（提供 PDF/图片等本地文件）
