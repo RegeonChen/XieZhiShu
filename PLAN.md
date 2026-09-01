@@ -221,6 +221,14 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 - **6.6**：编辑器观感达到选定样板；Markdown 存储/防抖保存/撤销重做正常；typecheck/构建通过。
 - **6.7**：文档与代码一致；三项验证通过；端到端闭环可用；发布产物可安装。
 
+## Phase 6.x 网页资料库后续优化（D8/E10/E11 已完成 2026-09-01）
+
+在已完成 **A1（sitemap 优先发现）/ A3（URL 规范化去重）/ B4（条件请求）/ C6（robots + 礼貌限速）/ A2（RSS/Atom 订阅源）** 的基础上继续：
+
+- **D8 成熟正文提取器 + 降级** ✅：新增 extractArticleText(html)——优先 article/main/正文容器，保留表格（单元格→制表符、行→换行）、去 script/style/nav/footer/aside；抓取正文用它做 cleanedText，过短自动回退浏览器净化的 stripHtml（诊断日志标注提取器=extractArticleText/stripHtml）。单篇失败保留标题+链接并跳过，不阻塞整站。
+- **E10 发布时间排序** ✅：新增 extractPublishedDate(html) 解析 meta（published_time/publishdate/pubdate/date）、<time datetime>、可见日期文本；抓取后写 web_site_articles.published_at（Migration 025），文章清单按 COALESCE(published_at, discovered_at) DESC 排序，与资料汇编时间排序一致。
+- **E11 领域词表自动化** ✅：落地「用户按站点配置关键词」分支——parseSiteKeywords 解析逗号/顿号/空格分隔，filterArticlesByQuery 把站点关键词并入该站点召回词（fetchRelatedSiteSources）；web_sites.keywords（Migration 025）+ IPC webSource:updateKeywords + preload + WebSourcePanel 关键词输入/保存。「已抓文章标题词频/聚类自动扩充」进阶方案留作后续可选。
+
 ## Phase 5: Acceptance & Packaging（待进行）
 
 **Overall Goal:** 产出 Windows 安装包、完成端到端演示与项目文档。

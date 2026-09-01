@@ -10,13 +10,17 @@
  */
 import type { Source } from '../../shared/types'
 import { fetchUrl } from '../import/url-fetcher'
+import { logMain } from '../logger'
 import { bigrams } from '../rag/retrieval'
-import { getSourceByUrl, insertSource } from '../db/sources'
+import { getSourceByUrl, getAnySourceByUrl, insertSource } from '../db/sources'
 import {
   getWebSiteById,
+  getSiteArticle,
   listSiteArticles,
   listWebSites,
   updateWebSiteLastSynced,
+  updateSiteArticleFetched,
+  updateSiteArticlePublished,
   upsertSiteArticles
 } from '../db/web-sites'
 
@@ -31,6 +35,49 @@ const SYNC_MAX_DEPTH = 2
 const IMPORT_DELAY_MS = 120
 
 /** 简单 HTML → 纯文本（标签/实体/空白清理，供提取链接文本） */
+/** 成熟正文提取（D8）：优先取 article/main/内容容器，去导航/页脚/广告噪音，并保留表格单元格（如志书数据表）。纯函数、可测试。 */
+export function extractArticleText(html: string): string {
+  let doc = html
+  const article = /<article[^>]*>([\s\S]*?)<\/article>/i.exec(html)
+  const main = /<main[^>]*>([\s\S]*?)<\/main>/i.exec(html)
+  if (article) {
+    doc = article[1]
+  } else if (main) {
+    doc = main[1]
+  } else {
+    const content = /<(?:div|section)[^>]*class=["'][^"']*(?:content|article|news|detail|body|text)[^"']*["'][^>]*>([\s\S]*?)<\/(?:div|section)>/i.exec(html)
+    if (content) doc = content[1]
+  }
+  // 表格保留：单元格→制表符，行→换行
+  doc = doc.replace(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi, (_, c: string) => c.trim() + '\t')
+  doc = doc.replace(/<tr[^>]*>/gi, '\n').replace(/<\/tr>/gi, '\n')
+  doc = doc.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+  doc = doc.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+  doc = doc.replace(/<(?:nav|footer|aside)\b[^>]*>[\s\S]*?<\/(?:nav|footer|aside)>/gi, '')
+  doc = doc.replace(/<[^>]+>/g, ' ')
+  doc = doc
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)))
+    .replace(/[ \t]+/g, ' ').replace(/[ \t]*\n[ \t]*/g, '\n').replace(/\n{3,}/g, '\n\n')
+  return doc.trim()
+}
+
+/** 从 HTML 提取发布日期（E10）：meta property/name 的 published_time/publishdate/pubdate，或 <time datetime>，或可见日期文本。纯函数、可测试。 */
+export function extractPublishedDate(html: string): string | null {
+  const metas = [
+    /<meta[^>]+(?:property|name)=["'](?:article:published_time|publishdate|pubdate|date)["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:article:published_time|publishdate|pubdate|date)["']/i
+  ]
+  for (const re of metas) {
+    const m = re.exec(html)
+    if (m && m[1]) return m[1].trim().slice(0, 20) || null
+  }
+  const time = /<time[^>]*datetime=["']([^"']+)["']/i.exec(html)
+  if (time && time[1]) return time[1].trim().slice(0, 20)
+  const text = /(20\d{2}\s*[年./-]\s*(?:0?[1-9]|1[0-2])\s*[月./-]\s*(?:0?[1-9]|[12]\d|3[01])日?)/.exec(html)
+  return text ? text[1].trim() : null
+}
+
 export function stripTags(html: string): string {
   return html
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
@@ -168,9 +215,216 @@ export function matchesExact(text: string, terms: string[]): boolean {
   return terms.some((t) => t && corpus.includes(t))
 }
 
-/** 文章 URL 去重键（纯函数、可测试）：去掉协议与尾部斜杠，使 http/https 同文归并为同一篇 */
+/** 常见跟踪参数（URL 规范化时移除，避免同一文章多入口重复抓取/入库） */
+const TRACKING_QUERY_KEYS = new Set([
+  'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'spm', 'from', 'ref', 'share', 'source', 'redirect'
+])
+
+/**
+ * URL 规范化（纯函数、可测试）：小写主机、去默认端口、去 fragment、去跟踪参数、去尾部斜杠。
+ * 用于文章去重（A3），使 `?utm_*`、`http/https`、尾斜杠等差异归并为同一篇。
+ */
+export function normalizeArticleUrl(raw: string, baseUrl?: string): string {
+  let u: URL
+  try { u = new URL(raw, baseUrl) } catch { return raw }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return raw
+  u.host = u.host.toLowerCase()
+  if ((u.protocol === 'http:' && u.port === '80') || (u.protocol === 'https:' && u.port === '443')) u.port = ''
+  u.hash = ''
+  const keep = new URLSearchParams()
+  for (const [k, v] of u.searchParams.entries()) {
+    if (!TRACKING_QUERY_KEYS.has(k.toLowerCase())) keep.append(k, v)
+  }
+  u.search = keep.toString()
+  u.pathname = u.pathname.replace(/\/+$/, '')
+  return u.toString()
+}
+
+/** 文章 URL 去重键（纯函数、可测试）：基于规范化 URL，去掉协议与尾部斜杠，使 http/https/跟踪参数/尾斜杠归并为同一篇 */
 export function dedupeArticleKey(url: string): string {
-  return url.replace(/^https?:\/\//i, '').replace(/\/+$/, '')
+  const n = normalizeArticleUrl(url)
+  const i = n.indexOf('://')
+  return i >= 0 ? n.slice(i + 3) : n
+}
+
+/** 解析 sitemap（xml）为 { url, lastmod? } 列表（纯函数、可测试）：兼容 sitemap index（子 sitemap）与 urlset。 */
+export function parseSiteMap(html: string, baseUrl: string): { url: string; lastmod?: string }[] {
+  const out: { url: string; lastmod?: string }[] = []
+  const locs = [...html.matchAll(/<loc>([^<]+)/gi)].map((m) => m[1].trim())
+  const lastmodByLoc = new Map<string, string>()
+  const blockRe = /<url>([\s\S]*?)<\/url>/gi
+  let b: RegExpExecArray | null
+  while ((b = blockRe.exec(html)) !== null) {
+    const loc = /<loc>([^<]+)/i.exec(b[1])?.[1]?.trim()
+    const lm = /<lastmod>([^<]+)/i.exec(b[1])?.[1]?.trim()
+    if (loc) lastmodByLoc.set(loc, lm ?? '')
+  }
+  for (const loc of locs) {
+    let abs: string
+    try { abs = new URL(loc, baseUrl).toString() } catch { continue }
+    out.push({ url: abs, lastmod: lastmodByLoc.get(loc) || undefined })
+  }
+  return out
+}
+
+
+/** 解析 RSS/Atom 订阅源为 { url, title, lastmod? } 列表（纯函数、可测试）：支持 RSS2 `<item>` 与 Atom `<entry>` */
+export function parseFeed(xml: string, baseUrl: string): { url: string; title: string; lastmod?: string }[] {
+  const out: { url: string; title: string; lastmod?: string }[] = []
+  const itemRe = /<item>([\s\S]*?)<\/item>/gi
+  let m: RegExpExecArray | null
+  while ((m = itemRe.exec(xml)) !== null) {
+    const b = m[1]
+    const loc = /<link>([^<]+)<\/link>/i.exec(b)?.[1]?.trim()
+    if (!loc) continue
+    let abs: string
+    try { abs = new URL(loc, baseUrl).toString() } catch { continue }
+    const title = /<title>([^<]+)<\/title>/i.exec(b)?.[1]?.trim() ?? ''
+    const pub = /<pubDate>([^<]+)<\/pubDate>/i.exec(b)?.[1]?.trim()
+    out.push({ url: abs, title, lastmod: pub || undefined })
+  }
+  const entryRe = /<entry>([\s\S]*?)<\/entry>/gi
+  while ((m = entryRe.exec(xml)) !== null) {
+    const b = m[1]
+    const loc = /<link[^>]*href="([^"]+)"/i.exec(b)?.[1]?.trim()
+    if (!loc) continue
+    let abs: string
+    try { abs = new URL(loc, baseUrl).toString() } catch { continue }
+    const title = /<title[^>]*>([^<]+)<\/title>/i.exec(b)?.[1]?.trim() ?? ''
+    const upd = /<updated>([^<]+)<\/updated>/i.exec(b)?.[1]?.trim()
+    out.push({ url: abs, title, lastmod: upd || undefined })
+  }
+  return out
+}
+
+/** 从站点首页 HTML 检测 RSS/Atom 订阅源链接（纯函数、可测试）：`<link rel=alternate type=application/rss|atom+xml href=...>` */
+export function detectFeedUrls(html: string, baseUrl: string): string[] {
+  const out = new Set<string>()
+  const re = /<link\b[^>]*type=["']application\/(rss|atom)\+xml["'][^>]*href=["']([^"']+)["']/gi
+  let m: RegExpExecArray | null
+  while ((m = re.exec(html)) !== null) {
+    try { out.add(new URL(m[2], baseUrl).toString()) } catch { /* ignore */ }
+  }
+  return [...out]
+}
+
+/** 尝试抓取并解析 RSS/Atom 订阅源（A2）：先检测首页 `<link>`，再尝试常见 feed 路径；无结果返回空（由 sitemap/BFS 兜底）。 */
+async function fetchFeedArticles(rootUrl: string): Promise<{ url: string; title: string }[]> {
+  const base = new URL(rootUrl)
+  const origin = base.origin
+  const feedUrls = new Set<string>()
+  try {
+    const home = (await fetchUrl(base.toString())).rawHtml
+    for (const u of detectFeedUrls(home, origin)) feedUrls.add(u)
+  } catch { /* ignore */ }
+  for (const p of ['/rss.xml', '/atom.xml', '/feed.xml', '/index.xml', '/rss', '/feed', '/rss/', '/feed/']) feedUrls.add(origin + p)
+  const found = new Map<string, { url: string; title: string; lastmod?: string }>()
+  for (const f of feedUrls) {
+    let xml: string
+    try { xml = (await fetchUrl(f)).rawHtml } catch { continue }
+    const items = parseFeed(xml, origin)
+    if (items.length === 0) continue
+    for (const it of items) if (isArticleUrl(it.url) && !found.has(dedupeArticleKey(it.url))) found.set(dedupeArticleKey(it.url), it)
+    if (found.size > 0) break
+  }
+  return [...found.values()].map(({ url, title }) => ({ url, title }))
+}
+/** 解析 robots.txt（User-agent: * 段落，简单尽力解析）：返回 crawl-delay 与 disallow 路径（纯函数、可测试） */
+export function parseRobotsTxt(text: string): { crawlDelay?: number; disallow: string[] } {
+  let agentStar = false
+  let crawlDelay: number | undefined
+  const disallow: string[] = []
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line || line.startsWith('#')) continue
+    const m = /^(user-agent|disallow|allow|crawl-delay)\s*:\s*(.*)$/i.exec(line)
+    if (!m) continue
+    const key = m[1].toLowerCase()
+    const val = m[2].trim()
+    if (key === 'user-agent') agentStar = val.toLowerCase() === '*'
+    else if (key === 'crawl-delay') { const d = parseFloat(val); if (!isNaN(d) && d > 0) crawlDelay = d }
+    else if (key === 'disallow' && agentStar && val !== '') disallow.push(val)
+  }
+  return { crawlDelay, disallow }
+}
+
+/** 抓取站点 robots.txt（失败视为未限制）。 */
+export async function fetchRobotsTxt(rootUrl: string): Promise<{ crawlDelay?: number; disallow: string[] }> {
+  try {
+    const base = new URL(rootUrl)
+    const robots = new URL('/robots.txt', base.origin).toString()
+    const res = await fetchUrl(robots)
+    return parseRobotsTxt(res.rawHtml)
+  } catch {
+    return { crawlDelay: undefined, disallow: [] }
+  }
+}
+
+/** 判断 URL 的 path 是否命中 robots 的 Disallow 规则（纯函数、可测试）。 */
+export function isPathDisallowed(url: string, disallow: string[]): boolean {
+  if (disallow.length === 0) return false
+  let u: URL
+  try { u = new URL(url) } catch { return false }
+  const p = u.pathname
+  return disallow.some((d) => d && (p === d || p.startsWith(d)))
+}
+
+/** 从 HTML 提取 <title>（纯函数、可测试）：sitemap 发现的文章没有标题，导入正文时用页面标题补齐。 */
+export function extractPageTitle(html: string): string {
+  const m = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)
+  return m ? stripTags(m[1]) : ''
+}
+
+/** 正文哈希（djb2，十六进制字符串）——用于正文级去重（A3 辅助）。 */
+function hashText(text: string): string {
+  let h = 5381
+  for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) >>> 0
+  return h.toString(16)
+}
+
+function delay(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)) }
+
+/**
+ * 站点点对点礼貌限速：按站点 host 维护最近一次请求时间，保证相邻请求间隔 >= crawlDelay（或默认最小间隔）。
+ */
+const lastRequestByHost = new Map<string, number>()
+async function politeDelay(host: string, crawlDelayMs?: number): Promise<void> {
+  const minMs = Math.max(IMPORT_DELAY_MS, crawlDelayMs ?? 0)
+  const last = lastRequestByHost.get(host) ?? 0
+  const wait = last + minMs - Date.now()
+  if (wait > 0) await delay(wait)
+  lastRequestByHost.set(host, Date.now())
+}
+
+/** 尝试用站点 sitemap 发现文章清单 (sitemap-first, A1)：无可用 sitemap 时返回空数组（由 BFS 兜底）。 */
+async function fetchSiteMapArticles(rootUrl: string): Promise<{ url: string; title: string }[]> {
+  const base = new URL(rootUrl)
+  const origin = base.origin
+  const candidates = ['/sitemap_index.xml', '/sitemap.xml']
+  const found = new Map<string, { url: string; lastmod?: string }>()
+  for (const path of candidates) {
+    const sitemapUrl = new URL(path, origin).toString()
+    let html: string
+    try { html = (await fetchUrl(sitemapUrl)).rawHtml } catch { continue }
+    const entries = parseSiteMap(html, origin)
+    if (entries.length === 0) continue
+    const childSitemaps = entries.filter((e) => /[a-z0-9_].*\.xml$/i.test(new URL(e.url).pathname) || /sitemap/i.test(new URL(e.url).pathname))
+    if (childSitemaps.length > 0) {
+      for (const cs of childSitemaps) {
+        let r: string
+        try { r = (await fetchUrl(cs.url)).rawHtml } catch { continue }
+        for (const e of parseSiteMap(r, cs.url)) {
+          if (isArticleUrl(e.url) && !found.has(dedupeArticleKey(e.url))) found.set(dedupeArticleKey(e.url), { url: e.url, lastmod: e.lastmod })
+        }
+      }
+    } else {
+      for (const e of entries) {
+        if (isArticleUrl(e.url) && !found.has(dedupeArticleKey(e.url))) found.set(dedupeArticleKey(e.url), { url: e.url, lastmod: e.lastmod })
+      }
+    }
+    if (found.size > 0) break
+  }
+  return [...found.values()].map((v) => ({ url: v.url, title: '' }))
 }
 
 /**
@@ -189,7 +443,30 @@ export async function discoverSiteArticles(
     return []
   }
   const host = base.host
+  const robots = await fetchRobotsTxt(rootUrl).catch(() => ({ crawlDelay: undefined, disallow: [] }))
   const found = new Map<string, { url: string; title: string }>() // dedupeKey -> 文章
+
+  // A2: RSS/Atom 订阅源优先（最稳、带标题/日期）；无订阅源则回退 sitemap/BFS
+  const feedArticles = await fetchFeedArticles(rootUrl).catch(() => [])
+  for (const a of feedArticles) {
+    if (!found.has(dedupeArticleKey(a.url))) found.set(dedupeArticleKey(a.url), { url: a.url, title: a.title })
+  }
+  if (found.size > 0) {
+    logMain('web', `站点发现 host=${host} 方式=feed 文章=${found.size}`)
+    return [...found.values()]
+  }
+
+  // A1: sitemap 优先发现（更全、省翻页；标题需在导入正文时从页面 <title> 补齐）
+  const sitemapArticles = await fetchSiteMapArticles(rootUrl).catch(() => [])
+  for (const a of sitemapArticles) {
+    if (!found.has(dedupeArticleKey(a.url))) found.set(dedupeArticleKey(a.url), { url: a.url, title: a.title })
+  }
+  if (found.size > 0) {
+    logMain('web', `站点发现 host=${host} 方式=sitemap 文章=${found.size}`)
+    return [...found.values()]
+  }
+
+  // 无 RSS/sitemap → 回退 BFS（限深度与页数；遵守 robots + 礼貌延迟）
   const visited = new Set<string>()
   const queue: { url: string; depth: number }[] = [{ url: base.toString(), depth: 0 }]
   let pages = 0
@@ -197,7 +474,9 @@ export async function discoverSiteArticles(
   while (queue.length > 0 && pages < maxPages) {
     const { url, depth } = queue.shift()!
     if (visited.has(url) || depth > maxDepth) continue
+    if (isPathDisallowed(url, robots.disallow)) continue
     visited.add(url)
+    await politeDelay(host, robots.crawlDelay)
     let html: string
     try {
       html = (await fetchUrl(url)).rawHtml
@@ -222,6 +501,7 @@ export async function discoverSiteArticles(
       }
     }
   }
+  logMain('web', `站点发现 host=${host} 方式=bfs 文章=${found.size}`)
   return [...found.values()]
 }
 
@@ -232,12 +512,24 @@ export async function discoverSiteArticles(
  */
 export function filterArticlesByQuery(
   articles: { url: string; title: string }[],
-  query: string
+  query: string,
+  extraTerms: string[] = []
 ): { url: string; title: string }[] {
   const terms = extractTopicTerms(query)
   if (terms.length === 0) return []
-  const allTerms = [...new Set([...terms, ...expandDomainHints(terms)])]
-  return articles.filter((a) => matchesAny(a.title ?? '', allTerms))
+  const allTerms = [...new Set([...terms, ...expandDomainHints(terms), ...extraTerms])]
+  return articles.filter((a) => {
+    const title = (a.title ?? '').trim()
+    // 无标题（如 sitemap 发现）→ 保守保留为候选，交由正文级精过滤决定是否落库
+    if (!title) return true
+    return matchesAny(title, allTerms)
+  })
+}
+
+/** 解析站点用户关键词（逗号/顿号/空格分隔），用于 E11 站点级召回增强。纯函数、可测试。 */
+export function parseSiteKeywords(keywords?: string): string[] {
+  if (!keywords) return []
+  return keywords.split(/[,，、\s]+/).map((k) => k.trim()).filter((k) => k.length >= 2)
 }
 
 /**
@@ -249,18 +541,60 @@ export async function importSiteArticle(
   url: string,
   title: string,
   terms: string[] = [],
-  taskId?: string
+  taskId?: string,
+  siteId?: string
 ): Promise<Source | null> {
   const existing = getSourceByUrl(url, taskId)
   if (existing) return existing
   try {
-    const { cleanedText, snapshotAt } = await fetchUrl(url)
-    // 精过滤探测文本：标题 + 正文前 12000 字（足以判定主题，避免超长正文拖慢匹配）
-    if (terms.length > 0 && !matchesExact(`${title}\n${cleanedText}`.slice(0, 12000), terms)) return null
+    // B4: 条件请求——带上上次抓取该页面时的 ETag / Last-Modified，内容未变则 304 复用已有正文
+    const meta = siteId ? getSiteArticle(siteId, url) : null
+    const result = await fetchUrl(url, {
+      ifNoneMatch: meta?.etag,
+      ifModifiedSince: meta?.lastModified
+    })
+    let cleanedText = result.cleanedText
+    let snapshotAt = result.snapshotAt
+    let pageTitle = title || ''
+    if (result.notModified) {
+      // 304：内容未变——若同一 URL 已抓过正文（任意任务）则复用，否则放弃该篇
+      const reused = getAnySourceByUrl(url)
+      if (!reused?.cleanedText) {
+        logMain('web', '304 但无已有正文可复用，放弃 url=' + url)
+        return null
+      }
+      cleanedText = reused.cleanedText
+      snapshotAt = reused.urlSnapshotAt ?? new Date().toISOString()
+      pageTitle = title || reused.title || url
+      logMain('web', '条件请求 304 复用正文 url=' + url + ' 标题=' + pageTitle + ' 正文字数=' + cleanedText.length)
+    } else {
+      pageTitle = title || extractPageTitle(result.rawHtml) || url
+      // D8：用成熟正文提取器提升中文正文/表格质量；提取过短时回退浏览器净化的 cleanedText
+      const richText = extractArticleText(result.rawHtml) || result.cleanedText
+      // 正文级精过滤：标题 + 正文前 12000 字（足以判定主题，避免超长正文拖慢匹配）
+      if (terms.length > 0 && !matchesExact((pageTitle + '\n' + richText).slice(0, 12000), terms)) {
+        logMain('web', '正文精过滤未命中，丢弃 url=' + url + ' 标题=' + pageTitle)
+        return null
+      }
+      cleanedText = richText
+      // E10：从正文/元数据解析发布时间并记录（供文章清单按时间排序）
+      const publishedAt = extractPublishedDate(result.rawHtml)
+      // 记录抓取元数据（ETag / Last-Modified / 正文哈希），供条件请求与正文去重用
+      if (siteId) {
+        updateSiteArticleFetched(siteId, url, {
+          etag: result.etag,
+          lastModified: result.lastModified,
+          bodyHash: hashText(cleanedText),
+          fetchedAt: new Date().toISOString()
+        })
+        if (publishedAt) updateSiteArticlePublished(siteId, url, publishedAt)
+      }
+      logMain('web', '抓取并落库 url=' + url + ' 标题=' + pageTitle + ' 正文字数=' + cleanedText.length + (publishedAt ? ' 发布时间=' + publishedAt : '') + (richText !== result.cleanedText ? ' 提取器=extractArticleText' : ' 提取器=stripHtml'))
+    }
     const source: Source = {
       id: crypto.randomUUID(),
       kind: 'url',
-      title: title || url,
+      title: pageTitle,
       url,
       urlSnapshotAt: snapshotAt,
       cleanedText,
@@ -311,13 +645,22 @@ export async function fetchRelatedSiteSources(
     } catch {
       continue
     }
+    let host: string
+    try { host = new URL(site.rootUrl).host } catch { host = site.rootUrl }
+    const robots = await fetchRobotsTxt(site.rootUrl).catch(() => ({ crawlDelay: undefined, disallow: [] }))
     const articles = listSiteArticles(site.id)
-    const hits = filterArticlesByQuery(articles, query)
+    // E11：站点用户关键词并入该站点召回词，增强站点级召回
+    const siteTerms = parseSiteKeywords(site.keywords)
+    const hits = filterArticlesByQuery(articles, query, siteTerms)
+    let imported = 0
     for (const h of hits) {
-      const src = await importSiteArticle(h.url, h.title, allTerms, taskId)
-      if (src) ids.push(src.id)
-      if (IMPORT_DELAY_MS > 0) await new Promise((r) => setTimeout(r, IMPORT_DELAY_MS))
+      // C6 礼貌限速：单站串行 + 请求间隔（robots crawl-delay 或默认最小间隔）
+      if (isPathDisallowed(h.url, robots.disallow)) continue
+      await politeDelay(host, robots.crawlDelay)
+      const src = await importSiteArticle(h.url, h.title, [...allTerms, ...siteTerms], taskId, site.id)
+      if (src) { ids.push(src.id); imported++ }
     }
+    logMain('web', `网页资料检索 站点=${site.title || site.rootUrl} 文章清单=${articles.length} 标题命中=${hits.length} 落库=${imported} robots.crawlDelay=${robots.crawlDelay ?? '-'} 站点关键词=${siteTerms.length}`)
   }
   return ids
 }
@@ -359,9 +702,10 @@ if (import.meta.vitest) {
       expect(hits.map((h) => h.url)).toEqual(['https://x.gov.cn/a.htm', 'https://x.gov.cn/c.htm'])
     })
 
-    it('returns empty when query or title is empty', () => {
+    it('returns empty when query is empty; keeps empty-title as candidate (sitemap-first, 2026-08-28)', () => {
       expect(filterArticlesByQuery([{ url: 'https://x.gov.cn/a.htm', title: '教育' }], '')).toEqual([])
-      expect(filterArticlesByQuery([{ url: 'https://x.gov.cn/a.htm', title: '' }], '教育')).toEqual([])
+      // 无标题文章（sitemap 发现）保守保留为候选，交由正文精过滤决定
+      expect(filterArticlesByQuery([{ url: 'https://x.gov.cn/a.htm', title: '' }], '教育')).toEqual([{ url: 'https://x.gov.cn/a.htm', title: '' }])
     })
 
     it('extracts title/subtitle terms from instruction', () => {
@@ -424,6 +768,57 @@ if (import.meta.vitest) {
       const terms = [...extractTopicTerms(query), ...expandDomainHints(extractTopicTerms(query))]
       expect(matchesExact('长乐首占安置房配建幼儿园，共有1346套下月部分完工。', terms)).toBe(true)
       expect(matchesExact('树立和践行正确政绩观学习教育，开展全区警示教育。', terms)).toBe(false)
+    })
+    it('normalizes article urls: host lowercase, strips http/https, tracking params, trailing slash (A3, 2026-08-28)', () => {
+      expect(normalizeArticleUrl('https://FZXQ.fuzhou.gov.cn/a.htm?utm_source=x&b=1#sec')).toBe('https://fzxq.fuzhou.gov.cn/a.htm?b=1')
+      expect(normalizeArticleUrl('http://fzxq.fuzhou.gov.cn/a.htm/')).toBe('http://fzxq.fuzhou.gov.cn/a.htm')
+      expect(dedupeArticleKey('https://fzxq.fuzhou.gov.cn/a.htm?utm_medium=x')).toBe('fzxq.fuzhou.gov.cn/a.htm')
+    })
+
+    it('parses sitemap xml (sitemap index + urlset) (A1, 2026-08-28)', () => {
+      const index = '<?xml version="1.0"?><sitemapindex><sitemap><loc>https://x.gov.cn/news.xml</loc></sitemap><sitemap><loc>https://x.gov.cn/zs.xml</loc></sitemap></sitemapindex>'
+      const i = parseSiteMap(index, 'https://x.gov.cn')
+      expect(i.map((e) => e.url)).toEqual(['https://x.gov.cn/news.xml', 'https://x.gov.cn/zs.xml'])
+      const urlset = '<urlset><url><loc>https://x.gov.cn/a.htm</loc><lastmod>2025-01-01</lastmod></url></urlset>'
+      const u = parseSiteMap(urlset, 'https://x.gov.cn')
+      expect(u[0].url).toBe('https://x.gov.cn/a.htm')
+      expect(u[0].lastmod).toBe('2025-01-01')
+    })
+
+    it('parses robots.txt crawl-delay + disallow (C6, 2026-08-28)', () => {
+      const robots = 'User-agent: *\nDisallow: /admin/\nDisallow: /search\nCrawl-delay: 2\nAllow: /public/'
+      const r = parseRobotsTxt(robots)
+      expect(r.crawlDelay).toBe(2)
+      expect(r.disallow).toEqual(['/admin/', '/search'])
+      expect(isPathDisallowed('https://x.gov.cn/admin/a.htm', r.disallow)).toBe(true)
+      expect(isPathDisallowed('https://x.gov.cn/a.htm', r.disallow)).toBe(false)
+    })
+
+    it('extracts <title> from html (B4/title fallback, 2026-08-28)', () => {
+      expect(extractPageTitle('<html><head><title>长乐区学前教育</title></head></html>')).toBe('长乐区学前教育')
+      expect(extractPageTitle('<html></html>')).toBe('')
+    })
+
+    it('parses RSS2 feed items (A2, 2026-08-28)', () => {
+      const rss = '<?xml?><rss><channel><item><title>长乐区幼儿园</title><link>https://x.gov.cn/a.htm</link><pubDate>Fri, 01 Jan 2025 00:00:00 GMT</pubDate></item></channel></rss>'
+      const items = parseFeed(rss, 'https://x.gov.cn')
+      expect(items).toHaveLength(1)
+      expect(items[0].url).toBe('https://x.gov.cn/a.htm')
+      expect(items[0].title).toBe('长乐区幼儿园')
+      expect(items[0].lastmod).toContain('2025')
+    })
+
+    it('parses Atom feed entries (A2, 2026-08-28)', () => {
+      const atom = '<?xml?><feed><entry><title>学前教育进展</title><link href="https://x.gov.cn/b.htm"/><updated>2025-02-01T00:00:00Z</updated></entry></feed>'
+      const items = parseFeed(atom, 'https://x.gov.cn')
+      expect(items).toHaveLength(1)
+      expect(items[0].url).toBe('https://x.gov.cn/b.htm')
+      expect(items[0].title).toBe('学前教育进展')
+    })
+
+    it('detects rss/atom feed link in homepage (A2, 2026-08-28)', () => {
+      const html = '<html><head><link rel="alternate" type="application/rss+xml" href="/rss.xml"/></head></html>'
+      expect(detectFeedUrls(html, 'https://x.gov.cn')).toEqual(['https://x.gov.cn/rss.xml'])
     })
   })
 }

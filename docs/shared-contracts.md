@@ -31,7 +31,7 @@ interface Source {
 interface Tag { id: string; name: string; createdAt: string; }
 
 /** 网页资料库站点（2026-08-11） */
-interface WebSite { id: string; rootUrl: string; title: string; createdAt: string; updatedAt: string; lastSyncedAt?: string; }
+interface WebSite { id: string; rootUrl: string; title: string; createdAt: string; updatedAt: string; lastSyncedAt?: string; keywords?: string; }
 
 /** 撰写任务 */
 interface WritingTask {
@@ -138,6 +138,7 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `webSource:add` | `{ rootUrl, title? }` → `{ site: WebSite }` | 注册站点（root_url 去重） |
 | `webSource:remove` | `{ id }` → `{ ok: true }` | 删除站点（文章清单级联删除） |
 | `webSource:sync` | `{ id }` → `{ articles: number }` | 手动同步站点文章清单，返回新增数 |
+| `webSource:updateKeywords` | `{ id, keywords }` → `{ site: WebSite }` | 保存站点用户关键词（逗号/顿号/空格分隔，参与该站点召回） |
 
 ### 2.2 标签（tags）
 

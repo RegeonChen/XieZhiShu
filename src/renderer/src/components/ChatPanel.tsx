@@ -41,13 +41,16 @@ interface ChatPanelProps {
   onOpenSource?: (sourceId: string) => void
 }
 
-/** 秒 → "X 分 Y 秒"（进度剩余时间展示） */
-function formatEta(sec: number): string {
-  const s = Math.max(0, Math.round(sec))
-  if (s < 60) return `${s} 秒`
-  const m = Math.floor(s / 60)
-  const rest = s % 60
-  return rest > 0 ? `${m} 分 ${rest} 秒` : `${m} 分钟`
+/** 秒 → "约 X–Y 秒 / 约 X–Y 分钟"（区间化，体现 AI 耗时不确定性，C） */
+function formatEtaRange(sec: number): string {
+  const s = Math.max(5, Math.round(sec))
+  const low = Math.max(0, s - Math.round(s * 0.2))
+  const high = s + Math.round(s * 0.25)
+  if (high < 60) return `约 ${low}–${high} 秒`
+  const lowM = Math.max(0, Math.round(low / 60))
+  const highM = Math.max(0, Math.round(high / 60))
+  if (lowM !== highM) return `约 ${lowM}–${highM} 分钟`
+  return `约 ${lowM} 分钟`
 }
 
 function ChatPanel({
@@ -69,6 +72,16 @@ function ChatPanel({
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
   const [presetOpen, setPresetOpen] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
+  // C：对预计剩余秒数做 EMA 平滑，避免进度回调抖动；新一次生成时重置
+  const smoothEtaRef = useRef<number | null>(null)
+  const rawEta = progress?.etaSeconds
+  if (progress && rawEta != null && rawEta > 0) {
+    const prev = smoothEtaRef.current
+    smoothEtaRef.current = prev == null ? Math.round(rawEta) : Math.round(prev * 0.5 + rawEta * 0.5)
+  } else if (!progress) {
+    smoothEtaRef.current = null
+  }
+  const displayEtaSec = smoothEtaRef.current
 
   // 自动滚动：用户已接近底部时才跟随（正在阅读历史时不抢滚动位置）；busy 提示始终可见
   useEffect(() => {
@@ -182,8 +195,8 @@ function ChatPanel({
                   </div>
                   <div className="chat-panel__progress-meta">
                     <span>{Math.round(progress.percent)}%</span>
-                    {progress.etaSeconds != null && progress.etaSeconds > 0 ? (
-                      <span>{zhCN.writingChat.etaText.replace('{time}', formatEta(progress.etaSeconds))}</span>
+                    {displayEtaSec != null && displayEtaSec > 0 ? (
+                      <span>{zhCN.writingChat.etaText.replace('{time}', formatEtaRange(displayEtaSec))}</span>
                     ) : null}
                   </div>
                 </div>
@@ -208,8 +221,8 @@ function ChatPanel({
                   </div>
                   <div className="chat-panel__progress-meta">
                     <span>{Math.round(progress.percent)}%</span>
-                    {progress.etaSeconds != null && progress.etaSeconds > 0 ? (
-                      <span>{zhCN.writingChat.etaText.replace('{time}', formatEta(progress.etaSeconds))}</span>
+                    {displayEtaSec != null && displayEtaSec > 0 ? (
+                      <span>{zhCN.writingChat.etaText.replace('{time}', formatEtaRange(displayEtaSec))}</span>
                     ) : null}
                   </div>
                 </div>

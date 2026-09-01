@@ -98,6 +98,13 @@ export function getSourceByUrl(url: string, taskId?: string): Source | null {
   return row ? rowToSource(row) : null
 }
 
+/** 按 URL 取任意一条来源（不限 task_id），用于条件请求 304 时复用已有正文（跨任务网站文章去重/省流量）。 */
+export function getAnySourceByUrl(url: string): Source | null {
+  const db = getDb()
+  const row = db.prepare('SELECT * FROM sources WHERE url = ? ORDER BY created_at DESC LIMIT 1').get(url) as SourceRow | undefined
+  return row ? rowToSource(row) : null
+}
+
 /** 批量按 ID 获取资料（保持传入顺序去重；用于 RAG 检索范围） */
 export function getSourcesByIds(ids: string[]): Source[] {
   const unique = Array.from(new Set(ids))

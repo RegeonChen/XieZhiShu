@@ -18,6 +18,8 @@ export interface AppApi {
   removeWebSource(id: string): Promise<{ ok: boolean; data?: undefined; error?: { code: string; message: string } }>
   /** 同步站点文章清单（发现新文章，返回新增数） */
   syncWebSource(id: string): Promise<{ ok: boolean; data?: { articles: number }; error?: { code: string; message: string } }>
+  /** 配置站点用户关键词（E11，逗号/顿号/空格分隔，参与该站点召回） */
+  updateWebSourceKeywords(id: string, keywords: string): Promise<{ ok: boolean; data?: { site: unknown }; error?: { code: string; message: string } }>
   listSources(params?: { tagIds?: string[]; search?: string }): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   importFiles(paths: string[]): Promise<{ ok: boolean; data?: { results: ImportResult[] }; error?: { code: string; message: string } }>
   openFileDialog(): Promise<{ ok: boolean; data?: { paths: string[] }; error?: { code: string; message: string } }>

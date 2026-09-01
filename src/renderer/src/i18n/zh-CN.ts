@@ -104,7 +104,11 @@ export const zhCN = {
     added: '注册成功',
     syncedAt: '上次同步：{time}',
     neverSynced: '尚未同步',
-    operationFailed: '操作失败：{message}'
+    operationFailed: '操作失败：{message}',
+    keywordsLabel: '站点关键词',
+    keywordsPlaceholder: '逗号分隔，如：学前教育,幼儿园（用于增强该站点召回）',
+    keywordsSaved: '站点关键词已保存',
+    keywordsSaveBtn: '保存'
   },
   sourceViewer: {
     summaryTitle: '资料摘要',

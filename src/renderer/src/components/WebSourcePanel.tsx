@@ -7,6 +7,7 @@ interface WebSiteItem {
   rootUrl: string
   title: string
   lastSyncedAt?: string
+  keywords?: string
 }
 
 /**
@@ -23,6 +24,7 @@ function WebSourcePanel() {
   const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [pendingRemove, setPendingRemove] = useState<WebSiteItem | null>(null)
+  const [keywordsDraft, setKeywordsDraft] = useState<Record<string, string>>({})
 
   const load = useCallback(async () => {
     const res = await window.api.listWebSources()
@@ -87,6 +89,24 @@ function WebSourcePanel() {
     }
   }
 
+  const handleSaveKeywords = async (id: string) => {
+    setMsg(null)
+    setErr(null)
+    setBusy(true)
+    const keywords = (keywordsDraft[id] ?? '').trim()
+    try {
+      const res = await window.api.updateWebSourceKeywords(id, keywords)
+      if (res.ok) {
+        setMsg(t.keywordsSaved)
+        await load()
+      } else {
+        setErr(t.operationFailed.replace('{message}', res.error?.message ?? ''))
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const formatTime = (iso?: string): string => {
     if (!iso) return t.neverSynced
     const d = new Date(iso)
@@ -140,6 +160,19 @@ function WebSourcePanel() {
                 </button>
                 <button type="button" className="source-list__btn source-list__btn--danger" onClick={() => setPendingRemove(s)} disabled={syncingId !== null}>
                   {t.remove}
+                </button>
+              </div>
+              <div className="web-source__item-keywords">
+                <span className="web-source__keywords-label">{t.keywordsLabel}</span>
+                <input
+                  type="text"
+                  className="source-list__url-input source-list__url-input--small"
+                  placeholder={t.keywordsPlaceholder}
+                  value={keywordsDraft[s.id] ?? s.keywords ?? ''}
+                  onChange={(e) => setKeywordsDraft((cur) => ({ ...cur, [s.id]: e.target.value }))}
+                />
+                <button type="button" className="source-list__btn" onClick={() => void handleSaveKeywords(s.id)} disabled={busy}>
+                  {busy ? zhCN.common.saving : t.keywordsSaveBtn}
                 </button>
               </div>
             </li>

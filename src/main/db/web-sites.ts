@@ -16,11 +16,17 @@ interface WebSiteRow {
   created_at: string
   updated_at: string
   last_synced_at: string | null
+  keywords: string
 }
 
 interface SiteArticleRow {
   url: string
   title: string
+  etag: string | null
+  last_modified: string | null
+  body_hash: string | null
+  last_fetched_at: string | null
+  published_at: string | null
 }
 
 function rowToWebSite(row: WebSiteRow): WebSite {
@@ -30,7 +36,8 @@ function rowToWebSite(row: WebSiteRow): WebSite {
     title: row.title,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    lastSyncedAt: row.last_synced_at ?? undefined
+    lastSyncedAt: row.last_synced_at ?? undefined,
+    keywords: row.keywords ?? ''
   }
 }
 
@@ -76,32 +83,38 @@ export function updateWebSiteLastSynced(id: string, at: string): void {
   db.prepare('UPDATE web_sites SET last_synced_at = ?, updated_at = ? WHERE id = ?').run(at, at, id)
 }
 
+/** 配置站点用户关键词（逗号分隔），参与该站点标题/正文召回（E11） */
+export function updateWebSiteKeywords(id: string, keywords: string): void {
+  const db = getDb()
+  db.prepare('UPDATE web_sites SET keywords = ?, updated_at = ? WHERE id = ?').run(keywords, new Date().toISOString(), id)
+}
+
 // ---- 站点文章清单（web_site_articles） ----
 
-/** 增量写入站点发现的文章（url 已存在则更新标题，幂等） */
-export function upsertSiteArticle(siteId: string, url: string, title: string): void {
+/** 增量写入站点发现的文章（url 已存在则更新标题/发布时间，幂等） */
+export function upsertSiteArticle(siteId: string, url: string, title: string, publishedAt?: string): void {
   const db = getDb()
   db.prepare(
-    `INSERT INTO web_site_articles (site_id, url, title, discovered_at)
-     VALUES (?, ?, ?, ?)
-     ON CONFLICT(site_id, url) DO UPDATE SET title = excluded.title`
-  ).run(siteId, url, title, new Date().toISOString())
+    `INSERT INTO web_site_articles (site_id, url, title, discovered_at, published_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(site_id, url) DO UPDATE SET title = excluded.title, published_at = COALESCE(excluded.published_at, web_site_articles.published_at)`
+  ).run(siteId, url, title, new Date().toISOString(), publishedAt ?? null)
 }
 
 /** 批量 upsert（单个事务内完成，同步站点清单用）；返回**新增**文章数（用于增量判断） */
-export function upsertSiteArticles(siteId: string, articles: { url: string; title: string }[]): number {
+export function upsertSiteArticles(siteId: string, articles: { url: string; title: string; publishedAt?: string }[]): number {
   const db = getDb()
   const exists = db.prepare('SELECT 1 FROM web_site_articles WHERE site_id = ? AND url = ?')
-  const insert = db.prepare('INSERT INTO web_site_articles (site_id, url, title, discovered_at) VALUES (?, ?, ?, ?)')
+  const insert = db.prepare('INSERT INTO web_site_articles (site_id, url, title, discovered_at, published_at) VALUES (?, ?, ?, ?, ?)')
   const update = db.prepare('UPDATE web_site_articles SET title = ? WHERE site_id = ? AND url = ?')
   let added = 0
   const now = new Date().toISOString()
-  const tx = db.transaction((list: { url: string; title: string }[]) => {
+  const tx = db.transaction((list: { url: string; title: string; publishedAt?: string }[]) => {
     for (const a of list) {
       if (exists.get(siteId, a.url)) {
         update.run(a.title, siteId, a.url)
       } else {
-        insert.run(siteId, a.url, a.title, now)
+        insert.run(siteId, a.url, a.title, now, a.publishedAt ?? null)
         added++
       }
     }
@@ -110,13 +123,67 @@ export function upsertSiteArticles(siteId: string, articles: { url: string; titl
   return added
 }
 
-/** 站点文章清单（按发现时间倒序，新文章在前） */
-export function listSiteArticles(siteId: string): { url: string; title: string }[] {
+/** 文章正文抓取后若解析出发布时间，更新该文章的 published_at（E10） */
+export function updateSiteArticlePublished(siteId: string, url: string, publishedAt: string): void {
+  const db = getDb()
+  db.prepare('UPDATE web_site_articles SET published_at = ? WHERE site_id = ? AND url = ?').run(publishedAt, siteId, url)
+}
+
+/** 站点文章清单（按发布时间倒序，无发布时间的按发现时间倒序） */
+export interface SiteArticleRecord {
+  url: string
+  title: string
+  etag?: string
+  lastModified?: string
+  bodyHash?: string
+  lastFetchedAt?: string
+  publishedAt?: string
+}
+
+export function listSiteArticles(siteId: string): SiteArticleRecord[] {
   const db = getDb()
   const rows = db.prepare(
-    'SELECT url, title FROM web_site_articles WHERE site_id = ? ORDER BY discovered_at DESC'
+    'SELECT url, title, etag, last_modified, body_hash, last_fetched_at, published_at FROM web_site_articles WHERE site_id = ? ORDER BY COALESCE(published_at, discovered_at) DESC'
   ).all(siteId) as SiteArticleRow[]
-  return rows
+  return rows.map((r) => ({
+    url: r.url,
+    title: r.title,
+    etag: r.etag ?? undefined,
+    lastModified: r.last_modified ?? undefined,
+    bodyHash: r.body_hash ?? undefined,
+    lastFetchedAt: r.last_fetched_at ?? undefined,
+    publishedAt: r.published_at ?? undefined
+  }))
+}
+
+/** 读取单篇站点文章的抓取元数据（含 etag/last-modified/正文哈希/发布时间），供条件请求与去重用。 */
+export function getSiteArticle(siteId: string, url: string): SiteArticleRecord | null {
+  const db = getDb()
+  const row = db.prepare(
+    'SELECT url, title, etag, last_modified, body_hash, last_fetched_at, published_at FROM web_site_articles WHERE site_id = ? AND url = ?'
+  ).get(siteId, url) as SiteArticleRow | undefined
+  if (!row) return null
+  return {
+    url: row.url,
+    title: row.title,
+    etag: row.etag ?? undefined,
+    lastModified: row.last_modified ?? undefined,
+    bodyHash: row.body_hash ?? undefined,
+    lastFetchedAt: row.last_fetched_at ?? undefined,
+    publishedAt: row.published_at ?? undefined
+  }
+}
+
+/** 文章正文抓取成功后更新其抓取元数据（条件请求与正文哈希去重用）。 */
+export function updateSiteArticleFetched(
+  siteId: string,
+  url: string,
+  meta: { etag?: string; lastModified?: string; bodyHash?: string; fetchedAt?: string }
+): void {
+  const db = getDb()
+  db.prepare(
+    'UPDATE web_site_articles SET etag = ?, last_modified = ?, body_hash = ?, last_fetched_at = ? WHERE site_id = ? AND url = ?'
+  ).run(meta.etag ?? null, meta.lastModified ?? null, meta.bodyHash ?? null, meta.fetchedAt ?? new Date().toISOString(), siteId, url)
 }
 
 // ---- vitest inline test ----
