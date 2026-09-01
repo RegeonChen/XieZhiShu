@@ -588,6 +588,25 @@ CREATE TABLE IF NOT EXISTS compilation_card_recycle_bin (
 );
 CREATE INDEX IF NOT EXISTS idx_compilation_card_bin_comp ON compilation_card_recycle_bin(compilation_id);
 `
+  },
+  {
+    // 2026-08-28：网页资料库增量抓取/条件请求——web_site_articles 增加文章抓取元数据：
+    // 用于 If-Modified-Since/ETag 条件请求（B4）、正文哈希去重（A3 辅助）、发布时间排序（E10 预留）。
+    version: 24,
+    sql: `
+ALTER TABLE web_site_articles ADD COLUMN etag TEXT;
+ALTER TABLE web_site_articles ADD COLUMN last_modified TEXT;
+ALTER TABLE web_site_articles ADD COLUMN body_hash TEXT;
+ALTER TABLE web_site_articles ADD COLUMN last_fetched_at TEXT;
+`
+  },
+  {
+    // 2026-08-28：网页资料库 E10/E11——文章发布时间（E10）与站点用户关键词（E11）。
+    version: 25,
+    sql: `
+ALTER TABLE web_site_articles ADD COLUMN published_at TEXT;
+ALTER TABLE web_sites ADD COLUMN keywords TEXT NOT NULL DEFAULT '';
+`
   }
 ]
 

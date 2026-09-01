@@ -72,7 +72,7 @@ import { getDb } from './db/connection'
 import { listSources, getSourceById, deleteSource, deleteSources, updateSourceTitle, updateSourceFingerprint } from './db/sources'
 import { listTags, createTag, updateTag, deleteTag, addTagToSource, removeTagFromSource, getTagsBySource, batchAddTags, searchTags, getSourceIdsByTag } from './db/tags'
 import { importFiles, importUrl } from './import'
-import { addWebSite, listWebSites, removeWebSite } from './db/web-sites'
+import { addWebSite, getWebSiteById, listWebSites, removeWebSite, updateWebSiteKeywords } from './db/web-sites'
 import { syncSite } from './web-source/site-crawler'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { safeStorageCodec } from './llm/secret'
@@ -131,7 +131,7 @@ import { setSourceRemovalNotify, listPendingSourceRemovals, decideSourceRemoval,
 import { trashSourceFile, renameSourceFile, resolveSourceFilePath } from './workspace/sync'
 import { migrateLegacyToWorkspace } from './workspace/migrate'
 import { loadWindowState, trackWindowState } from './window-state'
-import type { WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceSyncReq, WebSourceSyncRes, LogAppendReq, LogExportRes, StyleGuideListRes, StyleGuideSaveReq, StyleGuideSaveRes, StyleGuideSetDefaultReq, StyleGuideSetDefaultRes, StyleGuideDeleteReq } from '../shared/ipc'
+import type { WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceSyncReq, WebSourceSyncRes, WebSourceUpdateKeywordsReq, WebSourceUpdateKeywordsRes, LogAppendReq, LogExportRes, StyleGuideListRes, StyleGuideSaveReq, StyleGuideSaveRes, StyleGuideSetDefaultReq, StyleGuideSetDefaultRes, StyleGuideDeleteReq } from '../shared/ipc'
 import { logMain, logIpc, logRenderer, exportLogsText } from './logger'
 
 const APP_PROTOCOL_WHITELIST = /^https?:\/\//i
@@ -420,6 +420,18 @@ handleLogged(IPC.WEB_SOURCE_SYNC, async (_event, params: WebSourceSyncReq): Prom
   try {
     const added = await syncSite(params.id)
     return { ok: true, data: { articles: added } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 配置站点用户关键词（E11）——逗号/顿号/空格分隔，参与该站点标题/正文召回
+handleLogged(IPC.WEB_SOURCE_UPDATE_KEYWORDS, (_event, params: WebSourceUpdateKeywordsReq): ApiResult<WebSourceUpdateKeywordsRes> => {
+  try {
+    const site = getWebSiteById(params.id)
+    if (!site) return { ok: false, error: { code: 'WEB_SITE_NOT_FOUND', message: '站点不存在' } }
+    updateWebSiteKeywords(params.id, params.keywords ?? '')
+    return { ok: true, data: { site: getWebSiteById(params.id)! } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }

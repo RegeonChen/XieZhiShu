@@ -280,8 +280,8 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 
 ### 2.20 web_sites 与 web_site_articles（网页资料库，Migration 012，2026-08-11）
 
-- `web_sites`：id PK、root_url NOT NULL UNIQUE（去尾部斜杠归一）、title、created_at/updated_at、last_synced_at。
-- `web_site_articles`：site_id（FK CASCADE）+ url 联合主键、title、discovered_at——站点文章 URL 清单缓存（生成初稿时先同步清单，再用撰写要求标题粗筛，命中文章增量抓取正文落库为 `sources`（kind='url'，task_id 绑定任务））。
+- `web_sites`：id PK、root_url NOT NULL UNIQUE（去尾部斜杠归一）、title、created_at/updated_at、last_synced_at、keywords（站点用户关键词，逗号/顿号/空格分隔，Migration 025）。
+- `web_site_articles`：site_id（FK CASCADE）+ url 联合主键、title、discovered_at、etag/last_modified/body_hash/last_fetched_at（条件请求/正文去重，Migration 024）、published_at（解析到的发布时间，Migration 025）——站点文章 URL 清单缓存（生成初稿时先同步清单，再用撰写要求标题粗筛，命中文章增量抓取正文落库为 `sources`（kind='url'，task_id 绑定任务））。
 
 ### 2.21 compilations（资料汇编，Migration 016，Phase 6.0，2026-08-25）
 

@@ -138,6 +138,7 @@ export const IPC = {
   WEB_SOURCE_ADD: 'webSource:add',
   WEB_SOURCE_REMOVE: 'webSource:remove',
   WEB_SOURCE_SYNC: 'webSource:sync',
+  WEB_SOURCE_UPDATE_KEYWORDS: 'webSource:updateKeywords',
 
   /* 窗口 */
   WINDOW_FOCUS: 'window:focus',
@@ -201,6 +202,13 @@ export interface WebSourceSyncReq {
 }
 /** 手动同步站点：发现文章清单（web_site_articles）；返回本次发现的文章数 */
 export type WebSourceSyncRes = { articles: number }
+
+/** 配置站点用户关键词（E11，逗号/顿号/空格分隔），参与该站点标题/正文召回 */
+export interface WebSourceUpdateKeywordsReq {
+  id: string
+  keywords: string
+}
+export type WebSourceUpdateKeywordsRes = { site: WebSite }
 
 export interface SourceGetReq {
   id: string
@@ -646,6 +654,7 @@ export interface IpcMapping {
   [IPC.WEB_SOURCE_ADD]: { _req: WebSourceAddReq; _res: ApiResult<WebSourceAddRes> }
   [IPC.WEB_SOURCE_REMOVE]: { _req: WebSourceRemoveReq; _res: ApiResult<void> }
   [IPC.WEB_SOURCE_SYNC]: { _req: WebSourceSyncReq; _res: ApiResult<WebSourceSyncRes> }
+  [IPC.WEB_SOURCE_UPDATE_KEYWORDS]: { _req: WebSourceUpdateKeywordsReq; _res: ApiResult<WebSourceUpdateKeywordsRes> }
   [IPC.SOURCES_GET]: { _req: SourceGetReq; _res: ApiResult<{ source: Source; tags: Tag[] }> }
   [IPC.SOURCES_RENDER_HTML]: { _req: SourceRenderHtmlReq; _res: ApiResult<SourceRenderHtmlRes> }
   [IPC.SOURCES_GET_FILE_URL]: { _req: SourceGetReq; _res: ApiResult<SourceGetFileUrlRes> }

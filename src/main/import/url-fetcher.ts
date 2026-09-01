@@ -14,6 +14,19 @@ export interface FetchResult {
   rawHtml: string
   cleanedText: string
   snapshotAt: string
+  /** 条件请求下服务器返回 304（内容未变）时为 true，rawHtml/cleanedText 为空 */
+  notModified?: boolean
+  /** 响应头 ETag（无条件刷新时可能为空） */
+  etag?: string
+  /** 响应头 Last-Modified（无条件刷新时可能为空） */
+  lastModified?: string
+}
+
+export interface FetchUrlOptions {
+  /** 条件请求：If-None-Match（服务器返回 304 时表示内容未变） */
+  ifNoneMatch?: string
+  /** 条件请求：If-Modified-Since（服务器返回 304 时表示内容未变） */
+  ifModifiedSince?: string
 }
 
 /**
@@ -30,13 +43,17 @@ export function validateUrl(raw: string): string {
 /**
  * 抓取网页正文并清洗为纯文本
  */
-export async function fetchUrl(url: string): Promise<FetchResult> {
+export async function fetchUrl(url: string, opts: FetchUrlOptions = {}): Promise<FetchResult> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
 
+  const headers: Record<string, string> = {}
+  if (opts.ifNoneMatch) headers['If-None-Match'] = opts.ifNoneMatch
+  if (opts.ifModifiedSince) headers['If-Modified-Since'] = opts.ifModifiedSince
+
   let response: globalThis.Response
   try {
-    response = await net.fetch(url, { signal: controller.signal } as RequestInit)
+    response = await net.fetch(url, { signal: controller.signal, headers } as RequestInit)
   } catch (err) {
     clearTimeout(timer)
     const msg = (err as Error).message ?? ''
@@ -46,6 +63,19 @@ export async function fetchUrl(url: string): Promise<FetchResult> {
     throw Object.assign(new Error(`网络请求失败: ${msg}`), { code: 'FETCH_FAILED' })
   } finally {
     clearTimeout(timer)
+  }
+
+  // 条件请求 304：内容未变，调用方按“复用已有正文”处理
+  if (response.status === 304) {
+    return {
+      url,
+      rawHtml: '',
+      cleanedText: '',
+      snapshotAt: new Date().toISOString(),
+      notModified: true,
+      etag: response.headers.get('etag') ?? undefined,
+      lastModified: response.headers.get('last-modified') ?? undefined
+    }
   }
 
   if (!response.ok) {
@@ -79,7 +109,9 @@ export async function fetchUrl(url: string): Promise<FetchResult> {
     url,
     rawHtml,
     cleanedText,
-    snapshotAt: new Date().toISOString()
+    snapshotAt: new Date().toISOString(),
+    etag: response.headers.get('etag') ?? undefined,
+    lastModified: response.headers.get('last-modified') ?? undefined
   }
 }
 

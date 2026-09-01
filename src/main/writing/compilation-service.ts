@@ -36,6 +36,17 @@ const CARD_SCAN_MAX = 200
 const REPRODUCIBILITY_SEED = 42
 /** 卡片级矛盾扫描的温度阶梯（低温度 + 稍高温度各扫一次后按主题并集，提升召回且成本低） */
 const CARD_SCAN_TEMPERATURES = [0, 0.3]
+/** 预计剩余时间的各阶段先验（秒）——单次调用阶段无实时完成比例，先按先验估；窗口细读阶段改用实测均速外推（A+C） */
+const PHASE_KEYWORD_ETA_S = 20
+const PHASE_WEB_ETA_S = 30
+const PHASE_RECALL_ETA_S = 60
+const PHASE_GATE_ETA_S = 20
+const PHASE_CONTRADICTION_ETA_S = 30
+/** 窗口细读阶段每个窗口的默认先验（秒），随后用已完成窗口实测均速（EMA）不断校正（A） */
+const WINDOW_ETA_DEFAULT_S = 20
+const WINDOW_ETA_ALPHA = 0.7
+/** 窗口块尚未计算出前，给前置阶段一个合理的占位总预算（秒），避免“预计还剩不到 1 分钟”明显失真 */
+const WINDOWS_PRIOR_PLACEHOLDER_S = 120
 /** 关键帧提取结果按「撰写要求」缓存，保证同一指令的两轮任务用同一套粗筛关键词（B：消除第一层漂移） */
 const keywordExtractionCache = new Map<string, KeywordExtraction>()
 
@@ -560,13 +571,17 @@ export async function generateCompilation(
   if (!t) return fail(ErrorCodes.INVALID_PARAM, '请填写本次撰写的标题')
 
   const prov = resolveProvider()
+  // A+C：预计剩余时间——窗口细读用实测均速（EMA）外推；窗口块未算出前用占位预算，让前置阶段预估不至于明显失真
+  let avgWindowSec = WINDOW_ETA_DEFAULT_S
+  let windowsBudgetSec = WINDOWS_PRIOR_PLACEHOLDER_S
+  const preWindowEta = (remainingSinglePhaseSec: number): number => remainingSinglePhaseSec + windowsBudgetSec + PHASE_CONTRADICTION_ETA_S
 
   let scopeIds = resolveScopeSourceIds(task, { getSourceIdsByTag, getAllSourceIds })
   if (scopeIds.length === 0) return fail(ErrorCodes.TASK_NO_SCOPE, '资料库中没有可用资料')
 
   // 用大模型（若可用、更懂方志语境）从完整撰写要求中提取“标题 + 粗筛关键词（含近义词/专业词）”，
   // 用于本地粗筛与网页检索；失败或无 Provider 时回退本地 extractTopicTerms + expandDomainHints。
-  onProgress?.({ stage: '正在理解撰写任务并提取粗筛关键词…', percent: 6, etaSeconds: 20 })
+  onProgress?.({ stage: '正在理解撰写任务并提取粗筛关键词…', percent: 6, etaSeconds: preWindowEta(PHASE_KEYWORD_ETA_S + PHASE_WEB_ETA_S + PHASE_RECALL_ETA_S + PHASE_GATE_ETA_S) })
   let coarseQuery: string
   let vecQuery: string
   // B（稳定关键帧）：同一「撰写要求」复用已提取的关键词，避免两轮任务因 LLM 采样差异产生不同粗筛关键词
@@ -578,7 +593,7 @@ export async function generateCompilation(
   if (extracted) {
     coarseQuery = [...new Set([extracted.title, ...extracted.keywords])].filter(Boolean).join(' ') || fallbackCoarseQuery(t)
     vecQuery = extracted.title || coarseQuery
-    onProgress?.({ stage: '已提取标题：' + extracted.title + '；提取粗筛关键词 ' + extracted.keywords.length + ' 个', percent: 7, etaSeconds: 20 })
+    onProgress?.({ stage: '已提取标题：' + extracted.title + '；提取粗筛关键词 ' + extracted.keywords.length + ' 个', percent: 7, etaSeconds: preWindowEta(PHASE_WEB_ETA_S + PHASE_RECALL_ETA_S + PHASE_GATE_ETA_S) })
     // 首次由大模型提取出标题后，自动把任务标题从默认值改为该标题（用户仍可后续重命名）
     if (task.title === '新建任务' && extracted.title) {
       try { renameTask(taskId, extracted.title) } catch { /* 重命名失败不影响汇编生成 */ }
@@ -588,11 +603,11 @@ export async function generateCompilation(
     vecQuery = coarseQuery
   }
 
-  onProgress?.({ stage: '正在检索网页资料库…', percent: 8, etaSeconds: 30 })
+  onProgress?.({ stage: '正在检索网页资料库…', percent: 8, etaSeconds: preWindowEta(PHASE_RECALL_ETA_S + PHASE_GATE_ETA_S) })
   const webIds = await fetchRelatedSiteSources(coarseQuery, taskId).catch(() => [] as string[])
   if (webIds.length > 0) scopeIds = Array.from(new Set([...scopeIds, ...webIds]))
 
-  onProgress?.({ stage: '正在本地召回资料（宁多勿漏）…', percent: 10, etaSeconds: 60 })
+  onProgress?.({ stage: '正在本地召回资料（宁多勿漏）…', percent: 10, etaSeconds: preWindowEta(PHASE_GATE_ETA_S) })
   const allChunks = recallCandidateChunks(scopeIds, coarseQuery)
   if (allChunks.length === 0) return fail(ErrorCodes.LLM_NO_CANDIDATES, '资料库中没有可召回的资料')
 
@@ -604,7 +619,7 @@ export async function generateCompilation(
   // 2026-08-25 优化：调用大模型前用保守本地闸门收窄提交物——把"任务范围内全部段落"收敛为
   // "与主题相关的来源及其相关段落"。完全无关的来源整篇舍弃，宽口径来源只保留有信号的段；
   // 用低阈值向量路径兜底"字面无关但语义相关"的段落，避免误删可能相关的内容。
-  onProgress?.({ stage: '正在按主题收敛候选材料（保守闸门）…', percent: 11, etaSeconds: 20 })
+  onProgress?.({ stage: '正在按主题收敛候选材料（保守闸门）…', percent: 11, etaSeconds: preWindowEta(0) })
   const vectors = await embedTexts([vecQuery]).catch(() => null)
   const queryVector = vectors ? vectors[0] : undefined
   const recall = recallCompilationCandidates(scopeIds, coarseQuery, queryVector)
@@ -614,10 +629,12 @@ export async function generateCompilation(
 
   // 分窗 AI 细读
   const windows = sliceChunks(chunks, WINDOW_MAX_CHARS)
+  // 进入窗口阶段：窗口块预算从占位替换为实际窗口数（默认先验每窗 20s），之后由 EMA 实测均速校正
+  windowsBudgetSec = windows.length * WINDOW_ETA_DEFAULT_S
   onProgress?.({
     stage: '正在由 AI 细读资料（0/' + windows.length + ' 个窗口）…',
     percent: 12,
-    etaSeconds: windows.length * 20,
+    etaSeconds: preWindowEta(0),
     candidateChunks: chunks.length,
     candidateSources: refs.length
   })
@@ -632,13 +649,17 @@ export async function generateCompilation(
     while (true) {
       const i = nextWindow()
       if (i >= windows.length) return
+      const wStart = Date.now()
       const out = await readWindow(prov.provider, windows[i], refs, taskId, t)
+      // A：用每个窗口实测耗时做 EMA，校准每窗均速，剩余时间 = 均速 × 剩余窗口（含后续矛盾汇总预算）
+      const wSec = (Date.now() - wStart) / 1000
+      avgWindowSec = Math.round(WINDOW_ETA_ALPHA * wSec + (1 - WINDOW_ETA_ALPHA) * avgWindowSec)
       if (out) outputs.push(out)
       done += 1
       onProgress?.({
         stage: '正在由 AI 细读资料（' + done + '/' + windows.length + ' 个窗口）…',
         percent: Math.round(12 + (done / windows.length) * 68),
-        etaSeconds: Math.max(0, Math.round((windows.length - done) * 20)),
+        etaSeconds: Math.max(0, Math.round(avgWindowSec * (windows.length - done) + PHASE_CONTRADICTION_ETA_S)),
         candidateChunks: chunks.length,
         candidateSources: refs.length
       })
@@ -654,7 +675,7 @@ export async function generateCompilation(
 
   // 2026-08-25 优化：跨窗口/跨来源矛盾在逐窗细读时可能漏检（两个相左说法若落在不同窗口就不会一起看到）。
   // 细读产出最终卡片后，对精简后的卡片集再做一次矛盾扫描（输入量小、成本低），提升矛盾发现稳定性。
-  onProgress?.({ stage: '正在汇总卡片间的矛盾…', percent: 88, etaSeconds: 30 })
+  onProgress?.({ stage: '正在汇总卡片间的矛盾…', percent: 88, etaSeconds: PHASE_CONTRADICTION_ETA_S })
   const cardGroups = await scanCardContradictions(prov.provider, merged.items, refs, taskId).catch(() => [] as CompilationOutputGroup[])
   const contradictions = mergeContradictionGroups(merged.contradictions, cardGroups)
 

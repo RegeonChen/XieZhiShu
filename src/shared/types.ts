@@ -34,6 +34,8 @@ export interface WebSite {
   createdAt: string
   updatedAt: string
   lastSyncedAt?: string // 上次同步（发现文章清单）时间
+  /** 用户为该站点配置的关键词（逗号分隔），参与该站点的标题/正文召回（E11） */
+  keywords?: string
 }
 
 // ============================================================

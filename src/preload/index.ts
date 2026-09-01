@@ -68,6 +68,10 @@ const api = {
   syncWebSource(id: string): Promise<ApiResult<{ articles: number }>> {
     return ipcRenderer.invoke(IPC.WEB_SOURCE_SYNC, { id })
   },
+  /** 配置站点用户关键词（逗号/顿号/空格分隔，参与该站点召回）（E11） */
+  updateWebSourceKeywords(id: string, keywords: string): Promise<ApiResult<{ site: unknown }>> {
+    return ipcRenderer.invoke(IPC.WEB_SOURCE_UPDATE_KEYWORDS, { id, keywords })
+  },
   /** 更新标签 */
   updateTag(id: string, name?: string): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.TAGS_UPDATE, { id, name })
