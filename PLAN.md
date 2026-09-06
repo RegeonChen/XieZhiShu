@@ -4,6 +4,16 @@
 
 > **2026-08-19 文档整理说明**：原文件按时间追加了大量已完成任务的详细记录（含多次修订过程），本版将已完成阶段的冗杂过程合并为「已完成阶段摘要」，保留对后续开发仍有价值的方案结论与根因；详细历史仍可在 Git 提交记录中回溯。**未完成的 Phase 5 保持完整规划。**
 
+## 目录
+
+- [Team Responsibilities（模块职责范围）](#team-responsibilities模块职责范围)
+- [已完成阶段摘要（Phase 1 – Phase 3.7）](#已完成阶段摘要phase-1--phase-37)
+- [Phase 6: 三段式撰写重构](#phase-6-三段式撰写重构资料汇编--行文规范--初稿2026-08-25-规划中)
+- [Phase 6.x 网页资料库后续优化](#phase-6x-网页资料库后续优化)
+- [Phase 5: Acceptance & Packaging](#phase-5-acceptance--packaging待进行)
+- [Project Completion Criteria](#project-completion-criteria)
+
+
 ## Team Responsibilities（模块职责范围）
 
 | 模块 | 主要职责 | 主要交付 |
