@@ -256,8 +256,9 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
   const scanRepairsAndReload = useCallback(async (compilationId: string) => {
     try {
       await window.api.scanCompilationRepairs(compilationId)
-    } catch {
-      // 扫描失败是 additive，不阻断（忽略）
+    } catch (e) {
+      // 扫描失败是 additive，不阻断；但记日志便于排查为何二次修改没跑
+      void window.api.appendLog('WARN', 'repair', '二次修改扫描失败（已忽略）：' + (e instanceof Error ? e.message : String(e)))
     }
     await refreshCompilation(compilationId)
   }, [refreshCompilation])
@@ -285,12 +286,16 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
     try {
       const res = await window.api.generateCompilation(taskId, inst)
       if (res.ok && res.data) {
-        const comp = res.data.compilation as CompilationView
+        const data = res.data as { compilation: CompilationView; contradictionScan?: { ok: boolean; message?: string } }
+        const comp = data.compilation
         setCompilation(comp)
         const pendingCount = comp.contradictions.filter((c) => c.status === 'pending').length
+        const scanFailed = data.contradictionScan && data.contradictionScan.ok === false
         const summary = pendingCount > 0
           ? '已生成资料汇编：' + comp.items.length + ' 张卡片，' + pendingCount + ' 组矛盾待处理。请审阅并处理后点击「确认汇编」。'
-          : '已生成资料汇编：' + comp.items.length + ' 张卡片，无未处理矛盾。请审阅后点击「确认汇编」。'
+          : scanFailed
+            ? '已生成资料汇编：' + comp.items.length + ' 张卡片。注意：' + zhCN.compilation.contradictionScanFailed.replace('{reason}', data.contradictionScan?.message ?? '未知') + '请审阅并酌情复核。'
+            : '已生成资料汇编：' + comp.items.length + ' 张卡片，无未处理矛盾。请审阅后点击「确认汇编」。'
         appendAssistant(summary)
         void window.api.addTaskMessage(taskId, 'assistant', summary, 'notice')
         void scanRepairsAndReload(comp.id)

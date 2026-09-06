@@ -121,6 +121,8 @@ export const IPC = {
 
   /* 应用元数据（Task 1.1 已实现） */
   APP_GET_INFO: 'app:getInfo',
+  // pdf.js cMaps 资源基址（渲染层预览中文/ CID 字体 PDF 需要）
+  APP_GET_PDF_CMAPS_URL: 'app:getPdfCmapsUrl',
 
   /* 系统文件/目录选择对话框（安全：主进程打开，仅回传路径） */
   APP_OPEN_FILE_DIALOG: 'app:openFileDialog',
@@ -137,8 +139,7 @@ export const IPC = {
   WEB_SOURCE_LIST: 'webSource:list',
   WEB_SOURCE_ADD: 'webSource:add',
   WEB_SOURCE_REMOVE: 'webSource:remove',
-  WEB_SOURCE_SYNC: 'webSource:sync',
-  WEB_SOURCE_UPDATE_KEYWORDS: 'webSource:updateKeywords',
+  WEB_SOURCE_UPDATE: 'webSource:update',
 
   /* 窗口 */
   WINDOW_FOCUS: 'window:focus',
@@ -196,19 +197,12 @@ export type WebSourceAddRes = { site: WebSite }
 export interface WebSourceRemoveReq {
   id: string
 }
-
-export interface WebSourceSyncReq {
+export interface WebSourceUpdateReq {
   id: string
+  rootUrl?: string
+  title?: string
 }
-/** 手动同步站点：发现文章清单（web_site_articles）；返回本次发现的文章数 */
-export type WebSourceSyncRes = { articles: number }
-
-/** 配置站点用户关键词（E11，逗号/顿号/空格分隔），参与该站点标题/正文召回 */
-export interface WebSourceUpdateKeywordsReq {
-  id: string
-  keywords: string
-}
-export type WebSourceUpdateKeywordsRes = { site: WebSite }
+export type WebSourceUpdateRes = { site: WebSite }
 
 export interface SourceGetReq {
   id: string
@@ -291,7 +285,7 @@ export interface CompilationGenerateReq {
   taskId: string
   title: string
 }
-export type CompilationGenerateRes = { compilation: Compilation }
+export type CompilationGenerateRes = { compilation: Compilation; contradictionScan?: { ok: boolean; message?: string } }
 /** 资料汇编调整（2026-08-28，Phase 6.4.4）：首条消息生成汇编后续每条消息都是对汇编的调整（批量删除/增补/自定义编辑） */
 export interface CompilationAdjustReq {
   taskId: string
@@ -609,6 +603,7 @@ export type WorkspaceMigrateRes = {
 
 // -- 应用元数据 --
 export type AppInfoRes = { version: string; platform: string }
+export type AppGetPdfCmapsUrlRes = { url: string }
 
 // -- 剪贴板（2026-08-20）--
 export interface ClipboardWriteTextReq {
@@ -635,6 +630,7 @@ export type LogExportRes = { path: string; fileName: string }
 export interface IpcMapping {
   // 应用元数据
   [IPC.APP_GET_INFO]: { _req: void; _res: ApiResult<AppInfoRes> }
+  [IPC.APP_GET_PDF_CMAPS_URL]: { _req: void; _res: ApiResult<AppGetPdfCmapsUrlRes> }
   [IPC.APP_OPEN_EXTERNAL]: { _req: AppOpenExternalReq; _res: ApiResult<void> }
   [IPC.APP_OPEN_FILE_DIALOG]: { _req: void; _res: ApiResult<{ paths: string[] }> }
   [IPC.APP_OPEN_DIRECTORY_DIALOG]: { _req: void; _res: ApiResult<{ path: string | null }> }
@@ -653,8 +649,7 @@ export interface IpcMapping {
   [IPC.WEB_SOURCE_LIST]: { _req: WebSourceListReq; _res: ApiResult<WebSourceListRes> }
   [IPC.WEB_SOURCE_ADD]: { _req: WebSourceAddReq; _res: ApiResult<WebSourceAddRes> }
   [IPC.WEB_SOURCE_REMOVE]: { _req: WebSourceRemoveReq; _res: ApiResult<void> }
-  [IPC.WEB_SOURCE_SYNC]: { _req: WebSourceSyncReq; _res: ApiResult<WebSourceSyncRes> }
-  [IPC.WEB_SOURCE_UPDATE_KEYWORDS]: { _req: WebSourceUpdateKeywordsReq; _res: ApiResult<WebSourceUpdateKeywordsRes> }
+  [IPC.WEB_SOURCE_UPDATE]: { _req: WebSourceUpdateReq; _res: ApiResult<WebSourceUpdateRes> }
   [IPC.SOURCES_GET]: { _req: SourceGetReq; _res: ApiResult<{ source: Source; tags: Tag[] }> }
   [IPC.SOURCES_RENDER_HTML]: { _req: SourceRenderHtmlReq; _res: ApiResult<SourceRenderHtmlRes> }
   [IPC.SOURCES_GET_FILE_URL]: { _req: SourceGetReq; _res: ApiResult<SourceGetFileUrlRes> }

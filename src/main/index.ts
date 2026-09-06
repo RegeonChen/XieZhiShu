@@ -72,8 +72,8 @@ import { getDb } from './db/connection'
 import { listSources, getSourceById, deleteSource, deleteSources, updateSourceTitle, updateSourceFingerprint } from './db/sources'
 import { listTags, createTag, updateTag, deleteTag, addTagToSource, removeTagFromSource, getTagsBySource, batchAddTags, searchTags, getSourceIdsByTag } from './db/tags'
 import { importFiles, importUrl } from './import'
-import { addWebSite, getWebSiteById, listWebSites, removeWebSite, updateWebSiteKeywords } from './db/web-sites'
-import { syncSite } from './web-source/site-crawler'
+import { setPdfCmapsDir } from './import/file-parser'
+import { addWebSite, getWebSiteByRootUrl, listWebSites, removeWebSite, updateWebSite } from './db/web-sites'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { safeStorageCodec } from './llm/secret'
 import { listProviders, saveProvider, deleteProvider } from './llm/provider-store'
@@ -131,7 +131,7 @@ import { setSourceRemovalNotify, listPendingSourceRemovals, decideSourceRemoval,
 import { trashSourceFile, renameSourceFile, resolveSourceFilePath } from './workspace/sync'
 import { migrateLegacyToWorkspace } from './workspace/migrate'
 import { loadWindowState, trackWindowState } from './window-state'
-import type { WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceSyncReq, WebSourceSyncRes, WebSourceUpdateKeywordsReq, WebSourceUpdateKeywordsRes, LogAppendReq, LogExportRes, StyleGuideListRes, StyleGuideSaveReq, StyleGuideSaveRes, StyleGuideSetDefaultReq, StyleGuideSetDefaultRes, StyleGuideDeleteReq } from '../shared/ipc'
+import type { WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceUpdateReq, WebSourceUpdateRes, AppGetPdfCmapsUrlRes, LogAppendReq, LogExportRes, StyleGuideListRes, StyleGuideSaveReq, StyleGuideSaveRes, StyleGuideSetDefaultReq, StyleGuideSetDefaultRes, StyleGuideDeleteReq } from '../shared/ipc'
 import { logMain, logIpc, logRenderer, exportLogsText } from './logger'
 
 const APP_PROTOCOL_WHITELIST = /^https?:\/\//i
@@ -139,6 +139,8 @@ const APP_PROTOCOL_WHITELIST = /^https?:\/\//i
 // 内嵌 HTTP 文件服务：仅监听 127.0.0.1 随机端口，按资料 id 提供本地原文件
 let fileServerUrl: string | null = null
 let fileServer: ReturnType<typeof createServer> | null = null
+/** pdf.js cMaps 目录（中文／CID 字体 PDF 解码/渲染需要），启动时解析并注入 */
+let pdfCmapsDir = ''
 
 function startFileServer(): void {
   if (fileServer) return
@@ -158,6 +160,18 @@ function startFileServer(): void {
 
     try {
       const pathname = decodeURIComponent(new URL(req.url ?? '/', 'http://127.0.0.1').pathname).replace(/^\//, '')
+      // pdf.js cMaps：提供 .bcmap 给渲染层预览中文/CID 字体 PDF（getDocument({ cMapUrl })）
+      const cmapsMatch = pathname.match(/^pdf-cmaps\/([^/]+)$/)
+      if (cmapsMatch) {
+        const name = cmapsMatch[1]
+        if (!pdfCmapsDir || !/^[\w-]+\.bcmap$/.test(name)) { res.statusCode = 404; res.end(); return }
+        const cmapPath = join(pdfCmapsDir, name)
+        if (!existsSync(cmapPath)) { res.statusCode = 404; res.end(); return }
+        res.setHeader('content-type', 'application/octet-stream')
+        res.setHeader('cache-control', 'no-store')
+        res.end(readFileSync(cmapPath))
+        return
+      }
       // 仅允许按资料 id 取文件（Phase 2.2 起统一服务工作区与旧 imports 文件，白名单化防路径穿越）
       const match = pathname.match(/^source\/([^/]+)$/)
       if (!match) {
@@ -200,6 +214,18 @@ function startFileServer(): void {
       fileServerUrl = `http://127.0.0.1:${addr.port}`
     }
   })
+}
+
+/** 解析 pdf.js cMaps 目录（dev 与 asar 内均可经 fs 读取；打包时可经 extraResources 提供 resources/pdf-cmaps）。 */
+function resolvePdfCmapsDir(): string {
+  const root = app.getAppPath()
+  const candidates = [
+    join(root, 'node_modules', 'pdf-parse', 'node_modules', 'pdfjs-dist', 'cmaps'),
+    join(root, 'node_modules', 'pdfjs-dist', 'cmaps'),
+    join(process.resourcesPath, 'pdf-cmaps')
+  ]
+  for (const c of candidates) if (existsSync(join(c, '78-H.bcmap'))) return c
+  return ''
 }
 
 function createWindow(): void {
@@ -304,6 +330,11 @@ rawIpcHandle(IPC.LOG_EXPORT, async (): Promise<ApiResult<LogExportRes>> => {
 
 handleLogged(IPC.APP_GET_INFO, (): ApiResult<AppInfoRes> => {
   return { ok: true, data: { version: app.getVersion(), platform: process.platform } }
+})
+
+// pdf.js cMaps 基址（渲染层 getDocument({ cMapUrl }) 用；文件服务器启动后才非空）
+handleLogged(IPC.APP_GET_PDF_CMAPS_URL, (): ApiResult<AppGetPdfCmapsUrlRes> => {
+  return { ok: true, data: { url: fileServerUrl ? fileServerUrl + '/pdf-cmaps/' : '' } }
 })
 
 // 打开外部链接（预设模型注册页等；仅允许 http/https，防滥用）
@@ -416,26 +447,21 @@ handleLogged(IPC.WEB_SOURCE_REMOVE, (_event, params: WebSourceRemoveReq): ApiRes
   }
 })
 
-handleLogged(IPC.WEB_SOURCE_SYNC, async (_event, params: WebSourceSyncReq): Promise<ApiResult<WebSourceSyncRes>> => {
+// 修改网页资料库站点（名称/根网址）；根网址重复返回错误
+handleLogged(IPC.WEB_SOURCE_UPDATE, (_event, params: WebSourceUpdateReq): ApiResult<WebSourceUpdateRes> => {
   try {
-    const added = await syncSite(params.id)
-    return { ok: true, data: { articles: added } }
+    const site = updateWebSite(params.id, { rootUrl: params.rootUrl, title: params.title })
+    if (!site) {
+      const dup = params.rootUrl && getWebSiteByRootUrl(params.rootUrl.trim().replace(/\/+$/, ''))
+      return { ok: false, error: { code: dup && dup.id !== params.id ? 'ALREADY_EXISTS' : 'WEB_SITE_NOT_FOUND', message: dup && dup.id !== params.id ? '该网址已注册为网页资料库' : '站点不存在' } }
+    }
+    return { ok: true, data: { site } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
 })
 
-// 配置站点用户关键词（E11）——逗号/顿号/空格分隔，参与该站点标题/正文召回
-handleLogged(IPC.WEB_SOURCE_UPDATE_KEYWORDS, (_event, params: WebSourceUpdateKeywordsReq): ApiResult<WebSourceUpdateKeywordsRes> => {
-  try {
-    const site = getWebSiteById(params.id)
-    if (!site) return { ok: false, error: { code: 'WEB_SITE_NOT_FOUND', message: '站点不存在' } }
-    updateWebSiteKeywords(params.id, params.keywords ?? '')
-    return { ok: true, data: { site: getWebSiteById(params.id)! } }
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-})
+
 
 // Task 2.3 标签 CRUD
 handleLogged(IPC.TAGS_CREATE, (_event, params: { name: string }): ApiResult<{ tag: Tag }> => {
@@ -526,7 +552,7 @@ handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerate
   if (!res.ok) return { ok: false, error: res.error }
   const compilation = getCompilationById(res.compilationId)
   if (!compilation) return { ok: false, error: { code: 'INTERNAL_ERROR', message: '资料汇编落库失败' } }
-  return { ok: true, data: { compilation } }
+  return { ok: true, data: { compilation, contradictionScan: res.contradictionScan } }
 })
 
 handleLogged(IPC.COMPILATION_UPDATE_ITEM, (_event, params: CompilationUpdateItemReq): ApiResult<CompilationUpdateItemRes> => {
@@ -691,7 +717,7 @@ handleLogged(IPC.COMPILATION_RECYCLE_BIN_RESTORE, (_event, params: CompilationRe
 
 // 资料卡片二次加工（语义补全/修订，Phase 6.4.3）
 handleLogged(IPC.COMPILATION_REPAIR_SCAN, (_event, params: CompilationRepairScanReq): Promise<ApiResult<CompilationRepairScanRes>> => {
-  pushUndo(params.compilationId)
+  try { pushUndo(params.compilationId) } catch { /* undo 登记失败不阻断二次修改扫描 */ }
   return scanCompilationRepairs(params.compilationId).then((res) =>
     res.ok ? { ok: true, data: { repairs: res.repairs } } : { ok: false, error: res.error }
   )
@@ -1412,6 +1438,14 @@ app.whenReady().then(() => {
       if (!w.isDestroyed()) w.webContents.send(IPC_EVENTS.WORKSPACE_SOURCE_REMOVED, item)
     }
   })
+
+  // 解析并注入 pdf.js cMaps 目录（中文/CID 字体 PDF 的文字提取与渲染预览依赖 cMapUrl+cMapPacked）
+  const pdfCmaps = resolvePdfCmapsDir()
+  if (pdfCmaps) {
+    pdfCmapsDir = pdfCmaps
+    setPdfCmapsDir(pdfCmaps + '/')
+    logMain('app', 'pdf.js cmaps 已加载：' + pdfCmaps)
+  }
 
   // 启动内嵌文件服务（提供 PDF/图片等本地文件）
   startFileServer()

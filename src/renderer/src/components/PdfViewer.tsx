@@ -14,6 +14,18 @@ const ZOOM_MIN = 0.25
 const ZOOM_MAX = 4
 const ZOOM_STEP = 0.8
 
+// pdf.js cMaps 基址（中文/CID 字体 PDF 需要 cMapUrl+cMapPacked 才能正确渲染/显示文字）
+let pdfCmapsUrlPromise: Promise<string> | null = null
+function getPdfCmapsUrl(): Promise<string> {
+  if (!pdfCmapsUrlPromise) {
+    pdfCmapsUrlPromise = window.api
+      .getPdfCmapsUrl()
+      .then((res) => (res.ok && res.data ? res.data.url : ''))
+      .catch(() => '')
+  }
+  return pdfCmapsUrlPromise
+}
+
 function clampZoom(value: number): number {
   return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, value))
 }
@@ -40,21 +52,20 @@ export default function PdfViewer({ url }: PdfViewerProps) {
     setRendered(0)
     setError(null)
 
-    try {
-      const loadingTask = getDocument({ url })
-      loadingTaskRef.current = loadingTask
-      loadingTask.promise
-        .then((d) => {
-          if (cancelled) return
-          setDoc(d)
-          setNumPages(d.numPages)
-        })
-        .catch((err: unknown) => {
-          if (!cancelled) setError(err instanceof Error ? err.message : String(err))
-        })
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
+    ;(async () => {
+      try {
+        const cMapUrl = await getPdfCmapsUrl()
+        if (cancelled) return
+        const loadingTask = cMapUrl ? getDocument({ url, cMapUrl, cMapPacked: true }) : getDocument({ url })
+        loadingTaskRef.current = loadingTask
+        const d = await loadingTask.promise
+        if (cancelled) return
+        setDoc(d)
+        setNumPages(d.numPages)
+      } catch (err: unknown) {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err))
+      }
+    })()
 
     return () => {
       cancelled = true

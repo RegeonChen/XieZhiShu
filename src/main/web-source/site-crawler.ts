@@ -116,8 +116,33 @@ export function extractLinks(html: string, baseUrl: string): { href: string; tex
   return out
 }
 
+/** 常用"栏目/列表/频道页"的 basename（去掉扩展名后）——这些几乎不可能是单篇文章页。 */
+const LIST_PAGE_BASENAMES = new Set(['list', 'index', 'default', 'channel', 'category', 'column', 'col', 'lm', 'more', 'news_list'])
+
+/**
+ * 是否为"栏目/列表页"链接（纯函数、可测试、强特征、低误伤）：
+ * 只用 URL 的 basename 判断主流列表/栏目页命名（list/index/default/channel/category/column/col/lm/more/news_list）。
+ * 真实文章页的 basename 通常是日期/文章 ID/数字字母串（如 t20250101_xxx.htm、20250101.htm、a.htm），不在名单内，不会被误伤。
+ */
+export function isListPageUrl(url: string): boolean {
+  let u: URL
+  try { u = new URL(url) } catch { return false }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false
+  const path = u.pathname.replace(/\/+$/, '')
+  const seg = path.split('/').filter(Boolean)
+  const last = seg.length > 0 ? seg[seg.length - 1] : ''
+  const base = last.replace(/\.(?:htm|html|shtml|aspx?)$/i, '').toLowerCase()
+  if (LIST_PAGE_BASENAMES.has(base)) return true
+  // 路径段命中列表关键词（如 /more/<栏目ID>.shtml 这类"更多"列表页）且 basename 为纯数字 → 视为列表页。
+  // 真实文章页的 basename 通常含日期/文章 ID（含字母）或不带列表关键词的路径段，不会被命中，避免误伤相关文章。
+  if (/^\d+$/.test(base) && seg.some((s) => LIST_PAGE_BASENAMES.has(s.toLowerCase()))) return true
+  return false
+}
+
 /** 是否为"文章页"链接（静态后缀判定；纯函数、可测试） */
 export function isArticleUrl(url: string): boolean {
+  // ① 排除常见栏目/列表页（如 .../list.shtml、.../index.html），避免列表页被当作单篇文章收录
+  if (isListPageUrl(url)) return false
   return ARTICLE_SUFFIX_RE.test(url.split('?')[0].split('#')[0])
 }
 
@@ -512,12 +537,11 @@ export async function discoverSiteArticles(
  */
 export function filterArticlesByQuery(
   articles: { url: string; title: string }[],
-  query: string,
-  extraTerms: string[] = []
+  query: string
 ): { url: string; title: string }[] {
   const terms = extractTopicTerms(query)
   if (terms.length === 0) return []
-  const allTerms = [...new Set([...terms, ...expandDomainHints(terms), ...extraTerms])]
+  const allTerms = [...new Set([...terms, ...expandDomainHints(terms)])]
   return articles.filter((a) => {
     const title = (a.title ?? '').trim()
     // 无标题（如 sitemap 发现）→ 保守保留为候选，交由正文级精过滤决定是否落库
@@ -526,11 +550,6 @@ export function filterArticlesByQuery(
   })
 }
 
-/** 解析站点用户关键词（逗号/顿号/空格分隔），用于 E11 站点级召回增强。纯函数、可测试。 */
-export function parseSiteKeywords(keywords?: string): string[] {
-  if (!keywords) return []
-  return keywords.split(/[,，、\s]+/).map((k) => k.trim()).filter((k) => k.length >= 2)
-}
 
 /**
  * 增量导入单篇文章正文（幂等）：sources 中 (url, taskId) 已存在则直接返回已有，不重复抓取。
@@ -544,6 +563,11 @@ export async function importSiteArticle(
   taskId?: string,
   siteId?: string
 ): Promise<Source | null> {
+  // ② 列表页兜底：栏目/列表页（URL 强模式）绝不当作单篇文章正文落库，避免"打开来源跳到列表页"
+  if (isListPageUrl(url)) {
+    logMain('web', '列表页误判，丢弃 url=' + url)
+    return null
+  }
   const existing = getSourceByUrl(url, taskId)
   if (existing) return existing
   try {
@@ -649,18 +673,16 @@ export async function fetchRelatedSiteSources(
     try { host = new URL(site.rootUrl).host } catch { host = site.rootUrl }
     const robots = await fetchRobotsTxt(site.rootUrl).catch(() => ({ crawlDelay: undefined, disallow: [] }))
     const articles = listSiteArticles(site.id)
-    // E11：站点用户关键词并入该站点召回词，增强站点级召回
-    const siteTerms = parseSiteKeywords(site.keywords)
-    const hits = filterArticlesByQuery(articles, query, siteTerms)
+    const hits = filterArticlesByQuery(articles, query)
     let imported = 0
     for (const h of hits) {
       // C6 礼貌限速：单站串行 + 请求间隔（robots crawl-delay 或默认最小间隔）
       if (isPathDisallowed(h.url, robots.disallow)) continue
       await politeDelay(host, robots.crawlDelay)
-      const src = await importSiteArticle(h.url, h.title, [...allTerms, ...siteTerms], taskId, site.id)
+      const src = await importSiteArticle(h.url, h.title, allTerms, taskId, site.id)
       if (src) { ids.push(src.id); imported++ }
     }
-    logMain('web', `网页资料检索 站点=${site.title || site.rootUrl} 文章清单=${articles.length} 标题命中=${hits.length} 落库=${imported} robots.crawlDelay=${robots.crawlDelay ?? '-'} 站点关键词=${siteTerms.length}`)
+    logMain('web', `网页资料检索 站点=${site.title || site.rootUrl} 文章清单=${articles.length} 标题命中=${hits.length} 落库=${imported} robots.crawlDelay=${robots.crawlDelay ?? '-'}`)
   }
   return ids
 }
@@ -690,6 +712,22 @@ if (import.meta.vitest) {
       expect(isArticleUrl('https://fzxq.fuzhou.gov.cn/a.htm?page=2')).toBe(true)
       expect(isArticleUrl('https://fzxq.fuzhou.gov.cn/xxgk/ztzl/xqnj/')).toBe(false)
       expect(isArticleUrl('https://fzxq.fuzhou.gov.cn/sitemap.xml')).toBe(false)
+      expect(isArticleUrl('https://www.clnews.com.cn/html/22/list.shtml')).toBe(false)
+      expect(isArticleUrl('https://www.clnews.com.cn/index.html')).toBe(false)
+      expect(isArticleUrl('https://www.clnews.com.cn/more/22.shtml')).toBe(false)
+    })
+
+    it('detects list/channel pages but never real article pages', () => {
+      expect(isListPageUrl('https://www.clnews.com.cn/html/22/list.shtml')).toBe(true)
+      expect(isListPageUrl('https://www.clnews.com.cn/index.html')).toBe(true)
+      expect(isListPageUrl('https://x.gov.cn/channel/index.shtml')).toBe(true)
+      expect(isListPageUrl('https://www.clnews.com.cn/more/22.shtml')).toBe(true)
+      expect(isListPageUrl('http://www.clnews.com.cn/html/428/2019-01-28/083810141991.shtml')).toBe(false)
+      expect(isListPageUrl('https://fzxq.fuzhou.gov.cn/a.htm')).toBe(false)
+      expect(isListPageUrl('https://fzxq.fuzhou.gov.cn/a.htm?page=2')).toBe(false)
+      expect(isListPageUrl('https://fzxq.fuzhou.gov.cn/xxgk/ztzl/xqnj/202512/t20251203_5239523.htm')).toBe(false)
+      expect(isListPageUrl('https://x.gov.cn/news/123.html')).toBe(false)
+      expect(isListPageUrl('https://x.gov.cn/html/2025/t20250101_abc.htm')).toBe(false)
     })
 
     it('filters articles by query bigrams', () => {

@@ -139,13 +139,17 @@ export async function scanCompilationRepairs(
   const prov = resolveProvider()
   if (!prov.ok) return { ok: true, repairs: [] }
 
+  logMain('repair', '开始二次修改扫描 汇编=' + compilationId + ' 卡片=' + items.length)
   onProgress?.('正在扫描表意不明的资料卡片…')
   try {
     const result = await chatCompletion(prov.provider, buildPrompt(items), REPAIR_TIMEOUT_MS, { kind: 'compilation-repair-scan' }, {
       maxRetries: 1,
       temperature: 0
     })
-    if (!result.ok) return { ok: true, repairs: [] }
+    if (!result.ok) {
+      logMain('repair', '二次修改扫描失败 汇编=' + compilationId + ' 原因=' + (result.error?.message ?? '未知'))
+      return { ok: true, repairs: [] }
+    }
 
     const parsed = parseRepairScanOutput(result.text)
     if (!parsed) return { ok: true, repairs: [] }
@@ -171,7 +175,8 @@ export async function scanCompilationRepairs(
     const repairs = inputs.length > 0 ? insertRepairs(compilationId, inputs) : []
     logMain('repair', '二次修改扫描：自动补齐时间戳 ' + tsFilled + ' 条，生成待采纳修订 ' + repairs.length + ' 条')
     return { ok: true, repairs }
-  } catch {
+  } catch (e) {
+    logMain('repair', '二次修改扫描抛错 汇编=' + compilationId + ' 原因=' + (e instanceof Error ? e.message : String(e)))
     return { ok: true, repairs: [] }
   }
 }

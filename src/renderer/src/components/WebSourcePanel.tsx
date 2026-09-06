@@ -7,12 +7,11 @@ interface WebSiteItem {
   rootUrl: string
   title: string
   lastSyncedAt?: string
-  keywords?: string
 }
 
 /**
  * 网页资料库（2026-08-11）：注册站点后，生成初稿时自动检索该网站中与撰写要求相关的文章并抓取正文，
- * 与本地文件同等参与资料粗筛、矛盾检测与来源溯源。此处提供站点的注册 / 列表 / 删除 / 手动同步。
+ * 与本地文件同等参与资料粗筛、矛盾检测与来源溯源。此处提供站点的注册 / 列表 / 删除。
  */
 function WebSourcePanel() {
   const t = zhCN.webSource
@@ -20,11 +19,12 @@ function WebSourcePanel() {
   const [urlInput, setUrlInput] = useState('')
   const [titleInput, setTitleInput] = useState('')
   const [busy, setBusy] = useState(false)
-  const [syncingId, setSyncingId] = useState<string | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [pendingRemove, setPendingRemove] = useState<WebSiteItem | null>(null)
-  const [keywordsDraft, setKeywordsDraft] = useState<Record<string, string>>({})
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editTitle, setEditTitle] = useState('')
+  const [editUrl, setEditUrl] = useState('')
 
   const load = useCallback(async () => {
     const res = await window.api.listWebSources()
@@ -72,32 +72,40 @@ function WebSourcePanel() {
     }
   }
 
-  const handleSync = async (id: string) => {
-    setSyncingId(id)
-    setMsg(null)
-    setErr(null)
-    try {
-      const res = await window.api.syncWebSource(id)
-      if (res.ok && res.data) {
-        setMsg(t.syncDone.replace('{added}', String(res.data.articles)))
-      } else {
-        setErr(t.operationFailed.replace('{message}', res.error?.message ?? ''))
-      }
-      await load()
-    } finally {
-      setSyncingId(null)
-    }
+  const formatTime = (iso?: string): string => {
+    if (!iso) return t.neverSynced
+    const d = new Date(iso)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
   }
 
-  const handleSaveKeywords = async (id: string) => {
+  const startEdit = (site: WebSiteItem) => {
+    setEditingId(site.id)
+    setEditTitle(site.title || '')
+    setEditUrl(site.rootUrl || '')
     setMsg(null)
     setErr(null)
+  }
+  const cancelEdit = () => {
+    setEditingId(null)
+    setEditTitle('')
+    setEditUrl('')
+  }
+  const handleUpdate = async () => {
+    if (!editingId || busy) return
+    const rootUrl = editUrl.trim()
+    if (!rootUrl) {
+      setErr(t.operationFailed.replace('{message}', '网站网址不能为空'))
+      return
+    }
     setBusy(true)
-    const keywords = (keywordsDraft[id] ?? '').trim()
+    setMsg(null)
+    setErr(null)
     try {
-      const res = await window.api.updateWebSourceKeywords(id, keywords)
+      const res = await window.api.updateWebSource(editingId, rootUrl, editTitle.trim())
       if (res.ok) {
-        setMsg(t.keywordsSaved)
+        setMsg(t.updated)
+        cancelEdit()
         await load()
       } else {
         setErr(t.operationFailed.replace('{message}', res.error?.message ?? ''))
@@ -105,13 +113,6 @@ function WebSourcePanel() {
     } finally {
       setBusy(false)
     }
-  }
-
-  const formatTime = (iso?: string): string => {
-    if (!iso) return t.neverSynced
-    const d = new Date(iso)
-    const pad = (n: number) => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
   }
 
   return (
@@ -149,32 +150,50 @@ function WebSourcePanel() {
         <ul className="web-source__list">
           {sites.map((s) => (
             <li key={s.id} className="web-source__item">
-              <div className="web-source__item-info">
-                <span className="web-source__item-title">{s.title || s.rootUrl}</span>
-                {s.title ? <span className="web-source__item-url">{s.rootUrl}</span> : null}
-                <span className="web-source__item-synced">{t.syncedAt.replace('{time}', formatTime(s.lastSyncedAt))}</span>
-              </div>
-              <div className="web-source__item-actions">
-                <button type="button" className="source-list__btn" onClick={() => void handleSync(s.id)} disabled={syncingId !== null}>
-                  {syncingId === s.id ? t.syncing : t.sync}
-                </button>
-                <button type="button" className="source-list__btn source-list__btn--danger" onClick={() => setPendingRemove(s)} disabled={syncingId !== null}>
-                  {t.remove}
-                </button>
-              </div>
-              <div className="web-source__item-keywords">
-                <span className="web-source__keywords-label">{t.keywordsLabel}</span>
-                <input
-                  type="text"
-                  className="source-list__url-input source-list__url-input--small"
-                  placeholder={t.keywordsPlaceholder}
-                  value={keywordsDraft[s.id] ?? s.keywords ?? ''}
-                  onChange={(e) => setKeywordsDraft((cur) => ({ ...cur, [s.id]: e.target.value }))}
-                />
-                <button type="button" className="source-list__btn" onClick={() => void handleSaveKeywords(s.id)} disabled={busy}>
-                  {busy ? zhCN.common.saving : t.keywordsSaveBtn}
-                </button>
-              </div>
+              {editingId === s.id ? (
+                <div className="web-source__item-edit">
+                  <input
+                    type="text"
+                    className="source-list__url-input"
+                    placeholder={t.titlePlaceholder}
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                  />
+                  <input
+                    type="url"
+                    className="source-list__url-input"
+                    placeholder={t.urlPlaceholder}
+                    value={editUrl}
+                    onChange={(e) => setEditUrl(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') void handleUpdate() }}
+                  />
+                  <span className="web-source__item-synced">{t.syncedAt.replace('{time}', formatTime(s.lastSyncedAt))}</span>
+                  <div className="web-source__item-actions">
+                    <button type="button" className="source-list__btn source-list__btn--primary" onClick={() => void handleUpdate()} disabled={busy}>
+                      {t.updateSave}
+                    </button>
+                    <button type="button" className="source-list__btn" onClick={cancelEdit} disabled={busy}>
+                      {zhCN.common.cancel}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="web-source__item-info">
+                    <span className="web-source__item-title">{s.title || s.rootUrl}</span>
+                    {s.title ? <span className="web-source__item-url">{s.rootUrl}</span> : null}
+                    <span className="web-source__item-synced">{t.syncedAt.replace('{time}', formatTime(s.lastSyncedAt))}</span>
+                  </div>
+                  <div className="web-source__item-actions">
+                    <button type="button" className="source-list__btn" onClick={() => startEdit(s)} disabled={busy}>
+                      {t.edit}
+                    </button>
+                    <button type="button" className="source-list__btn source-list__btn--danger" onClick={() => setPendingRemove(s)} disabled={busy}>
+                      {t.remove}
+                    </button>
+                  </div>
+                </>
+              )}
             </li>
           ))}
         </ul>

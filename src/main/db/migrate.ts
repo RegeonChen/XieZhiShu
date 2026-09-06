@@ -607,6 +607,13 @@ ALTER TABLE web_site_articles ADD COLUMN last_fetched_at TEXT;
 ALTER TABLE web_site_articles ADD COLUMN published_at TEXT;
 ALTER TABLE web_sites ADD COLUMN keywords TEXT NOT NULL DEFAULT '';
 `
+  },
+  {
+    // 2026-09-01：撤销站点关键词（E11）功能——删除 web_sites.keywords 列
+    version: 26,
+    sql: `
+ALTER TABLE web_sites DROP COLUMN keywords;
+`
   }
 ]
 

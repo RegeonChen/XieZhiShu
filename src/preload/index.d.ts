@@ -6,6 +6,7 @@ export interface ImportResult {
 
 export interface AppApi {
   getAppInfo(): Promise<{ ok: boolean; data?: { version: string; platform: string }; error?: { code: string; message: string } }>
+  getPdfCmapsUrl(): Promise<{ ok: boolean; data?: { url: string }; error?: { code: string; message: string } }>
   openExternal(url: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   readClipboardText(): Promise<{ ok: boolean; data?: { text: string }; error?: { code: string; message: string } }>
   writeClipboardText(text: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
@@ -16,10 +17,8 @@ export interface AppApi {
   addWebSource(rootUrl: string, title?: string): Promise<{ ok: boolean; data?: { site: unknown }; error?: { code: string; message: string } }>
   /** 删除网页资料库站点 */
   removeWebSource(id: string): Promise<{ ok: boolean; data?: undefined; error?: { code: string; message: string } }>
-  /** 同步站点文章清单（发现新文章，返回新增数） */
-  syncWebSource(id: string): Promise<{ ok: boolean; data?: { articles: number }; error?: { code: string; message: string } }>
-  /** 配置站点用户关键词（E11，逗号/顿号/空格分隔，参与该站点召回） */
-  updateWebSourceKeywords(id: string, keywords: string): Promise<{ ok: boolean; data?: { site: unknown }; error?: { code: string; message: string } }>
+  /** 修改网页资料库站点（名称/根网址） */
+  updateWebSource(id: string, rootUrl: string, title: string): Promise<{ ok: boolean; data?: { site: unknown }; error?: { code: string; message: string } }>
   listSources(params?: { tagIds?: string[]; search?: string }): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   importFiles(paths: string[]): Promise<{ ok: boolean; data?: { results: ImportResult[] }; error?: { code: string; message: string } }>
   openFileDialog(): Promise<{ ok: boolean; data?: { paths: string[] }; error?: { code: string; message: string } }>
