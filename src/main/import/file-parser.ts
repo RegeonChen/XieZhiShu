@@ -52,12 +52,22 @@ export async function parseFile(filePath: string): Promise<ParseResult> {
   }
 }
 
+// 供主进程在启动时注入 pdf.js cmaps 目录（CID 字体/中文 PDF 需要 cMapUrl+cMapPacked 才能解码文字，否则只剩分页标记）。
+let _pdfCmapsDir = ''
+export function setPdfCmapsDir(dir: string): void { _pdfCmapsDir = dir }
+
 async function parsePdf(buffer: Buffer, _path: string): Promise<ParseResult> {
   try {
     // pdf-parse v11 ESM: PDFParse is a class; call load() then getText()
     const { PDFParse } = await import('pdf-parse')
+    const options: Record<string, unknown> = { data: new Uint8Array(buffer) }
+    // 中文 PDF（CID 字体）需提供 cMapUrl/cMapPacked，否则 loadFont/translateFont 失败，文字提取只剩分页标记
+    if (_pdfCmapsDir) {
+      options.cMapUrl = _pdfCmapsDir
+      options.cMapPacked = true
+    }
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
-    const instance = new (PDFParse as any)(new Uint8Array(buffer)) as { load(): Promise<unknown>; getText(): Promise<{ text: string; numpages: number }> }
+    const instance = new (PDFParse as any)(options) as { load(): Promise<unknown>; getText(): Promise<{ text: string; numpages: number }> }
     await instance.load()
     const data = await instance.getText()
     return { text: data.text, format: 'pdf', pageCount: data.numpages }

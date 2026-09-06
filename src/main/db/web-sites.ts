@@ -16,7 +16,6 @@ interface WebSiteRow {
   created_at: string
   updated_at: string
   last_synced_at: string | null
-  keywords: string
 }
 
 interface SiteArticleRow {
@@ -36,8 +35,7 @@ function rowToWebSite(row: WebSiteRow): WebSite {
     title: row.title,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    lastSyncedAt: row.last_synced_at ?? undefined,
-    keywords: row.keywords ?? ''
+    lastSyncedAt: row.last_synced_at ?? undefined
   }
 }
 
@@ -78,16 +76,26 @@ export function removeWebSite(id: string): void {
   db.prepare('DELETE FROM web_sites WHERE id = ?').run(id)
 }
 
+/** 更新站点（可改名称与根网址）；站点不存在或根网址重复时返回 null。 */
+export function updateWebSite(id: string, patch: { rootUrl?: string; title?: string }): WebSite | null {
+  const cur = getWebSiteById(id)
+  if (!cur) return null
+  const db = getDb()
+  const rootUrl = patch.rootUrl !== undefined ? patch.rootUrl.trim().replace(/\/+$/, '') : cur.rootUrl
+  if (!rootUrl) return null
+  const dup = getWebSiteByRootUrl(rootUrl)
+  if (dup && dup.id !== id) return null
+  const title = patch.title !== undefined ? patch.title.trim() : cur.title
+  db.prepare('UPDATE web_sites SET root_url = ?, title = ?, updated_at = ? WHERE id = ?')
+    .run(rootUrl, title, new Date().toISOString(), id)
+  return getWebSiteById(id)
+}
+
 export function updateWebSiteLastSynced(id: string, at: string): void {
   const db = getDb()
   db.prepare('UPDATE web_sites SET last_synced_at = ?, updated_at = ? WHERE id = ?').run(at, at, id)
 }
 
-/** 配置站点用户关键词（逗号分隔），参与该站点标题/正文召回（E11） */
-export function updateWebSiteKeywords(id: string, keywords: string): void {
-  const db = getDb()
-  db.prepare('UPDATE web_sites SET keywords = ?, updated_at = ? WHERE id = ?').run(keywords, new Date().toISOString(), id)
-}
 
 // ---- 站点文章清单（web_site_articles） ----
 

@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import PdfViewer from './PdfViewer'
 import { zhCN } from '../i18n/zh-CN'
-import { copyPlainText } from '../utils/clipboard'
 
 interface SourceDetail {
   source: {
@@ -31,17 +30,6 @@ function SourceViewer({ sourceId, onBack }: { sourceId: string; onBack: () => vo
   const [htmlLoading, setHtmlLoading] = useState(false)
   const [fileUrl, setFileUrl] = useState<string | null>(null)
   const [summary, setSummary] = useState<SummaryShape | null>(null)
-  const [copied, setCopied] = useState(false)
-
-  /** 复制资料全文（纯文本，来自清洗后的正文） */
-  const handleCopy = async () => {
-    if (!data) return
-    const ok = await copyPlainText(data.source.cleanedText)
-    if (ok) {
-      setCopied(true)
-      window.setTimeout(() => setCopied(false), 1500)
-    }
-  }
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -137,9 +125,6 @@ function SourceViewer({ sourceId, onBack }: { sourceId: string; onBack: () => vo
         <div className="source-viewer__header-actions">
           <button type="button" className="source-viewer__back" onClick={onBack} title={zhCN.sourceViewer.back}>
             &larr; {zhCN.sourceViewer.back}
-          </button>
-          <button type="button" className="source-list__btn" onClick={() => void handleCopy()} title={zhCN.sourceViewer.copyText}>
-            {copied ? zhCN.sourceViewer.copied : zhCN.sourceViewer.copyText}
           </button>
         </div>
         <h3 className="source-viewer__title">{source.title}</h3>

@@ -540,6 +540,16 @@ body {
   gap: 2px;
   min-width: 0;
 }
+.web-source__item-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+.web-source__item-edit .web-source__item-actions {
+  justify-content: flex-start;
+}
 .web-source__item-title {
   font-weight: 500;
   color: var(--fg);

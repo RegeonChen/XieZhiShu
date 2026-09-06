@@ -10,6 +10,10 @@ const api = {
   getAppInfo(): Promise<ApiResult<{ version: string; platform: string }>> {
     return ipcRenderer.invoke(IPC.APP_GET_INFO)
   },
+  /** pdf.js cMaps 资源基址（中文／CID 字体 PDF 预览需要） */
+  getPdfCmapsUrl(): Promise<ApiResult<{ url: string }>> {
+    return ipcRenderer.invoke(IPC.APP_GET_PDF_CMAPS_URL)
+  },
   /** 打开外部链接（预设模型注册页等，走系统默认浏览器） */
   openExternal(url: string): Promise<ApiResult<void>> {
     return ipcRenderer.invoke(IPC.APP_OPEN_EXTERNAL, { url })
@@ -64,13 +68,9 @@ const api = {
   removeWebSource(id: string): Promise<ApiResult<void>> {
     return ipcRenderer.invoke(IPC.WEB_SOURCE_REMOVE, { id })
   },
-  /** 同步站点文章清单（发现新文章，返回新增数） */
-  syncWebSource(id: string): Promise<ApiResult<{ articles: number }>> {
-    return ipcRenderer.invoke(IPC.WEB_SOURCE_SYNC, { id })
-  },
-  /** 配置站点用户关键词（逗号/顿号/空格分隔，参与该站点召回）（E11） */
-  updateWebSourceKeywords(id: string, keywords: string): Promise<ApiResult<{ site: unknown }>> {
-    return ipcRenderer.invoke(IPC.WEB_SOURCE_UPDATE_KEYWORDS, { id, keywords })
+  /** 修改网页资料库站点（名称/根网址） */
+  updateWebSource(id: string, rootUrl: string, title: string): Promise<ApiResult<{ site: unknown }>> {
+    return ipcRenderer.invoke(IPC.WEB_SOURCE_UPDATE, { id, rootUrl, title })
   },
   /** 更新标签 */
   updateTag(id: string, name?: string): Promise<ApiResult<unknown>> {

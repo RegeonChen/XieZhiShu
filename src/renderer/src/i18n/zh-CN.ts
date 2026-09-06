@@ -96,27 +96,21 @@ export const zhCN = {
     add: '注册',
     adding: '注册中...',
     empty: '尚未注册网页资料库',
-    sync: '同步',
-    syncing: '同步中...',
     remove: '删除',
     removeConfirm: '确定删除网页资料库「{title}」吗？已抓取的文章资料会保留。',
-    syncDone: '同步完成，发现 {added} 篇新文章',
     added: '注册成功',
+    edit: '修改',
+    updated: '站点已更新',
+    updateSave: '确认',
     syncedAt: '上次同步：{time}',
     neverSynced: '尚未同步',
-    operationFailed: '操作失败：{message}',
-    keywordsLabel: '站点关键词',
-    keywordsPlaceholder: '逗号分隔，如：学前教育,幼儿园（用于增强该站点召回）',
-    keywordsSaved: '站点关键词已保存',
-    keywordsSaveBtn: '保存'
+    operationFailed: '操作失败：{message}'
   },
   sourceViewer: {
     summaryTitle: '资料摘要',
     keywords: '主题词',
     entities: '关键实体',
-    back: '返回',
-    copyText: '复制全文',
-    copied: '已复制'
+    back: '返回'
   },
   sourceStatus: {
     ready: '已就绪',
@@ -420,6 +414,7 @@ export const zhCN = {
     confirmed: '资料汇编已确认，可进入下一步指定行文规范。',
     regenerated: '已重新生成资料汇编：{count} 张卡片。',
     adjusting: '正在调整资料汇编…',
+    contradictionScanFailed: '矛盾扫描未完成（{reason}），可能存在遗漏，请酌情复核。',
     presetButton: '预设提示词',
     presetBatchDeleteLabel: '批量删除',
     presetBatchDelete: '请删除与「……」高度相似的资料卡片。',

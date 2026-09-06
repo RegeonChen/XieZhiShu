@@ -29,7 +29,7 @@ const WINDOW_MAX_CHARS = 30000
 const WINDOW_CONCURRENCY = 2
 const TEMPERATURES = [0, 0.3]
 const KEYWORD_EXTRACT_TIMEOUT_MS = 60000
-const CARD_SCAN_TIMEOUT_MS = 120000
+const CARD_SCAN_TIMEOUT_MS = 300000
 /** 卡片级矛盾扫描单次最多扫描的卡片数（卡片集通常远小于原始材料，一次扫描成本低） */
 const CARD_SCAN_MAX = 200
 /** 可复现种子：传给支持 seed 的 Provider，让关键帧提取/细读/矛盾扫描在相同输入下更确定 */
@@ -69,7 +69,7 @@ export interface CompilationProgress {
 }
 
 export type GenerateCompilationResult =
-  | { ok: true; compilationId: string; candidateChunks: number; contradictions: number }
+  | { ok: true; compilationId: string; candidateChunks: number; contradictions: number; contradictionScan?: { ok: boolean; message?: string } }
   | { ok: false; error: { code: string; message: string } }
 
 interface ProviderInfo {
@@ -436,10 +436,12 @@ async function scanCardContradictions(
   items: CompilationOutputItem[],
   refs: SourceRefEntry[],
   taskId: string
-): Promise<CompilationOutputGroup[]> {
-  if (items.length === 0) return []
+): Promise<{ groups: CompilationOutputGroup[]; ok: boolean; message?: string }> {
+  if (items.length === 0) return { groups: [], ok: true }
   const batch = items.slice(0, CARD_SCAN_MAX)
   const titleByRef = new Map(refs.map((r, idx) => ['#' + (idx + 1), r.title]))
+  let allOk = true
+  let firstError: string | undefined
   const cardList = batch
     .map((it, i) => '[' + (i + 1) + '] 来源：#' + it.sourceRef + '《' + (titleByRef.get(it.sourceRef) ?? '') + '》，时间：' + (it.ts ?? '无') + '\n' + it.excerpt)
     .join('\n\n')
@@ -467,7 +469,11 @@ async function scanCardContradictions(
       temperature,
       seed: REPRODUCIBILITY_SEED
     })
-    if (!result.ok) continue
+    if (!result.ok) {
+      allOk = false
+      firstError = firstError ?? (result.error?.message ?? '矛盾扫描失败')
+      continue
+    }
     const groups = parseCardScanGroups(result.text)
     if (!groups) continue
     for (const g of groups) {
@@ -489,7 +495,7 @@ async function scanCardContradictions(
       }
     }
   }
-  return [...merged.values()]
+  return { groups: [...merged.values()], ok: allOk, message: allOk ? undefined : firstError }
 }
 
 /** 解析卡片级矛盾扫描输出（纯函数，可测试） */
@@ -676,10 +682,18 @@ export async function generateCompilation(
   // 2026-08-25 优化：跨窗口/跨来源矛盾在逐窗细读时可能漏检（两个相左说法若落在不同窗口就不会一起看到）。
   // 细读产出最终卡片后，对精简后的卡片集再做一次矛盾扫描（输入量小、成本低），提升矛盾发现稳定性。
   onProgress?.({ stage: '正在汇总卡片间的矛盾…', percent: 88, etaSeconds: PHASE_CONTRADICTION_ETA_S })
-  const cardGroups = await scanCardContradictions(prov.provider, merged.items, refs, taskId).catch(() => [] as CompilationOutputGroup[])
-  const contradictions = mergeContradictionGroups(merged.contradictions, cardGroups)
+  // A：分批扫描全部卡片（覆盖此前只扫前 CARD_SCAN_MAX 张的漏批）；任一批失败即标记，不再静默当成“无矛盾”。
+  const scanGroups: CompilationOutputGroup[] = []
+  let scanOk = true
+  let scanMessage: string | undefined
+  for (let st = 0; st < merged.items.length; st += CARD_SCAN_MAX) {
+    const res = await scanCardContradictions(prov.provider, merged.items.slice(st, st + CARD_SCAN_MAX), refs, taskId).catch((e) => ({ groups: [] as CompilationOutputGroup[], ok: false, message: e instanceof Error ? e.message : String(e) }))
+    scanGroups.push(...res.groups)
+    if (!res.ok) { scanOk = false; scanMessage = scanMessage ?? res.message }
+  }
+  const contradictions = mergeContradictionGroups(merged.contradictions, scanGroups)
 
-  return finalizeCompilation(taskId, title, { items: merged.items, contradictions }, refs, chunks.length)
+  return finalizeCompilation(taskId, title, { items: merged.items, contradictions }, refs, chunks.length, scanOk ? undefined : { ok: false, message: scanMessage })
 }
 
 function sliceChunks(chunks: RetrievedChunk[], maxChars: number): RetrievedChunk[][] {
@@ -757,7 +771,8 @@ function finalizeCompilation(
   title: string,
   output: CompilationOutput,
   refs: SourceRefEntry[],
-  candidateChunks: number
+  candidateChunks: number,
+  contradictionScan?: { ok: boolean; message?: string }
 ): GenerateCompilationResult {
   const items = sortItemsByTs(mapOutputItemsToInputs(output.items, refs))
   const compilation = createCompilation({ taskId, title })
@@ -786,5 +801,5 @@ function finalizeCompilation(
     }
   }
   const contradictions = insertCompilationContradictions(compilation.id, groups)
-  return { ok: true, compilationId: compilation.id, candidateChunks, contradictions: contradictions.length }
+  return { ok: true, compilationId: compilation.id, candidateChunks, contradictions: contradictions.length, contradictionScan }
 }
