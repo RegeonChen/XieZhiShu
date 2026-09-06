@@ -2,6 +2,24 @@
 
 本文件是 Coding Agent 与开发者共同使用的持久项目上下文。修改项目之前，必须先阅读本文件以及 `PLAN.md` 中与当前任务相关的部分。本文件应保持简洁，并在项目级决策、当前状态或已知问题发生变化时及时更新。
 
+## 目录
+
+- [项目目标](#项目目标)
+- [架构原则](#架构原则)
+- [技术架构（已确认）](#技术架构已确认)
+- [技术栈](#技术栈)
+- [核心功能](#核心功能)
+- [编码约定](#编码约定)
+- [单人开发与 Git 约定](#单人开发与-git-约定)
+- [远程仓库（GitHub）](#远程仓库github)
+- [Agent 工作规则](#agent-工作规则)
+- [当前状态](#当前状态)
+- [设计决策（要点，按时间倒序）](#设计决策要点按时间倒序)
+- [路线图](#路线图)
+- [近期记录（摘要）](#近期记录摘要)
+- [已知问题](#已知问题)
+
+
 ## 项目目标
 
 开发一款 Windows 桌面的、接入大模型的志书撰写工具，帮助地方党史方志办公室的公务员自动收集、整理、归纳、撰写、审校志书，覆盖"资料收集 → 志稿撰写 → 初稿完成"的完整业务闭环。
@@ -133,7 +151,20 @@
 
 ## 近期记录（摘要）
 
-> **2026-08-28（资料库直接删除来源触发级联清理资料汇编，含批量删除）**：此前「删除资料库中的资料」直接删库，即使该来源已被资料汇编引用也不会清理卡片；只有「工作区文件被删除」才触发级联确认框。修复：`sources:delete` 与 `sources:deleteMany` 均先判 `isSourceUsedInCompilation`，若被汇编引用则先移入系统回收站并登记 `registerSourceRemoval(..., 'manual')`（`pendingCascade:true`，暂不删库），渲染层复用同一来源移除确认框（`origin:'manual'` 文案区分）决定「删除卡片/保留卡片」，再经 `workspace:sourceRemoval:decide` 删除来源（+可选卡片）；批量删除会逐个来源弹确认框。**二次修改彻底清理**：`deleteCompilationItemsForSourceIds`/`deleteCompilationItemsByIds` 除卡片/矛盾分组（含矛盾回收站，随 FK 级联）与 live 修订（`compilation_repairs` 随 item_id 级联）外，还显式清理 `compilation_repair_recycle_bin`（其 item_id 无外键，否则删除卡片后会残留指向已删卡片的“待恢复”修订）。`WorkspaceSourceRemovalPending` 新增 `origin:'workspace'|'manual'`。**去重（2026-08-28）**：同一来源会被“资料库手动删除 + 工作区文件移入回收站触发的对账”等多条路径重复登记，导致同一来源连续弹多次确认框；修复为主进程 `registerSourceRemoval` 幂等（已 pending 则不再通知）、增/全量对账 `reconcilePaths`/`reconcileWorkspace` 跳过已 pending 来源、渲染层 `enqueueSourceRemoval` 按 sourceId 去重，且**当前正在展示的确认项不放入队列**（否则确认后 `shift` 会把同一个确认框重新弹出来——已通过导出日志定位到该根因，主进程实际只登记一次，重复弹框纯属渲染层队列把当前项 shift 回来）。验证：typecheck 零错误、177 项单测通过（1 项 watcher chokidar 环境失败为既有问题）、生产构建通过。**撰写工作台常驻挂载导致的“删除后卡片仍显示/来源空白”修复（2026-08-28）**：WritingWorkspace 切换页面仅隐藏不卸载，删除来源后其本地 compilation 状态不刷新，已删卡片仍以“来源空白”形式残留；新增 `reloadKey` prop，App 在来源移除确认完毕（delete/keep）后递增并传给 WritingWorkspace，触发重新加载，删除的来源卡片随即从界面消失。**二次修改自动补齐时间戳（2026-08-28）**：最近一次汇编中有大量卡片（如「首占璟月校区配套幼儿园二装工程」）无时间戳；`repair-service` 扫描提示词新增“对缺少时间戳的卡片结合原文上下文推断年份并给出 ts 字段”，解析输出新增可选 `ts`，扫描时对**缺失 ts 的卡片直接自动修改**（`updateCompilationItem`，无需用户采纳），语义补全/修订仍保留让用户采纳/不用；新增 2 项单测。**任务名未自动刷新 + 卡片时间排序修复（2026-08-28）**：① 任务名“新建任务”其实已在生成时被主进程改名（DB 已更新），但撰写工作台常驻挂载、任务列表未刷新故界面仍显示旧名；在 `handleGenerateCompilation` 成功分支补 `onChanged()` 刷新任务列表。② 汇编卡片在生成时按 ts 排序，但“缺失时间戳→排最后”的卡片被二次修改自动补齐 ts 后**未重新排序**，导致末尾大量时间倒挂（如 2024 之后接 2015/2017）；新增 `reorderCompilationItemsByTs`（无 ts 排最后、按年份升序重写 position），在二次修改补齐时间戳后重排整份汇编；新增 1 项单测。**资料汇编“按时间排序/切换正反序”按钮（2026-08-28）**：在「确认汇编，进入下一步」按钮左侧新增「按时间排序」按钮，点击即按时间重排汇编（正序=旧→新，再次点击切为反序=新→旧，循环切换）；新增主进程 IPC `compilation:reorder`（`reorderCompilationItemsByTs` 支持 direction）、preload `reorderCompilation`，`CompilationStep` 新增按钮与 `sortOrder` 状态，`WritingWorkspace` 新增 `handleReorderItems` 并刷新汇编。**按时间排序圆钮 + 撤销/恢复（2026-08-28）**：① 排序按钮改为圆形按钮（圆钮），图案为 ↑/↓ 体现正/反序切换状态；② 在其左侧新增「撤销」「恢复」两个同风格圆钮；③ 撤销/恢复采用“快照 + 栈”机制（`writing/compilation-undo.ts`），对每次汇编可变操作（LLM 调整、手动编辑卡片、删除卡片、矛盾采纳/忽略、二次修改采纳/不用、回收站恢复矛盾/修订、排序、确认等）登记撤销栈，撤销=恢复上一个完整快照、恢复=重做下一个快照；新增 IPC `compilation:undo/redo/undoState` + preload，`WritingWorkspace` 新增 `handleUndo/handleRedo` 并在汇编变化后同步撤销/恢复步数，`CompilationStep` 新增三个圆钮；新增 1 项撤销/恢复单测。**回收站新增「资料卡片」第三类（2026-08-28）**：被删除的资料卡片（单卡删除、以及汇编调整批量删除）会快照进新增的 `compilation_card_recycle_bin`（Migration 023，含卡片行 + 其矛盾变异/语义补全修订 JSON），回收站现在含**资料卡片/二次修改/矛盾**三类，统一按删除时间倒序（最新删除最先显示，栈式排序）；恢复卡片会连同其矛盾变异/语义补全修订一起还原；来源级联清理仍为硬删除不入回收站（来源已删，恢复外键悬空）。`CompilationRecycleBinItem` 新增 `kind:'card'`，IPC restore 响应新增 `card`。新增 1 项单测。**网页资料库行为优化（A1/A3/B4/C6，2026-08-28）**：① A1 站点发现改为 **sitemap 优先**（递归 sitemap index，`parseSiteMap`；无 sitemap 才回退 BFS）；② A3 URL 规范化 + 去重（`normalizeArticleUrl`/`dedupeArticleKey`：小写主机、去默认端口、去跟踪参数/尾斜杠/fragment）；③ B4 条件请求（`fetchUrl` 支持 If-None-Match/If-Modified-Since，304 复用已有正文；`web_site_articles` 新增 etag/last_modified/body_hash/last_fetched_at，Migration 024）；④ C6 礼貌限速（`parseRobotsTxt`/`fetchRobotsTxt`/`isPathDisallowed` + 站点级串行延迟，discover/import 均遵守）。**A2 RSS/Atom 订阅源（2026-08-28）**：`parseFeed`/`detectFeedUrls` + `fetchFeedArticles` 优先解析 RSS2/Atom（首页 `<link rel=alternate type=application/rss|atom+xml>` + 常见 feed 路径），站点发现顺序改为 **feed → sitemap → BFS**；无文章标题者保守保留为候选，导入正文时用页面 `<title>` 补齐。**诊断日志增强**：`[web]` 类别打印站点发现方式（feed/sitemap/bfs）+ 文章数、网页资料检索每站点“文章清单/标题命中/落库/robots crawl-delay”、单篇“304 复用/抓取落库/正文精过滤丢弃”。新增纯函数单测。**D8/E10/E11 已完成（2026-09-01）**：D8 新增 extractArticleText（article/main/正文容器优先、保留表格行列、去 script/style/nav/footer，正文过短回退 stripHtml，诊断日志标注提取器）；E10 新增 extractPublishedDate（meta published_time/publishdate/pubdate/date + <time datetime> + 可见日期文本），web_site_articles 新增 published_at（Migration 025），文章清单按 COALESCE(published_at, discovered_at) DESC 排序；E11 曾落地「用户按站点配置关键词」，已于 2026-09-01 应产品要求**移除**（Migration 026 删列、IPC/preload/UI/召回逻辑一并删除）。验证：typecheck 零错误、189 项单测通过（1 项 watcher chokidar 环境失败为既有问题）、生产构建通过。
+> 
+> **2026-08-28（资料库直接删除来源触发级联清理资料汇编，含批量删除）**：此前「删除资料库中的资料」直接删库，即使该来源已被资料汇编引用也不会清理卡片；只有「工作区文件被删除」才触发级联确认框。修复：`sources:delete` 与 `sources:deleteMany` 均先判 `isSourceUsedInCompilation`，若被汇编引用则先移入系统回收站并登记 `registerSourceRemoval(..., 'manual')`（`pendingCascade:true`，暂不删库），渲染层复用同一来源移除确认框（`origin:'manual'` 文案区分）决定「删除卡片/保留卡片」，再经 `workspace:sourceRemoval:decide` 删除来源（+可选卡片）；批量删除会逐个来源弹确认框。
+> **二次修改彻底清理**：`deleteCompilationItemsForSourceIds`/`deleteCompilationItemsByIds` 除卡片/矛盾分组（含矛盾回收站，随 FK 级联）与 live 修订（`compilation_repairs` 随 item_id 级联）外，还显式清理 `compilation_repair_recycle_bin`（其 item_id 无外键，否则删除卡片后会残留指向已删卡片的“待恢复”修订）。`WorkspaceSourceRemovalPending` 新增 `origin:'workspace'|'manual'`。
+> **去重（2026-08-28）**：同一来源会被“资料库手动删除 + 工作区文件移入回收站触发的对账”等多条路径重复登记，导致同一来源连续弹多次确认框；修复为主进程 `registerSourceRemoval` 幂等（已 pending 则不再通知）、增/全量对账 `reconcilePaths`/`reconcileWorkspace` 跳过已 pending 来源、渲染层 `enqueueSourceRemoval` 按 sourceId 去重，且**当前正在展示的确认项不放入队列**（否则确认后 `shift` 会把同一个确认框重新弹出来——已通过导出日志定位到该根因，主进程实际只登记一次，重复弹框纯属渲染层队列把当前项 shift 回来）。验证：typecheck 零错误、177 项单测通过（1 项 watcher chokidar 环境失败为既有问题）、生产构建通过。
+> **撰写工作台常驻挂载导致的“删除后卡片仍显示/来源空白”修复（2026-08-28）**：WritingWorkspace 切换页面仅隐藏不卸载，删除来源后其本地 compilation 状态不刷新，已删卡片仍以“来源空白”形式残留；新增 `reloadKey` prop，App 在来源移除确认完毕（delete/keep）后递增并传给 WritingWorkspace，触发重新加载，删除的来源卡片随即从界面消失。
+> **二次修改自动补齐时间戳（2026-08-28）**：最近一次汇编中有大量卡片（如「首占璟月校区配套幼儿园二装工程」）无时间戳；`repair-service` 扫描提示词新增“对缺少时间戳的卡片结合原文上下文推断年份并给出 ts 字段”，解析输出新增可选 `ts`，扫描时对**缺失 ts 的卡片直接自动修改**（`updateCompilationItem`，无需用户采纳），语义补全/修订仍保留让用户采纳/不用；新增 2 项单测。
+> **任务名未自动刷新 + 卡片时间排序修复（2026-08-28）**：① 任务名“新建任务”其实已在生成时被主进程改名（DB 已更新），但撰写工作台常驻挂载、任务列表未刷新故界面仍显示旧名；在 `handleGenerateCompilation` 成功分支补 `onChanged()` 刷新任务列表。② 汇编卡片在生成时按 ts 排序，但“缺失时间戳→排最后”的卡片被二次修改自动补齐 ts 后**未重新排序**，导致末尾大量时间倒挂（如 2024 之后接 2015/2017）；新增 `reorderCompilationItemsByTs`（无 ts 排最后、按年份升序重写 position），在二次修改补齐时间戳后重排整份汇编；新增 1 项单测。
+> **资料汇编“按时间排序/切换正反序”按钮（2026-08-28）**：在「确认汇编，进入下一步」按钮左侧新增「按时间排序」按钮，点击即按时间重排汇编（正序=旧→新，再次点击切为反序=新→旧，循环切换）；新增主进程 IPC `compilation:reorder`（`reorderCompilationItemsByTs` 支持 direction）、preload `reorderCompilation`，`CompilationStep` 新增按钮与 `sortOrder` 状态，`WritingWorkspace` 新增 `handleReorderItems` 并刷新汇编。
+> **按时间排序圆钮 + 撤销/恢复（2026-08-28）**：① 排序按钮改为圆形按钮（圆钮），图案为 ↑/↓ 体现正/反序切换状态；② 在其左侧新增「撤销」「恢复」两个同风格圆钮；③ 撤销/恢复采用“快照 + 栈”机制（`writing/compilation-undo.ts`），对每次汇编可变操作（LLM 调整、手动编辑卡片、删除卡片、矛盾采纳/忽略、二次修改采纳/不用、回收站恢复矛盾/修订、排序、确认等）登记撤销栈，撤销=恢复上一个完整快照、恢复=重做下一个快照；新增 IPC `compilation:undo/redo/undoState` + preload，`WritingWorkspace` 新增 `handleUndo/handleRedo` 并在汇编变化后同步撤销/恢复步数，`CompilationStep` 新增三个圆钮；新增 1 项撤销/恢复单测。
+> **回收站新增「资料卡片」第三类（2026-08-28）**：被删除的资料卡片（单卡删除、以及汇编调整批量删除）会快照进新增的 `compilation_card_recycle_bin`（Migration 023，含卡片行 + 其矛盾变异/语义补全修订 JSON），回收站现在含**资料卡片/二次修改/矛盾**三类，统一按删除时间倒序（最新删除最先显示，栈式排序）；恢复卡片会连同其矛盾变异/语义补全修订一起还原；来源级联清理仍为硬删除不入回收站（来源已删，恢复外键悬空）。`CompilationRecycleBinItem` 新增 `kind:'card'`，IPC restore 响应新增 `card`。新增 1 项单测。
+> **网页资料库行为优化（A1/A3/B4/C6，2026-08-28）**：① A1 站点发现改为 **sitemap 优先**（递归 sitemap index，`parseSiteMap`；无 sitemap 才回退 BFS）；② A3 URL 规范化 + 去重（`normalizeArticleUrl`/`dedupeArticleKey`：小写主机、去默认端口、去跟踪参数/尾斜杠/fragment）；③ B4 条件请求（`fetchUrl` 支持 If-None-Match/If-Modified-Since，304 复用已有正文；`web_site_articles` 新增 etag/last_modified/body_hash/last_fetched_at，Migration 024）；④ C6 礼貌限速（`parseRobotsTxt`/`fetchRobotsTxt`/`isPathDisallowed` + 站点级串行延迟，discover/import 均遵守）。
+> **A2 RSS/Atom 订阅源（2026-08-28）**：`parseFeed`/`detectFeedUrls` + `fetchFeedArticles` 优先解析 RSS2/Atom（首页 `<link rel=alternate type=application/rss|atom+xml>` + 常见 feed 路径），站点发现顺序改为 **feed → sitemap → BFS**；无文章标题者保守保留为候选，导入正文时用页面 `<title>` 补齐。
+> **诊断日志增强**：`[web]` 类别打印站点发现方式（feed/sitemap/bfs）+ 文章数、网页资料检索每站点“文章清单/标题命中/落库/robots crawl-delay”、单篇“304 复用/抓取落库/正文精过滤丢弃”。新增纯函数单测。
+> **D8/E10/E11 已完成（2026-09-01）**：D8 新增 extractArticleText（article/main/正文容器优先、保留表格行列、去 script/style/nav/footer，正文过短回退 stripHtml，诊断日志标注提取器）；E10 新增 extractPublishedDate（meta published_time/publishdate/pubdate/date + <time datetime> + 可见日期文本），web_site_articles 新增 published_at（Migration 025），文章清单按 COALESCE(published_at, discovered_at) DESC 排序；E11 曾落地「用户按站点配置关键词」，已于 2026-09-01 应产品要求**移除**（Migration 026 删列、IPC/preload/UI/召回逻辑一并删除）。验证：typecheck 零错误、189 项单测通过（1 项 watcher chokidar 环境失败为既有问题）、生产构建通过。
 
 > 完整的历史修改日志已整理进 `PLAN.md` 各阶段摘要；此处保留对未来开发仍有价值的根因结论。
 
