@@ -8,7 +8,7 @@ import type { Draft, RetrievedChunk } from '../../shared/types'
 import { ErrorCodes } from '../../shared/types'
 import { getTaskById, resolveScopeSourceIds, getAllSourceIds, updateTaskArticleTitle, updateTaskInstruction } from '../db/tasks'
 import { getDraftRowByVersion, createDraft, addSegment, getDraftById, deleteDraftByVersion } from '../db/drafts'
-import { insertContradictions, getContradictionsByDraft, updateContradictionQuote, updateVariantReplacement } from '../db/contradictions'
+import { getContradictionsByDraft } from '../db/contradictions'
 import { getCompilationById } from '../db/compilations'
 import { saveDraftGenerationContext } from '../db/draft-context'
 import { getDb } from '../db/connection'
@@ -22,8 +22,8 @@ import { safeStorageCodec } from '../llm/secret'
 import { chatCompletion, createJsonFieldStreamer, type ChatMessage } from '../llm/chat'
 import { retrieveChunks, bigrams, dice } from '../rag/retrieval'
 import { embedTexts } from '../rag/embed'
-import { getSourceSummariesByIds, summarizePendingForSourceIds, type SourceSummary } from '../rag/summarizer'
-import { fetchRelatedSiteSources, extractTopicTerms, expandDomainHints } from '../web-source/site-crawler'
+import { getSourceSummariesByIds, type SourceSummary } from '../rag/summarizer'
+// 旧版检索链路已移除；网页资料库的 fetchRelatedSiteSources/extractTopicTerms/expandDomainHints 不再在此使用
 
 /**
  * 初稿生成 LLM 调用超时（Task 3.4.8）：Task 3.4.7 取消材料供给限制后，提交的材料体量可能很大，
@@ -34,23 +34,6 @@ const DRAFT_GENERATE_TIMEOUT_MS = 600000
 /** 自由对话超时（初稿生成后的问题3修复：对话携带初稿全文+历史，Deepseek 等模型响应较慢，60s 不够） */
 const CHAT_TIMEOUT_MS = 300000
 
-/** 矛盾预扫描超时（Phase 3.7 Task 3.7.2：扫描提交全量材料，体量可能很大） */
-const CONTRADICTION_SCAN_TIMEOUT_MS = 600000
-
-/** 矛盾定位审查超时（Phase 3.7 Task 3.7.2：携带材料 + 初稿 + 矛盾清单） */
-const CONTRADICTION_LOCATE_TIMEOUT_MS = 600000
-
-/**
- * 矛盾扫描/定位的确定性采样温度阶梯（2026-08-11）：大模型默认采样温度下，
- * 同一份材料有时返回空矛盾（曾出现 1 秒返回 `{"contradictions":[]}`、同材料另一次 205 秒返回 940 字符矛盾）。
- * 扫描/定位改为低温度（更确定）+ 空结果/失败自动重试，避免"该发现却没发现"。
- */
-const CONTRADICTION_TEMPERATURES = [0, 0.3, 0.7]
-
-/** 矛盾分治扫描（2026-08-11 防漏改进）：单窗口最大字符数，避免单次上下文过长导致深层矛盾被漏检 */
-const CONTRADICTION_WINDOW_MAX_CHARS = 60000
-/** 矛盾扫描窗口并发度（2026-08-11 提速：串行改并发，限制并发避免触发模型限流 429） */
-const CONTRADICTION_SCAN_CONCURRENCY = 2
 
 /** 生成初稿进度百分比锚点（2026-08-11：整理摘要 → 网页资料检索 → 检索 → 矛盾扫描 → 生成 → 定位矛盾） */
 const GENERATE_PROGRESS = {
@@ -168,67 +151,17 @@ export function buildSourceRefList(chunks: RetrievedChunk[]): SourceRefEntry[] {
   return list
 }
 
-function sourceRefText(refList: SourceRefEntry[]): string {
-  return refList.map((r) => `${r.index}. 《${r.title}》`).join('\n')
-}
-
-function sourceIndexByRef(refList: SourceRefEntry[]): Map<string, number> {
-  return new Map(refList.map((r) => [r.sourceId, r.index]))
-}
-
-function buildScanSystemPrompt(): string {
-  return [
-    '你是一名地方志资料的审校专家，负责核对不同资料对同一史实的记述是否一致。',
-    '你将在下面获得若干【参考材料】，每个材料块标注了其在【文件清单】中的来源编号（如 #2）。',
-    '你的任务（请严格按步骤系统性核对，不要只凭第一印象或只看个别段落）：',
-    '1. 先列出材料中涉及"同一对象 / 同一事件"的全部事实条目清单——例如"某区某年在校生人数""某机构成立时间""某项政策实施年份"等（对象 + 事件）。',
-    '2. 对每个事实条目，逐条比对各来源（#N）的记述是否一致，重点核对五个维度：时间、数据、地点、主体/机构、事件经过与结果。',
-    '3. 只统计实质性冲突——必须是**两个及以上不同来源**对同一事实的相左说法（数据不同、时间不同、结果相反等）；同一来源内部的总分关系（如"总数 vs 分项之和"）、详略差异、措辞不同都不算矛盾；无法确定是否冲突时不要勉强输出。',
-    '4. 以"事实主题"分组：同一事实的所有相左说法归为一个矛盾组，不要逐对罗列（同一主题可能出现 3 个及以上来源各执一词）。',
-    '5. 每个说法摘录原文关键句（不超过 200 字），并列出支持该说法的来源编号（可多个，如 ["#2", "#5"]）。',
-    '6. 确信材料之间不存在矛盾时，输出空列表。',
-    '',
-    '输出要求：只输出一个 JSON 对象，不得输出 JSON 之外的任何文字、解释或代码块围栏。',
-    '正常输出：{"contradictions": [{"topic": "事实主题一句话", "kind": "data|time|place|fact|other", "variants": [{"text": "该说法原文摘录", "sourceRefs": ["#2", "#5"]}, {"text": "另一种说法原文摘录", "sourceRefs": ["#3"]}]}]}',
-    '无矛盾输出：{"contradictions": []}',
-    'kind 取值：data（数据相左）/ time（时间相左）/ place（地点相左）/ fact（事件经过或主体相左）/ other（其他实质冲突）。'
-  ].join('\n')
-}
-
-function buildScanUserPrompt(chunks: RetrievedChunk[], refList: SourceRefEntry[]): string {
-  const bySource = sourceIndexByRef(refList)
-  const materials = chunks
-    .map(
-      (c, i) =>
-        `[${i + 1}]（来源编号: #${bySource.get(c.sourceId) ?? '?'}，标题：《${c.sourceTitle}》，位置：${c.position}）\n${c.text}`
-    )
-    .join('\n\n')
-  return [
-    '【文件清单】',
-    sourceRefText(refList),
-    '',
-    '【参考材料】',
-    materials,
-    '',
-    '注意：材料可能只包含部分来源的段落（分窗口核对），请只对本窗口内出现的事实条目逐条核对差异，按上述 JSON 格式输出。'
-  ].join('\n')
-}
-
-interface ScanVariantOutput {
+/** 矛盾预扫描输出：一个矛盾组（同一主题的若干相左说法） */
+export interface ScanVariantOutput {
   text: string
   sourceRefs: string[]
 }
-
-interface ScanGroupOutput {
+export interface ScanGroupOutput {
   topic: string
   kind: string
   variants: ScanVariantOutput[]
 }
 
-/**
- * 解析矛盾预扫描的模型输出（Phase 3.7）：必须为 JSON `{ contradictions: [...] }`。
- * 只保留 topic 非空且 ≥2 条有效说法的分组；无法解析返回 null（调用方降级为"无矛盾清单"）。
- */
 export function parseScanOutput(text: string): ScanGroupOutput[] | null {
   const trimmed = text.trim()
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/)
@@ -421,98 +354,6 @@ export function mergeScanGroups(groups: ScanGroupOutput[]): ScanGroupOutput[] {
  * （test3 中"青少年心理援助中心/2021 幼儿园总数/鹤上云路小天使"来源都在却漏检的根因之一）。
  * 代价：确实无矛盾的窗口会多 1 次 LLM 调用，可接受。
  */
-async function scanWindow(
-  provider: ProviderInfo,
-  windowChunks: RetrievedChunk[],
-  refList: SourceRefEntry[],
-  taskId: string
-): Promise<ScanGroupOutput[]> {
-  let lastGroups: ScanGroupOutput[] | null = null
-  for (let i = 0; i < CONTRADICTION_TEMPERATURES.length; i++) {
-    const messages: ChatMessage[] = [
-      { role: 'system', content: buildScanSystemPrompt() },
-      { role: 'user', content: buildScanUserPrompt(windowChunks, refList) }
-    ]
-    const result = await chatCompletion(
-      provider,
-      messages,
-      CONTRADICTION_SCAN_TIMEOUT_MS,
-      { kind: 'contradiction-scan', taskId },
-      { temperature: CONTRADICTION_TEMPERATURES[i] }
-    )
-    if (!result.ok) continue
-    const groups = parseScanOutput(result.text)
-    if (groups === null) continue // 解析失败，重试下一档温度
-    lastGroups = groups
-    if (groups.length > 0) return groups // 有发现立即返回
-    // 空结果：继续下一档温度确认（完整阶梯）
-  }
-  return lastGroups ?? []
-}
-
-/**
- * 矛盾预扫描（2026-08-11 防漏 + 提速）：
- * 输入 = 任务范围内全部资料的分块（不依赖检索过滤）；
- * 按主题聚类 → 聚类内"整组窗口"扫描（单份材料只提交一次，替代两两配对避免调用爆炸，
- * 聚类保证同窗材料主题相关，冲突段落同窗概率高）→ 跨窗口合并去重 → 落库。
- * 窗口并发执行（限制并发度避免限流），并推送扫描进度。
- */
-async function scanContradictions(
-  provider: ProviderInfo,
-  allChunks: RetrievedChunk[],
-  taskId: string,
-  onProgress?: (stage: string, percent: number, etaSeconds?: number) => void
-): Promise<ContradictionInput[]> {
-  const refList = buildSourceRefList(allChunks)
-  const bySource = new Map<string, RetrievedChunk[]>()
-  for (const c of allChunks) {
-    if (!bySource.has(c.sourceId)) bySource.set(c.sourceId, [])
-    bySource.get(c.sourceId)!.push(c)
-  }
-  const clusters = clusterSourcesByTopics(bySource)
-  const windows: RetrievedChunk[][] = []
-  for (const cluster of clusters) {
-    if (cluster.length < 2) continue // 单份资料不存在"不同资料相左"，跳过
-    const combined = cluster.flatMap((id) => bySource.get(id) ?? [])
-    for (const w of sliceChunkWindows(combined, CONTRADICTION_WINDOW_MAX_CHARS)) windows.push(w)
-  }
-  if (windows.length === 0) return []
-
-  // 窗口并发扫描（并发度受常量限制），每完成一个窗口推送一次进度（百分比 + 预计剩余秒数）
-  const scanWindowEta = estimateLlmSeconds('contradiction-scan', 40)
-  const generateEta = estimateLlmSeconds('generate', 180)
-  const locateEta = estimateLlmSeconds('contradiction-locate', 60)
-  const allGroups: ScanGroupOutput[] = []
-  let done = 0
-  let idx = 0
-  onProgress?.(
-    `正在扫描资料矛盾（0/${windows.length} 个窗口）…`,
-    GENERATE_PROGRESS.scanFrom,
-    Math.round(windows.length * scanWindowEta + generateEta + locateEta)
-  )
-  const workers = Array.from({ length: Math.min(CONTRADICTION_SCAN_CONCURRENCY, windows.length) }, async () => {
-    while (true) {
-      const i = idx++
-      if (i >= windows.length) return
-      const groups = await scanWindow(provider, windows[i], refList, taskId)
-      allGroups.push(...groups)
-      done++
-      const remainSec = Math.round((windows.length - done) * scanWindowEta + generateEta + locateEta)
-      const percent = Math.round(
-        GENERATE_PROGRESS.scanFrom +
-          (done / windows.length) * (GENERATE_PROGRESS.scanTo - GENERATE_PROGRESS.scanFrom)
-      )
-      onProgress?.(`正在扫描资料矛盾（${done}/${windows.length} 个窗口）…`, percent, remainSec)
-    }
-  })
-  await Promise.all(workers)
-  return scanGroupsToInputs(mergeScanGroups(allGroups), refList)
-}
-
-/**
- * 组装"材料矛盾提示"区块（注入生成 system prompt，Phase 3.7 Task 3.7.2）：
- * 列出各矛盾组（主题 + 类型 + 各说法 + 来源文件），并明确"严禁合并/折中、分开列表述或只取一种、插入【矛盾#N】标注"。
- */
 export function formatContradictionBlock(contradictions: ContradictionInput[], refList: SourceRefEntry[]): string {
   const bySource = new Map(refList.map((r) => [r.sourceId, r]))
   const lines = contradictions.map((c, i) => {
@@ -536,65 +377,14 @@ export function formatContradictionBlock(contradictions: ContradictionInput[], r
   ].join('\n')
 }
 
-function buildLocateSystemPrompt(): string {
-  return [
-    '你是一名地方志审校助手。你将获得一份【初稿正文】、与初稿对应的【参考材料】（含来源编号）以及生成时发现的【矛盾清单】。',
-    '你的任务：逐条判断每个矛盾点是否被初稿正文涉及，并检查正文是否"自然合并"了相左说法。',
-    '- draftQuote：若正文确实写到与该矛盾相关的内容，摘录正文中的原句（一字不改）；若正文完全未涉及该矛盾，填 null。',
-    '- merged：若正文把多个相左说法合并 / 折中成了单个表述（如写成"约三万人""八十年代中期"这类两边都不挨着的说法），填 true；否则填 false。',
-    '- replacements：仅当 draftQuote 非 null 时，对【矛盾清单】中该矛盾的**每个说法**（按说法编号 1、2、3…）给出"采纳该说法后，正文该句应替换成的文句"，格式 [{"variantIndex": 1, "text": "替换后的文句"}]；variantIndex 与【矛盾清单】中说法编号一一对应，每个说法都必须给一条；text 只改这一句、保持志书风格、只依据该说法原文改写、严禁新增材料外的史实，且不得包含【矛盾#N】标注。',
-    '',
-    '输出要求：只输出一个 JSON 对象，不得输出 JSON 之外的任何文字、解释或代码块围栏。',
-    '输出格式：{"items": [{"seq": 1, "draftQuote": "正文原句或 null", "merged": false, "replacements": [{"variantIndex": 1, "text": "替换后的文句"}]}, {"seq": 2, "draftQuote": null, "merged": false, "replacements": []}]}',
-    '必须为矛盾清单中的每个矛盾输出一条 item（seq 一一对应），不得遗漏。'
-  ].join('\n')
-}
-
-function buildLocateUserPrompt(
-  chunks: RetrievedChunk[],
-  refList: SourceRefEntry[],
-  contradictions: ContradictionInput[],
-  draftText: string
-): string {
-  const bySource = sourceIndexByRef(refList)
-  const materials = chunks
-    .map(
-      (c, i) =>
-        `[${i + 1}]（来源编号: #${bySource.get(c.sourceId) ?? '?'}，标题：《${c.sourceTitle}》，位置：${c.position}）\n${c.text}`
-    )
-    .join('\n\n')
-  const list = contradictions
-    .map((c) => {
-      const kindLabel = CONTRADICTION_KIND_LABEL[c.kind ?? 'other']
-      const variants = c.variants
-        .map((v, i) => `说法 ${i + 1}：${v.variantText}（来源：#${v.sourceIds.map((id) => bySource.get(id) ?? '?').join('、')}）`)
-        .join('；')
-      return `- 矛盾 #${c.seq}（${kindLabel}）：${c.topic}——${variants}`
-    })
-    .join('\n')
-  return [
-    '【矛盾清单】',
-    list,
-    '',
-    '【初稿正文】',
-    draftText,
-    '',
-    '【参考材料】',
-    materials,
-    '',
-    '请按上述 JSON 格式，对每个矛盾输出其在初稿正文中的原句（未涉及为 null）与是否被合并的判定。'
-  ].join('\n')
-}
-
+/** 矛盾定位审查输出：单条正文矛盾定位 */
 export interface LocateItem {
   seq: number
   draftQuote: string | null
   merged: boolean
-  /** 每个说法的"采纳替换文句"（variantIndex 为该矛盾内说法编号，1 起） */
   replacements?: { variantIndex: number; text: string }[]
 }
 
-/** 解析矛盾定位审查输出（Phase 3.7）：必须为 JSON `{ items: [...] }`；无法解析返回 null（降级：矛盾保留但无正文定位） */
 export function parseLocateOutput(text: string): LocateItem[] | null {
   const trimmed = text.trim()
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/)
@@ -648,41 +438,6 @@ export function parseLocateOutput(text: string): LocateItem[] | null {
  * 矛盾定位审查调用（失败/解析失败/在正文矛盾缺 replacements 自动重试，2026-08-11）：
  * 低温度 + 温度阶梯重试；在正文的矛盾必须带完整"采纳替换文句"（否则采纳修订无法本地完成），缺失则重试。
  * 多次尝试仍失败返回 null，由调用方降级为"矛盾保留但无正文定位"。
- */
-async function locateContradictions(
-  provider: ProviderInfo,
-  chunks: RetrievedChunk[],
-  refList: SourceRefEntry[],
-  contradictions: ContradictionInput[],
-  draftText: string,
-  taskId: string
-): Promise<LocateItem[] | null> {
-  for (let attempt = 0; attempt < CONTRADICTION_TEMPERATURES.length; attempt++) {
-    const messages: ChatMessage[] = [
-      { role: 'system', content: buildLocateSystemPrompt() },
-      { role: 'user', content: buildLocateUserPrompt(chunks, refList, contradictions, draftText) }
-    ]
-    const result = await chatCompletion(
-      provider,
-      messages,
-      CONTRADICTION_LOCATE_TIMEOUT_MS,
-      { kind: 'contradiction-locate', taskId },
-      { temperature: CONTRADICTION_TEMPERATURES[attempt] }
-    )
-    if (!result.ok) continue
-    const parsed = parseLocateOutput(result.text)
-    if (!parsed) continue
-    const incomplete = parsed.some((item) => item.draftQuote && !item.replacements)
-    if (!incomplete || attempt === CONTRADICTION_TEMPERATURES.length - 1) return parsed
-  }
-  return null
-}
-
-/**
- * 解析生成初稿的模型输出（Phase 3.5）：必须为 JSON `{ title, content, error }`。
- * - 含 error → 返回 { error }（用户要求缺必要信息时大模型给出详细报错）
- * - title + content 齐全 → 返回 { title, content }
- * - 无法解析 → 返回 null
  */
 export function parseGenerateOutput(text: string): { title: string; content: string } | { error: string } | null {
   const trimmed = text.trim()
@@ -789,190 +544,57 @@ export async function generateDraft(
     if (draft) return { ok: true, draft, articleTitle: task.articleTitle ?? null, contradictions: getContradictionsByDraft(existing.id) }
   }
 
-  // Phase 6.3：已确认资料汇编路径——材料仅取汇编卡片，不再检索/摘要/网页抓取/矛盾扫描
-  if (compilationId) {
-    const compilation = getCompilationById(compilationId)
-    if (!compilation) return fail(ErrorCodes.INVALID_PARAM, '资料汇编不存在')
-    if (compilation.status !== 'finalized') return fail(ErrorCodes.INVALID_PARAM, '资料汇编尚未确认，请先在第一步确认汇编')
 
-    updateTaskInstruction(taskId, inst)
-    addTaskMessage(taskId, 'user', inst, 'instruction')
-
-    const chunks: RetrievedChunk[] = compilation.items
-      .filter((it) => it.kept)
-      .map((it) => ({
-        sourceId: it.sourceId,
-        sourceTitle: it.sourceTitle ?? it.sourceId,
-        position: it.note ?? '',
-        text: it.excerpt,
-        score: 0
-      }))
-    if (chunks.length === 0) return fail(ErrorCodes.LLM_NO_CANDIDATES, '资料汇编中没有可用的资料卡片')
-
-    const styleGuide = getDefaultStyleGuide()?.content ?? DEFAULT_STYLE_GUIDE
-    const materialsOrigin = '【参考材料】（来自你已确认的资料汇编，已剔除矛盾取舍中被排除的卡片）'
-    const messages: ChatMessage[] = [
-      { role: 'system', content: buildSystemPrompt(undefined, styleGuide) },
-      { role: 'user', content: buildUserPrompt(inst, chunks, styleGuide, task.modelText, materialsOrigin) }
-    ]
-
-    onProgress?.('正在基于已确认汇编生成初稿…', GENERATE_PROGRESS.generateFrom, estimateLlmSeconds('generate', 180))
-    const contentStreamer = onDelta ? createJsonFieldStreamer('content') : null
-    const result = await chatCompletion(prov.provider, messages, DRAFT_GENERATE_TIMEOUT_MS, { kind: 'generate', taskId }, {
-      maxRetries: 2,
-      onDelta: contentStreamer ? (delta) => onDelta?.(contentStreamer.feed(delta)) : undefined
-    })
-    if (!result.ok) {
-      addTaskMessage(taskId, 'assistant', '生成失败：' + result.error.message, 'notice')
-      return { ok: false, error: result.error }
-    }
-    const parsed = parseGenerateOutput(result.text)
-    if (!parsed) {
-      addTaskMessage(taskId, 'assistant', '生成失败：模型输出无法解析为「标题 + 正文」结构，请重试', 'notice')
-      return fail(ErrorCodes.LLM_FORMAT_INVALID, '模型输出无法解析为「标题 + 正文」结构，请重试')
-    }
-    if ('error' in parsed) {
-      addTaskMessage(taskId, 'assistant', '生成失败：' + parsed.error, 'notice')
-      return fail(ErrorCodes.LLM_FORMAT_INVALID, parsed.error)
-    }
-    const draft = createDraft(taskId, 0)
-    saveDraftGenerationContext(draft.id, chunks)
-    addSegment({ draftId: draft.id, ordering: 0, content: parsed.content, aiGenerated: true })
-    updateTaskArticleTitle(taskId, parsed.title)
-    addTaskMessage(taskId, 'assistant', '初稿《' + parsed.title + '》已生成。', 'notice')
-    const saved = getDraftById(draft.id)
-    if (!saved) return fail(ErrorCodes.INTERNAL_ERROR, '初稿保存失败')
-    onProgress?.('初稿生成完成', GENERATE_PROGRESS.done, 0)
-    return { ok: true, draft: saved, articleTitle: parsed.title, contradictions: [] }
-  }
-
-  let scopeIds = resolveScopeSourceIds(task, { getSourceIdsByTag, getAllSourceIds })
-  if (scopeIds.length === 0) return fail(ErrorCodes.TASK_NO_SCOPE, '资料库中没有可用资料')
-
-  // 稳定主题查询（2026-08-14 解耦重构）：矛盾扫描与网页资料检索统一用"标题词 + 领域下位词"（如
-  // "学前教育 学前 幼儿园 幼儿 保育 托育 入园 幼教"），而非只取第一个标题词。
-  // 1) 多词查询让"幼儿园/保育"等与标题词无字面重叠的相关正文也能被词法命中（避免"会堂路校区"这类
-  //    纯数据句段落因只含"幼儿园"不含"学前教育"而被检索漏掉，test3 漏检矛盾根因之一）；
-  // 2) 主题词稳定，避免随用户完整指令（含子标题、标点）波动导致两次生成材料集合不一致；
-  // 3) 生成正文仍使用完整指令 inst，保证按用户具体要求组织内容。
-  const scanTerms = extractTopicTerms(inst)
-  const scanQuery = [...new Set([...scanTerms, ...expandDomainHints(scanTerms)])].filter(Boolean).join(' ') || inst
-
-  // 各 LLM 阶段剩余时间预估（秒）：优先历史平均耗时，缺省回退默认值
-  const summaryEta = estimateLlmSeconds('summarize', 30)
-  const scanWindowEta = estimateLlmSeconds('contradiction-scan', 40)
-  const generateEta = estimateLlmSeconds('generate', 180)
-  const locateEta = estimateLlmSeconds('contradiction-locate', 60)
-  const afterScanEta = Math.round(generateEta + locateEta)
-
-  // 保存用户要求（重新生成初稿时复用）并持久化到任务消息（痕迹）
   updateTaskInstruction(taskId, inst)
   addTaskMessage(taskId, 'user', inst, 'instruction')
 
-  // 生成前自动整理任务范围内缺少摘要的资料（Task 3.4.9）：失败不阻断生成
-  onProgress?.('正在整理资料摘要…', GENERATE_PROGRESS.summary, Math.round(summaryEta + scanWindowEta * 2 + afterScanEta))
-  await summarizePendingForSourceIds(scopeIds).catch(() => undefined)
-
-  // 网页资料库（2026-08-11）：全局绑定站点——发现文章清单 → 标题粗筛 → 增量抓取正文落库为任务绑定缓存，并入 scope。
-  // 2026-08-14：改用稳定主题词 scanQuery 检索，避免完整指令波动导致两次网页召回不一致。
-  onProgress?.('正在检索网页资料库…', GENERATE_PROGRESS.webSync, Math.round(scanWindowEta * 2 + afterScanEta))
-  const siteSourceIds = await fetchRelatedSiteSources(scanQuery, taskId).catch(() => [] as string[])
-  if (siteSourceIds.length > 0) scopeIds = Array.from(new Set([...scopeIds, ...siteSourceIds]))
-
-  onProgress?.('正在检索资料…', GENERATE_PROGRESS.retrieve, Math.round(scanWindowEta * 2 + afterScanEta))
-  const chunks = await retrieveChunksHybrid(scopeIds, inst)
-  if (chunks.length === 0) return fail(ErrorCodes.LLM_NO_CANDIDATES, '未检索到与本次撰写要求相关的资料，请调整要求或先补充资料')
-
-  // 矛盾扫描材料（2026-08-14 解耦重构）：用稳定主题词检索，与生成正文 chunks 解耦，
-  // 使矛盾扫描输入在"同一主题、不同措辞"的两次任务间保持一致；scanQuery 与 inst 相同时复用 chunks，不额外检索。
-  const scanChunks = scanQuery === inst ? chunks : await retrieveChunksHybrid(scopeIds, scanQuery)
-
-  // ---- 矛盾预扫描（Phase 3.7 Task 3.7.2）：失败不阻断生成，仅提示 ----
-  // 2026-08-11 决策演进：扫描视野收敛为"粗筛/检索后、撰写初稿实际用到的文段"，替代早期"任务范围内全部资料分块"方案。
-  // 2026-08-14 解耦：扫描输入改为 scanChunks（稳定主题词检索结果），不再直接复用生成正文的 chunks，
-  // 使同一主题的两次任务扫描材料保持一致，减少"该发现的矛盾没发现"；仍只扫检索命中的聚焦文段，速度可控。
-  onProgress?.('正在扫描资料矛盾…', GENERATE_PROGRESS.scanFrom, Math.round(scanWindowEta * 2 + afterScanEta))
-  const refList = buildSourceRefList(scanChunks)
-  const scanned = await scanContradictions(prov.provider, scanChunks, taskId, onProgress).catch(() => null)
-  const contradictions: ContradictionInput[] = scanned ?? []
-  if (scanned === null) {
-    addTaskMessage(taskId, 'assistant', '矛盾扫描失败，本次初稿未附带矛盾清单；可重新生成初稿重试。', 'notice')
-  }
-  const contradictionBlock = contradictions.length > 0 ? formatContradictionBlock(contradictions, refList) : undefined
+  const chunks: RetrievedChunk[] = compilation.items
+    .filter((it) => it.kept)
+    .map((it) => ({
+      sourceId: it.sourceId,
+      sourceTitle: it.sourceTitle ?? it.sourceId,
+      position: it.note ?? '',
+      text: it.excerpt,
+      score: 0
+    }))
+  if (chunks.length === 0) return fail(ErrorCodes.LLM_NO_CANDIDATES, '资料汇编中没有可用的资料卡片')
 
   const styleGuide = getDefaultStyleGuide()?.content ?? DEFAULT_STYLE_GUIDE
+  const materialsOrigin = '【参考材料】（来自你已确认的资料汇编，已剔除矛盾取舍中被排除的卡片）'
   const messages: ChatMessage[] = [
-    { role: 'system', content: buildSystemPrompt(contradictionBlock, styleGuide) },
-    { role: 'user', content: buildUserPrompt(inst, chunks, styleGuide, task.modelText) }
+    { role: 'system', content: buildSystemPrompt(undefined, styleGuide) },
+    { role: 'user', content: buildUserPrompt(inst, chunks, styleGuide, task.modelText, materialsOrigin) }
   ]
 
-  onProgress?.('正在等待大模型回应，预计需要 1~5 分钟（资料较多时可能更久）…', GENERATE_PROGRESS.generateFrom, generateEta)
-  // 流式输出：只把 JSON 中 content 字段的正文增量回调给前端（原始 JSON 不刷屏）；
-  // 同时启用瞬时故障自动重试（429/5xx/网络错误 2 次指数退避）。
+  onProgress?.('正在基于已确认汇编生成初稿…', GENERATE_PROGRESS.generateFrom, estimateLlmSeconds('generate', 180))
   const contentStreamer = onDelta ? createJsonFieldStreamer('content') : null
   const result = await chatCompletion(prov.provider, messages, DRAFT_GENERATE_TIMEOUT_MS, { kind: 'generate', taskId }, {
     maxRetries: 2,
     onDelta: contentStreamer ? (delta) => onDelta?.(contentStreamer.feed(delta)) : undefined
   })
   if (!result.ok) {
-    const message = `生成失败：${result.error.message}`
-    addTaskMessage(taskId, 'assistant', message, 'notice')
+    addTaskMessage(taskId, 'assistant', '生成失败：' + result.error.message, 'notice')
     return { ok: false, error: result.error }
   }
-
   const parsed = parseGenerateOutput(result.text)
   if (!parsed) {
-    const message = '生成失败：模型输出无法解析为「标题 + 正文」结构，请重试'
-    addTaskMessage(taskId, 'assistant', message, 'notice')
+    addTaskMessage(taskId, 'assistant', '生成失败：模型输出无法解析为「标题 + 正文」结构，请重试', 'notice')
     return fail(ErrorCodes.LLM_FORMAT_INVALID, '模型输出无法解析为「标题 + 正文」结构，请重试')
   }
   if ('error' in parsed) {
-    const message = `生成失败：${parsed.error}`
-    addTaskMessage(taskId, 'assistant', message, 'notice')
+    addTaskMessage(taskId, 'assistant', '生成失败：' + parsed.error, 'notice')
     return fail(ErrorCodes.LLM_FORMAT_INVALID, parsed.error)
   }
-
   const draft = createDraft(taskId, 0)
-  // 记录生成上下文（2026-08-11）：本次实际使用的检索材料块，供"文段来源询问"按生成时的上下文溯源
+  // 记录生成上下文：本次实际使用的汇编卡片材料块，供'文段来源询问'按生成时的上下文溯源
   saveDraftGenerationContext(draft.id, chunks)
   addSegment({ draftId: draft.id, ordering: 0, content: parsed.content, aiGenerated: true })
   updateTaskArticleTitle(taskId, parsed.title)
-
-  // ---- 矛盾落库 + 定位审查（Phase 3.7 Task 3.7.2）----
-  // 定位审查失败时矛盾仍保留（draft_quote 为空：弹窗可用、正文定位缺失），不阻断生成
-  let savedContradictions: Contradiction[] = []
-  if (contradictions.length > 0) {
-    savedContradictions = insertContradictions(draft.id, contradictions)
-    onProgress?.('正在定位矛盾在正文中的位置…', GENERATE_PROGRESS.locate, locateEta)
-    const located = await locateContradictions(prov.provider, chunks, refList, contradictions, parsed.content, taskId).catch(
-      () => null
-    )
-    if (located) {
-      const bySeq = new Map(savedContradictions.map((c) => [c.seq, c]))
-      for (const item of located) {
-        const c = bySeq.get(item.seq)
-        if (!c) continue
-        // 定位审查成功：draftQuote 非空=在正文（矛盾），空=不在正文（警告）；同时回填每个说法的"采纳替换文句"，
-        // 供用户采纳时本地直接替换（无需再调用大模型）。
-        updateContradictionQuote(c.id, item.draftQuote ?? null, item.merged === true, item.draftQuote ? true : false)
-        for (const r of item.replacements ?? []) {
-          const variant = c.variants[r.variantIndex - 1]
-          if (variant) updateVariantReplacement(variant.id, r.text)
-        }
-      }
-      savedContradictions = getContradictionsByDraft(draft.id)
-    }
-  }
-
-  const notice =
-    contradictions.length > 0
-      ? `初稿《${parsed.title}》已生成，发现 ${contradictions.length} 处材料矛盾，请在正文中核对并取舍。`
-      : `初稿《${parsed.title}》已生成。`
-  addTaskMessage(taskId, 'assistant', notice, 'notice')
+  addTaskMessage(taskId, 'assistant', '初稿《' + parsed.title + '》已生成。', 'notice')
   const saved = getDraftById(draft.id)
   if (!saved) return fail(ErrorCodes.INTERNAL_ERROR, '初稿保存失败')
   onProgress?.('初稿生成完成', GENERATE_PROGRESS.done, 0)
-  return { ok: true, draft: saved, articleTitle: parsed.title, contradictions: savedContradictions }
+  return { ok: true, draft: saved, articleTitle: parsed.title, contradictions: [] }
 }
 
 /**
