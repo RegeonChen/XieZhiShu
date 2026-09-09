@@ -51,9 +51,21 @@ const PHASE_WEB_ETA_S = 30
 const PHASE_RECALL_ETA_S = 60
 const PHASE_GATE_ETA_S = 20
 const PHASE_CONTRADICTION_ETA_S = 30
-/** 窗口细读阶段每个窗口的默认先验（秒），随后用已完成窗口实测均速（EMA）不断校正（A） */
+/** 窗口细读阶段每个窗口的默认先验（秒），随后用已完成窗口实测均速不断校正（A） */
 const WINDOW_ETA_DEFAULT_S = 20
-const WINDOW_ETA_ALPHA = 0.7
+/** 均速 EMA 灵敏度（越低越平滑，避免单窗口抖动拉大误差） */
+const WINDOW_ETA_ALPHA = 0.35
+/** 用最近 N 个窗口的“每字符秒数”取中位数做平滑，压制个别快/慢窗口的抖动 */
+const WINDOW_ETA_MEDIAN_N = 5
+/** 预热窗口数：少于该数量时用“窗口数 × 默认先验”的较宽估计，不信任实测均速 */
+const WINDOW_ETA_WARMUP = 2
+
+function medianNumber(arr: number[]): number {
+  if (arr.length === 0) return 0
+  const s = [...arr].sort((a, b) => a - b)
+  const m = Math.floor(s.length / 2)
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2
+}
 /** 窗口块尚未计算出前，给前置阶段一个合理的占位总预算（秒），避免“预计还剩不到 1 分钟”明显失真 */
 const WINDOWS_PRIOR_PLACEHOLDER_S = 120
 /** 关键帧提取结果按「撰写要求」缓存，保证同一指令的两轮任务用同一套粗筛关键词（B：消除第一层漂移） */
@@ -115,7 +127,12 @@ interface CompilationResumeState {
   scanOffset: number
   /** 已成功扫描批次的矛盾分组 */
   scanGroups: CompilationOutputGroup[]
-  avgWindowSec: number
+  /** 各窗口的字符总量（用于“每字符秒数”外推剩余时间，避免大/小窗口平均失真） */
+  windowChars: number[]
+  /** 每字符秒数（EMA，越低越平滑；0=未预热） */
+  avgSecPerChar: number
+  /** 最近若干窗口的“每字符秒数”滚动样本（用于取中位数平滑，压制单窗口抖动） */
+  secPerCharSamples: number[]
   /** 并发窗口数（窗口细读/矛盾扫描并行度，来自 Provider 配置） */
   concurrency: number
   interrupted?: CompilationInterrupt
@@ -358,10 +375,10 @@ function buildSystemPrompt(instruction: string): string {
     '',
     '请以上述撰写主题与范围为准，判断哪些候选材料与主题相关；与主题无关或无法从材料中确认的内容不要输出。',
     '',
-    '每段候选材料可能是较长的整段文字，也可能是 PDF 排版被拆成多行的碎片。请先判断其中哪些内容与主题相关，把被换行/断行打断的同一句或同一事实合并还原，再按时间、事实、条目等维度做更细的切分，为每个细粒度事实输出一张卡片。',
+    '每条候选材料是一个【完整条目/整段】。请先判断它与本次主题是否相关；相关则把【该条目的完整原文】作为一张卡片输出，不要按时间/事实再做更细切分。仅当条目非常长（如超过 800 字）时，才可按事实拆成几张卡片，但每张必须自包含。',
     '',
     '对每个相关事实，输出一张卡片：',
-    '1. excerpt 必须是完整的一句话或一个完整事实（按原文逐字摘录，不得从句子中间截断、不得改写/补写/概括）；',
+    '1. excerpt 必须是该条目的【整段原文】，或一个自包含的完整事实（含主体/对象/时间等必要成分，能独立成句；不得只输出“其中…”这类缺少主语的从句部分，不得从句子中间截断，不得改写/补写/概括）；',
     '2. ts 为时间标签（如「2005 年」「2005—2010 年」），只写原文中能确定的时间，没有就填 null；',
     '3. sourceRef 用文件编号（如 #1）；',
     '4. 同一事实不同来源相左时，输出到 contradictions（仅实质性冲突：数据/时间/地点/主体/结果不同；措辞差异不算）。',
@@ -383,7 +400,7 @@ function buildUserPrompt(chunks: RetrievedChunk[], refs: SourceRefEntry[], instr
       return '[' + (i + 1) + ']（来源编号: #' + ref + '，标题：《' + c.sourceTitle + '》）\n' + c.text
     })
     .join('\n\n')
-  return ['【文件清单】', refText(refs), '本次撰写主题与范围：' + instruction, '', '【候选材料】', materials, '', '请按上述 JSON 格式输出资料汇编：先判断相关性，把被排版打断的句子/事实合并还原为完整事实，再按时间/事实/条目做更细切分；只保留与主题直接相关的条目，并跳过页码/目录/索引等噪声。'].join('\n')
+  return ['【文件清单】', refText(refs), '本次撰写主题与范围：' + instruction, '', '【候选材料】', materials, '', '请按上述 JSON 格式输出资料汇编：每条候选材料是一个完整条目/整段，相关时直接将其完整原文作为一张卡片（整段原文）；仅当条目极长才可按事实拆成自包含卡片。只保留与主题直接相关的条目，并跳过页码/目录/索引等噪声。'].join('\n')
 }
 
 export interface CompilationOutputItem {
@@ -756,11 +773,13 @@ export async function generateCompilation(
     chunks,
     refs,
     windows,
+    windowChars: windows.map((w) => w.reduce((n, c) => n + c.text.length, 0)),
     doneSet: new Set<number>(),
     windowOutputsByIndex: new Array<CompilationOutput | null>(windows.length).fill(null),
     scanOffset: 0,
     scanGroups: [],
-    avgWindowSec: WINDOW_ETA_DEFAULT_S,
+    avgSecPerChar: 0,
+    secPerCharSamples: [],
     concurrency: prov.provider.concurrency
   }
   onProgress?.({
@@ -944,7 +963,13 @@ async function runWindowPhase(state: CompilationResumeState, onProgress?: (p: Co
       const wStart = Date.now()
       const r = await readWindow(state.provider, state.windows[i], state.refs, state.taskId, state.title)
       const wSec = (Date.now() - wStart) / 1000
-      state.avgWindowSec = Math.round(WINDOW_ETA_ALPHA * wSec + (1 - WINDOW_ETA_ALPHA) * state.avgWindowSec)
+      // A+C 字符加权：用“每字符秒数”而非“每窗口秒数”，并取最近若干窗口的中位数平滑，压制单窗口抖动
+      const chars = state.windowChars[i] || 1
+      const secPerChar = wSec / chars
+      state.secPerCharSamples.push(secPerChar)
+      if (state.secPerCharSamples.length > WINDOW_ETA_MEDIAN_N) state.secPerCharSamples.shift()
+      if (state.avgSecPerChar === 0) state.avgSecPerChar = secPerChar
+      else state.avgSecPerChar = WINDOW_ETA_ALPHA * secPerChar + (1 - WINDOW_ETA_ALPHA) * state.avgSecPerChar
       if (r.failed) {
         halt = true
         interrupted = true
@@ -958,10 +983,20 @@ async function runWindowPhase(state: CompilationResumeState, onProgress?: (p: Co
         state.doneSet.add(i)
         state.windowOutputsByIndex[i] = r.out
         const done = state.doneSet.size
+        // 剩余字符数（未完成窗口）
+        const remainingChars = state.windowChars.reduce((acc, ch, wi) => acc + (state.doneSet.has(wi) ? 0 : ch), 0)
+        // 预热期：实测样本不足时用“窗口数 × 默认先验”的较宽估计；否则用“每字符秒数的中位数 × 剩余字符数”
+        const warm = state.secPerCharSamples.length < WINDOW_ETA_WARMUP
+        const secPerChar = state.secPerCharSamples.length > 0 ? medianNumber(state.secPerCharSamples) : state.avgSecPerChar
+        const windowEta = warm
+          ? (total - done) * WINDOW_ETA_DEFAULT_S
+          : Math.round((secPerChar > 0 ? secPerChar : state.avgSecPerChar) * remainingChars)
+        // 矛盾扫描阶段按“预计卡片批数 × 批均耗时”粗估，避免总剩余时间明显偏低
+        const contradictionEta = warm ? PHASE_CONTRADICTION_ETA_S : Math.min(180, (state.chunks.length / CARD_SCAN_MAX + 1) * 8)
         onProgress?.({
           stage: '正在由 AI 细读资料（' + done + '/' + total + ' 个窗口）…',
           percent: Math.round(12 + (done / total) * 68),
-          etaSeconds: Math.max(0, Math.round(state.avgWindowSec * (total - done) + PHASE_CONTRADICTION_ETA_S)),
+          etaSeconds: Math.max(0, Math.round(windowEta + contradictionEta)),
           candidateChunks: state.chunks.length,
           candidateSources: state.refs.length
         })
