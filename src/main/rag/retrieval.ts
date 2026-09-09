@@ -115,42 +115,77 @@ export function chunkParagraphs(text: string): Chunk[] {
   return chunks
 }
 
-/** 整段化切片（Phase A/B：卡片=整段/整子块）：
- *  按换行切“段”，跳过标题行；段 ≤ maxChars（默认 1000）→ 一块；超长段按句（。！？；;）折成 ≤maxChars 的子块。
- *  子块共享同一 paragraphIndex，用于“段级保留/剔除”（任一子块有信号 → 整段所有子块一起保留）。
+/** 整段化切片（Phase A/B，方案 C C2）：
+ *  先把“被换行打断的物理行”按句合并回逻辑句/段（处理 PDF 排版逐行文本），并过滤明确噪声（页标记/纯页码/目录点线；索引/数据行不滤，交给细读模型）。
+ *  段 ≤ maxChars（默认 1000）→ 一块；超长段按句（。！？；;）折成 ≤maxChars 的子块，共享同一 paragraphIndex（“段级保留/剔除”）。
  *  位置记 “第N段” 或 “第N段（片段M）”。 */
 export const CHUNK_PARAGRAPH_MAX = 1000
 export interface ParagraphChunk { text: string; position: string; paragraphIndex: number }
 export function chunkByParagraphs(text: string, maxChars: number = CHUNK_PARAGRAPH_MAX): ParagraphChunk[] {
-  const paras = text
-    .split(/\r?\n+/)
-    .map((p) => p.trim())
-    .filter(Boolean)
+  // C2：先把“被换行打断的物理行”按句合并回逻辑句/段，并过滤明确噪声（页标记/纯页码/目录点线）。
+  // 索引/数据行（如“高中 个 183”）不在此过滤，保留交给细读模型判断。
+  const lines = text.split(/\r?\n+/).map((p) => p.trim()).filter(Boolean)
+  const kept = lines.filter((L) => !isPdfNoiseLine(L) && !isTitleLikeLine(L))
+  const merged: string[] = []
+  let buf = ''
+  for (const L of kept) {
+    if (!buf) {
+      buf = L
+      continue
+    }
+    if (endsSentencePunct(buf)) {
+      merged.push(buf)
+      buf = L
+    } else {
+      buf = joinLine(buf, L)
+    }
+  }
+  if (buf) merged.push(buf)
+
   const out: ParagraphChunk[] = []
-  paras.forEach((p, i) => {
+  merged.forEach((p, i) => {
     const pos = `第${i + 1}段`
-    if (isTitleLikeLine(p)) return
     if (p.length <= maxChars) {
       out.push({ text: p, position: pos, paragraphIndex: i })
       return
     }
     const sentences = p.split(/(?<=[。！？；;])/).map((s) => s.trim()).filter(Boolean)
-    let buf = ''
+    let b = ''
     let sub = 1
     const flush = () => {
-      if (buf) {
-        out.push({ text: buf, position: `${pos}（片段${sub}）`, paragraphIndex: i })
+      if (b) {
+        out.push({ text: b, position: `第${i + 1}段（片段${sub}）`, paragraphIndex: i })
         sub += 1
-        buf = ''
+        b = ''
       }
     }
     for (const s of sentences) {
-      if (buf.length + s.length > maxChars) flush()
-      buf += s
+      if (b.length + s.length > maxChars) flush()
+      b += s
     }
     flush()
   })
   return out
+}
+
+/** 明确噪声：PDF 页标记 / 纯数字页码 / 目录点线。索引/数据行（含文本+数字）不在此过滤。 */
+function isPdfNoiseLine(text: string): boolean {
+  const t = text.trim()
+  if (/^--\s*\d+(\s+of\s+\d+)?\s*--$/.test(t)) return true
+  if (/^[\s0-9０-９]+$/.test(t)) return true
+  if (/[⋯…·]{3,}/.test(t)) return true
+  return false
+}
+
+/** 是否以句末标点收尾（视为一句完整）。 */
+function endsSentencePunct(text: string): boolean {
+  return /[。！？；]$/.test(text.trim())
+}
+
+/** 拼接相邻行：边界涉及数字/拉丁字母时补一个空格（避免 “2人”“2014年”粘连），否则直接拼接。 */
+function joinLine(cur: string, next: string): string {
+  if (/[0-9A-Za-z]$/.test(cur) || /^[0-9A-Za-z]/.test(next)) return cur + ' ' + next
+  return cur + next
 }
 
 /** 字符 bigram（中文无需分词，用相邻字符对近似文本相似度） */
@@ -305,6 +340,36 @@ if (import.meta.vitest) {
       expect(chunks.every((c) => c.paragraphIndex === chunks[0].paragraphIndex)).toBe(true)
       // 位置含“片段M”
       expect(chunks.every((c) => c.position.includes('片段'))).toBe(true)
+    })
+
+    it('chunkByParagraphs merges line-broken fragments and filters page/number noise (方案 C C2)', () => {
+      const text = [
+        '-- 1 of 371 --',
+        '12',
+        '【概况】普通高中录取 2599 人，参加',
+        '高考学生 2940 人（含复读生及职专生），其中本一上线 527 人，被清华大学录取 2',
+        '人，被香港中文大学录取 1 人，保送复旦大学等重点名校 17 人。',
+        '【达标高中建设】长乐二中、七中晋级“省二级达标校”。'
+      ].join('\n')
+      const chunks = chunkByParagraphs(text)
+      // 明确噪声被过滤
+      expect(chunks.some((c) => c.text.includes('-- 1 of 371 --'))).toBe(false)
+      expect(chunks.some((c) => /^\d+$/.test(c.text))).toBe(false)
+      // 被换行打断的句子还原为完整内容（不再有“被普通高/录取 2”这类句中截断）
+      const first = chunks.find((c) => c.text.includes('普通高中录取'))!
+      expect(first.text).toContain('被清华大学录取 2 人，被香港中文大学录取 1 人')
+      expect(first.text).toContain('重点名校 17 人。')
+      // 条目起始（【达标高中建设】）开启新段
+      const second = chunks.find((c) => c.text.includes('达标高中建设'))!
+      expect(second.text).not.toContain('普通高中录取')
+    })
+
+    it('chunkByParagraphs keeps index/data rows (不滤索引/数据行，交给模型)', () => {
+      const text = ['【数据】2015 年全区普通高中招生。', '高中个 183', '高中个 2645'].join('\n')
+      const chunks = chunkByParagraphs(text)
+      const joined = chunks.map((c) => c.text).join('\n')
+      expect(joined).toContain('高中个 183')
+      expect(joined).toContain('高中个 2645')
     })
 
     it('keeps all lexically related paragraphs and drops definitely-unrelated ones (Task 3.4.7)', () => {

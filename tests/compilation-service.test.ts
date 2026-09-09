@@ -15,6 +15,7 @@ import {
   buildCompilationSourceRefs,
   pickRemainingWindows,
   nextContradictionBatch,
+  splitCardScans,
   reduceConcurrency
 } from '../src/main/writing/compilation-service'
 
@@ -180,6 +181,24 @@ describe('card contradiction scan (Phase 6.1 优化)', () => {
     expect(nextContradictionBatch(5, 2, 5)).toBeNull()
     // 从断点（第 2 批之后）继续
     expect(nextContradictionBatch(4, 2, 6)).toEqual({ start: 4, end: 6 })
+  })
+
+  it('splitCardScans budgets both card count and cumulative chars (方案 C 卡片变长时避免单批过大)', () => {
+    const mk = (len: number): { excerpt: string; sourceRef: string; position: string; ts: string | null } => ({
+      excerpt: 'x'.repeat(len),
+      sourceRef: '#1',
+      position: '第1段',
+      ts: null
+    })
+    // 字符预算 10：每 5 字符×2 个 = 10 字符一批（count 上限 3 不生效）
+    const ranges = splitCardScans([mk(5), mk(5), mk(5), mk(5)], 0, 3, 10)
+    expect(ranges).toEqual([{ start: 0, end: 2 }, { start: 2, end: 4 }])
+    // 单条超预算：至少纳入该条（避免死循环）
+    const single = splitCardScans([mk(50), mk(5)], 0, 3, 10)
+    expect(single).toEqual([{ start: 0, end: 1 }, { start: 1, end: 2 }])
+    // count 预算优先
+    const byCount = splitCardScans([mk(1), mk(1), mk(1), mk(1)], 0, 2, 100)
+    expect(byCount).toEqual([{ start: 0, end: 2 }, { start: 2, end: 4 }])
   })
 
   it('reduceConcurrency halves (min 1) on rate limit (仅本次生成生效，不写回 Provider)', () => {
