@@ -122,25 +122,25 @@ export function chunkParagraphs(text: string): Chunk[] {
 export const CHUNK_PARAGRAPH_MAX = 1000
 export interface ParagraphChunk { text: string; position: string; paragraphIndex: number }
 export function chunkByParagraphs(text: string, maxChars: number = CHUNK_PARAGRAPH_MAX): ParagraphChunk[] {
-  // C2：先把“被换行打断的物理行”按句合并回逻辑句/段，并过滤明确噪声（页标记/纯页码/目录点线）。
+  // 方案 C（上下文感知）：两类合并——①【/条目起始行里，把同一条目的多句/多行合并为整条（保留主语/上文，避免“其中…”缺上下文）；
+  // ②非【 的普通文本仍按句末标点断段（保证“保守本地闸门”能按段剔除无关内容）。过滤明确噪声（页标记/纯页码/目录点线）。
   // 索引/数据行（如“高中 个 183”）不在此过滤，保留交给细读模型判断。
-  const lines = text.split(/\r?\n+/).map((p) => p.trim()).filter(Boolean)
-  const kept = lines.filter((L) => !isPdfNoiseLine(L) && !isTitleLikeLine(L))
+  const lines = text.split(/\r?\n+/).map((p) => p.trim())
   const merged: string[] = []
   let buf = ''
-  for (const L of kept) {
-    if (!buf) {
-      buf = L
-      continue
-    }
-    if (endsSentencePunct(buf)) {
-      merged.push(buf)
-      buf = L
-    } else {
-      buf = joinLine(buf, L)
-    }
+  let inEntry = false
+  const flush = () => { if (buf) { merged.push(buf); buf = '' } }
+  for (const L of lines) {
+    if (!L) { flush(); inEntry = false; continue }        // 空行 = 段边界
+    if (isPdfNoiseLine(L)) continue                        // 噪声直接跳过
+    if (startsNewEntry(L)) { flush(); buf = L; inEntry = true; continue } // 新条目：保留头部并整段合并
+    if (isTitleLikeLine(L)) { flush(); inEntry = false; continue }       // 副标题/章节标题 = 段边界（丢弃）
+    if (!buf) { buf = L; inEntry = false; continue }
+    if (inEntry) { buf = joinLine(buf, L); continue }      // 条目内多句/多行合并，保留完整上下文
+    if (endsSentencePunct(buf)) { flush(); buf = L }       // 普通文本：句末标点处断段（保留闸门粒度）
+    else buf = joinLine(buf, L)
   }
-  if (buf) merged.push(buf)
+  flush()
 
   const out: ParagraphChunk[] = []
   merged.forEach((p, i) => {
@@ -186,6 +186,14 @@ function endsSentencePunct(text: string): boolean {
 function joinLine(cur: string, next: string): string {
   if (/[0-9A-Za-z]$/.test(cur) || /^[0-9A-Za-z]/.test(next)) return cur + ' ' + next
   return cur + next
+}
+
+/** 是否为新条目/章节起点（决定在“整条目合并”时断段）：【、〔、［、（、《、◆、■，或 “一、/二、”/“1、/1.)” 等编号式小标题。 */
+function startsNewEntry(text: string): boolean {
+  const t = text.trim()
+  if (/^[【〔［（《◆■]/.test(t)) return true
+  if (/^[一二三四五六七八九十]+、/.test(t)) return true
+  return /^\d+[、.)．]/.test(t)
 }
 
 /** 字符 bigram（中文无需分词，用相邻字符对近似文本相似度） */
@@ -370,6 +378,23 @@ if (import.meta.vitest) {
       const joined = chunks.map((c) => c.text).join('\n')
       expect(joined).toContain('高中个 183')
       expect(joined).toContain('高中个 2645')
+    })
+
+    it('chunkByParagraphs keeps a whole entry even with sentence-final punctuation inside (方案C整段上下文)', () => {
+      const text = [
+        '【华侨中学新疆高中班】2014 年，长乐华侨中学新疆高中班有 4 个班级，学生 146 人，其中预科班 39 人。',
+        '在 2014 年高考中，首届 37 位新疆班毕业生全部被录取。',
+        '【达标高中建设】长乐二中、七中晋级“省二级达标校”。'
+      ].join('\n')
+      const chunks = chunkByParagraphs(text)
+      // 第一条目（含两句、句中有句号）保持为一个整段，不因句号被拆开
+      const entry = chunks.find((c) => c.text.includes('华侨中学新疆高中班'))!
+      expect(entry.text).toContain('其中预科班 39 人。在 2014 年高考中')
+      expect(entry.text).toContain('全部被录取。')
+      // 第二条目独立成段
+      const second = chunks.find((c) => c.text.includes('达标高中建设'))!
+      expect(second.text).toContain('长乐二中、七中晋级')
+      expect(second.text).not.toContain('华侨中学')
     })
 
     it('keeps all lexically related paragraphs and drops definitely-unrelated ones (Task 3.4.7)', () => {
