@@ -614,6 +614,14 @@ ALTER TABLE web_sites ADD COLUMN keywords TEXT NOT NULL DEFAULT '';
     sql: `
 ALTER TABLE web_sites DROP COLUMN keywords;
 `
+  },
+  {
+    // Phase B：每个 LLM Provider 可配置「并发数」（同时处理的窗口请求数；默认 4，上限由 UI 限制 8）。
+    // 用于资料汇编 AI 细读/矛盾扫描并发，缩短大量窗口的等待时间。
+    version: 27,
+    sql: `
+ALTER TABLE llm_providers ADD COLUMN concurrency INTEGER NOT NULL DEFAULT 4;
+`
   }
 ]
 

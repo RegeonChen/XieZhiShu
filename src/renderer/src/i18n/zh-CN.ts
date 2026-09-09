@@ -45,6 +45,10 @@ export const zhCN = {
       detailHint: 'LLM Provider 配置与通用设置将在后续开发阶段提供。'
     }
   },
+  paneEdge: {
+    hideCenter: '隐藏中栏',
+    showCenter: '显示中栏'
+  },
   topbar: {
     version: '版本',
     platform: '平台',
@@ -75,6 +79,8 @@ export const zhCN = {
   sourceList: {
     importing: '导入中...',
     emptyHint: '暂无资料。导入文件，或在下方「网页资料库」注册网站。',
+    localTitle: '本地资料库',
+    webTitle: '网页资料库',
     summarizeBtn: '整理资料',
     summarizing: '整理中...',
     summarizeDone: '整理完成：成功 {ok} 篇，失败 {failed} 篇',
@@ -203,6 +209,12 @@ export const zhCN = {
       workspaceLabel: '工作区',
       workspaceNone: '未设置'
     },
+    keepAwake: {
+      title: '长任务时保持电脑唤醒',
+      hint: '生成资料汇编 / 初稿 / 整理资料期间保持系统唤醒，避免因睡眠中断长任务。',
+      on: '开启',
+      off: '关闭'
+    },
     exportLog: {
       btn: '导出日志',
       exporting: '导出中...',
@@ -257,7 +269,9 @@ export const zhCN = {
         modelPlaceholder: '如：deepseek-chat',
         apiKey: 'API 密钥',
         apiKeyPlaceholder: '请输入 API 密钥',
-        apiKeyHint: '已设置密钥，留空保持不变'
+        apiKeyHint: '已设置密钥，留空保持不变',
+        concurrency: '并发窗口数',
+        concurrencyHint: '资料汇编 AI 细读/矛盾扫描同时处理的窗口数（1–8，默认 4）。越高越快，但需在 Provider 并发/速率限制内；超限失败可经断点续传降并发续跑。'
       }
     },
     workspace: {
@@ -307,6 +321,7 @@ export const zhCN = {
     regenerating: '正在整理资料摘要并重新生成初稿（资料较多时可能需要数分钟，请耐心等待）...',
     generated: '初稿《{title}》已生成。',
     generateFailed: '生成失败：{message}',
+    needConfirmedCompilation: '请先在第一步「生成资料汇编」中确认汇编，再生成初稿。',
     chatFailed: '对话失败：{message}',
     regenerateBtn: '重新生成初稿',
     regenerateConfirmTitle: '重新生成初稿',
@@ -411,6 +426,13 @@ export const zhCN = {
     editTitle: '编辑资料卡片',
     contradict: '矛盾',
     generating: '正在生成资料汇编（本地宽召回 + AI 细读，资料较多时可能需要数分钟）...',
+    interruptedTitle: '大模型生成中断',
+    interruptedMessage: '已中断于：{stage}。原因：{reason}。请修复该问题（如充值余额 / 检查网络）后点击「尝试继续」，将从断点续跑，无需重新开始。',
+    againInterrupted: '生成再次中断于：{stage}。原因：{reason}。请修复后再次点击「尝试继续」。',
+    continueBtn: '尝试继续',
+    continuing: '正在从断点继续生成资料汇编（复用已完成的部分）…',
+    adviceReduceConcurrency: '检测到频繁限流（HTTP 429）。已自动降低本次生成资料的并发数；建议您在「设置 → LLM Provider」中把当前大模型的「并发窗口数」调低（如 2），可减少限流。',
+    continueFailed: '继续生成失败：',
     confirmed: '资料汇编已确认，可进入下一步指定行文规范。',
     regenerated: '已重新生成资料汇编：{count} 张卡片。',
     adjusting: '正在调整资料汇编…',

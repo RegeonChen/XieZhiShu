@@ -40,9 +40,13 @@ interface WritingTransient {
   busyText: string | null
   progress: { percent: number; etaSeconds?: number } | null
   compilationProgress: { percent: number; etaSeconds?: number } | null
+  compilationInterrupt: { stage: string; message: string; percent: number } | null
   streamText: string | null
 }
 const transientByTask = new Map<string, WritingTransient>()
+// 前端 429 自动续传兜底参数（限流中断时自动调用 continueCompilation；上限与递增延迟，避免无限重试）
+const AUTO_RESUME_LIMIT = 2
+const AUTO_RESUME_DELAYS_MS = [8000, 20000]
 
 function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; onChanged: () => void; reloadKey?: number }) {
   const [task, setTask] = useState<TaskItem | null>(null)
@@ -76,7 +80,10 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
   const [undoAvailable, setUndoAvailable] = useState(0)
   const [redoAvailable, setRedoAvailable] = useState(0)
   const [compilationProgress, setCompilationProgress] = useState<{ percent: number; etaSeconds?: number } | null>(null)
+  const [compilationInterrupt, setCompilationInterrupt] = useState<{ stage: string; message: string; percent: number; retryable?: boolean } | null>(null)
   const [compilationInstruction, setCompilationInstruction] = useState('')
+  // 前端 429 自动续传兜底：限流中断时自动调用 continueCompilation（上限限制，避免无限重试）
+  const autoResumeAttemptRef = useRef(0)
   // ---- 矛盾回收站（Phase 6.1 优化） ----
   const [showRecycleBin, setShowRecycleBin] = useState(false)
   const [recycleBinItems, setRecycleBinItems] = useState<CompilationRecycleBinItem[]>([])
@@ -90,8 +97,8 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
 
   // 跨任务切换保留「生成中」临时状态（busy / busyText / progress / compilationProgress / streamText）：
   // 用模块级 Map 按 taskId 快照——挂载时恢复、卸载时保存，避免切走再切回时进度条消息消失（组件仍按任务 key 挂载）。
-  const liveTransientRef = useRef<WritingTransient>({ busy: null, busyText: null, progress: null, compilationProgress: null, streamText: null })
-  liveTransientRef.current = { busy, busyText, progress, compilationProgress, streamText }
+  const liveTransientRef = useRef<WritingTransient>({ busy: null, busyText: null, progress: null, compilationProgress: null, compilationInterrupt: null, streamText: null })
+  liveTransientRef.current = { busy, busyText, progress, compilationProgress, compilationInterrupt, streamText }
   useEffect(() => {
     const snap = transientByTask.get(taskId)
     if (snap) {
@@ -99,6 +106,7 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
       setBusyText(snap.busyText ?? null)
       setProgress(snap.progress ?? null)
       setCompilationProgress(snap.compilationProgress ?? null)
+      setCompilationInterrupt(snap.compilationInterrupt ?? null)
       setStreamText(snap.streamText ?? null)
     }
     return () => { transientByTask.set(taskId, liveTransientRef.current) }
@@ -194,6 +202,18 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
     setMessages((prev) => [...prev, { role: 'assistant', content: text }])
   }
 
+  // 订阅生成/续传过程中的建议提示（Phase A/B：429 限流后建议降低 Provider 并发数），翻译为中文并持久化
+  useEffect(() => {
+    const off = window.api.onCompilationAdvice?.((p) => {
+      if (p.taskId !== taskId) return
+      const msg = p.kind === 'reduce-concurrency' ? zhCN.compilation.adviceReduceConcurrency : ''
+      if (!msg) return
+      appendAssistant(msg)
+      void window.api.addTaskMessage(taskId, 'assistant', msg, 'notice')
+    })
+    return () => { off?.() }
+  }, [taskId, appendAssistant])
+
   const reloadMessages = useCallback(async () => {
     const res = await window.api.listTaskMessages(taskId)
     if (res.ok && res.data) {
@@ -283,31 +303,120 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
     setBusyText(zhCN.compilation.generating)
     setStreamText(null)
     setCompilationProgress(null)
+    setCompilationInterrupt(null)
+    autoResumeAttemptRef.current = 0
+    let keepProgress = false
     try {
       const res = await window.api.generateCompilation(taskId, inst)
       if (res.ok && res.data) {
-        const data = res.data as { compilation: CompilationView; contradictionScan?: { ok: boolean; message?: string } }
+        const data = res.data as { compilation: CompilationView; contradictionScan?: { ok: boolean; message?: string }; interrupted?: { stage: string; message: string; percent: number; retryable?: boolean } }
         const comp = data.compilation
         setCompilation(comp)
-        const pendingCount = comp.contradictions.filter((c) => c.status === 'pending').length
-        const scanFailed = data.contradictionScan && data.contradictionScan.ok === false
-        const summary = pendingCount > 0
-          ? '已生成资料汇编：' + comp.items.length + ' 张卡片，' + pendingCount + ' 组矛盾待处理。请审阅并处理后点击「确认汇编」。'
-          : scanFailed
-            ? '已生成资料汇编：' + comp.items.length + ' 张卡片。注意：' + zhCN.compilation.contradictionScanFailed.replace('{reason}', data.contradictionScan?.message ?? '未知') + '请审阅并酌情复核。'
-            : '已生成资料汇编：' + comp.items.length + ' 张卡片，无未处理矛盾。请审阅后点击「确认汇编」。'
-        appendAssistant(summary)
-        void window.api.addTaskMessage(taskId, 'assistant', summary, 'notice')
-        void scanRepairsAndReload(comp.id)
-        // 生成时主进程可能已把任务标题从「新建任务」自动改为大模型提取的标题，此处刷新任务列表以同步显示新标题
-        onChanged()
+        if (data.interrupted) {
+          // 大模型异常中断：保留进度（冻结在中断处），展示「尝试继续」，不运行语义补全扫描
+          keepProgress = true
+          setCompilationProgress({ percent: data.interrupted.percent })
+          setCompilationInterrupt(data.interrupted)
+          const msg = zhCN.compilation.interruptedMessage.replace('{stage}', data.interrupted.stage).replace('{reason}', data.interrupted.message)
+          appendAssistant(msg)
+          void window.api.addTaskMessage(taskId, 'assistant', msg, 'notice')
+          // 429 限流：自动续传兜底（有限次自动调用 continueCompilation），否则留待用户点击「尝试继续」
+          if (data.interrupted.retryable && autoResumeAttemptRef.current < AUTO_RESUME_LIMIT) {
+            autoResumeAttemptRef.current += 1
+            const delay = AUTO_RESUME_DELAYS_MS[autoResumeAttemptRef.current - 1] ?? 20000
+            setTimeout(() => { void handleContinueCompilation() }, delay)
+          }
+        } else {
+          setCompilationInterrupt(null)
+          const pendingCount = comp.contradictions.filter((c) => c.status === 'pending').length
+          const scanFailed = data.contradictionScan && data.contradictionScan.ok === false
+          const summary = pendingCount > 0
+            ? '已生成资料汇编：' + comp.items.length + ' 张卡片，' + pendingCount + ' 组矛盾待处理。请审阅并处理后点击「确认汇编」。'
+            : scanFailed
+              ? '已生成资料汇编：' + comp.items.length + ' 张卡片。注意：' + zhCN.compilation.contradictionScanFailed.replace('{reason}', data.contradictionScan?.message ?? '未知') + '请审阅并酌情复核。'
+              : '已生成资料汇编：' + comp.items.length + ' 张卡片，无未处理矛盾。请审阅后点击「确认汇编」。'
+          appendAssistant(summary)
+          void window.api.addTaskMessage(taskId, 'assistant', summary, 'notice')
+          void scanRepairsAndReload(comp.id)
+          // 生成时主进程可能已把任务标题从「新建任务」自动改为大模型提取的标题，此处刷新任务列表以同步显示新标题
+          onChanged()
+        }
       } else {
         const msg = '生成资料汇编失败：' + (res.error?.message ?? '')
         appendAssistant(msg)
         void window.api.addTaskMessage(taskId, 'assistant', msg, 'notice')
       }
     } finally {
-      resetBusy()
+      if (keepProgress) {
+        // 中断：清 busy（可点「尝试继续」），但保留进度条与中断信息
+        setBusy(null)
+        setBusyText(null)
+        setStreamText(null)
+      } else {
+        resetBusy()
+      }
+      await reloadMessages()
+    }
+  }
+
+  /** 从大模型异常中断处继续生成资料汇编（会话内断点续传） */
+  const handleContinueCompilation = async () => {
+    if (busy || !compilation) return
+    const cid = compilation.id
+    setBusy('generating')
+    setBusyText(zhCN.compilation.continuing)
+    setStreamText(null)
+    setCompilationProgress(null)
+    setCompilationInterrupt(null)
+    let keepProgress = false
+    try {
+      const res = await window.api.continueCompilation(cid)
+      if (res.ok && res.data) {
+        const data = res.data as { compilation: CompilationView; interrupted?: { stage: string; message: string; percent: number; retryable?: boolean } }
+        const comp = data.compilation
+        setCompilation(comp)
+        if (data.interrupted) {
+          // 续跑仍中断：再次展示中断信息
+          keepProgress = true
+          setCompilationProgress({ percent: data.interrupted.percent })
+          setCompilationInterrupt(data.interrupted)
+          const msg = zhCN.compilation.againInterrupted.replace('{stage}', data.interrupted.stage).replace('{reason}', data.interrupted.message)
+          appendAssistant(msg)
+          void window.api.addTaskMessage(taskId, 'assistant', msg, 'notice')
+          // 429 限流：自动续传兜底（有限次，重复调用 continueCompilation），否则留待用户点击「尝试继续」
+          if (data.interrupted.retryable && autoResumeAttemptRef.current < AUTO_RESUME_LIMIT) {
+            autoResumeAttemptRef.current += 1
+            const delay = AUTO_RESUME_DELAYS_MS[autoResumeAttemptRef.current - 1] ?? 20000
+            setTimeout(() => { void handleContinueCompilation() }, delay)
+          } else {
+            autoResumeAttemptRef.current = 0
+          }
+        } else {
+          autoResumeAttemptRef.current = 0
+          setCompilationInterrupt(null)
+          const pendingCount = comp.contradictions.filter((c) => c.status === 'pending').length
+          const summary = pendingCount > 0
+            ? '已继续生成资料汇编：' + comp.items.length + ' 张卡片，' + pendingCount + ' 组矛盾待处理。请审阅并处理后点击「确认汇编」。'
+            : '已继续生成资料汇编：' + comp.items.length + ' 张卡片，无未处理矛盾。请审阅后点击「确认汇编」。'
+          appendAssistant(summary)
+          void window.api.addTaskMessage(taskId, 'assistant', summary, 'notice')
+          void scanRepairsAndReload(comp.id)
+          onChanged()
+        }
+      } else {
+        autoResumeAttemptRef.current = 0
+        const msg = zhCN.compilation.continueFailed + (res.error?.message ?? '')
+        appendAssistant(msg)
+        void window.api.addTaskMessage(taskId, 'assistant', msg, 'notice')
+      }
+    } finally {
+      if (keepProgress) {
+        setBusy(null)
+        setBusyText(null)
+        setStreamText(null)
+      } else {
+        resetBusy()
+      }
       await reloadMessages()
     }
   }
@@ -471,8 +580,11 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
     setStreamText(null)
     setProgress(null)
     try {
-      const compilationId = compilation?.status === 'finalized' ? compilation.id : undefined
-      const res = await window.api.generateDraft(taskId, instruction, compilationId)
+      if (compilation?.status !== 'finalized') {
+        appendAssistant(zhCN.writingChat.needConfirmedCompilation)
+        return
+      }
+      const res = await window.api.generateDraft(taskId, instruction, compilation.id)
       if (res.ok && res.data) {
         const data = res.data as { draft: DraftItem; articleTitle: string | null; contradictions?: Contradiction[] }
         setDraft(data.draft)
@@ -529,8 +641,11 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
     setBusyText(zhCN.writingChat.regenerating)
     setStreamText(null)
     try {
-      const compilationId = compilation?.status === 'finalized' ? compilation.id : undefined
-      const res = await window.api.regenerateDraft(taskId, instruction, compilationId)
+      if (compilation?.status !== 'finalized') {
+        appendAssistant(zhCN.writingChat.needConfirmedCompilation)
+        return
+      }
+      const res = await window.api.regenerateDraft(taskId, instruction, compilation.id)
       if (res.ok && res.data) {
         const data = res.data as { draft: DraftItem; articleTitle: string | null; contradictions?: Contradiction[] }
         setDraft(data.draft)
@@ -637,6 +752,8 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
           busyText={busyText}
           streamText={streamText}
           progress={compilationProgress}
+          interrupt={compilationInterrupt}
+          onRetryCompilation={compilationInterrupt ? () => void handleContinueCompilation() : undefined}
           onGenerate={(text) => void (hasComp ? handleAdjustCompilation(text) : handleGenerateCompilation(text))}
           onChat={(message) => void (hasComp ? handleAdjustCompilation(message) : handleGenerateCompilation(message))}
           primaryLabel={firstSent ? '↑' : zhCN.compilation.generateBtn}

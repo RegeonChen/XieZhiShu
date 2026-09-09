@@ -309,6 +309,18 @@ export interface CompilationRecycleBinCard extends CompilationRecycleBinBase {
 }
 export type CompilationRecycleBinItem = CompilationRecycleBinContradiction | CompilationRecycleBinRepair | CompilationRecycleBinCard
 
+/** 生成资料汇编时大模型异常中断的可视化信息（供前端展示「尝试继续」） */
+export interface CompilationInterrupt {
+  /** 中断时所在的阶段描述（如「正在由 AI 细读资料（3/6 个窗口）」） */
+  stage: string
+  /** 中断原因（来自大模型错误信息，如余额不足/网络问题） */
+  message: string
+  /** 中断时的进度百分比（0~100） */
+  percent: number
+  /** true = 因限流（HTTP 429）中断，可自动续传/自动降并发；false/缺省 = 其他异常，需人工「尝试继续」 */
+  retryable?: boolean
+}
+
 // ============================================================
 // 规范文档库（Phase 6.4.1：第二步「指定行文规范」）
 // ============================================================
@@ -331,6 +343,8 @@ export interface LlmProviderConfig {
   apiBase: string
   model: string
   apiKeySet: boolean // 是否已设置密钥（密钥不回传）
+  /** Phase B：资料汇编 AI 细读/矛盾扫描的并发窗口数（默认 4，上限 8，用户可改） */
+  concurrency?: number
 }
 
 // ============================================================
@@ -344,6 +358,8 @@ export interface AppSettings {
   compilationProviderId?: string
   /** Phase 6.8：第 3 步（生成初稿）默认使用的大模型 Provider id；未设置回退任务/全局 */
   draftProviderId?: string
+  /** Phase A：长任务（生成汇编/初稿/整理）期间保持电脑唤醒；缺省/未设为 true 时开启，false 关闭 */
+  keepAwake?: boolean
 }
 
 // ============================================================
@@ -388,6 +404,7 @@ export const ErrorCodes = {
   DRAFT_NOT_FOUND: 'DRAFT_NOT_FOUND',
   TASK_NO_SCOPE: 'TASK_NO_SCOPE',
   TASK_NO_PROVIDER: 'TASK_NO_PROVIDER',
+  COMPILATION_NOT_FINALIZED: 'COMPILATION_NOT_FINALIZED',
 
   // 通用
   INVALID_PARAM: 'INVALID_PARAM',

@@ -142,8 +142,12 @@ const api = {
     return ipcRenderer.invoke(IPC.COMPILATION_GET, { compilationId })
   },
   /** 生成资料汇编（AI 服务 Phase 6.1 实现） */
-  generateCompilation(taskId: string, title: string): Promise<ApiResult<{ compilation: unknown }>> {
+  generateCompilation(taskId: string, title: string): Promise<ApiResult<{ compilation: unknown; interrupted?: { stage: string; message: string; percent: number } }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_GENERATE, { taskId, title })
+  },
+  /** 中断续跑（Phase 6.x：大模型异常中断后，从断点继续生成资料汇编） */
+  continueCompilation(compilationId: string): Promise<ApiResult<{ compilation: unknown; interrupted?: { stage: string; message: string; percent: number } }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_CONTINUE, { compilationId })
   },
   /** 重新生成资料汇编（AI 服务 Phase 6.1 实现） */
   adjustCompilation(taskId: string, compilationId: string, instruction: string): Promise<ApiResult<{ compilation: unknown; explain?: string; removedCards?: number; addedCards?: number; updatedCards?: number }>> {
@@ -231,7 +235,7 @@ const api = {
     return ipcRenderer.invoke(IPC.LLM_LIST_PROVIDERS)
   },
   /** 保存 Provider（新建/编辑；apiKey 可选，本地加密存储） */
-  saveProvider(input: { id?: string; name: string; apiBase: string; model: string; apiKey?: string }): Promise<ApiResult<{ provider: unknown }>> {
+  saveProvider(input: { id?: string; name: string; apiBase: string; model: string; apiKey?: string; concurrency?: number }): Promise<ApiResult<{ provider: unknown }>> {
     return ipcRenderer.invoke(IPC.LLM_SAVE_PROVIDER, input)
   },
   /** 删除 Provider */
@@ -247,7 +251,7 @@ const api = {
     return ipcRenderer.invoke(IPC.SETTINGS_GET)
   },
   /** 更新本地设置 */
-  updateSettings(patch: { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string }): Promise<ApiResult<unknown>> {
+  updateSettings(patch: { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string; keepAwake?: boolean }): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.SETTINGS_UPDATE, { patch })
   },
   /** 工作区状态（目录 + 资料统计） */
@@ -320,6 +324,12 @@ const api = {
     ipcRenderer.on(IPC_EVENTS.COMPILATION_PROGRESS, listener)
     return () => ipcRenderer.removeListener(IPC_EVENTS.COMPILATION_PROGRESS, listener)
   },
+  /** 订阅生成资料汇编/续传中的建议提示（如 429 限流后建议降低 Provider 并发数，Phase A/B） */
+  onCompilationAdvice(cb: (p: { taskId: string; kind: string }) => void): () => void {
+    const listener = (_event: Electron.IpcRendererEvent, p: { taskId: string; kind: string }): void => cb(p)
+    ipcRenderer.on(IPC_EVENTS.COMPILATION_ADVICE, listener)
+    return () => ipcRenderer.removeListener(IPC_EVENTS.COMPILATION_ADVICE, listener)
+  },
   /** 订阅生成/对话的流式增量文本（2026-08-19：正文/回复逐字推送，供聊天面板实时显示） */
   onWritingStreamDelta(cb: (p: { taskId: string; text: string }) => void): () => void {
     const listener = (_event: Electron.IpcRendererEvent, p: { taskId: string; text: string }): void => cb(p)
@@ -335,11 +345,11 @@ const api = {
     return ipcRenderer.invoke(IPC.WRITING_ASK_SOURCE, { taskId, selection })
   },
   /** 生成初稿（第 0 稿；instruction 为用户要求，应包含标题与可能的其他要求；compilationId 提供时以已确认汇编为材料） */
-  generateDraft(taskId: string, instruction: string, compilationId?: string): Promise<ApiResult<{ draft: unknown; articleTitle: string | null; contradictions: unknown[] }>> {
+  generateDraft(taskId: string, instruction: string, compilationId: string): Promise<ApiResult<{ draft: unknown; articleTitle: string | null; contradictions: unknown[] }>> {
     return ipcRenderer.invoke(IPC.WRITING_GENERATE_DRAFT, { taskId, instruction, compilationId })
   },
   /** 重新生成初稿（覆盖现有第 0 稿；compilationId 提供时以已确认汇编为材料） */
-  regenerateDraft(taskId: string, instruction: string, compilationId?: string): Promise<ApiResult<{ draft: unknown; articleTitle: string | null; contradictions: unknown[] }>> {
+  regenerateDraft(taskId: string, instruction: string, compilationId: string): Promise<ApiResult<{ draft: unknown; articleTitle: string | null; contradictions: unknown[] }>> {
     return ipcRenderer.invoke(IPC.DRAFT_REGENERATE, { taskId, instruction, compilationId })
   },
   /** 读取志稿（含片段与来源） */

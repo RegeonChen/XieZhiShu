@@ -8,7 +8,7 @@ import { ErrorCodes } from '../../shared/types'
 import { getTaskById, resolveScopeSourceIds, getAllSourceIds, renameTask } from '../db/tasks'
 import { getSourceIdsByTag } from '../db/tags'
 import { getSourcesByIds } from '../db/sources'
-import { bigrams, chunkParagraphs, scoreChunk } from '../rag/retrieval'
+import { bigrams, chunkByParagraphs, scoreChunk } from '../rag/retrieval'
 import { embedTexts } from '../rag/embed'
 import { vectorSearch } from '../rag/vector-store'
 import { getSettings } from '../db/settings'
@@ -20,13 +20,13 @@ import {
   createCompilation,
   insertCompilationItems,
   insertCompilationContradictions,
+  replaceCompilationItems,
   type CompilationItemInput,
   type CompilationContradictionInput
 } from '../db/compilations'
 
 const COMPILATION_TIMEOUT_MS = 600000
 const WINDOW_MAX_CHARS = 30000
-const WINDOW_CONCURRENCY = 2
 const TEMPERATURES = [0, 0.3]
 const KEYWORD_EXTRACT_TIMEOUT_MS = 60000
 const CARD_SCAN_TIMEOUT_MS = 300000
@@ -36,6 +36,11 @@ const CARD_SCAN_MAX = 200
 const REPRODUCIBILITY_SEED = 42
 /** 卡片级矛盾扫描的温度阶梯（低温度 + 稍高温度各扫一次后按主题并集，提升召回且成本低） */
 const CARD_SCAN_TEMPERATURES = [0, 0.3]
+/** Phase A/B：遇到限流（HTTP 429）自动续传——内部自动降并发并重试的轮数上限；降并发不写回 Provider 设置，仅本次生成生效 */
+const RATE_LIMIT_RESUME_LIMIT = 2
+/** 限流自动续传的退避延迟（毫秒，按轮次递增） */
+const RATE_LIMIT_RESUME_BACKOFF_MS = [10000, 25000]
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
 /** 预计剩余时间的各阶段先验（秒）——单次调用阶段无实时完成比例，先按先验估；窗口细读阶段改用实测均速外推（A+C） */
 const PHASE_KEYWORD_ETA_S = 20
 const PHASE_WEB_ETA_S = 30
@@ -69,13 +74,58 @@ export interface CompilationProgress {
 }
 
 export type GenerateCompilationResult =
-  | { ok: true; compilationId: string; candidateChunks: number; contradictions: number; contradictionScan?: { ok: boolean; message?: string } }
-  | { ok: false; error: { code: string; message: string } }
+  | { ok: true; compilationId: string; candidateChunks: number; contradictions: number; contradictionScan?: { ok: boolean; message?: string }; interrupted?: CompilationInterrupt }
+  | { ok: false; error: { code: string; message: string } };
+
+/** 生成资料汇编时大模型异常中断的可视化信息（供前端展示「尝试继续」） */
+export interface CompilationInterrupt {
+  /** 中断时所在的阶段描述（如「正在由 AI 细读资料（3/6 个窗口）」） */
+  stage: string
+  /** 中断原因（来自大模型错误信息，如余额不足/网络问题） */
+  message: string
+  /** 中断时的进度百分比（0~100） */
+  percent: number
+  /** true = 因限流（HTTP 429）中断，可自动续传/自动降并发；false/缺省 = 其他异常，需人工「尝试继续」 */
+  retryable?: boolean
+}
+
+/**
+ * 会话级断点续传状态（内存，不落库）：
+ * 记录窗口细读与矛盾扫描到哪个环节，续跑时从该处继续，复用已完成的窗口/卡片。
+ * 仅对「AI 窗口细读」与「卡片矛盾扫描」两个 LLM 环节启用；关键词提取/网页检索保持原有回退。
+ */
+interface CompilationResumeState {
+  taskId: string
+  compilationId: string
+  title: string
+  provider: ProviderInfo
+  phase: 'window' | 'contradiction'
+  chunks: RetrievedChunk[]
+  refs: SourceRefEntry[]
+  windows: RetrievedChunk[][]
+  /** 已成功细读完成的窗口下标集合（失败/未读的不在其中，续跑时重读） */
+  doneSet: Set<number>
+  /** 各窗口的细读输出（按下标；null=该窗口无产出但已完成），合并顺序确定 */
+  windowOutputsByIndex: (CompilationOutput | null)[]
+  /** 矛盾扫描已推进到的卡片偏移（在合并后 items 中的偏移） */
+  scanOffset: number
+  /** 已成功扫描批次的矛盾分组 */
+  scanGroups: CompilationOutputGroup[]
+  avgWindowSec: number
+  /** 并发窗口数（窗口细读/矛盾扫描并行度，来自 Provider 配置） */
+  concurrency: number
+  interrupted?: CompilationInterrupt
+}
+
+/** 会话级断点续传存储（key = compilationId）。应用重启后清空（会话内续传）。 */
+const resumeStore = new Map<string, CompilationResumeState>()
 
 interface ProviderInfo {
   apiBase: string
   model: string
   apiKey: string
+  /** 该 Provider 配置的并发窗口数（Phase B：AI 细读/矛盾扫描并行度；默认 4，范围 1–8） */
+  concurrency: number
 }
 
 function fail(code: string, message: string): GenerateCompilationResult {
@@ -90,7 +140,8 @@ function resolveProvider(): { ok: true; provider: ProviderInfo } | { ok: false; 
   const provider = getProviderSecret(providerId, safeStorageCodec)
   if (!provider) return { ok: false, error: { code: ErrorCodes.TASK_NO_PROVIDER, message: '所选的 LLM Provider 不存在' } }
   if (!provider.apiKey) return { ok: false, error: { code: ErrorCodes.LLM_UNAUTHORIZED, message: '所选的 LLM Provider 未设置 API 密钥' } }
-  return { ok: true, provider: { apiBase: provider.config.apiBase, model: provider.config.model, apiKey: provider.apiKey } }
+  const concurrency = Math.min(8, Math.max(1, Math.round(provider.config.concurrency ?? 4)))
+  return { ok: true, provider: { apiBase: provider.config.apiBase, model: provider.config.model, apiKey: provider.apiKey, concurrency } }
 }
 
 /** 大模型提取的粗筛关键词集合（标题 + 近义词/上下位词/专业词） */
@@ -171,7 +222,7 @@ export function recallCandidateChunks(scopeIds: string[], query: string): Retrie
   const qTerms = q.split(/\s+/).filter(Boolean)
   const out: RetrievedChunk[] = []
   for (const s of sources) {
-    for (const c of chunkParagraphs(s.cleanedText ?? '')) {
+    for (const c of chunkByParagraphs(s.cleanedText ?? '')) {
       out.push({
         sourceId: s.id,
         sourceTitle: s.title,
@@ -222,12 +273,14 @@ export function recallCompilationCandidates(
 
   const relevantSources = new Set<string>()
   const dedicatedSources = new Set<string>()
-  const indexed: { sourceId: string; sourceTitle: string; position: string; text: string; score: number; vecHit: boolean; inlineRelevant: boolean }[] = []
+  const indexed: { sourceId: string; sourceTitle: string; position: string; text: string; score: number; vecHit: boolean; inlineRelevant: boolean; paragraphKey: string }[] = []
   const maxScoreBySource = new Map<string, number>()
   const totalLenBySource = new Map<string, number>()
+  // 段级相关（Phase A/B：整段为一个保留/剔除单元——段内任一子块有信号 → 整段所有子块一起保留）
+  const paragraphRelevant = new Set<string>() // key = sourceId|第N段
 
   for (const s of sources) {
-    const chunks = chunkParagraphs(s.cleanedText ?? '')
+    const chunks = chunkByParagraphs(s.cleanedText ?? '')
     let maxScore = 0
     let totalLen = 0
     for (const c of chunks) {
@@ -238,8 +291,12 @@ export function recallCompilationCandidates(
       // 词法相关（粗筛）：只要有任意词法信号（scoreChunk>0）或向量语义（≥RECALL_VEC_MIN）即视为
       // "可能相关"；只剔除与标题完全无任何信号（score==0 且无向量命中）的"肯定无关"段。
       const inlineRelevant = score > RECALL_LEX_MIN || vecHit
-      indexed.push({ sourceId: s.id, sourceTitle: s.title, position: c.position, text: c.text, score, vecHit, inlineRelevant })
-      if (inlineRelevant) relevantSources.add(s.id)
+      const paragraphKey = c.position.match(/第(\d+)段/)?.[0] ?? c.position
+      indexed.push({ sourceId: s.id, sourceTitle: s.title, position: c.position, text: c.text, score, vecHit, inlineRelevant, paragraphKey })
+      if (inlineRelevant) {
+        relevantSources.add(s.id)
+        paragraphRelevant.add(s.id + '|' + paragraphKey)
+      }
     }
     maxScoreBySource.set(s.id, maxScore)
     totalLenBySource.set(s.id, totalLen)
@@ -257,7 +314,8 @@ export function recallCompilationCandidates(
   const out: RetrievedChunk[] = []
   for (const it of indexed) {
     if (!relevantSources.has(it.sourceId)) continue
-    if (dedicatedSources.has(it.sourceId) || it.inlineRelevant) {
+    // 整段级判定：专属来源整篇保留，否则仅保留“所在段”有任一子块信号的全部子块
+    if (dedicatedSources.has(it.sourceId) || paragraphRelevant.has(it.sourceId + '|' + it.paragraphKey)) {
       out.push({ sourceId: it.sourceId, sourceTitle: it.sourceTitle, position: it.position, text: it.text, score: it.score })
     }
   }
@@ -294,12 +352,12 @@ function buildSystemPrompt(instruction: string): string {
     '【本次撰写主题与范围】',
     instruction,
     '',
-    '请以上述撰写主题与范围为准，自行判断哪些事实与主题相关并提炼成卡片；与主题无关或无法从材料中确认的内容不要输出。',
+    '请以上述撰写主题与范围为准，判断哪些候选材料与主题相关；与主题无关或无法从材料中确认的内容不要输出。',
     '',
-    '每段候选材料可能是较长的整段文字；请先判断其中哪些内容与主题相关，再按时间、事实、条目等维度做更细的切分，为每个细粒度事实输出一张卡片。',
+    '每一条【候选材料】已经是一段完整的原文（或超长段按句切分后的一个片段）。请把【每一条候选材料】作为一张资料卡片输出，不要按时间/事实/条目再做更细切分，也不要合并多条候选材料。',
     '',
-    '对每个相关事实，输出一张卡片：',
-    '1. excerpt 必须是完整的一句话或一个完整事实（按原文逐字摘录，不得从句子中间截断、不得改写/补写/概括）；',
+    '对每一条【候选材料】，输出一张卡片：',
+    '1. excerpt 必须是该候选材料【整段原文】（按原文逐字摘录，不得截断、改写、补写或概括）；',
     '2. ts 为时间标签（如「2005 年」「2005—2010 年」），只写原文中能确定的时间，没有就填 null；',
     '3. sourceRef 用文件编号（如 #1）；',
     '4. 同一事实不同来源相左时，输出到 contradictions（仅实质性冲突：数据/时间/地点/主体/结果不同；措辞差异不算）。',
@@ -318,7 +376,7 @@ function buildUserPrompt(chunks: RetrievedChunk[], refs: SourceRefEntry[], instr
       return '[' + (i + 1) + ']（来源编号: #' + ref + '，标题：《' + c.sourceTitle + '》）\n' + c.text
     })
     .join('\n\n')
-  return ['【文件清单】', refText(refs), '本次撰写主题与范围：' + instruction, '', '【候选材料】', materials, '', '请只提炼与主题直接相关的事实，按上述 JSON 格式输出资料汇编。'].join('\n')
+  return ['【文件清单】', refText(refs), '本次撰写主题与范围：' + instruction, '', '【候选材料】', materials, '', '请按上述 JSON 格式，把【每一条候选材料】直接输出为一张卡片（excerpt=整段原文，不要切分/改写）；只保留与主题直接相关的条目。'].join('\n')
 }
 
 export interface CompilationOutputItem {
@@ -436,12 +494,13 @@ async function scanCardContradictions(
   items: CompilationOutputItem[],
   refs: SourceRefEntry[],
   taskId: string
-): Promise<{ groups: CompilationOutputGroup[]; ok: boolean; message?: string }> {
+): Promise<{ groups: CompilationOutputGroup[]; ok: boolean; message?: string; rateLimited?: boolean }> {
   if (items.length === 0) return { groups: [], ok: true }
   const batch = items.slice(0, CARD_SCAN_MAX)
   const titleByRef = new Map(refs.map((r, idx) => ['#' + (idx + 1), r.title]))
   let allOk = true
   let firstError: string | undefined
+  let rateLimited = false
   const cardList = batch
     .map((it, i) => '[' + (i + 1) + '] 来源：#' + it.sourceRef + '《' + (titleByRef.get(it.sourceRef) ?? '') + '》，时间：' + (it.ts ?? '无') + '\n' + it.excerpt)
     .join('\n\n')
@@ -472,6 +531,7 @@ async function scanCardContradictions(
     if (!result.ok) {
       allOk = false
       firstError = firstError ?? (result.error?.message ?? '矛盾扫描失败')
+      if (result.error?.code === ErrorCodes.LLM_RATE_LIMIT) rateLimited = true
       continue
     }
     const groups = parseCardScanGroups(result.text)
@@ -495,7 +555,7 @@ async function scanCardContradictions(
       }
     }
   }
-  return { groups: [...merged.values()], ok: allOk, message: allOk ? undefined : firstError }
+  return { groups: [...merged.values()], ok: allOk, message: allOk ? undefined : firstError, rateLimited }
 }
 
 /** 解析卡片级矛盾扫描输出（纯函数，可测试） */
@@ -548,6 +608,24 @@ export function mapOutputItemsToInputs(
   return out
 }
 
+/** 断点续传：返回仍需（重新）细读的窗口下标（升序；失败/未读的下标不在 doneSet，续跑时重新处理） */
+/** 429 限流自动降并发：减半（最小 1），仅本次生成生效，不写回 Provider 设置 */
+export function reduceConcurrency(concurrency: number): number {
+  return Math.max(1, Math.floor(concurrency / 2))
+}
+
+export function pickRemainingWindows(doneSet: Set<number>, total: number): number[] {
+  const out: number[] = []
+  for (let i = 0; i < total; i++) if (!doneSet.has(i)) out.push(i)
+  return out
+}
+
+/** 断点续传：返回下一个待扫描的矛盾卡片批范围；已扫完（scanOffset >= total）返回 null */
+export function nextContradictionBatch(scanOffset: number, batchSize: number, total: number): { start: number; end: number } | null {
+  if (scanOffset >= total) return null
+  return { start: scanOffset, end: Math.min(total, scanOffset + batchSize) }
+}
+
 /** 提取年份用于时间排序（无时间排最后） */
 function yearOf(ts: string | undefined): number | null {
   if (!ts) return null
@@ -569,7 +647,8 @@ function sortItemsByTs(items: CompilationItemInput[]): CompilationItemInput[] {
 export async function generateCompilation(
   taskId: string,
   title: string,
-  onProgress?: (p: CompilationProgress) => void
+  onProgress?: (p: CompilationProgress) => void,
+  onAdvice?: (message: string) => void
 ): Promise<GenerateCompilationResult> {
   const task = getTaskById(taskId)
   if (!task) return fail(ErrorCodes.TASK_NOT_FOUND, '撰写任务不存在')
@@ -578,7 +657,6 @@ export async function generateCompilation(
 
   const prov = resolveProvider()
   // A+C：预计剩余时间——窗口细读用实测均速（EMA）外推；窗口块未算出前用占位预算，让前置阶段预估不至于明显失真
-  let avgWindowSec = WINDOW_ETA_DEFAULT_S
   let windowsBudgetSec = WINDOWS_PRIOR_PLACEHOLDER_S
   const preWindowEta = (remainingSinglePhaseSec: number): number => remainingSinglePhaseSec + windowsBudgetSec + PHASE_CONTRADICTION_ETA_S
 
@@ -633,10 +711,32 @@ export async function generateCompilation(
 
   const refs = buildCompilationSourceRefs(chunks)
 
-  // 分窗 AI 细读
+  // 分窗 AI 细读（可中断/可续跑）
   const windows = sliceChunks(chunks, WINDOW_MAX_CHARS)
-  // 进入窗口阶段：窗口块预算从占位替换为实际窗口数（默认先验每窗 20s），之后由 EMA 实测均速校正
   windowsBudgetSec = windows.length * WINDOW_ETA_DEFAULT_S
+  // 清除该任务可能遗留的旧中断续传记录（「重新生成」语义：丢弃旧的断点）
+  for (const k of resumeStore.keys()) {
+    const st = resumeStore.get(k)
+    if (st && st.taskId === taskId) resumeStore.delete(k)
+  }
+  // 生成一开始就创建 drafting 汇编，使中断时能把「已完成窗口」的部分卡片落库、供用户看到并可续跑
+  const comp = createCompilation({ taskId, title })
+  const state: CompilationResumeState = {
+    taskId,
+    compilationId: comp.id,
+    title: t,
+    provider: prov.provider,
+    phase: 'window',
+    chunks,
+    refs,
+    windows,
+    doneSet: new Set<number>(),
+    windowOutputsByIndex: new Array<CompilationOutput | null>(windows.length).fill(null),
+    scanOffset: 0,
+    scanGroups: [],
+    avgWindowSec: WINDOW_ETA_DEFAULT_S,
+    concurrency: prov.provider.concurrency
+  }
   onProgress?.({
     stage: '正在由 AI 细读资料（0/' + windows.length + ' 个窗口）…',
     percent: 12,
@@ -645,55 +745,31 @@ export async function generateCompilation(
     candidateSources: refs.length
   })
 
-  const outputs: CompilationOutput[] = []
-  let done = 0
-  let idx = 0
-  function nextWindow(): number {
-    return idx++
+  let phaseRes = await runWithRateLimitAutoResume(state, runWindowPhase, onProgress, onAdvice)
+  if (phaseRes === 'interrupted') {
+    await persistPartialCompilation(state)
+    resumeStore.set(state.compilationId, state)
+    return interruptedResult(state)
   }
-  const workers = Array.from({ length: Math.min(WINDOW_CONCURRENCY, windows.length) }, async () => {
-    while (true) {
-      const i = nextWindow()
-      if (i >= windows.length) return
-      const wStart = Date.now()
-      const out = await readWindow(prov.provider, windows[i], refs, taskId, t)
-      // A：用每个窗口实测耗时做 EMA，校准每窗均速，剩余时间 = 均速 × 剩余窗口（含后续矛盾汇总预算）
-      const wSec = (Date.now() - wStart) / 1000
-      avgWindowSec = Math.round(WINDOW_ETA_ALPHA * wSec + (1 - WINDOW_ETA_ALPHA) * avgWindowSec)
-      if (out) outputs.push(out)
-      done += 1
-      onProgress?.({
-        stage: '正在由 AI 细读资料（' + done + '/' + windows.length + ' 个窗口）…',
-        percent: Math.round(12 + (done / windows.length) * 68),
-        etaSeconds: Math.max(0, Math.round(avgWindowSec * (windows.length - done) + PHASE_CONTRADICTION_ETA_S)),
-        candidateChunks: chunks.length,
-        candidateSources: refs.length
-      })
-    }
-  })
-  await Promise.all(workers)
 
-  const merged = mergeCompilationOutputs(outputs.filter((o): o is CompilationOutput => o !== null))
+  const merged = mergeCompilationOutputs(state.windowOutputsByIndex.filter((o): o is CompilationOutput => o !== null))
   if (merged.items.length === 0) {
-    // AI 未产出有效卡片 → 本地降级（用全量集合，不丢材料）
-    return finalizeCompilationLocal(taskId, title, allChunks)
+    // AI 未产出有效卡片 → 本地降级（用全量集合，不丢材料）；复用已创建的汇编
+    resumeStore.delete(state.compilationId)
+    return finalizeCompilationLocalInto(state.compilationId, allChunks)
   }
 
-  // 2026-08-25 优化：跨窗口/跨来源矛盾在逐窗细读时可能漏检（两个相左说法若落在不同窗口就不会一起看到）。
-  // 细读产出最终卡片后，对精简后的卡片集再做一次矛盾扫描（输入量小、成本低），提升矛盾发现稳定性。
-  onProgress?.({ stage: '正在汇总卡片间的矛盾…', percent: 88, etaSeconds: PHASE_CONTRADICTION_ETA_S })
-  // A：分批扫描全部卡片（覆盖此前只扫前 CARD_SCAN_MAX 张的漏批）；任一批失败即标记，不再静默当成“无矛盾”。
-  const scanGroups: CompilationOutputGroup[] = []
-  let scanOk = true
-  let scanMessage: string | undefined
-  for (let st = 0; st < merged.items.length; st += CARD_SCAN_MAX) {
-    const res = await scanCardContradictions(prov.provider, merged.items.slice(st, st + CARD_SCAN_MAX), refs, taskId).catch((e) => ({ groups: [] as CompilationOutputGroup[], ok: false, message: e instanceof Error ? e.message : String(e) }))
-    scanGroups.push(...res.groups)
-    if (!res.ok) { scanOk = false; scanMessage = scanMessage ?? res.message }
+  state.phase = 'contradiction'
+  phaseRes = await runWithRateLimitAutoResume(state, runContradictionPhase, onProgress, onAdvice)
+  if (phaseRes === 'interrupted') {
+    await persistPartialCompilation(state)
+    resumeStore.set(state.compilationId, state)
+    return interruptedResult(state)
   }
-  const contradictions = mergeContradictionGroups(merged.contradictions, scanGroups)
 
-  return finalizeCompilation(taskId, title, { items: merged.items, contradictions }, refs, chunks.length, scanOk ? undefined : { ok: false, message: scanMessage })
+  // 全部完成：清除断点，落库（替换为最终卡片 + 矛盾）
+  resumeStore.delete(state.compilationId)
+  return finalizeCompilationInto(state.compilationId, { items: merged.items, contradictions: mergeContradictionGroups(merged.contradictions, state.scanGroups) }, refs, chunks.length)
 }
 
 function sliceChunks(chunks: RetrievedChunk[], maxChars: number): RetrievedChunk[][] {
@@ -727,28 +803,45 @@ function sliceChunks(chunks: RetrievedChunk[], maxChars: number): RetrievedChunk
   return windows
 }
 
+interface ReadWindowResult {
+  out: CompilationOutput | null
+  /** true = 大模型调用异常（余额不足/网络/超时等），需要中断并允许「尝试继续」 */
+  failed: boolean
+  message?: string
+  /** true = 失败原因是限流（HTTP 429），可自动续传/自动降并发 */
+  rateLimited?: boolean
+}
+
 async function readWindow(
   provider: ProviderInfo,
   windowChunks: RetrievedChunk[],
   refs: SourceRefEntry[],
   taskId: string,
   instruction: string
-): Promise<CompilationOutput | null> {
+): Promise<ReadWindowResult> {
   const messages: ChatMessage[] = [
     { role: 'system', content: buildSystemPrompt(instruction) },
     { role: 'user', content: buildUserPrompt(windowChunks, refs, instruction) }
   ]
+  let failedMsg: string | undefined
+  let rateLimited = false
   for (let attempt = 0; attempt < TEMPERATURES.length; attempt++) {
     const result = await chatCompletion(provider, messages, COMPILATION_TIMEOUT_MS, { kind: 'compilation-read', taskId }, {
       maxRetries: 1,
       temperature: TEMPERATURES[attempt],
       seed: REPRODUCIBILITY_SEED
     })
-    if (!result.ok) continue
+    if (!result.ok) {
+      // 记录失败原因（最终若所有温度都失败则作为中断信息透出）；区分限流（429，可自动续传）
+      failedMsg = failedMsg ?? result.error?.message ?? '大模型调用异常'
+      if (result.error?.code === ErrorCodes.LLM_RATE_LIMIT) rateLimited = true
+      continue
+    }
     const parsed = parseCompilationOutput(result.text)
-    if (parsed) return parsed
+    if (parsed) return { out: parsed, failed: false }
   }
-  return null
+  // 全部温度要么调用失败、要么无可解析输出：调用失败视为「异常中断」，可继续；无可解析输出视为正常（无卡片）
+  return failedMsg ? { out: null, failed: true, message: failedMsg, rateLimited } : { out: null, failed: false }
 }
 
 function finalizeCompilationLocal(taskId: string, title: string, chunks: RetrievedChunk[]): GenerateCompilationResult {
@@ -766,17 +859,149 @@ function finalizeCompilationLocal(taskId: string, title: string, chunks: Retriev
   return { ok: true, compilationId: compilation.id, candidateChunks: chunks.length, contradictions: 0 }
 }
 
-function finalizeCompilation(
-  taskId: string,
-  title: string,
+/** 把「已完成窗口」的部分卡片落库（替换为当前部分结果），供中断时展示并可续跑 */
+async function persistPartialCompilation(state: CompilationResumeState): Promise<void> {
+  const merged = mergeCompilationOutputs(state.windowOutputsByIndex.filter((o): o is CompilationOutput => o !== null))
+  const items = mapOutputItemsToInputs(merged.items, state.refs)
+  replaceCompilationItems(state.compilationId, sortItemsByTs(items))
+}
+
+/** 大模型异常中断时的结果（ok: true，含部分卡片与中断信息） */
+function interruptedResult(state: CompilationResumeState): GenerateCompilationResult {
+  return { ok: true, compilationId: state.compilationId, candidateChunks: state.chunks.length, contradictions: 0, interrupted: state.interrupted }
+}
+
+/** 窗口细读（可中断/可续跑）：只读未完成的窗口；任一窗口大模型异常 → 置中断标志，返回 'interrupted' */
+type PhaseRunner = (state: CompilationResumeState, onProgress?: (p: CompilationProgress) => void) => Promise<'done' | 'interrupted'>
+
+/**
+ * 429 断点自动续传（Phase A/B）：遇到限流中断时，自动降低本次生成的并发数（不写回 Provider 设置），
+ * 提示用户建议降低 Provider 并发数，并退避后从断点重试；达到 RATE_LIMIT_RESUME_LIMIT 仍限流才真正中断。
+ * 由于 runWindowPhase/runContradictionPhase 是可续跑的（基于 doneSet/scanOffset），直接重跑即从断点继续。
+ */
+async function runWithRateLimitAutoResume(
+  state: CompilationResumeState,
+  runPhase: PhaseRunner,
+  onProgress?: (p: CompilationProgress) => void,
+  onAdvice?: (kind: string) => void
+): Promise<'done' | 'interrupted'> {
+  let resumes = 0
+  let result = await runPhase(state, onProgress)
+  while (result === 'interrupted' && state.interrupted?.retryable && resumes < RATE_LIMIT_RESUME_LIMIT) {
+    resumes += 1
+    // 仅本次生成自动降并发，不修改用户 Provider 设置
+    if (state.concurrency > 1) state.concurrency = reduceConcurrency(state.concurrency)
+    onAdvice?.('reduce-concurrency')
+    await sleep(RATE_LIMIT_RESUME_BACKOFF_MS[Math.min(resumes - 1, RATE_LIMIT_RESUME_BACKOFF_MS.length - 1)])
+    result = await runPhase(state, onProgress)
+  }
+  return result
+}
+
+async function runWindowPhase(state: CompilationResumeState, onProgress?: (p: CompilationProgress) => void): Promise<'done' | 'interrupted'> {
+  const total = state.windows.length
+  const remaining = pickRemainingWindows(state.doneSet, state.windows.length)
+  let idx = 0
+  let halt = false
+  let interrupted = false
+  const nextIdx = (): number | undefined => {
+    while (!halt && idx < remaining.length) {
+      const i = remaining[idx++]
+      if (!state.doneSet.has(i)) return i
+    }
+    return undefined
+  }
+  const workers = Array.from({ length: Math.min(state.concurrency, remaining.length) }, async () => {
+    while (!halt) {
+      const i = nextIdx()
+      if (i === undefined) return
+      const wStart = Date.now()
+      const r = await readWindow(state.provider, state.windows[i], state.refs, state.taskId, state.title)
+      const wSec = (Date.now() - wStart) / 1000
+      state.avgWindowSec = Math.round(WINDOW_ETA_ALPHA * wSec + (1 - WINDOW_ETA_ALPHA) * state.avgWindowSec)
+      if (r.failed) {
+        halt = true
+        interrupted = true
+        state.interrupted = {
+          stage: '正在由 AI 细读资料（' + (state.doneSet.size + 1) + '/' + total + ' 个窗口）',
+          message: r.message ?? '大模型调用异常中断',
+          percent: Math.round(12 + (state.doneSet.size / total) * 68),
+          retryable: r.rateLimited === true
+        }
+      } else {
+        state.doneSet.add(i)
+        state.windowOutputsByIndex[i] = r.out
+        const done = state.doneSet.size
+        onProgress?.({
+          stage: '正在由 AI 细读资料（' + done + '/' + total + ' 个窗口）…',
+          percent: Math.round(12 + (done / total) * 68),
+          etaSeconds: Math.max(0, Math.round(state.avgWindowSec * (total - done) + PHASE_CONTRADICTION_ETA_S)),
+          candidateChunks: state.chunks.length,
+          candidateSources: state.refs.length
+        })
+      }
+    }
+  })
+  await Promise.all(workers)
+  return interrupted ? 'interrupted' : 'done'
+}
+
+/** 卡片矛盾扫描（可中断/可续跑）：从 scanOffset 继续扫剩余批次；任一批大模型异常 → 置中断标志 */
+async function runContradictionPhase(state: CompilationResumeState, onProgress?: (p: CompilationProgress) => void): Promise<'done' | 'interrupted'> {
+  const merged = mergeCompilationOutputs(state.windowOutputsByIndex.filter((o): o is CompilationOutput => o !== null))
+  const items = merged.items
+  const total = items.length
+  if (total === 0) {
+    state.scanOffset = 0
+    state.scanGroups = []
+    return 'done'
+  }
+  if (state.scanOffset === 0) {
+    onProgress?.({ stage: '正在汇总卡片间的矛盾…', percent: 88, etaSeconds: PHASE_CONTRADICTION_ETA_S })
+  }
+  // Phase B：按 Provider 并发数成批并行扫描卡片矛盾（每波最多 concurrency 批；任一波失败则以该波起点中断，续跑重扫该波）
+  let offset = state.scanOffset
+  while (offset < total) {
+    const waveEnd = Math.min(total, offset + CARD_SCAN_MAX * state.concurrency)
+    const ranges: { start: number; end: number }[] = []
+    for (let st = offset; st < waveEnd; st += CARD_SCAN_MAX) {
+      const range = nextContradictionBatch(st, CARD_SCAN_MAX, total)
+      if (range) ranges.push(range)
+    }
+    const results = await Promise.all(
+      ranges.map((range) => {
+        const batch = items.slice(range.start, range.end)
+        return scanCardContradictions(state.provider, batch, state.refs, state.taskId).catch((e) => ({ groups: [] as CompilationOutputGroup[], ok: false, message: e instanceof Error ? e.message : String(e), rateLimited: false }))
+      })
+    )
+    const failedIdx = results.findIndex((res) => !res.ok)
+    if (failedIdx !== -1) {
+      const range = ranges[failedIdx]
+      state.interrupted = {
+        stage: '正在检索卡片矛盾（第 ' + (Math.floor(range.start / CARD_SCAN_MAX) + 1) + ' 批）',
+        message: results[failedIdx].message ?? '大模型调用异常中断',
+        percent: 88,
+        retryable: results[failedIdx].rateLimited === true
+      }
+      return 'interrupted'
+    }
+    for (const res of results) state.scanGroups.push(...res.groups)
+    offset = waveEnd
+    state.scanOffset = offset
+  }
+  return 'done'
+}
+
+/** 使用已创建的汇编整体替换为最终卡片 + 矛盾（供正常完成 / 续跑完成调用） */
+function finalizeCompilationInto(
+  compilationId: string,
   output: CompilationOutput,
   refs: SourceRefEntry[],
   candidateChunks: number,
   contradictionScan?: { ok: boolean; message?: string }
 ): GenerateCompilationResult {
   const items = sortItemsByTs(mapOutputItemsToInputs(output.items, refs))
-  const compilation = createCompilation({ taskId, title })
-  const insertedItems = insertCompilationItems(compilation.id, items)
+  const insertedItems = replaceCompilationItems(compilationId, items)
 
   // 矛盾分组：把 variant 的 excerpt 精确匹配到卡片
   const byExcerpt = new Map<string, string>()
@@ -800,6 +1025,57 @@ function finalizeCompilation(
       groups.push({ topic: g.topic, kind: (['data', 'time', 'place', 'fact', 'other'].includes(g.kind) ? g.kind : 'other') as CompilationContradictionInput['kind'], variants })
     }
   }
-  const contradictions = insertCompilationContradictions(compilation.id, groups)
-  return { ok: true, compilationId: compilation.id, candidateChunks, contradictions: contradictions.length, contradictionScan }
+  const contradictions = insertCompilationContradictions(compilationId, groups)
+  return { ok: true, compilationId, candidateChunks, contradictions: contradictions.length, contradictionScan }
+}
+
+/** 无 Provider / AI 无产出时的本地降级（替换到已创建的汇编） */
+function finalizeCompilationLocalInto(compilationId: string, chunks: RetrievedChunk[]): GenerateCompilationResult {
+  const dedup = new Set<string>()
+  const items: CompilationItemInput[] = []
+  for (const c of chunks) {
+    const key = c.sourceId + '|' + c.position + '|' + c.text
+    if (dedup.has(key)) continue
+    dedup.add(key)
+    const m = c.text.match(/(18|19|20)d{2}/)
+    items.push({ sourceId: c.sourceId, excerpt: c.text, ts: m ? m[0] + ' 年' : undefined })
+  }
+  replaceCompilationItems(compilationId, sortItemsByTs(items))
+  return { ok: true, compilationId, candidateChunks: chunks.length, contradictions: 0 }
+}
+
+/**
+ * 中断续跑（Phase 6.x）：从断点继续生成资料汇编。
+ * 仅会话内（内存 resumeStore，应用重启后清空）。复用已完成窗口/卡片输出，重读失败或未完成的窗口，
+ * 并继续扫描剩余矛盾批次；再次异常仍返回 interrupted（可再点「尝试继续」）。
+ */
+export async function continueCompilation(compilationId: string, onProgress?: (p: CompilationProgress) => void, onAdvice?: (message: string) => void): Promise<GenerateCompilationResult> {
+  const state = resumeStore.get(compilationId)
+  if (!state) return fail(ErrorCodes.INVALID_PARAM, '没有可继续的生成中断记录')
+
+  // 窗口阶段：继续读未完成窗口
+  if (state.phase === 'window') {
+    const pr = await runWithRateLimitAutoResume(state, runWindowPhase, onProgress, onAdvice)
+    if (pr === 'interrupted') {
+      await persistPartialCompilation(state)
+      return interruptedResult(state)
+    }
+    state.phase = 'contradiction'
+    state.scanOffset = 0
+  }
+
+  // 矛盾阶段
+  const merged = mergeCompilationOutputs(state.windowOutputsByIndex.filter((o): o is CompilationOutput => o !== null))
+  if (merged.items.length === 0) {
+    // AI 无产出 → 本地降级（复用已创建的汇编）；清除断点
+    resumeStore.delete(compilationId)
+    return finalizeCompilationLocalInto(state.compilationId, state.chunks)
+  }
+  const pr = await runWithRateLimitAutoResume(state, runContradictionPhase, onProgress, onAdvice)
+  if (pr === 'interrupted') {
+    await persistPartialCompilation(state)
+    return interruptedResult(state)
+  }
+  resumeStore.delete(compilationId)
+  return finalizeCompilationInto(state.compilationId, { items: merged.items, contradictions: mergeContradictionGroups(merged.contradictions, state.scanGroups) }, state.refs, state.chunks.length)
 }

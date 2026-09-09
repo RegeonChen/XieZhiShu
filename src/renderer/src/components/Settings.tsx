@@ -11,12 +11,14 @@ interface ProviderItem {
   apiBase: string
   model: string
   apiKeySet: boolean
+  concurrency?: number
 }
 
 interface AppSettingsShape {
   workspaceDir?: string
   compilationProviderId?: string
   draftProviderId?: string
+  keepAwake?: boolean
 }
 
 interface ProviderForm {
@@ -24,9 +26,10 @@ interface ProviderForm {
   apiBase: string
   model: string
   apiKey: string
+  concurrency: string
 }
 
-const EMPTY_FORM: ProviderForm = { name: '', apiBase: '', model: '', apiKey: '' }
+const EMPTY_FORM: ProviderForm = { name: '', apiBase: '', model: '', apiKey: '', concurrency: '4' }
 
 interface SettingsProps {
   /** 重新打开新手引导（由 App 注入） */
@@ -72,6 +75,7 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange }: Se
 
   // Phase 2.2 工作区
   const [workspaceDir, setWorkspaceDir] = useState<string | null>(null)
+  const [keepAwake, setKeepAwake] = useState(true)
   const [workspaceSaving, setWorkspaceSaving] = useState(false)
   const [workspaceMsg, setWorkspaceMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [legacySources, setLegacySources] = useState(0)
@@ -95,6 +99,7 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange }: Se
         setWorkspaceDir((sRes.data as AppSettingsShape).workspaceDir ?? null)
         setStep1Id((sRes.data as AppSettingsShape).compilationProviderId ?? null)
         setStep3Id((sRes.data as AppSettingsShape).draftProviderId ?? null)
+        setKeepAwake((sRes.data as AppSettingsShape).keepAwake !== false)
       }
       if (wsRes.ok && wsRes.data) {
         setLegacySources((wsRes.data as { legacySources?: number }).legacySources ?? 0)
@@ -138,7 +143,7 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange }: Se
 
   const startEdit = (p: ProviderItem) => {
     setEditing(p)
-    setForm({ name: p.name, apiBase: p.apiBase, model: p.model, apiKey: '' })
+    setForm({ name: p.name, apiBase: p.apiBase, model: p.model, apiKey: '', concurrency: String(p.concurrency ?? 4) })
     setFormErr(null)
     setTestMsg(null)
   }
@@ -153,10 +158,11 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange }: Se
     setSaving(true)
     setFormErr(null)
     try {
-      const input: { id?: string; name: string; apiBase: string; model: string; apiKey?: string } = {
+      const input: { id?: string; name: string; apiBase: string; model: string; apiKey?: string; concurrency?: number } = {
         name: form.name.trim(),
         apiBase: form.apiBase.trim(),
-        model: form.model.trim()
+        model: form.model.trim(),
+        concurrency: Math.min(8, Math.max(1, Math.round(Number(form.concurrency) || 4)))
       }
       if (editing !== 'new') input.id = editing.id
       if (form.apiKey.trim()) input.apiKey = form.apiKey.trim()
@@ -289,6 +295,14 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange }: Se
     }
   }
 
+  // Phase A：长任务时保持电脑唤醒开关（默认开启）
+  const handleToggleKeepAwake = async () => {
+    const next = !keepAwake
+    setKeepAwake(next)
+    const res = await window.api.updateSettings({ keepAwake: next })
+    if (!res.ok) setKeepAwake(!next) // 失败回滚
+  }
+
   // Phase 6.8：设置第 1/3 步默认大模型（从已配置 Provider 中选取；空 = 回退任务/全局）
   const handleStepModelChange = async (step: 1 | 3, id: string): Promise<void> => {
     const value = id ? id : null
@@ -325,6 +339,15 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange }: Se
           <span className="settings__overview-chip">
             {zhCN.settingsPage.overview.workspaceLabel}：{workspaceDir ?? zhCN.settingsPage.overview.workspaceNone}
           </span>
+        </div>
+        <div className="settings__switch-row">
+          <div>
+            <div className="settings__field-label">{zhCN.settingsPage.keepAwake.title}</div>
+            <div className="settings__hint">{zhCN.settingsPage.keepAwake.hint}</div>
+          </div>
+          <button type="button" className={'source-list__btn' + (keepAwake ? ' source-list__btn--primary' : '')} onClick={handleToggleKeepAwake}>
+            {keepAwake ? zhCN.settingsPage.keepAwake.on : zhCN.settingsPage.keepAwake.off}
+          </button>
         </div>
         <div className="settings__overview-actions">
           {onOpenOnboarding ? (
@@ -435,7 +458,7 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange }: Se
                     className="source-list__btn source-list__btn--primary"
                     onClick={() => {
                       setEditing('new')
-                      setForm({ name: preset.name, apiBase: preset.apiBase, model: preset.model, apiKey: '' })
+                      setForm({ name: preset.name, apiBase: preset.apiBase, model: preset.model, apiKey: '', concurrency: '4' })
                       setFormErr(null)
                       setTestMsg(null)
                     }}
@@ -533,6 +556,19 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange }: Se
                 placeholder={zhCN.settingsPage.provider.fields.modelPlaceholder}
                 onChange={(e) => setFormField('model', e.target.value)}
               />
+            </label>
+            <label className="settings__field">
+              <span className="settings__field-label">{zhCN.settingsPage.provider.fields.concurrency}</span>
+              <input
+                className="settings__input"
+                type="number"
+                min={1}
+                max={8}
+                value={form.concurrency}
+                placeholder="4"
+                onChange={(e) => setFormField('concurrency', e.target.value)}
+              />
+              <span className="settings__field-hint">{zhCN.settingsPage.provider.fields.concurrencyHint}</span>
             </label>
             <label className="settings__field">
               <span className="settings__field-label">{zhCN.settingsPage.provider.fields.apiKey}</span>

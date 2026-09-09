@@ -283,6 +283,24 @@ body {
   position: relative;
 }
 
+/* 中栏工具栏「…」菜单（标签管理 / 资料管理）：置于工具栏最右侧 */
+.source-list__menu {
+  margin-left: auto;
+  position: relative;
+  align-self: flex-start;
+}
+
+/* 资料库中栏分区小标题：网页资料库 / 本地资料库 */
+.source-list__section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg-soft);
+  margin: 6px 0 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  letter-spacing: 0.3px;
+}
+
 .source-list__btn {
   padding: 5px 12px;
   border: 1px solid var(--border);
@@ -1023,6 +1041,47 @@ body {
   background: var(--accent);
 }
 
+/* 中栏/右栏边界切换手柄：hover 高亮 + 圆角小三角按钮（切换中栏显隐） */
+.pane-edge {
+  position: relative;
+  width: 6px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.15s;
+}
+.pane-edge:hover {
+  background: var(--accent);
+}
+.pane-edge__btn {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 20px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--fg-soft);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+  z-index: 5;
+}
+.pane-edge:hover .pane-edge__btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+.pane-edge__btn:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 /* ---------- 资料查看器 ---------- */
 .source-viewer {
   min-width: 0;
@@ -1399,6 +1458,21 @@ body {
 .settings__field-label {
   font-size: 12px;
   color: var(--fg-soft);
+}
+.settings__field-hint {
+  font-size: 11px;
+  color: var(--fg-soft);
+  margin-top: 2px;
+  line-height: 1.5;
+}
+.settings__switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
 }
 
 .settings__input {
@@ -2003,6 +2077,43 @@ body {
   font-style: normal;
   color: var(--fg-soft);
 }
+
+/* 资料汇编生成：大模型异常中断提示 + 尝试继续（Phase 6.x） */
+.chat-panel__interrupt {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--danger, #e5484d);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger, #e5484d) 8%, transparent);
+}
+.chat-panel__interrupt-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--danger, #e5484d);
+  margin-bottom: 6px;
+}
+.chat-panel__interrupt-stage {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--fg);
+}
+.chat-panel__interrupt-reason {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--fg-soft);
+}
+.chat-panel__retry-btn {
+  margin-top: 8px;
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--accent, #3b82f6);
+  background: var(--accent, #3b82f6);
+  color: var(--on-accent, #fff);
+  font-size: 13px;
+  cursor: pointer;
+}
+.chat-panel__retry-btn:hover { opacity: 0.9; }
+.chat-panel__retry-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* AI 回复：气泡 + 一键复制按钮 */
 .chat-panel__assistant-block {

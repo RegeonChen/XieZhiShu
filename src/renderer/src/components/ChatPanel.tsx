@@ -27,6 +27,10 @@ interface ChatPanelProps {
   streamText?: string | null
   /** 生成初稿进度（2026-08-11：percent 进度百分比 + etaSeconds 预计剩余秒数，供进度条显示） */
   progress?: { percent: number; etaSeconds?: number } | null
+  /** 生成资料汇编时大模型异常中断信息（Phase 6.x：展示「尝试继续」断点续传） */
+  interrupt?: { stage: string; message: string; percent: number } | null
+  /** 点击「尝试继续」：从断点继续生成资料汇编 */
+  onRetryCompilation?: () => void
   onGenerate: (instruction: string) => void
   onChat: (message: string) => void
   /** 自定义主按钮文案（如「生成资料汇编」），提供时覆盖 draftExisted 判断的默认文案 */
@@ -60,6 +64,8 @@ function ChatPanel({
   busyText,
   streamText = null,
   progress,
+  interrupt = null,
+  onRetryCompilation,
   onGenerate,
   onChat,
   primaryLabel,
@@ -228,6 +234,22 @@ function ChatPanel({
                 </div>
               ) : null}
             </div>
+          </div>
+        ) : null}
+        {interrupt ? (
+          <div className="chat-panel__interrupt">
+            <div className="chat-panel__interrupt-title">{zhCN.compilation.interruptedTitle}</div>
+            <div className="chat-panel__progress-track">
+              <div className="chat-panel__progress-bar" style={{ width: `${Math.min(100, Math.max(0, interrupt.percent))}%` }} />
+            </div>
+            <div className="chat-panel__progress-meta"><span>{Math.round(interrupt.percent)}%</span></div>
+            <div className="chat-panel__interrupt-stage">{interrupt.stage}</div>
+            <div className="chat-panel__interrupt-reason">{interrupt.message}</div>
+            {onRetryCompilation ? (
+              <button type="button" className="chat-panel__retry-btn" onClick={onRetryCompilation}>
+                {zhCN.compilation.continueBtn}
+              </button>
+            ) : null}
           </div>
         ) : null}
       </div>
