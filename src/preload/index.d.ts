@@ -50,6 +50,11 @@ export interface AppApi {
   scanCompilationRepairs(compilationId: string): Promise<{ ok: boolean; data?: { repairs: unknown[] }; error?: { code: string; message: string } }>
   listCompilationRepairs(compilationId: string): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   decideCompilationRepair(repairId: string, action: 'accept' | 'reject'): Promise<{ ok: boolean; data?: { item: unknown; repair: unknown }; error?: { code: string; message: string } }>
+  exportCompilationDocx(compilationId: string): Promise<{ ok: boolean; data?: { path: string }; error?: { code: string; message: string } }>
+  exportCompilationArchive(compilationId: string): Promise<{ ok: boolean; data?: { path: string }; error?: { code: string; message: string } }>
+  importCompilationArchive(taskId: string, filePath: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
+  importCompilationFromTask(taskId: string, sourceCompilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
+  listFinalizedCompilationsForImport(): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   listSourceRemovals(): Promise<{ ok: boolean; data?: { items: { sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' }[] }; error?: { code: string; message: string } }>
   decideSourceRemoval(sourceId: string, action: 'delete' | 'keep'): Promise<{ ok: boolean; data?: { deletedItems: number; deletedContradictions: number; deletedRepairs: number }; error?: { code: string; message: string } }>
   onSourceRemoved(cb: (p: { sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' }) => void): () => void
@@ -75,8 +80,8 @@ export interface AppApi {
   workspaceNavSync(): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   migrateLegacyWorkspace(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   onWorkspaceProgress(cb: (p: { done: number; total: number; newFiles?: number; added?: number; changed?: number; removed?: number; moved?: number; errors?: number; finished?: boolean }) => void): () => void
-  createTask(input?: { title?: string; scope?: { all: true } | { sourceIds: string[] } | { tagIds: string[] }; llmProviderId?: string }): Promise<{ ok: boolean; data?: { task: unknown }; error?: { code: string; message: string } }>
-  listTasks(): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
+  createTask(input?: { title?: string; mode?: 'compile' | 'draft'; scope?: { all: true } | { sourceIds: string[] } | { tagIds: string[] }; llmProviderId?: string }): Promise<{ ok: boolean; data?: { task: unknown }; error?: { code: string; message: string } }>
+  listTasks(mode?: 'compile' | 'draft'): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   deleteTask(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   renameTask(taskId: string, title: string): Promise<{ ok: boolean; data?: { task: unknown }; error?: { code: string; message: string } }>
   updateTaskProvider(taskId: string, llmProviderId: string | null): Promise<{ ok: boolean; data?: { task: unknown }; error?: { code: string; message: string } }>

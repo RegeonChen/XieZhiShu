@@ -669,6 +669,60 @@ export function restoreRecycleBinContradiction(binId: string): CompilationContra
   return getContradictionById(row.contradiction_id)
 }
 
+/** 列出「生成汇编」功能区完成后(finalized)的汇编任务，供「撰写初稿」导入选择 */
+export function listFinalizedCompilationsForImport(): { taskId: string; taskTitle: string; compilation: Compilation }[] {
+  const db = getDb()
+  const rows = db
+    .prepare(`
+      SELECT c.id AS cid, c.task_id AS task_id, c.title AS ctitle, t.title AS task_title
+      FROM compilations c
+      JOIN writing_tasks t ON t.id = c.task_id
+      WHERE t.mode = 'compile' AND c.status = 'finalized'
+      ORDER BY c.updated_at DESC
+    `).all() as { cid: string; task_id: string; ctitle: string; task_title: string }[]
+  const out: { taskId: string; taskTitle: string; compilation: Compilation }[] = []
+  for (const r of rows) {
+    const comp = getCompilationById(r.cid)
+    if (comp) out.push({ taskId: r.task_id, taskTitle: r.task_title, compilation: comp })
+  }
+  return out
+}
+
+/** 把一份资料汇编深拷贝到指定任务（用于「撰写初稿」从「生成汇编」导入）。目标任务与源任务须不同。 */
+export function importCompilationIntoTask(taskId: string, source: Compilation): Compilation {
+  const db = getDb()
+  const now = new Date().toISOString()
+  const newCompId = crypto.randomUUID()
+  db.prepare("INSERT INTO compilations (id, task_id, title, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+    .run(newCompId, taskId, source.title, `finalized`, now, now)
+
+  const itemIdMap = new Map<string, string>()
+  const insItem = db.prepare("INSERT INTO compilation_items (id, compilation_id, position, source_id, excerpt, ts, note, extra_tags, kept, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+  const insC = db.prepare("INSERT INTO compilation_contradictions (id, compilation_id, topic, kind, status, chosen_item_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+  const insV = db.prepare("INSERT INTO compilation_contradiction_variants (id, contradiction_id, item_id, variant_text, source_id, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+  const insR = db.prepare("INSERT INTO compilation_repairs (id, compilation_id, item_id, original_text, revised_text, reason, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+  const tx = db.transaction(() => {
+    source.items.forEach((it, i) => {
+      const nid = crypto.randomUUID()
+      itemIdMap.set(it.id, nid)
+      insItem.run(nid, newCompId, i, it.sourceId, it.excerpt, it.ts ?? null, it.note ?? null, JSON.stringify(it.extraTags ?? []), it.kept ? 1 : 0, it.createdAt || now)
+    })
+    for (const c of source.contradictions) {
+      const ncid = crypto.randomUUID()
+      const chosen = c.chosenItemId ? itemIdMap.get(c.chosenItemId) ?? null : null
+      insC.run(ncid, newCompId, c.topic, c.kind, c.status, chosen, c.createdAt || now)
+      for (const v of c.variants) {
+        insV.run(crypto.randomUUID(), ncid, itemIdMap.get(v.itemId) ?? '', v.variantText, v.sourceId, v.createdAt || now)
+      }
+    }
+    for (const r of (source.repairs ?? [])) {
+      insR.run(crypto.randomUUID(), newCompId, itemIdMap.get(r.itemId) ?? '', r.originalText, r.revisedText, r.reason, r.status, r.createdAt || now, r.updatedAt || now)
+    }
+  })
+  tx()
+  return getCompilationById(newCompId)!
+}
+
 // ---- vitest inline test ----
 if (import.meta.vitest) {
   const { describe, expect, it, beforeAll, afterAll } = import.meta.vitest

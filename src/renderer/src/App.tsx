@@ -20,7 +20,8 @@ import { zhCN } from './i18n/zh-CN'
 
 const NAV_ITEMS: { key: PageKey; label: string }[] = [
   { key: 'sources', label: zhCN.nav.sources },
-  { key: 'writing', label: zhCN.nav.writing },
+  { key: 'compile', label: zhCN.nav.compile },
+  { key: 'draft', label: zhCN.nav.draft },
   { key: 'settings', label: zhCN.nav.settings }
 ]
 
@@ -86,12 +87,17 @@ export default function App() {
   const enqueuedSourceRemovalIdsRef = useRef<Set<string>>(new Set())
   // 当前正在展示的确认框（同步镜像 sourceRemoval 状态）；当前项不放入队列，避免确认后又被 shift 回来重复弹框
   const sourceRemovalRef = useRef<{ sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' } | null>(null)
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
+  // 生成汇编功能区选中的任务
+  const [selectedCompileId, setSelectedCompileId] = useState<string | null>(null)
+  // 撰写初稿功能区选中的任务
+  const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null)
   const [writingReload, setWritingReload] = useState(0)
   // 来源移除确认完毕后，让常驻的撰写工作台重新加载（否则已删除的来源卡片会以空白来源形式残留在界面状态里）
   const [sourceRemovalReloadKey, setSourceRemovalReloadKey] = useState(0)
-  /** 撰写任务总数（用于右栏空状态判断；null = 尚未加载） */
-  const [writingTaskCount, setWritingTaskCount] = useState<number | null>(null)
+  /** 生成汇编任务总数（用于右栏空状态判断；null = 尚未加载） */
+  const [compileTaskCount, setCompileTaskCount] = useState<number | null>(null)
+  /** 撰写初稿任务总数（用于右栏空状态判断；null = 尚未加载） */
+  const [draftTaskCount, setDraftTaskCount] = useState<number | null>(null)
   const [sidebarW, setSidebarW] = useState(() => readLayout(LS_SIDEBAR_W, DEFAULT_SIDEBAR))
   const [centerW, setCenterW] = useState(() => readLayout(LS_CENTER_W, DEFAULT_CENTER))
   // 中栏显隐（默认显示；顶栏按钮切换，持久化）
@@ -141,19 +147,24 @@ export default function App() {
     }
   }, [page])
 
-  // 进入"撰写"功能区时加载任务数（用于右栏空状态判断；任务增删/改名后随 writingReload 刷新）
+  // 进入"生成汇编"/"撰写初稿"功能区时加载各自任务数（用于右栏空状态判断；任务增删/改名后随 writingReload 刷新）
   useEffect(() => {
-    if (page !== 'writing') return
-    window.api.listTasks().then((res) => {
-      setWritingTaskCount(res.ok && res.data ? (res.data.items as unknown[]).length : 0)
-    }).catch(() => setWritingTaskCount(0))
+    if (page !== 'compile' && page !== 'draft') return
+    const mode: 'compile' | 'draft' = page === 'compile' ? 'compile' : 'draft'
+    window.api.listTasks(mode).then((res) => {
+      const n = res.ok && res.data ? (res.data.items as unknown[]).length : 0
+      if (mode === 'compile') setCompileTaskCount(n)
+      else setDraftTaskCount(n)
+    }).catch(() => { if (mode === 'compile') setCompileTaskCount(0); else setDraftTaskCount(0) })
   }, [page, writingReload])
 
   // Phase 3.5：点击"新建任务"立即创建（标题默认"新建任务"、范围=全部文件）并进入该任务工作台
-  const handleCreateTask = async () => {
-    const res = await window.api.createTask()
+  const handleCreateTask = async (mode: 'compile' | 'draft') => {
+    const res = await window.api.createTask({ mode })
     if (res.ok && res.data) {
-      setSelectedTaskId((res.data.task as { id: string }).id)
+      const id = (res.data.task as { id: string }).id
+      if (mode === 'compile') setSelectedCompileId(id)
+      else setSelectedDraftId(id)
       setWritingReload((v) => v + 1)
     }
   }
@@ -218,15 +229,17 @@ export default function App() {
   // 新手引导：步骤切换时联动切换功能区页面，使目标元素渲染出来
   const handleOnboardingStepChange = useCallback((page: string) => {
     setPage(page as PageKey)
-    // 引导切到「撰写」页时自动打开演示任务，使三步工作台与顶部步骤条可见
-    if (page === 'writing') {
-      window.api.listTasks().then((res) => {
+    // 引导切到「生成汇编」/「撰写初稿」页时自动打开演示任务，使工作台与功能可见
+    if (page === 'compile' || page === 'draft') {
+      const mode: 'compile' | 'draft' = page === 'compile' ? 'compile' : 'draft'
+      window.api.listTasks(mode).then((res) => {
         if (!(res.ok && res.data)) return
         const items = (res.data.items as { id: string; title: string }[])
         const demo = items.find((t) => t.title === DEMO_TASK_TITLE)
         const target = demo ?? items[0]
         if (target) {
-          setSelectedTaskId(target.id)
+          if (mode === 'compile') setSelectedCompileId(target.id)
+          else setSelectedDraftId(target.id)
           setWritingReload((v) => v + 1)
         }
       }).catch(() => { /* 忽略 */ })
@@ -251,24 +264,47 @@ export default function App() {
             />
           </section>
         )
-      case 'writing':
+      case 'compile':
         return (
           <section className="center-pane" style={{ width: centerW, flexShrink: 0 }}>
             <div className="center-pane__header">
-              <h3 className="center-pane__title">{zhCN.panes.writing.listTitle}</h3>
+              <h3 className="center-pane__title">{zhCN.panes.compile.listTitle}</h3>
               <button
                 type="button"
                 className="source-list__btn source-list__btn--primary"
                 data-onboarding="writing-new-task"
-                onClick={() => void handleCreateTask()}
+                onClick={() => void handleCreateTask('compile')}
               >
                 {zhCN.writingTasks.newBtn}
               </button>
             </div>
             <WritingTaskList
-              selectedId={selectedTaskId}
-              onSelect={setSelectedTaskId}
+              selectedId={selectedCompileId}
+              onSelect={setSelectedCompileId}
               reloadKey={writingReload}
+              mode="compile"
+            />
+          </section>
+        )
+      case 'draft':
+        return (
+          <section className="center-pane" style={{ width: centerW, flexShrink: 0 }}>
+            <div className="center-pane__header">
+              <h3 className="center-pane__title">{zhCN.panes.draft.listTitle}</h3>
+              <button
+                type="button"
+                className="source-list__btn source-list__btn--primary"
+                data-onboarding="writing-new-task"
+                onClick={() => void handleCreateTask('draft')}
+              >
+                {zhCN.writingTasks.newBtn}
+              </button>
+            </div>
+            <WritingTaskList
+              selectedId={selectedDraftId}
+              onSelect={setSelectedDraftId}
+              reloadKey={writingReload}
+              mode="draft"
             />
           </section>
         )
@@ -309,7 +345,8 @@ export default function App() {
             </ErrorBoundary>
           </main>
         )
-      case 'writing':
+      case 'compile':
+      case 'draft':
         // 撰写工作台改为常驻挂载（见 app-body 中的常驻容器），此处不渲染，避免切换页面时卸载丢失对话/进度状态
         return null
       case 'settings':
@@ -334,22 +371,45 @@ export default function App() {
           onResize={centerVisible ? handleResizeCenter : () => {}}
         />
         {renderWorkPane()}
-        {/* 撰写工作台常驻挂载：切换页面仅隐藏不卸载，保留进行中的对话记录与生成进度（2026-08-14） */}
-        <main className="work-pane work-pane--writing" style={{ display: page === 'writing' ? undefined : 'none' }}>
+        {/* 生成汇编工作台常驻挂载：切换页面仅隐藏不卸载，保留进行中的对话记录与生成进度 */}
+        <main className="work-pane work-pane--writing" style={{ display: page === 'compile' ? undefined : 'none' }}>
           <ErrorBoundary>
-            {selectedTaskId ? (
+            {selectedCompileId ? (
               <WritingWorkspace
-                key={selectedTaskId}
-                taskId={selectedTaskId}
+                key={selectedCompileId}
+                taskId={selectedCompileId}
+                mode="compile"
                 onChanged={() => setWritingReload((v) => v + 1)}
                 reloadKey={sourceRemovalReloadKey}
               />
-            ) : writingTaskCount === 0 ? (
+            ) : compileTaskCount === 0 ? (
               <WritingEmptyState
-                onCreated={(id) => { setSelectedTaskId(id); setWritingReload((v) => v + 1) }}
+                mode="compile"
+                onCreated={(id) => { setSelectedCompileId(id); setWritingReload((v) => v + 1) }}
               />
             ) : (
-              <EmptyState title={zhCN.panes.writing.detailTitle} hint={zhCN.panes.writing.detailHint} />
+              <EmptyState title={zhCN.panes.compile.detailTitle} hint={zhCN.panes.compile.detailHint} />
+            )}
+          </ErrorBoundary>
+        </main>
+        {/* 撰写初稿工作台常驻挂载 */}
+        <main className="work-pane work-pane--writing" style={{ display: page === 'draft' ? undefined : 'none' }}>
+          <ErrorBoundary>
+            {selectedDraftId ? (
+              <WritingWorkspace
+                key={selectedDraftId}
+                taskId={selectedDraftId}
+                mode="draft"
+                onChanged={() => setWritingReload((v) => v + 1)}
+                reloadKey={sourceRemovalReloadKey}
+              />
+            ) : draftTaskCount === 0 ? (
+              <WritingEmptyState
+                mode="draft"
+                onCreated={(id) => { setSelectedDraftId(id); setWritingReload((v) => v + 1) }}
+              />
+            ) : (
+              <EmptyState title={zhCN.panes.draft.detailTitle} hint={zhCN.panes.draft.detailHint} />
             )}
           </ErrorBoundary>
         </main>

@@ -205,6 +205,27 @@ const api = {
   decideCompilationRepair(repairId: string, action: 'accept' | 'reject'): Promise<ApiResult<{ item: unknown; repair: unknown }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_REPAIR_DECIDE, { repairId, action })
   },
+  // ---- 资料汇编导出/导入（生成汇编 → 撰写初稿，2026-09） ----
+  /** 导出资料汇编为 .docx */
+  exportCompilationDocx(compilationId: string): Promise<ApiResult<{ path: string }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_EXPORT_DOCX, { compilationId })
+  },
+  /** 导出资料汇编为软件专用格式 .xzsc */
+  exportCompilationArchive(compilationId: string): Promise<ApiResult<{ path: string }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_EXPORT_ARCHIVE, { compilationId })
+  },
+  /** 从外部 .xzsc 导入资料汇编到「撰写初稿」任务（当前为先预留：未实现解析） */
+  importCompilationArchive(taskId: string, filePath: string): Promise<ApiResult<{ compilation: unknown }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_IMPORT_ARCHIVE, { taskId, filePath })
+  },
+  /** 从「生成汇编」已完成任务导入其资料汇编到当前「撰写初稿」任务（深拷贝） */
+  importCompilationFromTask(taskId: string, sourceCompilationId: string): Promise<ApiResult<{ compilation: unknown }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_IMPORT_FROM_TASK, { taskId, sourceCompilationId })
+  },
+  /** 列出「生成汇编」功能区内已完成（finalized）的汇编任务，供「撰写初稿」导入选择 */
+  listFinalizedCompilationsForImport(): Promise<ApiResult<{ items: unknown[] }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_LIST_FINALIZED_FOR_IMPORT)
+  },
   // ---- 来源移除确认（2026-08-28：来源被删除且已被资料汇编引用；来源=工作区文件删除或资料库直接删除） ----
   listSourceRemovals(): Promise<ApiResult<{ items: { sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' }[] }>> {
     return ipcRenderer.invoke(IPC.WORKSPACE_SOURCE_REMOVAL_LIST)
@@ -273,12 +294,12 @@ const api = {
     return () => ipcRenderer.removeListener(IPC_EVENTS.WORKSPACE_PROGRESS, listener)
   },
   /** 新建撰写任务（Phase 3.5：点击立即创建，标题默认"新建任务"、范围=全部文件；可传大模型） */
-  createTask(input?: { title?: string; scope?: { all: true } | { sourceIds: string[] } | { tagIds: string[] }; llmProviderId?: string }): Promise<ApiResult<{ task: unknown }>> {
+  createTask(input?: { title?: string; mode?: 'compile' | 'draft'; scope?: { all: true } | { sourceIds: string[] } | { tagIds: string[] }; llmProviderId?: string }): Promise<ApiResult<{ task: unknown }>> {
     return ipcRenderer.invoke(IPC.WRITING_CREATE_TASK, input ?? {})
   },
-  /** 撰写任务列表 */
-  listTasks(): Promise<ApiResult<{ items: unknown[] }>> {
-    return ipcRenderer.invoke(IPC.WRITING_LIST_TASKS)
+  /** 撰写任务列表（可按类型筛选） */
+  listTasks(mode?: 'compile' | 'draft'): Promise<ApiResult<{ items: unknown[] }>> {
+    return ipcRenderer.invoke(IPC.WRITING_LIST_TASKS, { mode })
   },
   /** 删除撰写任务 */
   deleteTask(id: string): Promise<ApiResult<void>> {

@@ -32,7 +32,7 @@ interface DraftItem {
 }
 
 type BusyState = 'generating' | 'chatting' | null
-type WizardStep = 0 | 1 | 2
+type DraftPhase = 'import' | 'style' | 'write'
 
 /** 撰写工作台的「生成中」临时状态（跨任务切换用模块级 Map 快照恢复） */
 interface WritingTransient {
@@ -48,7 +48,7 @@ const transientByTask = new Map<string, WritingTransient>()
 const AUTO_RESUME_LIMIT = 2
 const AUTO_RESUME_DELAYS_MS = [8000, 20000]
 
-function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; onChanged: () => void; reloadKey?: number }) {
+function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: string; mode: 'compile' | 'draft'; onChanged: () => void; reloadKey?: number }) {
   const [task, setTask] = useState<TaskItem | null>(null)
   const [draft, setDraft] = useState<DraftItem | null>(null)
   const [loading, setLoading] = useState(true)
@@ -73,9 +73,15 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
   const contradictionsRef = useRef(contradictions)
   contradictionsRef.current = contradictions
 
-  // ---- Phase 6.2：三段式向导 ----
-  const [step, setStep] = useState<WizardStep>(0)
+  // ---- 功能区（生成汇编 / 撰写初稿）----
+  const [draftPhase, setDraftPhase] = useState<DraftPhase>('import')
   const [compilation, setCompilation] = useState<CompilationView | null>(null)
+  // 「撰写初稿」导入资料汇编：可导入的已完成汇编列表 + 选中项
+  const [importOptions, setImportOptions] = useState<{ taskId: string; taskTitle: string; compilation: CompilationView }[]>([])
+  const [importing, setImporting] = useState(false)
+  // 「生成汇编」导出菜单
+  const [showExportMenu, setShowExportMenu] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const [compilationMeta, setCompilationMeta] = useState<{ candidateChunks?: number; candidateSources?: number } | null>(null)
   const [undoAvailable, setUndoAvailable] = useState(0)
   const [redoAvailable, setRedoAvailable] = useState(0)
@@ -149,9 +155,20 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
       // 恢复汇编指令（供“重新生成汇编”使用；编译的 title 存的就是用户完整撰写要求）
       setCompilationInstruction(comp?.title ?? '')
 
-      if (hasDraft) setStep(2)
-      else if (comp && comp.status === 'finalized') setStep(2)
-      else setStep(0)
+      if (mode === 'compile') {
+        setDraftPhase(comp ? 'style' : 'import')
+      } else {
+        // 撰写初稿：已有汇编（已导入）则进入规范/撰写；否则停留在导入页
+        setDraftPhase(comp ? (hasDraft ? 'write' : 'style') : 'import')
+      }
+      if (mode === 'draft') {
+        const optRes = await window.api.listFinalizedCompilationsForImport()
+        if (optRes.ok && optRes.data) {
+          setImportOptions(optRes.data.items as { taskId: string; taskTitle: string; compilation: CompilationView }[])
+        } else {
+          setImportOptions([])
+        }
+      }
 
       const mRes = await window.api.listTaskMessages(taskId)
       if (mRes.ok && mRes.data) {
@@ -456,16 +473,82 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
     }
   }
 
-  const handleConfirmCompilation = async () => {
+  /** 「导出资料汇编」：先确认（finalize），再弹出格式选择 */
+  const handleExportCompilation = async () => {
     if (!compilation || busy) return
-    const res = await window.api.confirmCompilation(compilation.id)
-    if (res.ok && res.data) {
-      setCompilation(res.data.compilation as CompilationView)
-      appendAssistant(zhCN.compilation.confirmed)
-      setStep(1)
-    } else {
-      appendAssistant('确认汇编失败：' + (res.error?.message ?? ''))
+    setExporting(true)
+    try {
+      if (compilation.status !== 'finalized') {
+        const res = await window.api.confirmCompilation(compilation.id)
+        if (res.ok && res.data) setCompilation(res.data.compilation as CompilationView)
+      }
+      setShowExportMenu(true)
+    } finally {
+      setExporting(false)
     }
+  }
+
+  const handleExportDocx = async () => {
+    if (!compilation) return
+    setShowExportMenu(false)
+    setExporting(true)
+    try {
+      const res = await window.api.exportCompilationDocx(compilation.id)
+      if (res.ok && res.data) {
+        appendAssistant('已导出 Word 文档：' + (res.data as { path: string }).path)
+      } else {
+        appendAssistant('导出失败：' + (res.error?.message ?? ''))
+      }
+    } catch (e) {
+      appendAssistant('导出失败：' + String(e))
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const handleExportArchive = async () => {
+    if (!compilation) return
+    setShowExportMenu(false)
+    setExporting(true)
+    try {
+      const res = await window.api.exportCompilationArchive(compilation.id)
+      if (res.ok && res.data) {
+        appendAssistant('已导出软件格式(.xzsc)：' + (res.data as { path: string }).path)
+      } else {
+        appendAssistant('导出失败：' + (res.error?.message ?? ''))
+      }
+    } catch (e) {
+      appendAssistant('导出失败：' + String(e))
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  /** 「撰写初稿」从「生成汇编」已完成任务导入其资料汇编（深拷贝到本任务） */
+  const handleImportFromTask = async (sourceCompilationId: string) => {
+    if (importing) return
+    setImporting(true)
+    try {
+      const res = await window.api.importCompilationFromTask(taskId, sourceCompilationId)
+      if (res.ok && res.data) {
+        const comp = res.data.compilation as CompilationView
+        setCompilation(comp)
+        setDraftPhase('style')
+        appendAssistant(zhCN.draftArea.imported.replace('{title}', comp.title))
+        onChanged()
+      } else {
+        appendAssistant(zhCN.draftArea.importFailed.replace('{message}', res.error?.message ?? ''))
+      }
+    } catch (e) {
+      appendAssistant(zhCN.draftArea.importFailed.replace('{message}', String(e)))
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  /** 「撰写初稿」导入外部 .xzsc（当前预留：仅按钮 + 占位提示） */
+  const handleImportExternal = async () => {
+    appendAssistant(zhCN.draftArea.externalSoon)
   }
 
   /** 资料汇编卡片重新按时间排序（asc 正序 / desc 反序） */
@@ -602,13 +685,14 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
     }
   }
 
-  /** 第二步「下一步」：进入第三步并自动基于已确认汇编生成初稿（进度在左侧对话框体现） */
-  const handleNextToStep3 = (): void => {
-    setStep(2)
-    const instruction = (compilationInstruction || task?.userInstruction || '').trim()
-    if (instruction && !draft) {
-      void handleGenerateDraft(instruction)
-    }
+  /** 「开始撰写」：从规范面板进入初稿撰写视图 */
+  const handleStartWriting = (): void => {
+    setDraftPhase('write')
+  }
+
+  /** 初稿视图返回规范面板 */
+  const handleBackToStyle = (): void => {
+    setDraftPhase('style')
   }
 
   const handleChat = async (message: string) => {
@@ -729,18 +813,8 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
     await reloadMessages()
   }
 
-  const compilationFinalized = compilation?.status === 'finalized'
-
-  const goToStep = (target: WizardStep): void => {
-    if (target === 0) {
-      setStep(0)
-      return
-    }
-    if (compilationFinalized) setStep(target)
-  }
-
   const renderChat = () => {
-    if (step === 0) {
+    if (mode === 'compile') {
       // 首条消息生成资料汇编（按钮「生成汇编」）；首条已发出（生成中或已生成）后按钮变「↑」，后续每条消息都是对汇编的调整
       const hasComp = !!compilation
       const firstSent = hasComp || busy !== null
@@ -764,7 +838,9 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
         />
       )
     }
-    if (step === 1) {
+    // 撰写初稿
+    if (!compilation) {
+      // 未导入资料汇编：仅自由对话
       return (
         <ChatPanel
           messages={messages}
@@ -790,7 +866,7 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
         busyText={busyText}
         streamText={streamText}
         progress={progress}
-        onGenerate={(instruction) => void handleGenerateDraft(instruction)}
+        onGenerate={(instruction) => void handleGenerateDraft((instruction || compilationInstruction || task?.userInstruction || '').trim())}
         onChat={(message) => void handleChat(message)}
         refs={sourceRefs}
         onOpenSource={(sourceId) => void handleOpenSource(sourceId)}
@@ -799,13 +875,13 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
   }
 
   const renderContent = () => {
-    if (step === 0) {
+    if (mode === 'compile') {
       return (
         <CompilationStep
           compilation={compilation}
           busy={busy !== null}
           candidateChunks={compilationMeta?.candidateChunks}
-          onConfirm={() => void handleConfirmCompilation()}
+          onConfirm={() => void handleExportCompilation()}
           onOpenSource={(sourceId) => void handleOpenSource(sourceId)}
           onUpdateItem={handleUpdateItem}
           onDeleteItem={(itemId) => void handleDeleteItem(itemId)}
@@ -819,8 +895,49 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
         />
       )
     }
-    if (step === 1) {
-      return <StyleGuideEditor taskId={taskId} onNext={handleNextToStep3} />
+    // 撰写初稿功能区
+    if (!compilation || draftPhase === 'import') {
+      return (
+        <div className="draft-import">
+          <h3 className="draft-import__title">{zhCN.draftArea.importTitle}</h3>
+          <p className="draft-import__hint">{zhCN.draftArea.importHint}</p>
+          <div className="draft-import__actions">
+            <button type="button" className="source-list__btn" onClick={() => void handleImportExternal()} disabled={importing}>
+              {zhCN.draftArea.importExternal}
+            </button>
+          </div>
+          <div className="draft-import__list">
+            <div className="draft-import__list-head">{zhCN.draftArea.fromCompile}</div>
+            {importOptions.length === 0 ? (
+              <p className="draft-import__empty">{zhCN.draftArea.emptyList}</p>
+            ) : (
+              importOptions.map((opt) => (
+                <div key={opt.compilation.id} className="draft-import__item">
+                  <div className="draft-import__item-info">
+                    <span className="draft-import__item-title">{opt.compilation.title}</span>
+                    <span className="draft-import__item-task">来源任务：{opt.taskTitle}</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="source-list__btn source-list__btn--primary"
+                    disabled={importing}
+                    onClick={() => void handleImportFromTask(opt.compilation.id)}
+                  >
+                    {importing ? '...' : '导入'}
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )
+    }
+    if (draftPhase === 'style') {
+      return (
+        <div className="draft-style-wrap">
+          <StyleGuideEditor taskId={taskId} onNext={handleStartWriting} />
+        </div>
+      )
     }
     if (draft) {
       return (
@@ -844,14 +961,6 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
     )
   }
 
-  const stepClass = (i: WizardStep): string => {
-    const parts = ['writing-stepper__step']
-    if (i === step) parts.push('is-active')
-    else if (i < step) parts.push('is-done')
-    else if (!compilationFinalized) parts.push('is-locked')
-    return parts.join(' ')
-  }
-
   return (
     <div className="writing-workspace writing-workspace--chat">
       <header className="writing-workspace__header">
@@ -864,6 +973,16 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
           ) : null}
         </div>
         <div className="writing-workspace__header-actions">
+          {mode === 'draft' && draftPhase === 'write' ? (
+            <button
+              type="button"
+              className="source-list__btn"
+              disabled={busy !== null}
+              onClick={handleBackToStyle}
+            >
+              {zhCN.draftArea.backToStyle}
+            </button>
+          ) : null}
           <button
             type="button"
             className="recycle-bin-btn style-guide-btn"
@@ -876,7 +995,7 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
               <path d="M9 5v3M13 5v3M5 9h3M5 13h3" />
             </svg>
           </button>
-          {compilation ? (
+          {mode === 'compile' && compilation ? (
             <button
               type="button"
               className="recycle-bin-btn"
@@ -892,7 +1011,7 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
               </svg>
             </button>
           ) : null}
-          {draft && step === 2 ? (
+          {mode === 'draft' && draft && draftPhase === 'write' ? (
             <button
               type="button"
               className="source-list__btn source-list__btn--danger"
@@ -905,26 +1024,27 @@ function WritingWorkspace({ taskId, onChanged, reloadKey }: { taskId: string; on
         </div>
       </header>
 
-      <nav className="writing-stepper" data-onboarding="writing-stepper" aria-label="撰写步骤">
-        {zhCN.writingWorkspace.steps.map((label, i) => (
-          <button
-            key={i}
-            type="button"
-            className={stepClass(i as WizardStep)}
-            disabled={i > step && !compilationFinalized}
-            onClick={() => goToStep(i as WizardStep)}
-          >
-            <span className="writing-stepper__index">{i + 1}</span>
-            <span className="writing-stepper__label">{label}</span>
-          </button>
-        ))}
-      </nav>
-
       <div className="writing-workspace__body">
         <section className="writing-workspace__chat" style={{ width: chatWidth }}>{renderChat()}</section>
         <ResizeHandle onResize={handleChatResize} direction="horizontal" />
         <section className="writing-workspace__editor">{renderContent()}</section>
       </div>
+
+      {/* 「生成汇编」导出格式选择 */}
+      {showExportMenu && mode === 'compile' ? (
+        <div className="export-menu">
+          <div className="export-menu__title">{zhCN.compilation.exportTitle}</div>
+          <button type="button" className="export-menu__btn" disabled={exporting} onClick={() => void handleExportDocx()}>
+            {zhCN.compilation.exportDocx}
+          </button>
+          <button type="button" className="export-menu__btn" disabled={exporting} onClick={() => void handleExportArchive()}>
+            {zhCN.compilation.exportArchive}
+          </button>
+          <button type="button" className="export-menu__btn export-menu__btn--cancel" disabled={exporting} onClick={() => setShowExportMenu(false)}>
+            取消
+          </button>
+        </div>
+      ) : null}
 
       {dialogState ? (
         <ContradictionDialog

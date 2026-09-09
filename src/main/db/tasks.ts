@@ -2,13 +2,14 @@
  * tasks.ts —— 撰写任务仓储。
  */
 import Database from 'better-sqlite3'
-import type { WritingScope, WritingTask } from '../../shared/types'
+import type { TaskMode, WritingScope, WritingTask } from '../../shared/types'
 import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
 
 interface TaskRow {
   id: string
   title: string
+  mode: string
   scope_json: string
   template_book_id: string | null
   llm_provider_id: string | null
@@ -41,6 +42,7 @@ function rowToTask(row: TaskRow): WritingTask {
   return {
     id: row.id,
     title: row.title,
+    mode: row.mode === 'draft' ? 'draft' : 'compile',
     scope,
     templateBookId: row.template_book_id ?? undefined,
     skillIds: parseSkillIds(row.skill_ids),
@@ -62,6 +64,8 @@ function getTaskRowById(id: string): TaskRow | undefined {
 export interface CreateTaskInput {
   /** 中栏显示的任务标题；缺省为"新建任务"（用户可右键重命名） */
   title?: string
+  /** 任务类型：compile = 生成汇编，draft = 撰写初稿；缺省 compile */
+  mode?: TaskMode
   /** 文件范围；缺省为 { all: true }（资料库全部文件，Phase 3.5 起固定） */
   scope?: WritingScope
   llmProviderId?: string
@@ -69,6 +73,7 @@ export interface CreateTaskInput {
 
 export function createTask(input: CreateTaskInput = {}): WritingTask {
   const title = (input.title ?? '新建任务').trim() || '新建任务'
+  const mode: TaskMode = input.mode ?? 'compile'
   const scope: WritingScope = input.scope ?? { all: true }
   if (input.llmProviderId) {
     const db = getDb()
@@ -80,9 +85,9 @@ export function createTask(input: CreateTaskInput = {}): WritingTask {
   const id = crypto.randomUUID()
   const now = new Date().toISOString()
   db.prepare(
-    `INSERT INTO writing_tasks (id, title, scope_json, template_book_id, llm_provider_id, current_version, created_at, updated_at)
-     VALUES (?, ?, ?, NULL, ?, 0, ?, ?)`
-  ).run(id, title, JSON.stringify(scope), input.llmProviderId ?? null, now, now)
+    `INSERT INTO writing_tasks (id, title, mode, scope_json, template_book_id, llm_provider_id, current_version, created_at, updated_at)
+     VALUES (?, ?, ?, ?, NULL, ?, 0, ?, ?)`
+  ).run(id, title, mode, JSON.stringify(scope), input.llmProviderId ?? null, now, now)
   const row = getTaskRowById(id)
   return rowToTask(row!)
 }
@@ -139,9 +144,11 @@ export function updateTaskModelText(taskId: string, modelText: string): WritingT
 }
 
 
-export function listTasks(): WritingTask[] {
+export function listTasks(mode?: TaskMode): WritingTask[] {
   const db = getDb()
-  const rows = db.prepare('SELECT * FROM writing_tasks ORDER BY created_at DESC').all() as TaskRow[]
+  const rows = mode
+    ? db.prepare('SELECT * FROM writing_tasks WHERE mode = ? ORDER BY created_at DESC').all(mode) as TaskRow[]
+    : db.prepare('SELECT * FROM writing_tasks ORDER BY created_at DESC').all() as TaskRow[]
   return rows.map(rowToTask)
 }
 
@@ -237,13 +244,13 @@ if (import.meta.vitest) {
         getSourceIdsByTag: (id: string) => (id === 't1' ? ['a', 'b', 'a'] : []),
         getAllSourceIds: () => ['all1']
       }
-      const resolved = resolveScopeSourceIds({ id: 'x', title: 't', scope: { tagIds }, currentVersion: 0, createdAt: '', updatedAt: '' }, deps)
+      const resolved = resolveScopeSourceIds({ id: 'x', title: 't', mode: 'compile', scope: { tagIds }, currentVersion: 0, createdAt: '', updatedAt: '' }, deps)
       expect(resolved).toEqual(['a', 'b'])
     })
 
     it('resolves {all:true} scope to all source ids (Phase 3.5)', () => {
       const resolved = resolveScopeSourceIds(
-        { id: 'x', title: 't', scope: { all: true }, currentVersion: 0, createdAt: '', updatedAt: '' },
+        { id: 'x', title: 't', mode: 'compile', scope: { all: true }, currentVersion: 0, createdAt: '', updatedAt: '' },
         { getSourceIdsByTag: () => [], getAllSourceIds: () => ['a1', 'b2'] }
       )
       expect(resolved).toEqual(['a1', 'b2'])
