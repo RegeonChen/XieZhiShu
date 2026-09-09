@@ -29,9 +29,13 @@ const COMPILATION_TIMEOUT_MS = 600000
 const WINDOW_MAX_CHARS = 30000
 const TEMPERATURES = [0, 0.3]
 const KEYWORD_EXTRACT_TIMEOUT_MS = 60000
-const CARD_SCAN_TIMEOUT_MS = 300000
-/** 卡片级矛盾扫描单次最多扫描的卡片数（卡片集通常远小于原始材料，一次扫描成本低） */
-const CARD_SCAN_MAX = 200
+// 方案 C 后资料卡片常为整段/较长的完整事实，单次扫描需兼顾“输入大小可控 + 不快超时”：
+// 单批卡片数上限（较原 200 下调，降低模型逐两两比对同一批卡片的推理负载与超时风险）
+const CARD_SCAN_TIMEOUT_MS = 420000
+/** 卡片级矛盾扫描单次最多扫描的卡片数（方案 C 后卡片变长，下调以控制单次输入与耗时） */
+const CARD_SCAN_MAX = 60
+/** 卡片级矛盾扫描单批累计字符上限（进一步约束长卡片批次，避免上下文过大/响应过慢） */
+const CARD_SCAN_CHARS = 6000
 /** 可复现种子：传给支持 seed 的 Provider，让关键帧提取/细读/矛盾扫描在相同输入下更确定 */
 const REPRODUCIBILITY_SEED = 42
 /** 卡片级矛盾扫描的温度阶梯（低温度 + 稍高温度各扫一次后按主题并集，提升召回且成本低） */
@@ -354,13 +358,16 @@ function buildSystemPrompt(instruction: string): string {
     '',
     '请以上述撰写主题与范围为准，判断哪些候选材料与主题相关；与主题无关或无法从材料中确认的内容不要输出。',
     '',
-    '每一条【候选材料】已经是一段完整的原文（或超长段按句切分后的一个片段）。请把【每一条候选材料】作为一张资料卡片输出，不要按时间/事实/条目再做更细切分，也不要合并多条候选材料。',
+    '每段候选材料可能是较长的整段文字，也可能是 PDF 排版被拆成多行的碎片。请先判断其中哪些内容与主题相关，把被换行/断行打断的同一句或同一事实合并还原，再按时间、事实、条目等维度做更细的切分，为每个细粒度事实输出一张卡片。',
     '',
-    '对每一条【候选材料】，输出一张卡片：',
-    '1. excerpt 必须是该候选材料【整段原文】（按原文逐字摘录，不得截断、改写、补写或概括）；',
+    '对每个相关事实，输出一张卡片：',
+    '1. excerpt 必须是完整的一句话或一个完整事实（按原文逐字摘录，不得从句子中间截断、不得改写/补写/概括）；',
     '2. ts 为时间标签（如「2005 年」「2005—2010 年」），只写原文中能确定的时间，没有就填 null；',
     '3. sourceRef 用文件编号（如 #1）；',
     '4. 同一事实不同来源相左时，输出到 contradictions（仅实质性冲突：数据/时间/地点/主体/结果不同；措辞差异不算）。',
+    '',
+    '若遇到页码、页眉/页脚、目录点线、索引行、纯数据行等排版噪声，直接跳过，不要输出卡片。',
+    '若多条候选材料是同一句子的延续，请合并成一张卡片后输出。',
     '',
     '输出要求：只输出一个 JSON 对象，不得输出 JSON 之外的任何文字、解释或代码块围栏。',
     '正常输出：{"items":[{"sourceRef":"#1","excerpt":"原文摘录","ts":"2005 年"}],"contradictions":[{"topic":"事实主题","kind":"data|time|place|fact|other","variants":[{"excerpt":"说法一原文","sourceRefs":["#1","#2"]}]}]}',
@@ -376,7 +383,7 @@ function buildUserPrompt(chunks: RetrievedChunk[], refs: SourceRefEntry[], instr
       return '[' + (i + 1) + ']（来源编号: #' + ref + '，标题：《' + c.sourceTitle + '》）\n' + c.text
     })
     .join('\n\n')
-  return ['【文件清单】', refText(refs), '本次撰写主题与范围：' + instruction, '', '【候选材料】', materials, '', '请按上述 JSON 格式，把【每一条候选材料】直接输出为一张卡片（excerpt=整段原文，不要切分/改写）；只保留与主题直接相关的条目。'].join('\n')
+  return ['【文件清单】', refText(refs), '本次撰写主题与范围：' + instruction, '', '【候选材料】', materials, '', '请按上述 JSON 格式输出资料汇编：先判断相关性，把被排版打断的句子/事实合并还原为完整事实，再按时间/事实/条目做更细切分；只保留与主题直接相关的条目，并跳过页码/目录/索引等噪声。'].join('\n')
 }
 
 export interface CompilationOutputItem {
@@ -496,9 +503,9 @@ async function scanCardContradictions(
   taskId: string
 ): Promise<{ groups: CompilationOutputGroup[]; ok: boolean; message?: string; rateLimited?: boolean }> {
   if (items.length === 0) return { groups: [], ok: true }
-  const batch = items.slice(0, CARD_SCAN_MAX)
+  const batch = items
   const titleByRef = new Map(refs.map((r, idx) => ['#' + (idx + 1), r.title]))
-  let allOk = true
+  let anyOk = false
   let firstError: string | undefined
   let rateLimited = false
   const cardList = batch
@@ -529,13 +536,13 @@ async function scanCardContradictions(
       seed: REPRODUCIBILITY_SEED
     })
     if (!result.ok) {
-      allOk = false
       firstError = firstError ?? (result.error?.message ?? '矛盾扫描失败')
       if (result.error?.code === ErrorCodes.LLM_RATE_LIMIT) rateLimited = true
       continue
     }
     const groups = parseCardScanGroups(result.text)
     if (!groups) continue
+    anyOk = true
     for (const g of groups) {
       const variants: CompilationOutputVariant[] = []
       for (const ci of g.cardIndices) {
@@ -555,7 +562,8 @@ async function scanCardContradictions(
       }
     }
   }
-  return { groups: [...merged.values()], ok: allOk, message: allOk ? undefined : firstError, rateLimited }
+  // 任一温度解析成功即视为本批成功（防止单个温度超时/失败把整批误判为中断；若两温度都失败才降为失败）
+  return { groups: [...merged.values()], ok: anyOk, message: anyOk ? undefined : firstError, rateLimited }
 }
 
 /** 解析卡片级矛盾扫描输出（纯函数，可测试） */
@@ -624,6 +632,24 @@ export function pickRemainingWindows(doneSet: Set<number>, total: number): numbe
 export function nextContradictionBatch(scanOffset: number, batchSize: number, total: number): { start: number; end: number } | null {
   if (scanOffset >= total) return null
   return { start: scanOffset, end: Math.min(total, scanOffset + batchSize) }
+}
+
+/** 按“卡片数 + 累计字符”双预算切批（方案 C 后卡片变长，避免长卡片把单批撑得过大导致响应超时）。 */
+export function splitCardScans(items: CompilationOutputItem[], startIndex: number, maxCount: number, maxChars: number): { start: number; end: number }[] {
+  const ranges: { start: number; end: number }[] = []
+  let i = startIndex
+  while (i < items.length) {
+    const start = i
+    let chars = 0
+    let count = 0
+    while (i < items.length && count < maxCount && (chars + items[i].excerpt.length <= maxChars || count === 0)) {
+      chars += items[i].excerpt.length
+      count += 1
+      i += 1
+    }
+    ranges.push({ start, end: i })
+  }
+  return ranges
 }
 
 /** 提取年份用于时间排序（无时间排最后） */
@@ -959,26 +985,24 @@ async function runContradictionPhase(state: CompilationResumeState, onProgress?:
   if (state.scanOffset === 0) {
     onProgress?.({ stage: '正在汇总卡片间的矛盾…', percent: 88, etaSeconds: PHASE_CONTRADICTION_ETA_S })
   }
+  // 用「卡片数 + 字符预算」切批（方案 C 后卡片较长，缩小单批输入以避免单次响应过大而超时）
+  const allRanges = splitCardScans(items, 0, CARD_SCAN_MAX, CARD_SCAN_CHARS)
+  let ri = state.scanOffset > 0 ? allRanges.findIndex((r) => r.end > state.scanOffset) : 0
+  if (ri === -1) return 'done'
   // Phase B：按 Provider 并发数成批并行扫描卡片矛盾（每波最多 concurrency 批；任一波失败则以该波起点中断，续跑重扫该波）
-  let offset = state.scanOffset
-  while (offset < total) {
-    const waveEnd = Math.min(total, offset + CARD_SCAN_MAX * state.concurrency)
-    const ranges: { start: number; end: number }[] = []
-    for (let st = offset; st < waveEnd; st += CARD_SCAN_MAX) {
-      const range = nextContradictionBatch(st, CARD_SCAN_MAX, total)
-      if (range) ranges.push(range)
-    }
+  while (ri < allRanges.length) {
+    const wave = allRanges.slice(ri, ri + state.concurrency)
     const results = await Promise.all(
-      ranges.map((range) => {
+      wave.map((range) => {
         const batch = items.slice(range.start, range.end)
         return scanCardContradictions(state.provider, batch, state.refs, state.taskId).catch((e) => ({ groups: [] as CompilationOutputGroup[], ok: false, message: e instanceof Error ? e.message : String(e), rateLimited: false }))
       })
     )
     const failedIdx = results.findIndex((res) => !res.ok)
     if (failedIdx !== -1) {
-      const range = ranges[failedIdx]
+      const range = wave[failedIdx]
       state.interrupted = {
-        stage: '正在检索卡片矛盾（第 ' + (Math.floor(range.start / CARD_SCAN_MAX) + 1) + ' 批）',
+        stage: '正在检索卡片矛盾（第 ' + (allRanges.indexOf(range) + 1) + ' 批）',
         message: results[failedIdx].message ?? '大模型调用异常中断',
         percent: 88,
         retryable: results[failedIdx].rateLimited === true
@@ -986,8 +1010,8 @@ async function runContradictionPhase(state: CompilationResumeState, onProgress?:
       return 'interrupted'
     }
     for (const res of results) state.scanGroups.push(...res.groups)
-    offset = waveEnd
-    state.scanOffset = offset
+    ri += wave.length
+    state.scanOffset = wave[wave.length - 1].end
   }
   return 'done'
 }
