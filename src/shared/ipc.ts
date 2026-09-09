@@ -20,7 +20,8 @@ import type {
   Source,
   Tag,
   WebSite,
-  WritingTask
+  WritingTask,
+  TaskMode
 } from './types'
 
 // ============================================================
@@ -73,6 +74,11 @@ export const IPC = {
   COMPILATION_REPAIR_SCAN: 'compilation:repairScan',
   COMPILATION_REPAIRS_LIST: 'compilation:repairs:list',
   COMPILATION_REPAIR_DECIDE: 'compilation:repairs:decide',
+  COMPILATION_EXPORT_DOCX: 'compilation:exportDocx',
+  COMPILATION_EXPORT_ARCHIVE: 'compilation:exportArchive',
+  COMPILATION_IMPORT_ARCHIVE: 'compilation:importArchive',
+  COMPILATION_IMPORT_FROM_TASK: 'compilation:importFromTask',
+  COMPILATION_LIST_FINALIZED_FOR_IMPORT: 'compilation:listFinalizedForImport',
 
   /* 规范文档库（Phase 6.4.1：第二步「指定行文规范」） */
   STYLE_GUIDE_LIST: 'styleGuide:list',
@@ -377,6 +383,22 @@ export interface CompilationRepairDecideReq {
 }
 export type CompilationRepairDecideRes = { item: CompilationItem; repair: CompilationRepair }
 
+/** 导出资料汇编为 .docx（生成汇编功能区，2026-09） */
+export interface CompilationExportDocxReq { compilationId: string }
+export type CompilationExportDocxRes = { path: string }
+/** 导出资料汇编为软件专用格式 .xzsc（可被「撰写初稿」导入） */
+export interface CompilationExportArchiveReq { compilationId: string }
+export type CompilationExportArchiveRes = { path: string }
+/** 从外部 .xzsc 导入资料汇编到「撰写初稿」任务（当前为预留：未实现解析） */
+export interface CompilationImportArchiveReq { taskId: string; filePath: string }
+export type CompilationImportArchiveRes = { compilation: Compilation }
+/** 从「生成汇编」功能区已完成任务导入其资料汇编到「撰写初稿」任务（深拷贝） */
+export interface CompilationImportFromTaskReq { taskId: string; sourceCompilationId: string }
+export type CompilationImportFromTaskRes = { compilation: Compilation }
+/** 列出「生成汇编」功能区所有已完成（finalized）汇编任务，供「撰写初稿」导入选择 */
+export interface CompilationListFinalizedForImportReq {}
+export type CompilationListFinalizedForImportRes = { items: { taskId: string; taskTitle: string; compilation: Compilation }[] }
+
 /** 工作区来源移除待确认（2026-08-28）：文件被删除且已被资料汇编引用 */
 export interface WorkspaceSourceRemovalPending {
   sourceId: string
@@ -425,6 +447,8 @@ export interface StyleGuideDefaultRes { styleGuide: StyleGuide | null }
 export interface WritingCreateTaskReq {
   /** 中栏显示的任务标题；缺省为"新建任务"（Phase 3.5 起点击"新建任务"立即创建） */
   title?: string
+  /** 任务类型：generate-compile（生成汇编）或 write-draft（撰写初稿）；缺省 compile */
+  mode?: TaskMode
   /** 文件范围；缺省为 { all: true }（资料库全部文件，用户不可自定） */
   scope?: { all: true } | { sourceIds: string[] } | { tagIds: string[] }
   templateBookId?: string
@@ -432,6 +456,7 @@ export interface WritingCreateTaskReq {
 }
 export type WritingCreateTaskRes = { task: WritingTask }
 
+export interface WritingListTasksReq { mode?: TaskMode }
 export type WritingListTasksRes = { items: WritingTask[] }
 
 export interface WritingDeleteTaskReq {

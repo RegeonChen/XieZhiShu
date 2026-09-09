@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 
-export type PageKey = 'sources' | 'writing' | 'templates' | 'settings'
+export type PageKey = 'sources' | 'compile' | 'draft' | 'templates' | 'settings'
 
 interface SideNavProps {
   current: PageKey
@@ -16,7 +16,12 @@ const ICONS: Record<PageKey, ReactNode> = {
       <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
     </svg>
   ),
-  writing: (
+  compile: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 3l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 7.7l5.4-.8L12 3z" />
+    </svg>
+  ),
+  draft: (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
     </svg>

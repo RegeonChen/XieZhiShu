@@ -3,10 +3,11 @@ import { zhCN } from '../i18n/zh-CN'
 
 interface WritingEmptyStateProps {
   onCreated: (taskId: string) => void
+  mode?: 'compile' | 'draft'
 }
 
 /** 无撰写任务时的右栏空状态：插图 + 引导文案 + 「新建任务」按钮（点击立即创建） */
-function WritingEmptyState({ onCreated }: WritingEmptyStateProps) {
+function WritingEmptyState({ onCreated, mode = 'compile' }: WritingEmptyStateProps) {
   const [creating, setCreating] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
@@ -15,7 +16,7 @@ function WritingEmptyState({ onCreated }: WritingEmptyStateProps) {
     setCreating(true)
     setErr(null)
     try {
-      const res = await window.api.createTask()
+      const res = await window.api.createTask({ mode })
       if (res.ok && res.data) {
         onCreated((res.data.task as { id: string }).id)
       } else {

@@ -25,10 +25,11 @@ interface ContextMenuState {
   title: string
 }
 
-function WritingTaskList({ selectedId, onSelect, reloadKey }: {
+function WritingTaskList({ selectedId, onSelect, reloadKey, mode }: {
   selectedId: string | null
   onSelect: (id: string | null) => void
   reloadKey: number
+  mode: 'compile' | 'draft'
 }) {
   const [tasks, setTasks] = useState<WritingTaskItem[] | null>(null)
   const [loading, setLoading] = useState(false)
@@ -45,7 +46,7 @@ function WritingTaskList({ selectedId, onSelect, reloadKey }: {
     setLoading(true)
     setErr(null)
     try {
-      const res = await window.api.listTasks()
+      const res = await window.api.listTasks(mode)
       if (res.ok && res.data) setTasks(res.data.items as WritingTaskItem[])
       else setErr(zhCN.writingTasks.loadFailed.replace('{message}', res.error?.message ?? ''))
     } finally {

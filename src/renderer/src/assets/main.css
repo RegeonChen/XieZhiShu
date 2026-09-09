@@ -4831,3 +4831,28 @@ textarea:focus-visible {
   .draft-editor__doc .tiptap { max-width: none; padding: 0; }
 }
 
+
+/* ---------- 生成汇编 / 撰写初稿 功能区（2026-09） ---------- */
+.writing-workspace--chat { position: relative; }
+
+/* 撰写初稿：导入资料汇编 */
+.draft-import { padding: 20px 24px; overflow: auto; }
+.draft-import__title { font-size: 18px; margin: 0 0 8px; }
+.draft-import__hint { margin: 0 0 16px; color: var(--fg-soft); line-height: 1.6; }
+.draft-import__actions { margin-bottom: 16px; }
+.draft-import__list { border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.draft-import__list-head { font-weight: 600; margin-bottom: 8px; }
+.draft-import__empty { color: var(--fg-soft); margin: 0; }
+.draft-import__item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.draft-import__item:last-child { border-bottom: none; }
+.draft-import__item-info { display: flex; flex-direction: column; min-width: 0; }
+.draft-import__item-title { font-weight: 500; }
+.draft-import__item-task { font-size: 12px; color: var(--fg-soft); }
+.draft-style-wrap { height: 100%; overflow: auto; }
+
+/* 生成汇编：导出资料汇编（两种格式选择） */
+.export-menu { position: absolute; top: 52px; right: 16px; z-index: 30; min-width: 230px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; box-shadow: 0 6px 24px rgba(0,0,0,0.14); display: flex; flex-direction: column; gap: 6px; }
+.export-menu__title { font-weight: 600; margin-bottom: 4px; }
+.export-menu__btn { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); text-align: left; }
+.export-menu__btn--cancel { color: var(--fg-soft); }
+

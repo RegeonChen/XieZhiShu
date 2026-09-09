@@ -25,8 +25,8 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
   { id: 'preset', page: 'settings', targets: ['[data-onboarding="settings-preset"]'], padding: 8 },
   { id: 'workspace', page: 'settings', targets: ['[data-onboarding="settings-workspace"]'], padding: 8 },
   { id: 'library', page: 'sources', targets: ['[data-onboarding="sources-library"]'], padding: 8 },
-  { id: 'demoTask', page: 'writing', targets: ['[data-onboarding="writing-demo-task"]'], padding: 8 },
-  { id: 'writingFlow', page: 'writing', targets: ['[data-onboarding="writing-stepper"]'], padding: 8 }
+  { id: 'demoTask', page: 'compile', targets: ['[data-onboarding="writing-demo-task"]'], padding: 8 },
+  { id: 'writingFlow', page: 'draft', targets: ['[data-onboarding="writing-new-task"]'], padding: 8 }
 ]
 
 export const ONBOARDING_COPY = {
@@ -70,17 +70,18 @@ export const ONBOARDING_COPY = {
     demoTask: {
       title: '演示任务（仅作为演示）',
       description:
-        '为避免任务列表为空时无从下手，软件已为你预制一个「' + DEMO_TASK_TITLE + '」。' +
-        '点击它即可打开：左侧对话历史、右侧三步工作台，并已预置「资料汇编（含矛盾与二次改动）」和「志书初稿」，' +
+        '为避免任务列表为空时无从下手，软件已为你预制「' + DEMO_TASK_TITLE + '」，在「生成汇编」与「撰写初稿」两个功能区各有一份。' +
+        '点击它即可打开：左侧对话历史、右侧对应的工作台，并已预置「资料汇编（含矛盾与二次改动）」与「志书初稿」，' +
         '方便你逐个环节对照理解。',
       hint: '该任务仅供演示，可随意操作；不满意也可在右键菜单删除它。'
     },
     writingFlow: {
-      title: '三步生成志书初稿',
+      title: '生成汇编 → 撰写初稿',
       description:
-        '撰写工作台分三步：① 生成「资料汇编」——AI 细读资料产出事实卡片，并根据需要进行矛盾标注（不同来源相左）与语义补全/修订，处理完矛盾后「确认汇编」；' +
-        '② 指定「行文规范」——确认默认规范，也可参考范本；③ 生成「志书初稿」——基于已确认汇编与规范一键成稿，生成后仍可在编辑器继续修改、框选正文「询问来源」。',
-      hint: '当前演示任务已走完三步，点击顶部 ①②③ 可来回查看每一阶段的成果。'
+        '撰写流程分为两个功能区：①「生成汇编」——AI 细读资料产出事实卡片，标注矛盾（不同来源相左）与语义补全/修订，处理完矛盾后可「导出资料汇编」；' +
+        '②「撰写初稿」——新建任务后从「生成汇编」导入一份已完成汇编（或导入外部文件），先指定「行文规范」，再点击「开始撰写」并「生成志书初稿」，' +
+        '生成后仍可在编辑器继续修改、框选正文「询问来源」。',
+      hint: '两个功能区任务列表相互独立；「撰写初稿」需先导入一份资料汇编。'
     }
   }
 }

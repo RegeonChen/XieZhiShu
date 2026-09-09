@@ -7,6 +7,7 @@ import {
   type AppInfoRes,
   type LlmSaveProviderReq,
   type WritingCreateTaskReq,
+  type WritingListTasksReq,
   type WritingRenameTaskReq,
   type WritingRenameTaskRes,
   type WritingUpdateProviderReq,
@@ -95,7 +96,9 @@ import {
   listRecycleBinByCompilation,
   restoreRecycleBinContradiction,
   reorderCompilationItemsByTs,
-  restoreCompilationCardRecycleBin
+  restoreCompilationCardRecycleBin,
+  listFinalizedCompilationsForImport,
+  importCompilationIntoTask
 } from './db/compilations'
 import { decideRepair, listRepairsByCompilation, restoreRepairRecycleBin } from './db/compilation-repairs'
 import {
@@ -107,6 +110,7 @@ import {
 } from './db/style-guides'
 import { ensureDemoTask } from './db/demo-task'
 import { generateCompilation, continueCompilation } from './writing/compilation-service'
+import { renderCompilationDocx, serializeCompilationArchive } from './writing/compilation-export'
 import { adjustCompilation } from './writing/compilation-adjust'
 import { scanCompilationRepairs } from './writing/repair-service'
 import {
@@ -134,7 +138,7 @@ import { setSourceRemovalNotify, listPendingSourceRemovals, decideSourceRemoval,
 import { trashSourceFile, renameSourceFile, resolveSourceFilePath } from './workspace/sync'
 import { migrateLegacyToWorkspace } from './workspace/migrate'
 import { loadWindowState, trackWindowState } from './window-state'
-import type { WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceUpdateReq, WebSourceUpdateRes, AppGetPdfCmapsUrlRes, LogAppendReq, LogExportRes, StyleGuideListRes, StyleGuideSaveReq, StyleGuideSaveRes, StyleGuideSetDefaultReq, StyleGuideSetDefaultRes, StyleGuideDeleteReq } from '../shared/ipc'
+import type { WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceUpdateReq, WebSourceUpdateRes, AppGetPdfCmapsUrlRes, LogAppendReq, LogExportRes, StyleGuideListRes, StyleGuideSaveReq, StyleGuideSaveRes, StyleGuideSetDefaultReq, StyleGuideSetDefaultRes, StyleGuideDeleteReq, CompilationExportDocxReq, CompilationExportDocxRes, CompilationExportArchiveReq, CompilationExportArchiveRes, CompilationImportArchiveReq, CompilationImportArchiveRes, CompilationImportFromTaskReq, CompilationImportFromTaskRes, CompilationListFinalizedForImportReq, CompilationListFinalizedForImportRes } from '../shared/ipc'
 import { logMain, logIpc, logRenderer, exportLogsText } from './logger'
 
 /** 长任务保持唤醒：开启则 start，任务结束/异常在 finally 中 stop（引用计数，重叠任务不提前释放） */
@@ -666,6 +670,65 @@ handleLogged(IPC.COMPILATION_CONFIRM, (_event, params: CompilationConfirmReq): A
   }
 })
 
+handleLogged(IPC.COMPILATION_LIST_FINALIZED_FOR_IMPORT, (_event, _params: CompilationListFinalizedForImportReq): ApiResult<CompilationListFinalizedForImportRes> => {
+  try {
+    return { ok: true, data: { items: listFinalizedCompilationsForImport() } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.COMPILATION_IMPORT_FROM_TASK, (_event, params: CompilationImportFromTaskReq): ApiResult<CompilationImportFromTaskRes> => {
+  try {
+    const source = getCompilationById(params.sourceCompilationId)
+    if (!source) return { ok: false, error: { code: 'INVALID_PARAM', message: '来源资料汇编不存在' } }
+    const compilation = importCompilationIntoTask(params.taskId, source)
+    return { ok: true, data: { compilation } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.COMPILATION_EXPORT_DOCX, async (_event, params: CompilationExportDocxReq): Promise<ApiResult<CompilationExportDocxRes>> => {
+  try {
+    const compilation = getCompilationById(params.compilationId)
+    if (!compilation) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料汇编不存在' } }
+    const res = await dialog.showSaveDialog({
+      title: '导出资料汇编为 Word 文档',
+      defaultPath: compilation.title + '.docx',
+      filters: [{ name: 'Word 文档', extensions: ['docx'] }]
+    })
+    if (res.canceled || !res.filePath) return { ok: false, error: { code: 'EXPORT_CANCELED', message: '已取消导出' } }
+    const buf = await renderCompilationDocx(compilation)
+    writeFileSync(res.filePath, buf)
+    return { ok: true, data: { path: res.filePath } }
+  } catch (err) {
+    return { ok: false, error: { code: 'EXPORT_FAILED', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.COMPILATION_EXPORT_ARCHIVE, async (_event, params: CompilationExportArchiveReq): Promise<ApiResult<CompilationExportArchiveRes>> => {
+  try {
+    const compilation = getCompilationById(params.compilationId)
+    if (!compilation) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料汇编不存在' } }
+    const res = await dialog.showSaveDialog({
+      title: '导出资料汇编为软件专用格式',
+      defaultPath: compilation.title + '.xzsc',
+      filters: [{ name: '志书工具资料汇编', extensions: ['xzsc'] }]
+    })
+    if (res.canceled || !res.filePath) return { ok: false, error: { code: 'EXPORT_CANCELED', message: '已取消导出' } }
+    writeFileSync(res.filePath, serializeCompilationArchive(compilation), 'utf8')
+    return { ok: true, data: { path: res.filePath } }
+  } catch (err) {
+    return { ok: false, error: { code: 'EXPORT_FAILED', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.COMPILATION_IMPORT_ARCHIVE, async (_event, _params: CompilationImportArchiveReq): Promise<ApiResult<CompilationImportArchiveRes>> => {
+  // 预留：外部 .xzsc 导入「撰写初稿」——当前返回未实现，后端解析待后续接入
+  return { ok: false, error: { code: 'NOT_IMPLEMENTED', message: '外部资料汇编导入功能开发中' } }
+})
+
 handleLogged(IPC.COMPILATION_ADJUST, async (_event, params: CompilationAdjustReq): Promise<ApiResult<CompilationAdjustRes>> => {
   try {
     pushUndo(params.compilationId)
@@ -1194,16 +1257,16 @@ handleLogged(IPC.WORKSPACE_MIGRATE, async (): Promise<ApiResult<WorkspaceMigrate
 handleLogged(IPC.WRITING_CREATE_TASK, (_event, params: WritingCreateTaskReq): ApiResult<{ task: WritingTask }> => {
   try {
     // Phase 3.5：点击"新建任务"立即创建（标题默认"新建任务"、范围=全部文件），可选范本/大模型
-    const task = createWritingTask(params ?? {})
+    const task = createWritingTask({ ...(params ?? {}), mode: params?.mode ?? 'compile' })
     return { ok: true, data: { task } }
   } catch (err) {
     return { ok: false, error: { code: 'INVALID_PARAM', message: String(err) } }
   }
 })
 
-handleLogged(IPC.WRITING_LIST_TASKS, (): ApiResult<{ items: WritingTask[] }> => {
+handleLogged(IPC.WRITING_LIST_TASKS, (_event, params: WritingListTasksReq): ApiResult<{ items: WritingTask[] }> => {
   try {
-    return { ok: true, data: { items: listWritingTasks() } }
+    return { ok: true, data: { items: listWritingTasks(params?.mode) } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }

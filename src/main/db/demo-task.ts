@@ -10,7 +10,7 @@ import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
 import { createTask, getTaskById, updateTaskInstruction } from './tasks'
 import { addTaskMessage, listTaskMessages } from './task-messages'
-import { createCompilation, insertCompilationItems, insertCompilationContradictions, confirmCompilation, listCompilationsByTask } from './compilations'
+import { createCompilation, insertCompilationItems, insertCompilationContradictions, confirmCompilation, listCompilationsByTask, importCompilationIntoTask } from './compilations'
 import { insertRepair } from './compilation-repairs'
 import { createDraft, replaceDraftSegments, addSegmentSource, getLatestDraftByTask } from './drafts'
 
@@ -72,23 +72,17 @@ function insertDemoSources(taskId: string): void {
   for (const s of DEMO_SOURCES) ins.run(s.id, s.title, s.cleanedText, taskId, now, now)
 }
 
-function seedDemoTask(): WritingTask {
-  const task = createTask({ title: DEMO_TASK_TITLE })
+function seedCompileDemoTask(): WritingTask {
+  const task = createTask({ title: DEMO_TASK_TITLE, mode: 'compile' })
   updateTaskInstruction(task.id, DEMO_INSTRUCTION)
   insertDemoSources(task.id)
 
-  // 对话历史：撰写要求 + 生成摘要 + 初稿提示
+  // 对话历史：撰写要求 + 生成摘要
   addTaskMessage(task.id, 'user', DEMO_INSTRUCTION, 'instruction')
   addTaskMessage(
     task.id,
     'assistant',
-    '已生成资料汇编：7 张卡片，1 组矛盾待处理。请在第一步审阅资料卡片并处理矛盾，然后点击「确认汇编」。',
-    'notice'
-  )
-  addTaskMessage(
-    task.id,
-    'assistant',
-    '初稿《福州市学前教育事业发展概况》已生成，可在第三步查看并继续编辑，也支持框选正文询问来源。',
+    '已生成资料汇编：7 张卡片，1 组矛盾待处理。请审阅资料卡片并处理矛盾，处理完成后可点击「导出资料汇编」。',
     'notice'
   )
 
@@ -125,6 +119,22 @@ function seedDemoTask(): WritingTask {
   }
   confirmCompilation(compilation.id)
 
+  return getTaskById(task.id)!
+}
+
+/** 撰写初稿演示任务：从「生成汇编」演示任务导入其资料汇编，再预置志书初稿 */
+function seedDraftDemoTask(compileDemo: WritingTask): WritingTask {
+  const task = createTask({ title: DEMO_TASK_TITLE, mode: 'draft' })
+  updateTaskInstruction(task.id, DEMO_INSTRUCTION)
+  addTaskMessage(task.id, 'user', DEMO_INSTRUCTION, 'instruction')
+  const comps = listCompilationsByTask(compileDemo.id)
+  const srcComp = comps.find((c) => c.status === 'finalized')
+  if (srcComp) {
+    importCompilationIntoTask(task.id, srcComp)
+    addTaskMessage(task.id, 'assistant', '已从「生成汇编」导入资料汇编：' + srcComp.title, 'notice')
+  }
+  addTaskMessage(task.id, 'assistant', '初稿《福州市学前教育事业发展概况》已生成，可继续编辑，也支持框选正文询问来源。', 'notice')
+
   // 志书初稿
   const draft = createDraft(task.id, 0)
   const rebuilt = replaceDraftSegments(draft.id, DEMO_DRAFT_MD)
@@ -134,15 +144,21 @@ function seedDemoTask(): WritingTask {
   return getTaskById(task.id)!
 }
 
-/** 确保演示任务存在（幂等）：已存在同标题任务则不重复创建 */
-export function ensureDemoTask(): WritingTask | null {
+function getDemoTaskByMode(mode: 'compile' | 'draft'): WritingTask | null {
   const db = getDb()
-  const existing = db.prepare('SELECT id FROM writing_tasks WHERE title = ? LIMIT 1').get(DEMO_TASK_TITLE) as
+  const row = db.prepare('SELECT id FROM writing_tasks WHERE title = ? AND mode = ? LIMIT 1').get(DEMO_TASK_TITLE, mode) as
     | { id: string }
     | undefined
-  if (existing) return getTaskById(existing.id)
+  return row ? getTaskById(row.id) : null
+}
+
+/** 确保两个演示任务存在（幂等）：「生成汇编」一份（含汇编/矛盾/二次改动）、「撰写初稿」一份（导入汇编 + 初稿）。 */
+export function ensureDemoTask(): WritingTask | null {
   try {
-    return seedDemoTask()
+    let compileDemo = getDemoTaskByMode('compile')
+    if (!compileDemo) compileDemo = seedCompileDemoTask()
+    if (!getDemoTaskByMode('draft')) seedDraftDemoTask(compileDemo)
+    return getTaskById(compileDemo.id)
   } catch (err) {
     console.error('演示任务生成失败:', err)
     return null
@@ -161,14 +177,14 @@ if (import.meta.vitest) {
   })
   afterAll(() => db.close())
 
-  describe('demo task seed (2026-08-28)', () => {
-    it('creates a demo task with messages/compilation/contradictions/repairs/draft', () => {
+  describe('demo task seed (两个功能区各一份，2026-09)', () => {
+    it('creates compile demo (compilation/contradictions/repairs) and draft demo (imported compilation/draft)', () => {
       const task = ensureDemoTask()
       expect(task).not.toBeNull()
       expect(task!.title).toBe(DEMO_TASK_TITLE)
       expect(task!.userInstruction).toContain('学前教育')
       const msgs = listTaskMessages(task!.id)
-      expect(msgs.length).toBeGreaterThanOrEqual(3)
+      expect(msgs.length).toBeGreaterThanOrEqual(2)
       const comps = listCompilationsByTask(task!.id)
       expect(comps).toHaveLength(1)
       expect(comps[0].status).toBe('finalized')
@@ -176,18 +192,29 @@ if (import.meta.vitest) {
       expect(comps[0].contradictions).toHaveLength(1)
       expect(comps[0].contradictions[0].status).toBe('pending')
       expect(comps[0].repairs).toHaveLength(1)
-      const draft = getLatestDraftByTask(task!.id)
+
+      // 撰写初稿演示任务：从生成汇编导入汇编 + 预置初稿
+      const draftRows = getDb().prepare("SELECT id FROM writing_tasks WHERE title = ? AND mode = 'draft'").all(DEMO_TASK_TITLE) as { id: string }[]
+      expect(draftRows).toHaveLength(1)
+      const draftTask = getTaskById(draftRows[0].id)!
+      const draftComps = listCompilationsByTask(draftTask.id)
+      expect(draftComps).toHaveLength(1)
+      expect(draftComps[0].status).toBe('finalized')
+      const draft = getLatestDraftByTask(draftTask.id)
       expect(draft).not.toBeNull()
       expect(draft!.segments.length).toBeGreaterThanOrEqual(3)
     })
 
-    it('is idempotent: second call returns the same task without duplicating', () => {
+    it('is idempotent: second call does not duplicate the two demos', () => {
       const a = ensureDemoTask()!
       const b = ensureDemoTask()!
       expect(a.id).toBe(b.id)
-      expect(listCompilationsByTask(a.id)).toHaveLength(1)
-      const count = getDb().prepare('SELECT COUNT(*) c FROM writing_tasks WHERE title = ?').get(DEMO_TASK_TITLE) as { c: number }
-      expect(count.c).toBe(1)
+      const total = getDb().prepare('SELECT COUNT(*) c FROM writing_tasks WHERE title = ?').get(DEMO_TASK_TITLE) as { c: number }
+      expect(total.c).toBe(2)
+      const compileCount = getDb().prepare("SELECT COUNT(*) c FROM writing_tasks WHERE title = ? AND mode = 'compile'").get(DEMO_TASK_TITLE) as { c: number }
+      const draftCount = getDb().prepare("SELECT COUNT(*) c FROM writing_tasks WHERE title = ? AND mode = 'draft'").get(DEMO_TASK_TITLE) as { c: number }
+      expect(compileCount.c).toBe(1)
+      expect(draftCount.c).toBe(1)
     })
   })
 }

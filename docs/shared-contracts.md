@@ -33,10 +33,11 @@ interface Tag { id: string; name: string; createdAt: string; }
 /** 网页资料库站点（2026-08-11） */
 interface WebSite { id: string; rootUrl: string; title: string; createdAt: string; updatedAt: string; lastSyncedAt?: string; }
 
-/** 撰写任务 */
+/** 撰写任务（2026-09：拆分为「生成汇编 / 撰写初稿」两个功能区） */
 interface WritingTask {
   id: string;
   title: string;
+  mode: 'compile' | 'draft';  // 任务类型：compile=生成汇编，draft=撰写初稿（Migration 028）
   scope: { all: true } | { sourceIds: string[] } | { tagIds: string[] };  // Phase 3.5 起固定 { all: true }，旧任务兼容保留
   llmProviderId?: string;   // 任务固定大模型；未设置回退全局当前 Provider
   articleTitle?: string;    // 大模型从用户要求中抓取的文章标题
@@ -46,6 +47,8 @@ interface WritingTask {
   createdAt: string;
   updatedAt: string;
 }
+
+> **2026-09（撰写拆分）**：`writing:createTask` 新增可选 `mode`（`compile`/`draft`，缺省 `compile`），`writing:listTasks` 新增可选 `mode` 过滤；新增 IPC `compilation:exportDocx`、`compilation:exportArchive`（导出 `.docx`/`.xzsc`）、`compilation:importFromTask`（从生成汇编已完成任务深拷贝资料汇编到撰写初稿任务）、`compilation:listFinalizedForImport`（列出可导入的已完成汇编）、`compilation:importArchive`（外部 `.xzsc` 导入，当前返回 `NOT_IMPLEMENTED` 占位）。
 
 /** 志稿（初稿；2026-08-11 删去版本管理后仅保留初稿） */
 interface Draft {

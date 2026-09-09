@@ -187,7 +187,7 @@ function CompilationStep({
             disabled={busy || pending.length > 0}
             title={pending.length > 0 ? t.pendingContradictions.replace('{count}', String(pending.length)) : undefined}
           >
-            {t.confirmBtn}
+            {t.exportBtn}
           </button>
         </div>
       </div>

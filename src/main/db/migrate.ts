@@ -622,6 +622,36 @@ ALTER TABLE web_sites DROP COLUMN keywords;
     sql: `
 ALTER TABLE llm_providers ADD COLUMN concurrency INTEGER NOT NULL DEFAULT 4;
 `
+  },
+  {
+    // 2026-09-0x：撰写功能区拆分为「生成汇编 / 撰写初稿」——任务按类型区分，并删除本地全部旧任务。
+    version: 28,
+    run: (db) => {
+      db.exec("ALTER TABLE writing_tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'compile';")
+      // 升级到分区前清空本地旧任务（外键在迁移批次中被关闭，需手动按依赖顺序删除子表）
+      const tables = [
+        'review_records',
+        'segment_sources',
+        'segments',
+        'contradiction_variants',
+        'draft_contradictions',
+        'draft_generation_sources',
+        'drafts',
+        'compilation_card_recycle_bin',
+        'compilation_repair_recycle_bin',
+        'compilation_repairs',
+        'compilation_recycle_bin',
+        'compilation_contradiction_variants',
+        'compilation_contradictions',
+        'compilation_items',
+        'compilations',
+        'task_messages',
+        'writing_tasks'
+      ]
+      for (const table of tables) {
+        db.prepare("DELETE FROM " + table).run()
+      }
+    }
   }
 ]
 

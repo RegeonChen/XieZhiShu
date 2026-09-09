@@ -64,7 +64,12 @@ export interface TemplateBook {
 /** 文件范围：{ all: true } = 资料库（工作区）全部文件（Phase 3.5 起固定）；旧任务保留具体 sourceIds/tagIds */
 export type WritingScope = { all: true } | { sourceIds: string[] } | { tagIds: string[] }
 
+/** 撰写任务类型：生成汇编（compile） vs 撰写初稿（draft） */
+export type TaskMode = 'compile' | 'draft'
+
 export interface WritingTask {
+  /** 任务类型：'compile' = 生成汇编功能区，'draft' = 撰写初稿功能区 */
+  mode: TaskMode
   id: string
   /** 中栏列表显示的任务标题（默认"新建任务"，可右键重命名） */
   title: string

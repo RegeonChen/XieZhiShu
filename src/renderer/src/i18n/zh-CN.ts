@@ -16,7 +16,8 @@ export const zhCN = {
   },
   nav: {
     sources: '资料库',
-    writing: '撰写',
+    compile: '生成汇编',
+    draft: '撰写初稿',
     settings: '设置'
   },
   panes: {
@@ -32,11 +33,17 @@ export const zhCN = {
       detailTitle: '写作规范',
       detailHint: '管理志书写作规范（通用规范 + 部类细则），生成初稿时自动注入相应规范。'
     },
-    writing: {
-      listTitle: '撰写任务',
+    compile: {
+      listTitle: '生成汇编任务',
       listEmpty: '暂无任务',
-      detailTitle: '请选择或新建一个撰写任务以开始您的工作',
-      detailHint: ''
+      detailTitle: '请选择或新建一个生成汇编任务',
+      detailHint: '在生成汇编功能区生成并导出资料汇编。'
+    },
+    draft: {
+      listTitle: '撰写初稿任务',
+      listEmpty: '暂无任务',
+      detailTitle: '请选择或新建一个撰写初稿任务',
+      detailHint: '导入资料汇编后撰写志书初稿。'
     },
     settings: {
       listTitle: '设置项',
@@ -352,12 +359,23 @@ export const zhCN = {
     articleTitle: '文章标题：《{title}》',
     loading: '加载中...',
     loadFailed: '加载失败：{message}',
-    steps: ['生成资料汇编', '指定行文规范', '生成志书初稿'],
-    prev: '上一步',
-    next: '下一步',
+    next: '开始撰写',
     styleHint: '本环节为预留：默认注入「志书通用行文规范」，也可在左侧对话框中直接提出行文要求。',
-    styleTitle: '指定行文规范（默认注入）',
-    styleGuideLabel: '以下为默认注入的「志书文体文风与行文规则」规范，后续可在左侧对话中补充行文要求。'
+    styleTitle: '指定行文规范',
+    styleGuideLabel: '以下为默认注入的「志书文体文风与行文规则」规范，可在左侧对话框中补充行文要求。'
+  },
+  draftArea: {
+    importTitle: '导入资料汇编',
+    importHint: '撰写初稿前，需要先导入一份资料汇编：可从「生成汇编」功能区选择已完成的任务，也可导入外部文件（即将支持）。',
+    fromCompile: '从「生成汇编」选择',
+    importExternal: '导入外部文件',
+    externalSoon: '外部文件导入功能开发中',
+    emptyList: '「生成汇编」功能区暂无已完成的任务，请先在「生成汇编」中生成并确认资料汇编。',
+    imported: '已导入资料汇编：{title}',
+    importFailed: '导入资料汇编失败：{message}',
+    goStyle: '开始撰写',
+    backToStyle: '返回规范',
+    writeHint: '已导入资料汇编。可先指定行文规范，再点击「开始撰写」生成初稿。'
   },
   styleGuide: {
     entry: '规范',
@@ -398,7 +416,11 @@ export const zhCN = {
     empty: '尚未生成资料汇编。请在左侧输入本次撰写的标题与要求，点击「生成汇编」。',
     generateBtn: '生成汇编',
     regenerateBtn: '重新生成汇编',
-    confirmBtn: '确认汇编，进入下一步',
+    confirmBtn: '导出资料汇编',
+    exportBtn: '导出资料汇编',
+    exportDocx: '导出 Word (…docx)',
+    exportArchive: '导出软件格式 (…xzsc)',
+    exportTitle: '导出资料汇编',
     sortBtn: '按时间排序',
     sortAsc: '按时间正序',
     sortDesc: '按时间反序',
