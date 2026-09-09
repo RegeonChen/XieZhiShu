@@ -115,6 +115,44 @@ export function chunkParagraphs(text: string): Chunk[] {
   return chunks
 }
 
+/** 整段化切片（Phase A/B：卡片=整段/整子块）：
+ *  按换行切“段”，跳过标题行；段 ≤ maxChars（默认 1000）→ 一块；超长段按句（。！？；;）折成 ≤maxChars 的子块。
+ *  子块共享同一 paragraphIndex，用于“段级保留/剔除”（任一子块有信号 → 整段所有子块一起保留）。
+ *  位置记 “第N段” 或 “第N段（片段M）”。 */
+export const CHUNK_PARAGRAPH_MAX = 1000
+export interface ParagraphChunk { text: string; position: string; paragraphIndex: number }
+export function chunkByParagraphs(text: string, maxChars: number = CHUNK_PARAGRAPH_MAX): ParagraphChunk[] {
+  const paras = text
+    .split(/\r?\n+/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+  const out: ParagraphChunk[] = []
+  paras.forEach((p, i) => {
+    const pos = `第${i + 1}段`
+    if (isTitleLikeLine(p)) return
+    if (p.length <= maxChars) {
+      out.push({ text: p, position: pos, paragraphIndex: i })
+      return
+    }
+    const sentences = p.split(/(?<=[。！？；;])/).map((s) => s.trim()).filter(Boolean)
+    let buf = ''
+    let sub = 1
+    const flush = () => {
+      if (buf) {
+        out.push({ text: buf, position: `${pos}（片段${sub}）`, paragraphIndex: i })
+        sub += 1
+        buf = ''
+      }
+    }
+    for (const s of sentences) {
+      if (buf.length + s.length > maxChars) flush()
+      buf += s
+    }
+    flush()
+  })
+  return out
+}
+
 /** 字符 bigram（中文无需分词，用相邻字符对近似文本相似度） */
 export function bigrams(s: string): string[] {
   const chars = Array.from(s.replace(/\s+/g, ''))
@@ -253,6 +291,20 @@ if (import.meta.vitest) {
       expect(chunks.some((c) => c.text.startsWith('第一段完整的一句话'))).toBe(true)
       expect(chunks.some((c) => c.text.endsWith('何况这是一句。'))).toBe(true)
       expect(chunks.some((c) => c.position.includes('片段'))).toBe(false)
+    })
+
+    it('chunkByParagraphs splits over-long paragraph into pieces sharing paragraphIndex (Phase A/B 整段化)', () => {
+      const long = '学前教育蓬勃发展。' + '园所数量逐年增加，师资队伍不断壮大，办园质量稳步提升。'.repeat(30)
+      const chunks = chunkByParagraphs('教育\n\n' + long, 100)
+      // 跳过标题行
+      expect(chunks.some((c) => c.text === '教育')).toBe(false)
+      // 每一块长度 ≤ 上限
+      expect(chunks.every((c) => c.text.length <= 100)).toBe(true)
+      // 超长段被拆成多块，且都共享同一个 paragraphIndex（同一段）
+      expect(chunks.length).toBeGreaterThan(1)
+      expect(chunks.every((c) => c.paragraphIndex === chunks[0].paragraphIndex)).toBe(true)
+      // 位置含“片段M”
+      expect(chunks.every((c) => c.position.includes('片段'))).toBe(true)
     })
 
     it('keeps all lexically related paragraphs and drops definitely-unrelated ones (Task 3.4.7)', () => {

@@ -105,10 +105,48 @@ interface Contradiction {
   variants: ContradictionVariant[];
 }
 
-/** LLM Provider 配置（密钥不回传，只回 apiKeySet） */
-interface LlmProviderConfig { id: string; name: string; apiBase: string; model: string; apiKeySet: boolean; }
+/** 资料汇编（Phase 6：三段式撰写第一步） */
+type CompilationStatus = 'drafting' | 'reviewing' | 'finalized';
+type CompilationContradictionStatus = 'pending' | 'resolved' | 'ignored';
+interface CompilationItem {
+  id: string; compilationId: string; position: number; sourceId: string;
+  excerpt: string; ts?: string; note?: string; extraTags: string[]; kept: boolean;
+  sourceTitle?: string;   // 服务端 JOIN 填充
+  createdAt: string;
+}
+interface CompilationContradictionVariant {
+  id: string; contradictionId: string; itemId: string; variantText: string;
+  sourceId: string; sourceTitle?: string; createdAt: string;
+}
+interface CompilationContradiction {
+  id: string; compilationId: string; topic: string; kind: ContradictionKind;
+  status: CompilationContradictionStatus; chosenItemId?: string; createdAt: string;
+  variants: CompilationContradictionVariant[];
+}
+type CompilationRepairStatus = 'pending' | 'accepted' | 'rejected';
+interface CompilationRepair {
+  id: string; compilationId: string; itemId: string; originalText: string;
+  revisedText: string; reason: string; status: CompilationRepairStatus;
+  createdAt: string; updatedAt: string;
+}
+interface Compilation {
+  id: string; taskId: string; title: string; status: CompilationStatus;
+  createdAt: string; updatedAt: string;
+  items: CompilationItem[]; contradictions: CompilationContradiction[]; repairs?: CompilationRepair[];
+}
+/** 汇编回收站条目（判别联合：资料卡片 / 语义补全修订 / 矛盾） */
+type CompilationRecycleBinItem =
+  | { kind: 'contradiction'; id: string; contradiction: CompilationContradiction }
+  | { kind: 'repair'; id: string; repair: CompilationRepair }
+  | { kind: 'card'; id: string; item: CompilationItem };
 
-interface AppSettings { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string; }
+/** 规范文档库（Phase 6.4.1） */
+interface StyleGuide { id: string; name: string; content: string; isDefault: boolean; createdAt: string; updatedAt: string; }
+
+/** LLM Provider 配置（密钥不回传，只回 apiKeySet） */
+interface LlmProviderConfig { id: string; name: string; apiBase: string; model: string; apiKeySet: boolean; concurrency?: number; }
+
+interface AppSettings { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string; keepAwake?: boolean; }
 
 /** 统一错误返回 */
 interface ApiError { code: string; message: string; details?: unknown; }
@@ -162,8 +200,12 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 |---|---|---|
 | `compilation:list` | `{ taskId }` → `{ compilations: Compilation[] }` | 任务的全部资料汇编（按时间倒序，含卡片与矛盾） |
 | `compilation:get` | `{ compilationId }` → `{ compilation: Compilation }` | 读取一次资料汇编 |
-| `compilation:generate` | `{ taskId, title }` → `{ compilation: Compilation }` | 生成资料汇编（本地宽召回 + AI 细读 + 矛盾标注；无 Provider/失败降级本地候选） |
+| `compilation:generate` | `{ taskId, title }` → `{ compilation: Compilation, interrupted? }` | 生成资料汇编（本地宽召回 + AI 细读 + 矛盾标注；无 Provider/失败降级本地候选）。大模型异常中断时返回 `interrupted:{stage,message,percent}` 且 `compilation` 为已完成窗口的部分卡片（`drafting`），供前端展示「尝试继续」 |
 | `compilation:regenerate` | `{ taskId, title }` → `{ compilation: Compilation }` | 重新生成资料汇编 |
+| `compilation:continue` | `{ compilationId }` → `{ compilation: Compilation, interrupted? }` | 中断续跑（Phase 6.x，会话内）：从断点继续窗口细读/矛盾扫描，复用已完成窗口/卡片，不重复读取；再次异常仍返回 `interrupted`（可再点「尝试继续」） |
+
+> **整段化切片（Phase A/B）**：切片以**整段**为基本单元——`chunkByParagraphs`（默认上限 `CHUNK_PARAGRAPH_MAX=1000`）按换行切段；超长段仅按句号折成 ≤上限 的子块并共存同一 `paragraphIndex`；**粗细筛以整段为单位做“保留/剔除”**（段内任一子块有信号 → 整段所有子块一起保留，避免“一整段相关却被误筛”）。**资料卡片=整段/整子块**（AI 不再按时间/事实切分，excerpt=该段原文）。
+> **429 自动续传（Phase A/B）**：窗口细读/矛盾扫描遇到**限流（HTTP 429）**时，主进程自动降本次生成并发数（`reduceConcurrency` 减半、最小 1，**不写回 Provider 设置**，仅本次生效）、退避后从断点自动续跑（`runWithRateLimitAutoResume`，默认上限 `RATE_LIMIT_RESUME_LIMIT=2`）；降并发时经事件 **``compilation:advice`（`{ taskId, kind:'reduce-concurrency' }`）** 推送建议，渲染层翻译为「建议降低当前大模型的并发数」存为对话消息。若仍限流，`interrupted.retryable=true` 供前端自动续传兜底（前端最多 2 次、间隔递增），其余异常 `retryable` 缺省，仅提供手动「尝试继续」。`CompilationInterrupt` 增加 `retryable?: boolean`。
 | `compilation:updateItem` | `{ itemId, excerpt?, ts?, note?, extraTags?, kept? }` → `{ item: CompilationItem }` | 编辑资料卡片 |
 | `compilation:deleteItem` | `{ itemId }` → `{ ok: true }` | 删除资料卡片 |
 | `compilation:resolveContradiction` | `{ contradictionId, action: 'resolve'\|'ignore', chosenItemId? }` → `{ contradiction: CompilationContradiction }` | 汇编矛盾取舍：resolve 须传保留的卡片 id（属于该矛盾）；ignore 清空已选 |
@@ -207,11 +249,11 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `taskMessages:list` | `{ taskId }` → `{ items: TaskMessage[] }` | 任务对话历史（role: user/assistant；kind: chat/instruction/notice） |
 | `taskMessages:add` | `{ taskId, role, kind, content }` → `{ message: TaskMessage }` | 追加任务消息（一般由主进程自动写入） |
 | `writing:retrieve` | `{ taskId }` → `{ chunks: RetrievedChunk[] }` | 任务范围内 RAG 检索预览 |
-| `writing:generateDraft` | `{ taskId, instruction, compilationId? }` → `{ draft: Draft, articleTitle: string \| null, contradictions: Contradiction[] }` | 生成第 0 稿（幂等：已有初稿直接返回既有稿与矛盾清单）。提供 `compilationId` 时仅以已确认汇编卡片为材料，跳过检索/扫描。阶段进度经事件 `draft:generateProgress` 推送 |
+| `writing:generateDraft` | `{ taskId, instruction, compilationId }` → `{ draft: Draft, articleTitle: string \| null, contradictions: Contradiction[] }` | 生成第 0 稿（幂等：已有初稿直接返回既有稿与矛盾清单）。**三步式（强制）**：`compilationId` 必填且须为已确认（`finalized`）的资料汇编，仅以该汇编 kept 卡片为材料，跳过检索/扫描；缺失/未确认返回 `COMPILATION_NOT_FINALIZED`。阶段进度经事件 `draft:generateProgress` 推送 |
 | `draft:get` | `{ draftId }` → `{ draft: Draft }` | 读取某稿（含片段与来源） |
 | `draft:getLatest` | `{ taskId }` → `{ draft: Draft }` | 读取任务最新一稿（仅初稿） |
 | `draft:updateContent` | `{ draftId, markdown }` → `{ draft: Draft }` | 整稿保存（按标题行重建片段） |
-| `draft:regenerate` | `{ taskId, instruction, compilationId? }` → 同 generateDraft | 删除现有第 0 稿后重新生成（覆盖旧稿）；`compilationId` 语义同 generateDraft |
+| `draft:regenerate` | `{ taskId, instruction, compilationId }` → 同 generateDraft | 删除现有第 0 稿后重新生成（覆盖旧稿）；`compilationId` 语义同 generateDraft（必填、须已确认） |
 | `draft:getContradictions` | `{ draftId }` → `{ contradictions: Contradiction[] }` | 读取矛盾清单 |
 | `draft:resolveContradiction` | `{ contradictionId, action: 'adopt'\|'ignore'\|'revert', variantId? }` → `{ contradiction: Contradiction }` | 矛盾取舍：adopt 须带属于该矛盾的说法 id；ignore 清空采纳；revert=撤销采纳（配合编辑器撤销回退为待处理）。仅标记状态，不修改正文 |
 | `draft:applyContradiction` | `{ draftId, contradictionId, variantId }` → `{ draft: Draft, contradiction: Contradiction }` | 采纳 → 正文本地替换（from=draftQuote → to=replacement，移除 `【矛盾#N】` 标注，整稿落库，不调用大模型，资料库只读；from 未逐字匹配则失败且状态不变） |
@@ -243,6 +285,7 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `app:openFileDialog` | `{}` → `{ paths: string[] }` | 系统文件选择对话框（主进程打开，仅回传路径） |
 | `app:openDirectoryDialog` | `{}` → `{ path: string \| null }` | 系统目录选择对话框（工作区选择） |
 | `app:getInfo` | `{}` → `{ version, platform }` | 应用版本与平台 |
+| `app:getPdfCmapsUrl` | `{}` → `{ url: string }` | pdf.js cMaps 资源基址（渲染层预览中文/CID 字体 PDF 需要；主进程启动时注入 `setPdfCmapsDir`） |
 | `app:openExternal` | `{ url }` → `{ ok: true }` | 打开外部链接（http/https 白名单，预设模型注册页等） |
 | `clipboard:readText` | `{}` → `{ text: string }` | 读取系统剪贴板纯文本（自定义右键菜单「粘贴」经主进程访问 clipboard） |
 | `clipboard:writeText` | `{ text }` → `{ ok: true }` | 写入系统剪贴板纯文本（自定义右键菜单「复制/剪切」经主进程访问 clipboard） |
@@ -264,13 +307,13 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 - **资料**：`SOURCE_NOT_FOUND`、`SOURCE_DUPLICATE`、`PARSE_UNSUPPORTED`、`PARSE_FAILED`
 - **信源**：`URL_INVALID`、`URL_BLOCKED`（协议白名单外）、`FETCH_FAILED`、`FETCH_TIMEOUT`
 - **LLM**：`LLM_UNAUTHORIZED`、`LLM_TIMEOUT`、`LLM_RATE_LIMIT`、`LLM_NETWORK`、`LLM_PROVIDER_ERROR`、`LLM_EMPTY_RESPONSE`、`LLM_FORMAT_INVALID`、`LLM_NO_CANDIDATES`
-- **撰写**：`TASK_NOT_FOUND`、`DRAFT_NOT_FOUND`、`TASK_NO_SCOPE`、`TASK_NO_PROVIDER`
+- **撰写**：`TASK_NOT_FOUND`、`DRAFT_NOT_FOUND`、`TASK_NO_SCOPE`、`TASK_NO_PROVIDER`、`COMPILATION_NOT_FINALIZED`
 - **通用**：`INVALID_PARAM`、`INTERNAL_ERROR`
 
 ## 4. 生成初稿的契约（Phase 3.5：指令驱动 + JSON 输出）
 
-- 请求：`writing:generateDraft { taskId, instruction, compilationId? }`（`instruction` 为用户要求，应包含标题与可能的其他要求；`compilationId` 提供已确认汇编时，材料仅取该汇编 kept 卡片，不再实时检索/扫描）。
-- 提交物：默认行文规范（`DEFAULT_STYLE_GUIDE`，合并「志书文体文风」+「志书行文规则」，注入 system/user prompt）+ 资料库检索到的全部有效材料 + 用户要求。
+- 请求：`writing:generateDraft { taskId, instruction, compilationId }`（`instruction` 为用户要求；`compilationId` **必填**且须为已确认 `finalized` 的资料汇编，材料仅取该汇编 kept 卡片，不再实时检索/扫描）。
+- 提交物：**三段式（Phase 6.3）**——已确认资料汇编的 `kept` 卡片文本（矛盾取舍中被排除的卡片 `kept=0` 不纳入，按时间排序去重）+ 当前默认行文规范（`getDefaultStyleGuide()?.content` 或回退 `DEFAULT_STYLE_GUIDE`）+ 可选任务级参考范本（`task.modelText`，非空时注入【参考范本】）。仅在未提供 `compilationId` 的旧链路下，材料为「资料库检索到的全部有效材料 + 用户要求」。
 - 大模型输出要求为 JSON（缺标题等必要信息时输出 error 详情）：
 
 ```json

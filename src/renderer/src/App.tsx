@@ -1,5 +1,4 @@
 import { useEffect, useState, useCallback, useRef, type ReactNode } from 'react'
-import TopBar from './components/TopBar'
 import SideNav, { type PageKey } from './components/SideNav'
 import EmptyState from './components/EmptyState'
 import SourceList from './components/SourceList'
@@ -11,14 +10,13 @@ import WritingTaskList from './components/WritingTaskList'
 import WritingEmptyState from './components/WritingEmptyState'
 import WritingWorkspace from './components/WritingWorkspace'
 import ResizeHandle from './components/ResizeHandle'
+import PaneEdgeToggle from './components/PaneEdgeToggle'
 import ErrorBoundary from './components/ErrorBoundary'
 import OnboardingOverlay from './components/OnboardingOverlay/OnboardingOverlay'
 import TextContextMenu from './components/TextContextMenu'
 import ConfirmDialog from './components/ConfirmDialog'
 import { DEMO_TASK_TITLE } from '../../shared/demo'
 import { zhCN } from './i18n/zh-CN'
-
-interface AppInfo { version: string; platform: string }
 
 const NAV_ITEMS: { key: PageKey; label: string }[] = [
   { key: 'sources', label: zhCN.nav.sources },
@@ -77,11 +75,9 @@ function readLayout(key: string, fallback: number): number {
 
 export default function App() {
   const [page, setPage] = useState<PageKey>('sources')
-  const [appInfo, setAppInfo] = useState<AppInfo | null>(null)
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null)
   const [showTagManager, setShowTagManager] = useState(false)
   const [bulkMode, setBulkMode] = useState(false)
-  const [menuOpen, setMenuOpen] = useState(false)
   const [sourcesVersion, setSourcesVersion] = useState(0)
   // 工作区来源移除确认（2026-08-28）：文件被删除且已被资料汇编引用时，弹框决定是否清理该来源的卡片
   const [sourceRemoval, setSourceRemoval] = useState<{ sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' } | null>(null)
@@ -138,16 +134,6 @@ export default function App() {
     try { localStorage.setItem(LS_THEME, theme) } catch { /* ignore */ }
   }, [theme])
 
-  useEffect(() => {
-    let cancelled = false
-    window.api.getAppInfo().then((res) => {
-      if (!cancelled && res.ok && res.data) setAppInfo(res.data)
-    }).catch(() => { if (!cancelled) setAppInfo(null) })
-    return () => { cancelled = true }
-  }, [])
-
-  const pageTitle = NAV_ITEMS.find((item) => item.key === page)?.label ?? ''
-
   // 每次进入"资料库"功能区时自动触发一次工作区同步（Task 2.2.5，效果等同手动"同步工作区"）
   useEffect(() => {
     if (page === 'sources') {
@@ -171,14 +157,6 @@ export default function App() {
       setWritingReload((v) => v + 1)
     }
   }
-
-  // 功能菜单：点击外部关闭
-  useEffect(() => {
-    if (!menuOpen) return
-    const close = () => setMenuOpen(false)
-    document.addEventListener('mousedown', close)
-    return () => document.removeEventListener('mousedown', close)
-  }, [menuOpen])
 
   // 资料被删除后清理选中状态
   const handleSourcesChanged = useCallback((deletedIds: string[]) => {
@@ -260,37 +238,7 @@ export default function App() {
       case 'sources':
         return (
           <section className="center-pane" data-onboarding="sources-library" style={{ width: centerW, flexShrink: 0 }}>
-            <div className="center-pane__header">
-              <h3 className="center-pane__title">{zhCN.panes.sources.listTitle}</h3>
-              <div className="center-pane__menu">
-                <button
-                  type="button"
-                  className="center-pane__menu-btn"
-                  onClick={(e) => { e.stopPropagation(); setMenuOpen((o) => !o) }}
-                  title={zhCN.sourceMenu.tooltip}
-                >
-                  &#8943;
-                </button>
-                {menuOpen ? (
-                  <div className="center-pane__menu-dropdown" onMouseDown={(e) => e.stopPropagation()}>
-                    <button
-                      type="button"
-                      className="center-pane__menu-item"
-                      onClick={() => { setShowTagManager(true); setSelectedSourceId(null); setBulkMode(false); setMenuOpen(false) }}
-                    >
-                      {zhCN.sourceMenu.tagManage}
-                    </button>
-                    <button
-                      type="button"
-                      className="center-pane__menu-item"
-                      onClick={() => { setBulkMode(true); setMenuOpen(false) }}
-                    >
-                      {zhCN.sourceMenu.manage}
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-            </div>
+            {/* 资料库中栏：顶部导入/整理资料按钮 + 下方「网页资料库」「本地资料库」两段小标题（标签/资料管理入口已并入工具栏菜单） */}
             <SourceList
               onSelect={(id) => { setSelectedSourceId(id); setShowTagManager(false) }}
               activeId={selectedSourceId}
@@ -298,6 +246,8 @@ export default function App() {
               onExitBulk={() => setBulkMode(false)}
               onSourcesChanged={handleSourcesChanged}
               reloadKey={sourcesVersion}
+              onOpenTagManager={() => { setShowTagManager(true); setSelectedSourceId(null); setBulkMode(false) }}
+              onEnterBulk={() => setBulkMode(true)}
             />
           </section>
         )
@@ -373,21 +323,16 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <TopBar
-        pageTitle={pageTitle}
-        appInfo={appInfo}
-        centerVisible={centerVisible}
-        onToggleCenter={() => setCenterVisible((v) => !v)}
-      />
       <div className="app-body">
         <SideNav current={page} items={NAV_ITEMS} onSelect={setPage} style={{ width: sidebarW, flexShrink: 0 }} />
         <ResizeHandle onResize={handleResizeSidebar} />
-        {centerVisible ? (
-          <>
-            {renderCenterPane()}
-            <ResizeHandle onResize={handleResizeCenter} />
-          </>
-        ) : null}
+        {centerVisible ? renderCenterPane() : null}
+        {/* 中栏/右栏边界：光标悬停时边界线高亮并出现圆角小三角按钮，点击切换中栏显隐（原顶栏「隐藏中栏」按钮已移除，迁移至此） */}
+        <PaneEdgeToggle
+          visible={centerVisible}
+          onToggle={() => setCenterVisible((v) => !v)}
+          onResize={centerVisible ? handleResizeCenter : () => {}}
+        />
         {renderWorkPane()}
         {/* 撰写工作台常驻挂载：切换页面仅隐藏不卸载，保留进行中的对话记录与生成进度（2026-08-14） */}
         <main className="work-pane work-pane--writing" style={{ display: page === 'writing' ? undefined : 'none' }}>

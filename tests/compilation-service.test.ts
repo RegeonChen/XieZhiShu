@@ -12,7 +12,10 @@ import {
   mergeContradictionGroups,
   mapOutputItemsToInputs,
   mergeCompilationOutputs,
-  buildCompilationSourceRefs
+  buildCompilationSourceRefs,
+  pickRemainingWindows,
+  nextContradictionBatch,
+  reduceConcurrency
 } from '../src/main/writing/compilation-service'
 
 let db: Database.Database
@@ -31,6 +34,17 @@ describe('compilation service (Phase 6.1)', () => {
     expect(chunks.some((c) => c.sourceId === 's1')).toBe(true)
     expect(chunks.some((c) => c.sourceId === 's2')).toBe(true)
     expect(chunks.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('recallCompilationCandidates keeps all pieces of a paragraph if any piece has signal (整段级保留，Phase A/B)', () => {
+    const longPara = '学前教育事业发展概述。' + '多年来，办园水平不断提升，教师队伍持续优化，城乡差距不断缩小，各项指标稳步向好。'.repeat(40)
+    const filler = '与主题完全无关的历史沿革记载，内容不涉及本次撰写主题。'.repeat(600)
+    db.prepare(`INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('wid', 'file', '某区综合史料汇编', ?, 'ready')`).run(longPara + '\n' + filler)
+    const res = recallCompilationCandidates(['wid'], '学前教育')
+    const para1 = res.chunks.filter((c) => c.position.startsWith('第1段'))
+    expect(para1.length).toBeGreaterThan(1)
+    expect(para1.every((c) => c.sourceId === 'wid')).toBe(true)
+    expect(res.chunks.every((c) => c.position.startsWith('第1段'))).toBe(true)
   })
 
   it('parseCompilationOutput parses fenced JSON with items and contradictions', () => {
@@ -148,5 +162,30 @@ describe('card contradiction scan (Phase 6.1 优化)', () => {
     const b = [{ topic: '数量', kind: 'data', variants: [{ excerpt: '82 所', sourceRefs: ['#2'] }, { excerpt: '76 所', sourceRefs: ['#1'] }] }]
     const merged = mergeContradictionGroups(a, b)
     expect(merged).toHaveLength(1)
+  })
+
+  it('pickRemainingWindows returns window indices not yet done (断点续传不重复读已完成窗口)', () => {
+    const done = new Set([0, 1, 3])
+    expect(pickRemainingWindows(done, 5)).toEqual([2, 4])
+    expect(pickRemainingWindows(done, 4)).toEqual([2])
+    expect(pickRemainingWindows(new Set([0, 1, 2, 3]), 4)).toEqual([])
+    // 失败/未读的窗口不在 doneSet → 续跑时重新读（不丢任何窗口）
+    expect(pickRemainingWindows(new Set([0, 2]), 4)).toEqual([1, 3])
+  })
+
+  it('nextContradictionBatch advances the scan offset and stops when done (断点续传从正确批次继续)', () => {
+    expect(nextContradictionBatch(0, 2, 5)).toEqual({ start: 0, end: 2 })
+    expect(nextContradictionBatch(2, 2, 5)).toEqual({ start: 2, end: 4 })
+    expect(nextContradictionBatch(4, 2, 5)).toEqual({ start: 4, end: 5 })
+    expect(nextContradictionBatch(5, 2, 5)).toBeNull()
+    // 从断点（第 2 批之后）继续
+    expect(nextContradictionBatch(4, 2, 6)).toEqual({ start: 4, end: 6 })
+  })
+
+  it('reduceConcurrency halves (min 1) on rate limit (仅本次生成生效，不写回 Provider)', () => {
+    expect(reduceConcurrency(8)).toBe(4)
+    expect(reduceConcurrency(4)).toBe(2)
+    expect(reduceConcurrency(3)).toBe(1)
+    expect(reduceConcurrency(1)).toBe(1)
   })
 })

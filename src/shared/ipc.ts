@@ -7,6 +7,7 @@ import type {
   AppSettings,
   Compilation,
   CompilationContradiction,
+  CompilationInterrupt,
   CompilationItem,
   CompilationRepair,
   CompilationRecycleBinItem,
@@ -57,6 +58,7 @@ export const IPC = {
   COMPILATION_LIST: 'compilation:list',
   COMPILATION_GET: 'compilation:get',
   COMPILATION_GENERATE: 'compilation:generate',
+  COMPILATION_CONTINUE: 'compilation:continue',
   COMPILATION_UPDATE_ITEM: 'compilation:updateItem',
   COMPILATION_DELETE_ITEM: 'compilation:deleteItem',
   COMPILATION_RESOLVE_CONTRADICTION: 'compilation:resolveContradiction',
@@ -159,6 +161,8 @@ export const IPC_EVENTS = {
   WRITING_STREAM_DELTA: 'writing:streamDelta',
   /** 资料汇编生成进度：{ taskId, stage, percent, etaSeconds?, candidateChunks?, candidateSources? }（Phase 6.1） */
   COMPILATION_PROGRESS: 'compilation:progress',
+  /** 资料汇编生成/续传过程中的建议提示（如 429 限流后建议降低 Provider 并发数）：{ taskId, message }（Phase A/B） */
+  COMPILATION_ADVICE: 'compilation:advice',
   /** 工作区文件被移除且已被资料汇编引用：需用户确认是否删除该来源的卡片（2026-08-28） */
   WORKSPACE_SOURCE_REMOVED: 'workspace:sourceRemoved'
 } as const
@@ -285,7 +289,12 @@ export interface CompilationGenerateReq {
   taskId: string
   title: string
 }
-export type CompilationGenerateRes = { compilation: Compilation; contradictionScan?: { ok: boolean; message?: string } }
+export type CompilationGenerateRes = { compilation: Compilation; contradictionScan?: { ok: boolean; message?: string }; interrupted?: CompilationInterrupt }
+/** 中断续跑（Phase 6.x：会话内断点续传） */
+export interface CompilationContinueReq {
+  compilationId: string
+}
+export type CompilationContinueRes = { compilation: Compilation; interrupted?: CompilationInterrupt }
 /** 资料汇编调整（2026-08-28，Phase 6.4.4）：首条消息生成汇编后续每条消息都是对汇编的调整（批量删除/增补/自定义编辑） */
 export interface CompilationAdjustReq {
   taskId: string
@@ -505,8 +514,8 @@ export interface WritingGenerateDraftReq {
   taskId: string
   /** 用户要求（应包含标题与可能的其他要求）；大模型缺必要信息时返回详细报错 */
   instruction: string
-  /** Phase 6.3：使用已确认的资料汇编作为材料（缺省走旧检索链路） */
-  compilationId?: string
+  /** 三步式（强制）：必须为已确认（finalized）的资料汇编 id；未提供/未确认返回 COMPILATION_NOT_FINALIZED */
+  compilationId: string
 }
 export type WritingGenerateDraftRes = {
   draft: Draft
@@ -582,6 +591,8 @@ export interface LlmSaveProviderReq {
   apiBase: string
   model: string
   apiKey?: string
+  /** Phase B：并发窗口数（默认 4，范围 1–8） */
+  concurrency?: number
 }
 export type LlmSaveProviderRes = { provider: LlmProviderConfig }
 
@@ -673,6 +684,7 @@ export interface IpcMapping {
   [IPC.COMPILATION_LIST]: { _req: CompilationListReq; _res: ApiResult<CompilationListRes> }
   [IPC.COMPILATION_GET]: { _req: CompilationGetReq; _res: ApiResult<CompilationGetRes> }
   [IPC.COMPILATION_GENERATE]: { _req: CompilationGenerateReq; _res: ApiResult<CompilationGenerateRes> }
+  [IPC.COMPILATION_CONTINUE]: { _req: CompilationContinueReq; _res: ApiResult<CompilationContinueRes> }
   [IPC.COMPILATION_UPDATE_ITEM]: { _req: CompilationUpdateItemReq; _res: ApiResult<CompilationUpdateItemRes> }
   [IPC.COMPILATION_DELETE_ITEM]: { _req: CompilationDeleteItemReq; _res: ApiResult<void> }
   [IPC.COMPILATION_RESOLVE_CONTRADICTION]: { _req: CompilationResolveContradictionReq; _res: ApiResult<CompilationResolveContradictionRes> }

@@ -2,7 +2,7 @@
 
 本计划基于 `AGENTS.md` 制定。本项目为**单人开发**，`Team Responsibilities` 中的模块划分是代码组织边界，不涉及多人协作。设计文档位于 `docs/`（数据模型 `data-model.md`、共享契约 `shared-contracts.md`、UI 架构 `ui-architecture.md`），与代码同步维护。
 
-> **2026-08-19 文档整理说明**：原文件按时间追加了大量已完成任务的详细记录（含多次修订过程），本版将已完成阶段的冗杂过程合并为「已完成阶段摘要」，保留对后续开发仍有价值的方案结论与根因；详细历史仍可在 Git 提交记录中回溯。**未完成的 Phase 5 保持完整规划。**
+> **2026-08-19 文档整理说明**：原文件按时间追加了大量已完成任务的详细记录（含多次修订过程），本版将已完成阶段的冗杂过程合并为「已完成阶段摘要」，保留对后续开发仍有价值的方案结论与根因；详细历史仍可在 Git 提交记录中回溯。**未完成的 Last Phase（收尾阶段，原 Phase 5）保持完整规划。**
 
 ## 目录
 
@@ -10,7 +10,7 @@
 - [已完成阶段摘要（Phase 1 – Phase 3.7）](#已完成阶段摘要phase-1--phase-37)
 - [Phase 6: 三段式撰写重构](#phase-6-三段式撰写重构资料汇编--行文规范--初稿2026-08-25-规划中)
 - [Phase 6.x 网页资料库后续优化](#phase-6x-网页资料库后续优化)
-- [Phase 5: Acceptance & Packaging](#phase-5-acceptance--packaging待进行)
+- [Last Phase（收尾阶段）：Acceptance & Packaging](#last-phaseacceptance--packaging收尾阶段全项目最后执行)
 - [Project Completion Criteria](#project-completion-criteria)
 
 
@@ -214,11 +214,13 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 - **UI**：设置页新增「**步骤默认模型**」区块（中栏导航新增「步骤默认模型」），两个下拉分别选第 1/3 步默认模型，选项为已配置 Provider + 「未设置（回退任务/全局）」；保存即时生效。
 - **验收**：第 1/3 步可分别选不同默认模型并真实生效（生成汇编 / 生成初稿分别用所设 Provider）；未设置或任务已固定时按「任务 → 步骤默认 → 全局」回退；typecheck 零错误、166 项单测、构建通过。
 
-### Phase 6.7 测试、文档与发布
+### Phase 6.7 测试、文档与发布（已完成）
 
 - 更新 `docs/{data-model,shared-contracts,ui-architecture}.md`、`PLAN.md`（本阶段标记完成）、`README.md`、`agents.md`（决策与近期记录）。
 - 全量验证：typecheck 零错误 / 单测（预计 150+）/ 生产构建；端到端演示：选工作区 → ① 生成汇编（召回+细读+矛盾）→ 审阅取舍 → 确认 → ② 规范（预留）→ ③ 生成初稿（流式）→ 编辑保存。
 - 视达成度发布新版本（如 `v0.2.0`），配置 GitHub Actions release（沿用 v* tag 触发）。
+
+> **Status（2026-09-06）**：已完成——文档同步至当前三段式代码现状（`docs/{data-model,shared-contracts,ui-architecture}.md` 更新资料汇编/二次加工/回收站/规范库/按步骤默认模型/网页资料库优化/PDF cmaps；`README.md` 功能与技术实现更新；`PLAN.md` 标记本阶段完成、将 Phase 5 重命名为 **Last Phase（收尾阶段）** 避免序号歧义；`AGENTS.md` 同步当前状态与近期记录）。验证：typecheck 零错误、单测 190 项通过（1 项 watcher chokidar 环境失败为既有问题）、生产构建成功。端到端真实大模型生成/矛盾取舍/站点抓取仍需用户实测。
 
 ### 验收标准汇总
 
@@ -239,7 +241,9 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 - **E10 发布时间排序** ✅：新增 extractPublishedDate(html) 解析 meta（published_time/publishdate/pubdate/date）、<time datetime>、可见日期文本；抓取后写 web_site_articles.published_at（Migration 025），文章清单按 COALESCE(published_at, discovered_at) DESC 排序，与资料汇编时间排序一致。
 - **E11 领域词表自动化** ✅→已撤销（2026-09-01）：曾落地「用户按站点配置关键词」（parseSiteKeywords + web_sites.keywords + IPC webSource:updateKeywords + WebSourcePanel 输入），应产品要求**移除站点关键词功能**——Migration 026 删除 keywords 列，IPC/preload/UI/召回逻辑一并删除。「已抓文章标题词频/聚类自动扩充」进阶方案未实现。
 
-## Phase 5: Acceptance & Packaging（待进行）
+## Last Phase（收尾阶段）: Acceptance & Packaging（待进行）
+
+> **说明**：本阶段是**整个项目的收尾阶段**，在所有功能阶段（Phase 1–6.x）全部完成后才执行。此处保留「Phase 5」的旧编号仅为历史追溯，不代表其应在 Phase 6 之前完成；序号与执行顺序无关。
 
 **Overall Goal:** 产出 Windows 安装包、完成端到端演示与项目文档。
 

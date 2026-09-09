@@ -34,7 +34,8 @@ export interface AppApi {
   getTagSourceIds(tagId: string): Promise<{ ok: boolean; data?: { sourceIds: string[] }; error?: { code: string; message: string } }>
   listCompilations(taskId: string): Promise<{ ok: boolean; data?: { compilations: unknown[] }; error?: { code: string; message: string } }>
   getCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
-  generateCompilation(taskId: string, title: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
+  generateCompilation(taskId: string, title: string): Promise<{ ok: boolean; data?: { compilation: unknown; interrupted?: { stage: string; message: string; percent: number } }; error?: { code: string; message: string } }>
+  continueCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown; interrupted?: { stage: string; message: string; percent: number } }; error?: { code: string; message: string } }>
   adjustCompilation(taskId: string, compilationId: string, instruction: string): Promise<{ ok: boolean; data?: { compilation: unknown; explain?: string; removedCards?: number; addedCards?: number; updatedCards?: number }; error?: { code: string; message: string } }>
   reorderCompilation(compilationId: string, direction: 'asc' | 'desc'): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
   undoCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown; undoAvailable: number; redoAvailable: number }; error?: { code: string; message: string } }>
@@ -65,11 +66,11 @@ export interface AppApi {
   summarizeAll(): Promise<{ ok: boolean; data?: { processed: number; ok: number; failed: number }; error?: { code: string; message: string } }>
   getSourceSummary(id: string): Promise<{ ok: boolean; data?: { summary?: unknown }; error?: { code: string; message: string } }>
   listProviders(): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
-  saveProvider(input: { id?: string; name: string; apiBase: string; model: string; apiKey?: string }): Promise<{ ok: boolean; data?: { provider: unknown }; error?: { code: string; message: string } }>
+  saveProvider(input: { id?: string; name: string; apiBase: string; model: string; apiKey?: string; concurrency?: number }): Promise<{ ok: boolean; data?: { provider: unknown }; error?: { code: string; message: string } }>
   deleteProvider(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   testProvider(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   getSettings(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
-  updateSettings(patch: { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string }): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
+  updateSettings(patch: { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string; keepAwake?: boolean }): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   getWorkspaceStatus(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   workspaceNavSync(): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   migrateLegacyWorkspace(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
@@ -86,11 +87,12 @@ export interface AppApi {
   addTaskMessage(taskId: string, role: 'user' | 'assistant', content: string, kind: 'chat' | 'instruction' | 'notice'): Promise<{ ok: boolean; data?: { message: unknown }; error?: { code: string; message: string } }>
   onDraftGenerateProgress(cb: (p: { taskId: string; stage: string; percent: number; etaSeconds?: number }) => void): () => void
   onCompilationProgress(cb: (p: { taskId: string; stage: string; percent: number; etaSeconds?: number; candidateChunks?: number; candidateSources?: number }) => void): () => void
+  onCompilationAdvice(cb: (p: { taskId: string; kind: string }) => void): () => void
   onWritingStreamDelta(cb: (p: { taskId: string; text: string }) => void): () => void
   retrieveChunks(taskId: string): Promise<{ ok: boolean; data?: { chunks: unknown[] }; error?: { code: string; message: string } }>
   askSource(taskId: string, selection: string): Promise<{ ok: boolean; data?: { reply: string; refs: { index: number; sourceId: string; title: string; position?: string }[] }; error?: { code: string; message: string } }>
-  generateDraft(taskId: string, instruction: string, compilationId?: string): Promise<{ ok: boolean; data?: { draft: unknown; articleTitle: string | null; contradictions: unknown[] }; error?: { code: string; message: string } }>
-  regenerateDraft(taskId: string, instruction: string, compilationId?: string): Promise<{ ok: boolean; data?: { draft: unknown; articleTitle: string | null; contradictions: unknown[] }; error?: { code: string; message: string } }>
+  generateDraft(taskId: string, instruction: string, compilationId: string): Promise<{ ok: boolean; data?: { draft: unknown; articleTitle: string | null; contradictions: unknown[] }; error?: { code: string; message: string } }>
+  regenerateDraft(taskId: string, instruction: string, compilationId: string): Promise<{ ok: boolean; data?: { draft: unknown; articleTitle: string | null; contradictions: unknown[] }; error?: { code: string; message: string } }>
   getDraft(draftId: string): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   updateDraftContent(draftId: string, markdown: string): Promise<{ ok: boolean; data?: { draft: unknown }; error?: { code: string; message: string } }>
   getDraftContradictions(draftId: string): Promise<{ ok: boolean; data?: { contradictions: unknown[] }; error?: { code: string; message: string } }>

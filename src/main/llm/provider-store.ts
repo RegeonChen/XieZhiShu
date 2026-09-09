@@ -16,12 +16,19 @@ interface ProviderRow {
   api_base: string
   model: string
   api_key: string | null
+  concurrency: number | null
   created_at: string
   updated_at: string
 }
 
 function rowToConfig(row: ProviderRow): LlmProviderConfig {
-  return { id: row.id, name: row.name, apiBase: row.api_base, model: row.model, apiKeySet: row.api_key != null }
+  return { id: row.id, name: row.name, apiBase: row.api_base, model: row.model, apiKeySet: row.api_key != null, concurrency: clampConcurrency(row.concurrency ?? 4) }
+}
+
+/** 并发数允许范围 1–8（Provider 并发/速率限制内，超限可能 429） */
+export function clampConcurrency(v: number | null | undefined): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return 4
+  return Math.min(8, Math.max(1, Math.round(v)))
 }
 
 export interface SaveProviderInput {
@@ -30,6 +37,8 @@ export interface SaveProviderInput {
   apiBase: string
   model: string
   apiKey?: string
+  /** Phase B：并发窗口数（默认 4，范围 1–8） */
+  concurrency?: number
 }
 
 function getProviderRowById(id: string): ProviderRow | undefined {
@@ -77,16 +86,17 @@ export function saveProvider(input: SaveProviderInput, codec: SecretCodec): LlmP
   }
 
   const now = new Date().toISOString()
+  const concurrency = clampConcurrency(input.concurrency ?? 4)
   if (existing) {
-    db.prepare('UPDATE llm_providers SET name = ?, api_base = ?, model = ?, api_key = ?, updated_at = ? WHERE id = ?')
-      .run(name, apiBase, model, apiKeyEncrypted, now, existing.id)
+    db.prepare('UPDATE llm_providers SET name = ?, api_base = ?, model = ?, api_key = ?, concurrency = ?, updated_at = ? WHERE id = ?')
+      .run(name, apiBase, model, apiKeyEncrypted, concurrency, now, existing.id)
     const row = getProviderRowById(existing.id)
     return rowToConfig(row!)
   }
 
   const id = crypto.randomUUID()
-  db.prepare('INSERT INTO llm_providers (id, name, api_base, model, api_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .run(id, name, apiBase, model, apiKeyEncrypted, now, now)
+  db.prepare('INSERT INTO llm_providers (id, name, api_base, model, api_key, concurrency, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(id, name, apiBase, model, apiKeyEncrypted, concurrency, now, now)
   const row = getProviderRowById(id)
   return rowToConfig(row!)
 }

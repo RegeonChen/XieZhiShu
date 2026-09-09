@@ -41,12 +41,12 @@
 | 决策点 | 方案 | 状态 |
 |---|---|---|
 | 桌面框架 | Electron 43 + React 18 + TypeScript strict（electron-vite 构建） | 已确认 |
-| 本地数据库 | SQLite（better-sqlite3 13，WAL + 外键 + 嵌入式迁移框架 Migration 001–016） | 已确认 |
+| 本地数据库 | SQLite（better-sqlite3 13，WAL + 外键 + 嵌入式迁移框架 Migration 001–027） | 已确认 |
 | 检索增强（RAG） | 本地向量嵌入（BGE-small-zh-v1.5，transformers.js + onnxruntime-web WASM 后端，纯本地）+ 词法 bigram 过滤式检索 + 可选 LLM 摘要粗筛；模型/引擎不可用自动降级纯词法 | 已确认 |
 | 文档解析 | PDF(pdf-parse) / Word(mammoth + word-extractor) / WPS(签名分发) / Excel(xlsx 0.20.3) / TXT / MD / 图片OCR(tesseract.js) | 已确认 |
 | 工作区资料库 | 指定本地文件夹即资料库：sha256+mtime/size 指纹对账、chokidar 实时监听 + 聚焦/进资料库/每分钟确定性兜底、双向同步（删除→回收站、改名→重命名文件） | 已确认 |
 | LLM 接入 | OpenAI-compatible Provider（兼容 DeepSeek、智谱等），safeStorage(DPAPI) 加密存密钥；任务可固定 Provider，未固定回退全局当前 Provider | 已确认 |
-| 写作规范 | 「范本」已重构为「写作规范 skills」（2026-08-13）：通用规范默认注入 + 部类细则按标题匹配/智能匹配/手动选择 | 已确认 |
+| 写作规范 | 规范文档库（`style_guides`，Phase 6.4.1）：默认规范（合并「志书文体文风」+「志书行文规则」）自动注入生成；可多篇、可设默认、可另存/覆盖/重命名/删除；第二步可选任务级参考范本（Phase 6.4.2） | 已确认 |
 | 编辑器 | TipTap 2.27 + tiptap-markdown，初稿为单编辑器连续 Markdown 文档，800ms 防抖整稿保存 | 已确认 |
 | 打包发布 | electron-builder（Windows NSIS，GitHub Actions tag 触发） | 已确认 |
 
@@ -123,8 +123,8 @@
 
 - **已完成**：Phase 1（脚手架/共享契约/数据库迁移框架）、Phase 2（文件导入/信源抓取/标签）、Phase 2.1（删除与标签重构）、Phase 2.2（工作区资料库 + 实时双向同步 + 自动同步触发源）、Phase 3.1（LLM Provider 配置）、Phase 3.2（BGE 向量嵌入 + 词法/向量混合检索 + LLM 摘要索引）、Phase 3.3（范本 → 后重构为写作规范 skills）、Phase 3.4（连续整稿显示 / 摘要粗筛 / 检索过滤式 / 重新生成）、Phase 3.5（聊天式工作台 + 对话持久化 + 进度提示）、Phase 3.6（预设大模型 + 获取 API key 指引）、Phase 3.7（矛盾预扫描 → 生成注入 → 定位审查三次调用链路、编辑器内嵌矛盾标注与弹窗、采纳本地修订 + 撤销兼容、矛盾/警告分类、文段来源询问、来源文件打开）、网页资料库（站点注册/发现/粗筛/增量抓取，任务绑定缓存文章）。
 - **产品范围**：收敛为"资料收集 → 撰写 → 初稿完成"；版本管理已删除（数据库保留旧列不动），每个任务仅保留初稿。
-- **验证基线**：typecheck 零错误；vitest 内联单测 149 项通过；生产构建成功。端到端实测（真实大模型生成/矛盾取舍/站点抓取）部分场景留待用户操作。
-- **进行中**：三段式撰写重构 Phase 6.0–6.6 已实现（数据模型/汇编生成/三步向导/生成链路/删 skills+默认规范/规范库/范本/三套主题/编辑器深改；Migration 016–020）。Phase 6.8「按步骤分别指定大模型」已完成（设置页全局第 1/3 步默认模型，大模型配置一律以步骤默认模型为准，已删全局默认+任务级下拉，重新生成修复走第 3 步模型）。**Phase 6.4.3 资料卡片二次加工（语义补全/修订）已完成**：Step-1 生成汇编后追加 LLM 语义补全扫描（`compilation_repairs`，Migration 021），绿框卡片前后对比 + 采纳/不用，可进“回收站”恢复；回收站统一展示矛盾 + 语义补全。验证：typecheck 零错误、174 项单测、生产构建通过。**2026-08-28 新增：新手教程重写（6 步聚光引导覆盖大模型两种配置/工作区/资料库/三步生成）+ 启动自动预制「测试任务（仅作为演示）」（对话/汇编[矛盾+二次改动]/初稿）+ 修复规范列表点击跳错条目；验证 typecheck 零错误、176 项单测、生产构建通过。**待用户实测：真实 Provider 的 AI 细读/矛盾标注/语义补全、三步端到端、基于汇编生成初稿、按步骤默认模型生效；随后进入 Phase 6.7（测试/文档/发布）与 Phase 5（Windows 安装包/端到端演示）。**
+- **验证基线（截至 2026-09-06，v0.2.1）**：typecheck 零错误；vitest 内联单测 190 项通过（另有 1 项 watcher chokidar `unlink` 在本机不触发，为既有环境问题，非功能回归）；生产构建成功。端到端实测（真实大模型生成/矛盾取舍/站点抓取）部分场景仍待用户操作。
+- **进行中**：三段式撰写重构 Phase 6.0–6.6 已实现（数据模型/汇编生成/三步向导/生成链路/删 skills+默认规范/规范库/范本/三套主题/编辑器深改；Migration 016–020）。Phase 6.8「按步骤分别指定大模型」已完成（设置页全局第 1/3 步默认模型，大模型配置一律以步骤默认模型为准，已删全局默认+任务级下拉，重新生成修复走第 3 步模型）。**Phase 6.4.3 资料卡片二次加工（语义补全/修订）已完成**：Step-1 生成汇编后追加 LLM 语义补全扫描（`compilation_repairs`，Migration 021），绿框卡片前后对比 + 采纳/不用，可进“回收站”恢复；回收站统一展示矛盾 + 语义补全。验证：typecheck 零错误、174 项单测、生产构建通过。**2026-08-28 新增：新手教程重写（6 步聚光引导覆盖大模型两种配置/工作区/资料库/三步生成）+ 启动自动预制「测试任务（仅作为演示）」（对话/汇编[矛盾+二次改动]/初稿）+ 修复规范列表点击跳错条目；验证 typecheck 零错误、176 项单测、生产构建通过。**待用户实测：真实 Provider 的 AI 细读/矛盾标注/语义补全、三步端到端、基于汇编生成初稿、按步骤默认模型生效。**Phase 6.7（测试/文档/发布）已完成**（文档同步至三段式现状、README 更新、PLAN.md 标记完成并将 Phase 5 重命名为 **Last Phase（收尾阶段）** 避免序号歧义；验证 typecheck 零错误、单测 190 项通过（1 项 watcher chokidar 环境失败为既有问题）、生产构建成功）。**剩余 Last Phase（收尾阶段，原 Phase 5）：Windows 安装包 / 端到端演示 / 文档整理。**
 
 ## 设计决策（要点，按时间倒序）
 
@@ -145,7 +145,7 @@
 1. Phase 1：项目基础（脚手架、共享契约、本地数据库）——已完成
 2. Phase 2：资料收集闭环（工作区资料库 / 标签 / 网页资料库 / 写作规范）——已完成
 3. Phase 3：撰写闭环（LLM 接入 / RAG 检索 / 初稿生成与来源标注 / 矛盾检测与取舍）——已完成
-4. Phase 5：验收与打包（Windows 安装包、端到端演示、文档）——**待进行**
+4. Last Phase（收尾阶段）：验收与打包（Windows 安装包、端到端演示、文档）——**待进行**
 
 详细任务和验收标准位于 `PLAN.md`，本文件不重复记录任务级进度。
 
@@ -168,6 +168,12 @@
 
 > 完整的历史修改日志已整理进 `PLAN.md` 各阶段摘要；此处保留对未来开发仍有价值的根因结论。
 
+- **（整段化切片 + 强制三步式，Phase A/B）**：① **整段化切片**——新增 `chunkByParagraphs`（默认上限 `CHUNK_PARAGRAPH_MAX=1000`，超长段按句折成 ≤上限 子块并共存同一 `paragraphIndex`），粗细筛改为**整段级保留/剔除**（段内任一子块有信号 → 整段所有子块保留）；**资料卡片=整段/整子块**（AI 细读提示词改为“每条候选材料直接作为一张卡片，excerpt=整段原文，不再按事实切分”，旧“AI 切事实卡”暂移除、后续可补回）。② **强制三步式/移除旧链路**——`generateDraft`/`regenerateDraft` 的 `compilationId` 改为**必填**且校验汇编 `finalized`，缺失/未确认返回新错误码 `COMPILATION_NOT_FINALIZED`；删除“无汇编时的旧检索生成”入口（前端拦截、不再调用）；保留 `retrieveChunks`/`chunkText`（向量索引、文段来源询问、检索预览仍用）。旧检索编排代码暂留在 `generate.ts` 中但已不可达（后续可单独清理）。确认：`WritingGenerateDraftReq`/`DraftRegenerateReq.compilationId` 必填、preload 签名同步。验证：typecheck 零错误、198 项单测通过（1 项 watcher chokidar 环境失败为既有问题）、生产构建成功。
+- **（429 限流断点自动续传 Phase A/B）**：区分限流（可重试）与余额不足/其他（不自动重试）；`readWindow`/`scanCardContradictions` 以 `result.error?.code===LLM_RATE_LIMIT` 识别 429 并标记 `rateLimited`/`interrupted.retryable=true`；生成管线在限流中断时自动降本次并发数（`reduceConcurrency` 减半、最小 1，**不写回 Provider 设置**，仅本次生成生效）、退避后从断点自动续跑（`runWithRateLimitAutoResume`，上限 2 次、间隔 10s/25s）；降并发时经新事件 **`compilation:advice`（`{taskId, kind:'reduce-concurrency'}`）** 推送建议，渲染层翻译为「建议降低当前大模型的并发数」并持久化到对话；若仍限流，前端自动续传兜底（最多 2 次、间隔递增，`AUTO_RESUME_LIMIT`）。`CompilationInterrupt` 增加 `retryable?`。验证：typecheck 零错误、196 项单测通过（1 项 watcher chokidar 环境失败为既有问题）、生产构建成功。
+- **（长任务防睡眠 + 按 Provider 并发处理窗口，Phase A/B）**：**A 防睡眠**——主进程新增 `power/keep-awake.ts`（封装 electron `powerSaveBlocker`，`prevent-app-suspension` 保持系统活跃且屏幕可关），引用计数/幂等、无 electron 降级 no-op；在 `compilation:generate/continue/repairScan`、`writing:generateDraft/regenerate`、`sources:summarizeAll` 的长任务 handler 用 `withKeepAwake` 包裹（入口 start、finally stop）；设置页总览新增「长任务时保持电脑唤醒」开关（`AppSettings.keepAwake`，默认开启）。**B 并发窗口**——每个 Provider 可配置「并发窗口数」（`llm_providers.concurrency`，Migration 027，默认 4、范围 1–8）；设置页 Provider 表单新增「并发窗口数」输入；`compilation-service` 的 `WINDOW_CONCURRENCY` 由常量改为读取 Provider 配置，窗口细读并行数=该值，且矛盾扫描按「波次」并行（每波 ≤ concurrency 批；任一波失败以该波起点中断，续跑重扫该波，与断点续传兼容）。文档同步。验证：typecheck 零错误、195 项单测通过（1 项 watcher chokidar 环境失败为既有问题）、生产构建成功。
+- **（前端界面调整：顶栏移除 + 中栏显隐改为边界手柄 + 资料库中栏分区）**：① 移除最上方横栏（软件名「志书撰写工具」/「隐藏中栏」按钮/版本号/平台信息）；② 「隐藏中栏」功能改为**中栏/右栏边界悬停切换手柄**——光标放到边界时边界线高亮并出现圆角长方形小三角按钮（中栏可见=左向、隐藏=右向），点击切换中栏显隐（持久化），并保留拖动边界调宽；③ 资料库中栏顶部保留「导入」「整理资料」按钮（去掉「全部资料」标题），下方分「网页资料库」「本地资料库」两段小标题；标签管理/资料管理入口由顶部「…」菜单并入工具栏菜单。新增 `PaneEdgeToggle` 组件、`sourceList.webTitle/localTitle`、`paneEdge.*` 文案。验证：typecheck 零错误、192 项单测通过（1 项 watcher chokidar 环境失败为既有问题）、生产构建成功。
+- **（资料汇编生成异常中断断点续传，Phase 6.x 新增）**：用户试用反馈——生成资料汇编时若大模型异常中断（余额不足/网络），进度条卡住且无反馈，修复后只能重开任务。新增**会话内断点续传**：① `compilation-service` 把窗口细读与卡片矛盾扫描改为可中断/可续跑（`resumeStore` 记录 phase/doneSet/scanOffset/windowOutputs，`readWindow` 区分「LLM 异常 → 中断」与「无解析输出 → 正常」）；② 生成开始时即创建 `drafting` 汇编，中断时把已完成窗口卡片落库（`replaceCompilationItems`），前端可看到部分卡片；③ 新增 IPC `compilation:continue` + preload + main handler，`continueCompilation` 从断点继续（复用已完成输出，仅重读失败/未完成窗口、续扫剩余矛盾批次），再次异常可再「尝试继续」；④ 渲染层 `CompilationStep`/`ChatPanel` 在左栏进度区展示中断提示 + 「尝试继续」按钮，中断时不运行语义补全扫描。文档与 `docs/shared-contracts.md`/`ui-architecture.md` 同步。验证：typecheck 零错误、新增 2 项断点续传单测、生产构建成功。
+- **2026-09-06（Phase 6.7 测试/文档/发布完成 + Phase 5 重命名为 Last Phase）**：完成 Phase 6.7 的文档同步与全量验证——`docs/data-model.md`/`shared-contracts.md`/`ui-architecture.md` 更新至当前三段式代码现状（资料汇编/二次加工/三类回收站/规范文档库/参考范本/按步骤默认模型/网页资料库优化/PDF cmaps/settings 键）；`README.md` 功能与技术实现更新（三步向导/主题切换/按步骤默认模型/网页资料库/PDF cmaps）；`PLAN.md` 标记 Phase 6.7 完成，并将「Phase 5: Acceptance & Packaging」重命名为 **Last Phase（收尾阶段）**——明确其为整个项目收尾阶段、在执行顺序上位于全部功能阶段之后，避免与其它阶段的序号顺序混淆；`AGENTS.md` 同步当前状态（Migration 001–026、验证基线 v0.2.1：typecheck 零错误、190 项单测 + 1 项 watcher chokidar 环境失败、生产构建成功）与近期记录。验证：typecheck 零错误、190 项单测通过（1 项 chokidar 环境失败为既有问题）、生产构建成功。
 - **2026-09-01（网页资料库：修复「打开来源跳到栏目列表页」）**：`clnews.com.cn/html/22/list.shtml` 这类列表/栏目页因扩展名 `.shtml` 被 `isArticleUrl` 误判为文章页，sitemap 发现时以空标题收录，抓取后正文提取器把列表页内容当作正文、`matchesExact` 命中其中某条文章标题/摘要，于是列表页被当成单篇来源落库。修复：新增 `isListPageUrl`（按 basename 名单 `list/index/default/channel/category/column/col/lm/more/news_list` 判断，真实文章 basename 为日期/文章 ID/数字字母串，不受影响），① `isArticleUrl` 先排除列表页（发现阶段不收录），② `importSiteArticle` 入口再兜底（抓取/复用阶段直接丢弃并记日志）。新增单测。验证：typecheck 零错误、190 项单测通过（1 项 watcher chokidar 环境失败为既有问题）、生产构建通过。
 - **2026-09-01（资料库精简 & PDF 中文乱码修复）**：① 移除「站点关键词（E11）」功能（Migration 026 删 web_sites.keywords 列；IPC/preload/UI/site-crawler 召回逻辑一并删除）；② 移除「复制全文」按钮（SourceViewer）；③ 移除网页资料库「同步」手动按钮+IPC/preload（生成汇编时仍自动 `syncSite`，不影响抓取）。④ 修复中文/CID 字体 PDF 文字提取与预览空白：根因是 pdf.js 未提供 cMapUrl/cMapPacked —— 主进程 `parsePdf` 注入 cmaps 目录（`setPdfCmapsDir`）；文件服务器新增 `/pdf-cmaps/<name>.bcmap` 路由 + IPC `app:getPdfCmapsUrl`，`PdfViewer` 传给 `getDocument({ cMapUrl, cMapPacked:true })`。验证：typecheck 零错误、190 项单测通过（1 项 watcher chokidar 环境失败为既有问题）、生产构建通过。
 - **2026-09-01（资料汇编矛盾扫描 & 二次修改可靠性）**：① 矛盾扫描曾对 `deepseek-v4-flash` 在 120s 内超时（`LLM_TIMEOUT`）且错误被静默吞掉 → 显示“0 矛盾”；现`CARD_SCAN_TIMEOUT_MS` 120s→300s、按 `CARD_SCAN_MAX` 分批扫描覆盖全部卡片、任一批失败即标记并透出 `contradictionScan:{ok,message}`，前端在生成汇总里提醒“矛盾扫描未完成，可能存在遗漏”。② 二次修改（`compilation-repair-scan`）此前在某任务未留下任何调用痕迹且 `compilation_repairs` 为空（137 张缺 ts 未补）；respair-scan 主 handler 对 `pushUndo` 加 try/catch 防阻断、repair-service 增“开始扫描/失败/抛错”日志、前端 `scanRepairsAndReload` 捕获失败时记 `[repair]` 日志。验证：typecheck 零错误、190 项单测通过（1 项 watcher chokidar 环境失败为既有问题）、生产构建通过。

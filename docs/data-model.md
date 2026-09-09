@@ -169,7 +169,7 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 - `key` TEXT PK
 - `value` TEXT NOT NULL
 - `updated_at` TEXT NOT NULL
-- 现有键：`data_dir`、`current_llm_provider_id`、`workspace_dir`（Phase 2.2 工作区根目录）
+- 现有键：`data_dir`、`workspace_dir`（Phase 2.2 工作区根目录）、`compilation_provider_id`（Phase 6.8 第 1 步资料汇编默认 Provider）、`draft_provider_id`（Phase 6.8 第 3 步生成初稿默认 Provider）。`current_llm_provider_id`（全局默认 Provider）已于 Phase 6.8 移除，Provider 解析一律以步骤默认模型为准（任务固定 → 步骤默认 → 全局当前）。
 
 ### 2.11 llm_providers（LLM Provider 配置，Phase 3 Task 3.1）
 
@@ -180,6 +180,7 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 | api_base | TEXT | NOT NULL | OpenAI-compatible API 地址（如 `https://api.deepseek.com/v1`） |
 | model | TEXT | NOT NULL | 模型名 |
 | api_key | TEXT | NULL | 密钥，以 `safe-storage:v1:<base64>`（Electron safeStorage/Windows DPAPI）加密存储 |
+| concurrency | INTEGER | NOT NULL DEFAULT 4 | Phase B：资料汇编 AI 细读/矛盾扫描的并发窗口数（1–8，用户可改；Migration 027） |
 | created_at / updated_at | TEXT | NOT NULL | |
 
 ### 2.12 FTS5 索引（全文检索）
@@ -280,7 +281,7 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 
 ### 2.20 web_sites 与 web_site_articles（网页资料库，Migration 012，2026-08-11）
 
-- `web_sites`：id PK、root_url NOT NULL UNIQUE（去尾部斜杠归一）、title、created_at/updated_at、last_synced_at。
+- `web_sites`：id PK、root_url NOT NULL UNIQUE（去尾部斜杠归一）、title、created_at/updated_at、last_synced_at。`keywords`（用户站点关键词，E11）已由 Migration 026 于 2026-09-01 移除。
 - `web_site_articles`：site_id（FK CASCADE）+ url 联合主键、title、discovered_at、etag/last_modified/body_hash/last_fetched_at（条件请求/正文去重，Migration 024）、published_at（解析到的发布时间，Migration 025）——站点文章 URL 清单缓存（生成初稿时先同步清单，再用撰写要求标题粗筛，命中文章增量抓取正文落库为 `sources`（kind='url'，task_id 绑定任务））。
 
 ### 2.21 compilations（资料汇编，Migration 016，Phase 6.0，2026-08-25）
@@ -302,7 +303,7 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 | id | TEXT PK | |
 | compilation_id | TEXT NOT NULL REFERENCES compilations(id) ON DELETE CASCADE | 所属汇编 |
 | position | INTEGER NOT NULL | 时间升序位次 |
-| source_id | TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE | 来源资料 |
+| source_id | TEXT NULL REFERENCES sources(id) ON DELETE SET NULL | 来源资料（Migration 022：来源删除后置空，不再级联删卡；是否删卡由「来源移除确认」流程决定） |
 | excerpt | TEXT NOT NULL | 卡片正文摘录 |
 | ts | TEXT NULL | 时间标签（如「2005 年」） |
 | note | TEXT NULL | 用户/大模型备注 |
@@ -313,8 +314,24 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 ### 2.23 compilation_contradictions / compilation_contradiction_variants（汇编矛盾，Migration 016，Phase 6.0）
 
 - `compilation_contradictions`：id PK、compilation_id FK CASCADE、topic NOT NULL、kind CHECK('data','time','place','fact','other')、status CHECK('pending','resolved','ignored')、chosen_item_id（status=resolved 时用户保留的卡片 id）、created_at、UNIQUE(compilation_id, topic)。
-- `compilation_contradiction_variants`：id PK、contradiction_id FK CASCADE、item_id REFERENCES compilation_items(id) ON DELETE CASCADE、variant_text、source_id REFERENCES sources(id) ON DELETE CASCADE、created_at。
+- `compilation_contradiction_variants`：id PK、contradiction_id FK CASCADE、item_id REFERENCES compilation_items(id) ON DELETE CASCADE、variant_text、source_id REFERENCES sources(id) ON DELETE SET NULL（Migration 022）、created_at。
 - 矛盾取舍只在汇编阶段发生（初稿生成不再扫描矛盾）；`pending` 未处理完时前端阻止进入下一步。
+- 回收站：采纳/忽略某组矛盾时快照进 `compilation_recycle_bin`（Migration 017，引用 contradiction_id，随 compilation 级联），恢复=所有 variant 卡片改回 `kept=1`、矛盾状态回 pending、删除回收站条目；**用软删除代替硬删除，恢复不重建卡片**。
+
+### 2.24 compilation_repairs 与 compilation_repair_recycle_bin（资料卡片二次加工，Migration 021，Phase 6.4.3）
+
+Step-1 生成汇编后追加 LLM 语义补全/修订扫描：对表意不明/疑似残缺的卡片读取来源原文上下文，生成 pending 修订，用户可「采纳 / 不用」，均快照进回收站供恢复。
+
+- `compilation_repairs`：id PK、compilation_id FK CASCADE、item_id REFERENCES compilation_items(id) ON DELETE CASCADE、original_text、revised_text、reason、status CHECK('pending','accepted','rejected')、created_at/updated_at；索引 (compilation_id)、(item_id)。
+- `compilation_repair_recycle_bin`：id PK、compilation_id FK CASCADE、repair_id、item_id、original_text、revised_text、chosen CHECK('accepted','rejected')、created_at；索引 (compilation_id)。
+
+> 二次修改扫描还会对**缺失时间戳的卡片结合原文上下文推断年份并自动补全 `ts`**（无需用户采纳）。
+
+### 2.25 compilation_card_recycle_bin（资料卡片回收站，Migration 023，Phase 6.4.3）
+
+被删除的资料卡片（单卡删除、汇编调整批量删除）快照进该表，含卡片行 + 其矛盾变异/语义补全修订 JSON（`extra`）。回收站统一含**资料卡片 / 语义补全修订 / 矛盾**三类，按删除时间倒序（栈式，最近删除在前）；恢复卡片连同其矛盾变异/语义补全修订一起还原。**来源级联清理仍为硬删除不入回收站**（来源已删，恢复外键悬空）。
+
+- 字段：id PK、compilation_id FK CASCADE、item_id、position、source_id、excerpt、ts、note、extra_tags、kept、created_at、deleted_at、extra（默认 '{}'）。
 
 ## 3. 关键设计决策
 

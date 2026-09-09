@@ -772,6 +772,12 @@ export async function generateDraft(
   const inst = instruction.trim()
   if (!inst) return fail(ErrorCodes.INVALID_PARAM, '请填写本次撰写的标题与要求')
 
+  // 强制三步式（Phase A/B）：必须基于“已确认的资料汇编”生成初稿；缺失/未确认直接报错，不再走旧检索链路
+  if (!compilationId) return fail(ErrorCodes.COMPILATION_NOT_FINALIZED, '请先确认资料汇编')
+  const compilation = getCompilationById(compilationId)
+  if (!compilation) return fail(ErrorCodes.COMPILATION_NOT_FINALIZED, '资料汇编不存在')
+  if (compilation.status !== 'finalized') return fail(ErrorCodes.COMPILATION_NOT_FINALIZED, '资料汇编尚未确认，请先在第一步确认汇编')
+
   const prov = resolveTaskProvider('draft')
   if (!prov.ok) return prov
 

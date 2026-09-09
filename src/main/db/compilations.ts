@@ -251,6 +251,18 @@ export function insertCompilationItems(compilationId: string, inputs: Compilatio
   return getItemsByCompilation(compilationId)
 }
 
+/** 删除某汇编的全部资料卡片（硬删除，不进回收站；用于生成/续跑时整体替换中间产物）。 */
+export function deleteCompilationItems(compilationId: string): void {
+  const db = getDb()
+  db.prepare('DELETE FROM compilation_items WHERE compilation_id = ?').run(compilationId)
+}
+
+/** 用目标卡片整体替换某汇编的卡片（先删后插）；返回插入后的卡片。用于生成/续跑把中间/最终产物落库。 */
+export function replaceCompilationItems(compilationId: string, inputs: CompilationItemInput[]): CompilationItem[] {
+  deleteCompilationItems(compilationId)
+  return insertCompilationItems(compilationId, inputs)
+}
+
 export interface CompilationItemPatch {
   excerpt?: string
   ts?: string | null

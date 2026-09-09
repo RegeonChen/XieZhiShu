@@ -37,6 +37,8 @@ import {
   type CompilationGetRes,
   type CompilationGenerateReq,
   type CompilationGenerateRes,
+  type CompilationContinueReq,
+  type CompilationContinueRes,
   type CompilationUpdateItemReq,
   type CompilationUpdateItemRes,
   type CompilationDeleteItemReq,
@@ -79,6 +81,7 @@ import { safeStorageCodec } from './llm/secret'
 import { listProviders, saveProvider, deleteProvider } from './llm/provider-store'
 import { testProviderConnection } from './llm/test'
 import { getSettings, updateSettings } from './db/settings'
+import { startKeepAwake, stopKeepAwake } from './power/keep-awake'
 import { createTask as createWritingTask, listTasks as listWritingTasks, getTaskById, deleteTask as deleteWritingTask, renameTask, updateTaskProvider, updateTaskInstruction, updateTaskModelText } from './db/tasks'
 import { getDraftById, getLatestDraftByTask, updateSegmentContent, replaceDraftSegments } from './db/drafts'
 import { getContradictionsByDraft, updateContradictionStatus } from './db/contradictions'
@@ -103,7 +106,7 @@ import {
   ensureDefaultStyleGuide
 } from './db/style-guides'
 import { ensureDemoTask } from './db/demo-task'
-import { generateCompilation } from './writing/compilation-service'
+import { generateCompilation, continueCompilation } from './writing/compilation-service'
 import { adjustCompilation } from './writing/compilation-adjust'
 import { scanCompilationRepairs } from './writing/repair-service'
 import {
@@ -133,6 +136,16 @@ import { migrateLegacyToWorkspace } from './workspace/migrate'
 import { loadWindowState, trackWindowState } from './window-state'
 import type { WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceUpdateReq, WebSourceUpdateRes, AppGetPdfCmapsUrlRes, LogAppendReq, LogExportRes, StyleGuideListRes, StyleGuideSaveReq, StyleGuideSaveRes, StyleGuideSetDefaultReq, StyleGuideSetDefaultRes, StyleGuideDeleteReq } from '../shared/ipc'
 import { logMain, logIpc, logRenderer, exportLogsText } from './logger'
+
+/** 长任务保持唤醒：开启则 start，任务结束/异常在 finally 中 stop（引用计数，重叠任务不提前释放） */
+function keepAwakeEnabled(): boolean {
+  try { return getSettings().keepAwake !== false } catch { return true }
+}
+function withKeepAwake<T>(fn: () => Promise<T>): Promise<T> {
+  const enabled = keepAwakeEnabled()
+  if (enabled) startKeepAwake()
+  return Promise.resolve().then(fn).finally(() => { if (enabled) stopKeepAwake() })
+}
 
 const APP_PROTOCOL_WHITELIST = /^https?:\/\//i
 
@@ -536,7 +549,7 @@ handleLogged(IPC.COMPILATION_GET, (_event, params: CompilationGetReq): ApiResult
 })
 
 // 生成资料汇编（Phase 6.1：本地宽召回宁多勿漏 + AI 细读 + 矛盾标注；无 Provider/失败降级本地候选）
-handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerateReq): Promise<ApiResult<CompilationGenerateRes>> => {
+handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerateReq): Promise<ApiResult<CompilationGenerateRes>> => withKeepAwake(async () => {
   // 持久化用户撰写要求（供对话历史 / 重新生成汇编使用）
   const inst = params.title.trim()
   if (inst) {
@@ -548,12 +561,52 @@ handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerate
       event.sender.send(IPC_EVENTS.COMPILATION_PROGRESS, { taskId: params.taskId, ...p })
     }
   }
-  const res = await generateCompilation(params.taskId, params.title, onProgress)
+  // 限流/降并发等建议提示（429 自动续传时推送，渲染层按 kind 翻译为中文并持久化）
+  const onAdvice = (kind: string): void => {
+    if (!event.sender.isDestroyed()) {
+      event.sender.send(IPC_EVENTS.COMPILATION_ADVICE, { taskId: params.taskId, kind })
+    }
+  }
+  // 不让生成管线裸抛 reject 导致进度冻结/无反馈：任何异常都转成结构化错误
+  let res: { ok: true; compilationId: string; candidateChunks: number; contradictions: number; contradictionScan?: { ok: boolean; message?: string }; interrupted?: { stage: string; message: string; percent: number; retryable?: boolean } } | { ok: false; error: { code: string; message: string } }
+  try {
+    res = await generateCompilation(params.taskId, params.title, onProgress, onAdvice)
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
   if (!res.ok) return { ok: false, error: res.error }
   const compilation = getCompilationById(res.compilationId)
   if (!compilation) return { ok: false, error: { code: 'INTERNAL_ERROR', message: '资料汇编落库失败' } }
-  return { ok: true, data: { compilation, contradictionScan: res.contradictionScan } }
-})
+  return { ok: true, data: { compilation, contradictionScan: res.contradictionScan, interrupted: res.interrupted } }
+}))
+
+// 中断续跑（Phase 6.x：大模型异常中断后，从断点继续生成资料汇编；仅会话内）
+handleLogged(IPC.COMPILATION_CONTINUE, async (event, params: CompilationContinueReq): Promise<ApiResult<CompilationContinueRes>> => withKeepAwake(async () => {
+  // 进度事件需带真实 taskId 供渲染层按任务过滤
+  const existing = getCompilationById(params.compilationId)
+  const progressTaskId = existing?.taskId ?? ''
+  const onProgress = (p: { stage: string; percent: number; etaSeconds?: number; candidateChunks?: number; candidateSources?: number }): void => {
+    if (!event.sender.isDestroyed()) {
+      event.sender.send(IPC_EVENTS.COMPILATION_PROGRESS, { taskId: progressTaskId, ...p })
+    }
+  }
+  // 限流/降并发等建议提示（429 自动续传时推送，渲染层按 kind 翻译为中文并持久化）
+  const onAdvice = (kind: string): void => {
+    if (!event.sender.isDestroyed()) {
+      event.sender.send(IPC_EVENTS.COMPILATION_ADVICE, { taskId: progressTaskId, kind })
+    }
+  }
+  let res: { ok: true; compilationId: string; candidateChunks: number; contradictions: number; contradictionScan?: { ok: boolean; message?: string }; interrupted?: { stage: string; message: string; percent: number; retryable?: boolean } } | { ok: false; error: { code: string; message: string } }
+  try {
+    res = await continueCompilation(params.compilationId, onProgress, onAdvice)
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+  if (!res.ok) return { ok: false, error: res.error }
+  const compilation = getCompilationById(res.compilationId)
+  if (!compilation) return { ok: false, error: { code: 'INTERNAL_ERROR', message: '资料汇编落库失败' } }
+  return { ok: true, data: { compilation, interrupted: res.interrupted } }
+}))
 
 handleLogged(IPC.COMPILATION_UPDATE_ITEM, (_event, params: CompilationUpdateItemReq): ApiResult<CompilationUpdateItemRes> => {
   try {
@@ -716,12 +769,11 @@ handleLogged(IPC.COMPILATION_RECYCLE_BIN_RESTORE, (_event, params: CompilationRe
 })
 
 // 资料卡片二次加工（语义补全/修订，Phase 6.4.3）
-handleLogged(IPC.COMPILATION_REPAIR_SCAN, (_event, params: CompilationRepairScanReq): Promise<ApiResult<CompilationRepairScanRes>> => {
+handleLogged(IPC.COMPILATION_REPAIR_SCAN, (_event, params: CompilationRepairScanReq): Promise<ApiResult<CompilationRepairScanRes>> => withKeepAwake(async () => {
   try { pushUndo(params.compilationId) } catch { /* undo 登记失败不阻断二次修改扫描 */ }
-  return scanCompilationRepairs(params.compilationId).then((res) =>
-    res.ok ? { ok: true, data: { repairs: res.repairs } } : { ok: false, error: res.error }
-  )
-})
+  const res = await scanCompilationRepairs(params.compilationId)
+  return res.ok ? { ok: true, data: { repairs: res.repairs } } : { ok: false, error: res.error }
+}))
 
 handleLogged(IPC.COMPILATION_REPAIRS_LIST, (_event, params: CompilationRepairsListReq): ApiResult<CompilationRepairsListRes> => {
   try {
@@ -956,14 +1008,14 @@ handleLogged(IPC.SOURCES_UPDATE_TITLE, (_event, params: { id: string; title: str
 })
 
 // 整理资料库：对尚无摘要的资料逐篇调用 LLM 生成摘要（Task 3.2.3）
-handleLogged(IPC.SOURCES_SUMMARIZE_ALL, async (): Promise<ApiResult<{ processed: number; ok: number; failed: number }>> => {
+handleLogged(IPC.SOURCES_SUMMARIZE_ALL, async (): Promise<ApiResult<{ processed: number; ok: number; failed: number }>> => withKeepAwake(async () => {
   try {
     const res = await summarizeAllPending()
     return { ok: true, data: res }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
-})
+}))
 
 // 读取单篇资料摘要
 handleLogged(IPC.SOURCES_GET_SUMMARY, (_event, params: { id: string }): ApiResult<{ summary?: unknown }> => {
@@ -1263,7 +1315,7 @@ handleLogged(IPC.WRITING_RETRIEVE, async (_event, params: WritingRetrieveReq): P
   }
 })
 
-handleLogged(IPC.WRITING_GENERATE_DRAFT, async (event, params: WritingGenerateDraftReq): Promise<ApiResult<WritingGenerateDraftRes>> => {
+handleLogged(IPC.WRITING_GENERATE_DRAFT, async (event, params: WritingGenerateDraftReq): Promise<ApiResult<WritingGenerateDraftRes>> => withKeepAwake(async () => {
   // 生成初稿阶段进度推送（Phase 3.5 后续 / 2026-08-11：文字提示 + 进度百分比 + 预计剩余秒数）
   const onProgress = (stage: string, percent: number, etaSeconds?: number): void => {
     if (!event.sender.isDestroyed()) {
@@ -1279,10 +1331,10 @@ handleLogged(IPC.WRITING_GENERATE_DRAFT, async (event, params: WritingGenerateDr
   const result = await generateDraft(params.taskId, params.instruction, onProgress, onDelta, params.compilationId)
   if (result.ok) return { ok: true, data: { draft: result.draft, articleTitle: result.articleTitle, contradictions: result.contradictions } }
   return { ok: false, error: result.error }
-})
+}))
 
 // 重新生成初稿（Task 3.4.5）：删除现有第 0 稿后重新生成（覆盖旧稿）
-handleLogged(IPC.DRAFT_REGENERATE, async (event, params: DraftRegenerateReq): Promise<ApiResult<DraftRegenerateRes>> => {
+handleLogged(IPC.DRAFT_REGENERATE, async (event, params: DraftRegenerateReq): Promise<ApiResult<DraftRegenerateRes>> => withKeepAwake(async () => {
   const onProgress = (stage: string, percent: number, etaSeconds?: number): void => {
     if (!event.sender.isDestroyed()) {
       event.sender.send(IPC_EVENTS.DRAFT_GENERATE_PROGRESS, { taskId: params.taskId, stage, percent, etaSeconds })
@@ -1296,7 +1348,7 @@ handleLogged(IPC.DRAFT_REGENERATE, async (event, params: DraftRegenerateReq): Pr
   const result = await regenerateDraft(params.taskId, params.instruction, onProgress, onDelta, params.compilationId)
   if (result.ok) return { ok: true, data: { draft: result.draft, articleTitle: result.articleTitle, contradictions: result.contradictions } }
   return { ok: false, error: result.error }
-})
+}))
 
 handleLogged(IPC.DRAFT_GET, (_event, params: DraftGetReq): ApiResult<Draft> => {
   try {

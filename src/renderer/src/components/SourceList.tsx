@@ -17,6 +17,10 @@ interface SourceListProps {
   onSourcesChanged?: (deletedIds: string[]) => void
   /** 外部数据变化（如标签变更）时递增，触发列表重新加载 */
   reloadKey?: number
+  /** 打开「标签管理」（中栏工具栏菜单入口） */
+  onOpenTagManager?: () => void
+  /** 进入「资料管理」批量模式（中栏工具栏菜单入口） */
+  onEnterBulk?: () => void
 }
 
 interface ContextMenuState {
@@ -26,7 +30,7 @@ interface ContextMenuState {
   title: string
 }
 
-function SourceList({ onSelect, activeId = null, bulkMode, onExitBulk, onSourcesChanged, reloadKey }: SourceListProps) {
+function SourceList({ onSelect, activeId = null, bulkMode, onExitBulk, onSourcesChanged, reloadKey, onOpenTagManager, onEnterBulk }: SourceListProps) {
   const [sources, setSources] = useState<SourceItem[]>([])
   const [loading, setLoading] = useState(false)
   const [importing, setImporting] = useState(false)
@@ -38,6 +42,8 @@ function SourceList({ onSelect, activeId = null, bulkMode, onExitBulk, onSources
   const [pendingDelete, setPendingDelete] = useState<{ kind: 'one'; id: string; title: string } | { kind: 'bulk'; ids: string[] } | null>(null)
   const [deleting, setDeleting] = useState(false)
   const [deleteErr, setDeleteErr] = useState<string | null>(null)
+  // 中栏工具栏「…」菜单（标签管理 / 资料管理）：点击外部关闭
+  const [menuOpen, setMenuOpen] = useState(false)
   const [summarizing, setSummarizing] = useState(false)
   const [summarizeMsg, setSummarizeMsg] = useState<string | null>(null)
 
@@ -131,6 +137,19 @@ function SourceList({ onSelect, activeId = null, bulkMode, onExitBulk, onSources
       document.removeEventListener('keydown', onKey)
     }
   }, [contextMenu])
+
+  // 中栏工具栏「…」菜单：点击外部 / Esc 关闭
+  useEffect(() => {
+    if (!menuOpen) return
+    const close = () => setMenuOpen(false)
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close() }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [menuOpen])
 
   const handleImport = async () => {
     const result = await window.api.openFileDialog()
@@ -262,6 +281,35 @@ function SourceList({ onSelect, activeId = null, bulkMode, onExitBulk, onSources
             }}
           >i</button>
         </div>
+        {/* 中栏工具栏「…」菜单（标签管理 / 资料管理）：原顶部「全部资料」横栏已移除，菜单并入此处 */}
+        <div className="source-list__menu">
+          <button
+            type="button"
+            className="center-pane__menu-btn"
+            onClick={(e) => { e.stopPropagation(); setMenuOpen((o) => !o) }}
+            title={zhCN.sourceMenu.tooltip}
+          >
+            &#8943;
+          </button>
+          {menuOpen ? (
+            <div className="center-pane__menu-dropdown" onMouseDown={(e) => e.stopPropagation()}>
+              <button
+                type="button"
+                className="center-pane__menu-item"
+                onClick={() => { setMenuOpen(false); onOpenTagManager?.() }}
+              >
+                {zhCN.sourceMenu.tagManage}
+              </button>
+              <button
+                type="button"
+                className="center-pane__menu-item"
+                onClick={() => { setMenuOpen(false); onEnterBulk?.() }}
+              >
+                {zhCN.sourceMenu.manage}
+              </button>
+            </div>
+          ) : null}
+        </div>
       </div>
 
       {/* 说明气泡：Portal 到 body 顶层，fixed 定位悬浮在窗口最上方，避免被右栏/滚动容器遮挡 */}
@@ -293,10 +341,13 @@ function SourceList({ onSelect, activeId = null, bulkMode, onExitBulk, onSources
       ) : null}
       {reconcileMsg ? <p className="source-list__msg">{reconcileMsg}</p> : null}
       {summarizeMsg ? <p className="source-list__msg">{summarizeMsg}</p> : null}
+      <div className="source-list__section-title">{zhCN.sourceList.webTitle}</div>
       {/* 网页资料库（2026-08-11）：注册站点后生成初稿时自动检索相关文章 */}
       <WebSourcePanel />
       {importErr ? <p className="source-list__error">{importErr}</p> : null}
       {deleteErr ? <p className="source-list__error">{deleteErr}</p> : null}
+      <div className="source-list__section-title">{zhCN.sourceList.localTitle}</div>
+
       {tagFilters.length > 0 ? (
         <div className="source-list__tag-bar">
           <button type="button" className={`source-list__tag-chip ${!activeTagId ? 'source-list__tag-chip--active' : ''}`} onClick={() => setActiveTagId(null)}>全部</button>
