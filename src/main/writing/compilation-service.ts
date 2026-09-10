@@ -1681,7 +1681,9 @@ function finalizeCompilationLocalInto(compilationId: string, chunks: RetrievedCh
     const key = c.sourceId + '|' + c.position + '|' + c.text
     if (dedup.has(key)) continue
     dedup.add(key)
-    const m = c.text.match(/(18|19|20)d{2}/)
+    // 年份正则：`\d{2}` 曾被误写为 `d{2}`（少一个反斜杠，等同于字面量「d」），
+    // 导致本地降级产出的卡片永远没有时间戳；此处修正为 4 位年份匹配。
+    const m = c.text.match(/(18|19|20)\d{2}/)
     items.push({ sourceId: c.sourceId, excerpt: c.text, ts: m ? m[0] + ' 年' : undefined })
   }
   replaceCompilationItems(compilationId, sortItemsByTs(items))
