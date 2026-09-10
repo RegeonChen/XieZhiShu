@@ -1,6 +1,6 @@
 /**
  * demo-task.ts —— 演示用「测试任务（仅作为演示）」种子（2026-08-28）。
- * 仅用于新手教程展示三段式撰写闭环：预置对话历史、资料汇编（含矛盾与二次改动）、志书初稿。
+ * 仅用于新手教程展示三段式撰写闭环：预置对话历史、资料汇编（含矛盾与大模型修正标记）、志书初稿。
  * 幂等：若已存在同标题任务则直接返回，不重复创建。
  */
 import Database from 'better-sqlite3'
@@ -10,7 +10,7 @@ import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
 import { createTask, getTaskById, updateTaskInstruction } from './tasks'
 import { addTaskMessage, listTaskMessages } from './task-messages'
-import { createCompilation, insertCompilationItems, insertCompilationContradictions, confirmCompilation, listCompilationsByTask, importCompilationIntoTask } from './compilations'
+import { createCompilation, insertCompilationItems, insertCompilationContradictions, confirmCompilation, listCompilationsByTask, importCompilationIntoTask, updateCompilationItem } from './compilations'
 import { insertRepair } from './compilation-repairs'
 import { createDraft, replaceDraftSegments, addSegmentSource, getLatestDraftByTask } from './drafts'
 
@@ -109,13 +109,16 @@ function seedCompileDemoTask(): WritingTask {
   }
   const item7 = byExcerpt.get('全市幼儿园教职工总数 1.2 万人。')
   if (item7) {
+    // 大模型修正（2026-09-08 起默认直接应用）：卡片文本已是修正后文本，记录保留修正前原文与理由供查看/回退
+    const revised = '2021 年，全市幼儿园教职工共 1.2 万人，其中专任教师 0.9 万人。'
     insertRepair({
       compilationId: compilation.id,
       itemId: item7.id,
       originalText: item7.excerpt,
-      revisedText: '2021 年，全市幼儿园教职工共 1.2 万人，其中专任教师 0.9 万人。',
+      revisedText: revised,
       reason: '表意不明：缺少年份与分项，疑为表格切片。'
     })
+    updateCompilationItem(item7.id, { excerpt: revised })
   }
   confirmCompilation(compilation.id)
 
@@ -192,6 +195,9 @@ if (import.meta.vitest) {
       expect(comps[0].contradictions).toHaveLength(1)
       expect(comps[0].contradictions[0].status).toBe('pending')
       expect(comps[0].repairs).toHaveLength(1)
+      expect(comps[0].repairs![0].status).toBe('applied')
+      // 修正默认已应用：卡片文本即修正后文本（标记可点开查看原文与理由并回退）
+      expect(comps[0].items.map((i) => i.excerpt)).toContain('2021 年，全市幼儿园教职工共 1.2 万人，其中专任教师 0.9 万人。')
 
       // 撰写初稿演示任务：从生成汇编导入汇编 + 预置初稿
       const draftRows = getDb().prepare("SELECT id FROM writing_tasks WHERE title = ? AND mode = 'draft'").all(DEMO_TASK_TITLE) as { id: string }[]

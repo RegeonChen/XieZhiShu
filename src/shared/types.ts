@@ -250,10 +250,17 @@ export interface CompilationContradiction {
   variants: CompilationContradictionVariant[]
 }
 
-/** 一次资料汇编（生成后待用户审阅，确认后 finalize） */
-export type CompilationRepairStatus = 'pending' | 'accepted' | 'rejected'
+/**
+ * 资料卡片「大模型修正」（原“二次加工/语义补全”）状态（2026-09-08 改版）：
+ * - applied：修正已默认应用到卡片（卡片显示「经过大模型修正」标记，可点开查看原文/理由）
+ * - reverted：用户点了「回退到修正前」，卡片已还原为修正前文本（保留记录，可再次应用）
+ */
+export type CompilationRepairStatus = 'applied' | 'reverted'
 
-/** 资料卡片二次加工（语义补全/修订）：对表意不明的卡片，读取原文上下文后由大模型提出补全/修订文本 */
+/**
+ * 资料卡片二次加工（大模型修正）：卡片表意不明/疑似残缺时，读取来源上下文后由大模型提出修正文本，
+ * 默认直接应用到卡片，并在卡片上留下标记供用户查看修正前原文、理由与回退。
+ */
 export interface CompilationRepair {
   id: string
   compilationId: string
@@ -275,7 +282,7 @@ export interface Compilation {
   updatedAt: string
   items: CompilationItem[]
   contradictions: CompilationContradiction[]
-  /** 资料卡片二次加工（语义补全/修订）的待处理/已采纳/已拒绝修订 */
+  /** 资料卡片「大模型修正」记录（默认已应用，卡片上以标记承载，可回退/再次应用） */
   repairs?: CompilationRepair[]
 }
 
@@ -293,17 +300,7 @@ export interface CompilationRecycleBinContradiction extends CompilationRecycleBi
   status: 'resolved' | 'ignored'
   contradiction: CompilationContradiction
 }
-/** 回收站中的一条语义补全/修订（可恢复后重新取舍） */
-export interface CompilationRecycleBinRepair extends CompilationRecycleBinBase {
-  kind: 'repair'
-  repairId: string
-  itemId: string
-  originalText: string
-  revisedText: string
-  chosen: 'accepted' | 'rejected'
-  repair: CompilationRepair
-}
-/** 回收站中的一条被删除的资料卡片（可恢复，含其矛盾变异/语义补全修订） */
+/** 回收站中的一条被删除的资料卡片（可恢复，含其矛盾变异与大模型修正记录） */
 export interface CompilationRecycleBinCard extends CompilationRecycleBinBase {
   kind: 'card'
   itemId: string
@@ -312,7 +309,11 @@ export interface CompilationRecycleBinCard extends CompilationRecycleBinBase {
   sourceTitle?: string
   item: CompilationItem
 }
-export type CompilationRecycleBinItem = CompilationRecycleBinContradiction | CompilationRecycleBinRepair | CompilationRecycleBinCard
+/**
+ * 回收站条目（2026-09-08 起仅两类）：被删除的资料卡片 / 已取舍的矛盾。
+ * 大模型修正不再进入回收站——改由卡片上的标记承载（点击可查看原文与理由并回退）。
+ */
+export type CompilationRecycleBinItem = CompilationRecycleBinContradiction | CompilationRecycleBinCard
 
 /** 生成资料汇编时大模型异常中断的可视化信息（供前端展示「尝试继续」） */
 export interface CompilationInterrupt {

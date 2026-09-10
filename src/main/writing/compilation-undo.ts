@@ -1,7 +1,7 @@
 /**
  * compilation-undo.ts —— 资料汇编操作的撤销/恢复（2026-08-28）。
- * 采用“快照”机制：每次对汇编的可变操作（编辑/删除/调整/矛盾取舍/二次修改采纳/回收站恢复/排序/确认等）
- * 前，把该汇编在 6 张表中的完整状态快照入栈；撤销=恢复上一个快照，恢复=重做下一个快照。
+ * 采用“快照”机制：每次对汇编的可变操作（编辑/删除/调整/矛盾取舍/大模型修正回退或应用/回收站恢复/排序/确认等）
+ * 前，把该汇编在 5 张表中的完整状态快照入栈；撤销=恢复上一个快照，恢复=重做下一个快照。
  * 栈按 compilationId 各持一份，应用重启后清空（撤销/恢复为会话内能力）。
  */
 import { getDb } from '../db/connection'
@@ -22,9 +22,6 @@ interface RowRecycle {
 interface RowRepair {
   id: string; compilation_id: string; item_id: string; original_text: string; revised_text: string; reason: string; status: string; created_at: string; updated_at: string
 }
-interface RowRepairBin {
-  id: string; compilation_id: string; repair_id: string; item_id: string; original_text: string; revised_text: string; chosen: string; created_at: string
-}
 interface RowComp {
   id: string; task_id: string; title: string; status: string; created_at: string; updated_at: string
 }
@@ -36,7 +33,6 @@ export interface CompilationSnapshot {
   variants: RowVariant[]
   recycleBin: RowRecycle[]
   repairs: RowRepair[]
-  repairRecycleBin: RowRepairBin[]
 }
 
 const undoStacks = new Map<string, CompilationSnapshot[]>()
@@ -46,7 +42,7 @@ function place(n: number): string {
   return new Array(n).fill('?').join(',')
 }
 
-/** 捕获某汇编的完整状态（6 张表 + compilations 行）。返回 null 表示汇编不存在。 */
+/** 捕获某汇编的完整状态（5 张表 + compilations 行）。返回 null 表示汇编不存在。 */
 export function captureCompilationSnapshot(compilationId: string): CompilationSnapshot | null {
   const db = getDb()
   const comp = db.prepare('SELECT * FROM compilations WHERE id = ?').get(compilationId) as RowComp | undefined
@@ -59,11 +55,10 @@ export function captureCompilationSnapshot(compilationId: string): CompilationSn
     : []
   const recycleBin = db.prepare('SELECT * FROM compilation_recycle_bin WHERE compilation_id = ?').all(compilationId) as RowRecycle[]
   const repairs = db.prepare('SELECT * FROM compilation_repairs WHERE compilation_id = ?').all(compilationId) as RowRepair[]
-  const repairRecycleBin = db.prepare('SELECT * FROM compilation_repair_recycle_bin WHERE compilation_id = ?').all(compilationId) as RowRepairBin[]
-  return { compilation: comp, items, contradictions, variants, recycleBin, repairs, repairRecycleBin }
+  return { compilation: comp, items, contradictions, variants, recycleBin, repairs }
 }
 
-/** 用快照替换某汇编的全部状态（先清空 6 张表中属于该汇编的行，再按原 ID 重插）。 */
+/** 用快照替换某汇编的全部状态（先清空 5 张表中属于该汇编的行，再按原 ID 重插）。 */
 export function restoreCompilationSnapshot(snapshot: CompilationSnapshot): void {
   const db = getDb()
   const cid = snapshot.compilation.id
@@ -72,7 +67,6 @@ export function restoreCompilationSnapshot(snapshot: CompilationSnapshot): void 
   try {
     const tx = db.transaction(() => {
       db.prepare('DELETE FROM compilation_recycle_bin WHERE compilation_id = ?').run(cid)
-      db.prepare('DELETE FROM compilation_repair_recycle_bin WHERE compilation_id = ?').run(cid)
       db.prepare('DELETE FROM compilation_repairs WHERE compilation_id = ?').run(cid)
       db.prepare('DELETE FROM compilation_contradiction_variants WHERE contradiction_id IN (SELECT id FROM compilation_contradictions WHERE compilation_id = ?)').run(cid)
       db.prepare('DELETE FROM compilation_contradictions WHERE compilation_id = ?').run(cid)
@@ -95,9 +89,6 @@ export function restoreCompilationSnapshot(snapshot: CompilationSnapshot): void 
 
       const insRepair = db.prepare('INSERT INTO compilation_repairs (id, compilation_id, item_id, original_text, revised_text, reason, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
       for (const r of snapshot.repairs) insRepair.run(r.id, r.compilation_id, r.item_id, r.original_text, r.revised_text, r.reason, r.status, r.created_at, r.updated_at)
-
-      const insRepairBin = db.prepare('INSERT INTO compilation_repair_recycle_bin (id, compilation_id, repair_id, item_id, original_text, revised_text, chosen, created_at) VALUES (?,?,?,?,?,?,?,?)')
-      for (const r of snapshot.repairRecycleBin) insRepairBin.run(r.id, r.compilation_id, r.repair_id, r.item_id, r.original_text, r.revised_text, r.chosen, r.created_at)
     })
     tx()
   } finally {
@@ -171,11 +162,11 @@ export function compilationIdOfRepair(id: string): string | null {
   const row = db.prepare('SELECT compilation_id FROM compilation_repairs WHERE id = ?').get(id) as { compilation_id: string } | undefined
   return row?.compilation_id ?? null
 }
-/** 由回收站条目 id 反查所属汇编 id（矛盾或语义补全回收站）。 */
+/** 由回收站条目 id 反查所属汇编 id（被删除的资料卡片回收站）。 */
 export function compilationIdOfBin(binId: string): string | null {
   const db = getDb()
   const a = db.prepare('SELECT compilation_id FROM compilation_recycle_bin WHERE id = ?').get(binId) as { compilation_id: string } | undefined
   if (a) return a.compilation_id
-  const b = db.prepare('SELECT compilation_id FROM compilation_repair_recycle_bin WHERE id = ?').get(binId) as { compilation_id: string } | undefined
+  const b = db.prepare('SELECT compilation_id FROM compilation_card_recycle_bin WHERE id = ?').get(binId) as { compilation_id: string } | undefined
   return b?.compilation_id ?? null
 }

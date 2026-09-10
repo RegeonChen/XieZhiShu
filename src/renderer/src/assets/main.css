@@ -4340,38 +4340,87 @@ textarea:focus-visible {
   color: var(--fg-soft);
 }
 
-/* 资料卡片二次加工（语义补全/修订） */
+/* 资料卡片「大模型修正」（2026-09-08：卡片标记 + 详情弹窗；默认已应用，可回退/再次应用） */
 .compilation-card.is-repair {
   border-color: var(--success);
   border-left-color: var(--success);
 }
-.compilation-repair {
-  margin-top: 6px;
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-soft);
+.compilation-chip--fix {
+  border: 1px solid var(--success);
+  background: transparent;
+  color: var(--success);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  padding: 1px 7px;
+  transition: background 0.15s ease, color 0.15s ease;
 }
-.compilation-repair__label {
+.compilation-chip--fix:hover {
+  background: var(--success);
+  color: #fff;
+}
+.compilation-chip--fix.is-reverted {
+  border-color: var(--border);
+  color: var(--fg-soft);
+}
+.compilation-chip--fix.is-reverted:hover {
+  background: var(--bg-soft);
+  color: var(--fg);
+}
+.compilation-fix-modal {
+  width: 620px;
+  max-height: 76vh;
+  overflow-y: auto;
+}
+.compilation-fix-status {
+  align-self: flex-start;
+  font-size: 12px;
+  color: var(--success);
+  border: 1px solid var(--success);
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+.compilation-fix-status.is-reverted {
+  color: var(--fg-soft);
+  border-color: var(--border);
+}
+.compilation-fix-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.compilation-fix-label {
   font-size: 11px;
   color: var(--fg-soft);
 }
-.compilation-repair__original {
+.compilation-fix-original,
+.compilation-fix-revised,
+.compilation-fix-reason {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.compilation-fix-original {
   color: var(--fg-faint);
   text-decoration: line-through;
 }
-.compilation-repair__revised {
+.compilation-fix-revised {
   color: var(--success);
 }
-.compilation-repair__reason {
-  font-size: 12px;
+.compilation-fix-reason {
   color: var(--fg-soft);
-  margin-top: 4px;
+  text-decoration: none;
 }
-.compilation-repair__actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 6px;
+.compilation-fix-note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--fg-faint);
+  line-height: 1.6;
 }
 .compilation-card-head {
   display: flex;

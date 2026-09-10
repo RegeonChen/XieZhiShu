@@ -423,7 +423,7 @@ export default function App() {
               .replace('{summary}', [
                 `${sourceRemoval.cardCount} 张卡片`,
                 sourceRemoval.contradictionCount > 0 ? `${sourceRemoval.contradictionCount} 组矛盾` : null,
-                sourceRemoval.repairCount > 0 ? `${sourceRemoval.repairCount} 条二次改动` : null
+                sourceRemoval.repairCount > 0 ? `${sourceRemoval.repairCount} 条大模型修正` : null
               ].filter(Boolean).join('，'))
           }
           confirmText={zhCN.sourceRemoval.confirm}

@@ -71,9 +71,9 @@ export const IPC = {
   COMPILATION_UNDO_STATE: 'compilation:undoState',
   COMPILATION_RECYCLE_BIN_LIST: 'compilation:recycleBin:list',
   COMPILATION_RECYCLE_BIN_RESTORE: 'compilation:recycleBin:restore',
-  COMPILATION_REPAIR_SCAN: 'compilation:repairScan',
-  COMPILATION_REPAIRS_LIST: 'compilation:repairs:list',
-  COMPILATION_REPAIR_DECIDE: 'compilation:repairs:decide',
+  /* 资料卡片大模型修正（2026-09-08）：默认已应用，卡片上以标记承载；仅需回退 / 再次应用两个动作 */
+  COMPILATION_REPAIR_REVERT: 'compilation:repairs:revert',
+  COMPILATION_REPAIR_APPLY: 'compilation:repairs:apply',
   COMPILATION_EXPORT_DOCX: 'compilation:exportDocx',
   COMPILATION_EXPORT_ARCHIVE: 'compilation:exportArchive',
   COMPILATION_IMPORT_ARCHIVE: 'compilation:importArchive',
@@ -366,22 +366,20 @@ export type CompilationRecycleBinListRes = { items: CompilationRecycleBinItem[] 
 export interface CompilationRecycleBinRestoreReq {
   binId: string
 }
-export type CompilationRecycleBinRestoreRes = { contradiction?: CompilationContradiction; repair?: CompilationRepair; item?: CompilationItem; card?: CompilationItem }
+export type CompilationRecycleBinRestoreRes = { contradiction?: CompilationContradiction; item?: CompilationItem; card?: CompilationItem }
 
-/** 资料卡片二次加工（语义补全/修订）：对表意不明的卡片做扫描并生成 pending 修订 */
-export interface CompilationRepairScanReq {
-  compilationId: string
-}
-export type CompilationRepairScanRes = { repairs: CompilationRepair[] }
-export interface CompilationRepairsListReq {
-  compilationId: string
-}
-export type CompilationRepairsListRes = { items: CompilationRepair[] }
-export interface CompilationRepairDecideReq {
+/**
+ * 资料卡片「大模型修正」（2026-09-08 改版）：修正默认已应用到卡片，仅需两个动作——
+ * revert（回退到修正前文本）/ apply（把修正文本再次应用）。二者均登记撤销栈。
+ */
+export interface CompilationRepairRevertReq {
   repairId: string
-  action: 'accept' | 'reject'
 }
-export type CompilationRepairDecideRes = { item: CompilationItem; repair: CompilationRepair }
+export type CompilationRepairRevertRes = { item: CompilationItem; repair: CompilationRepair }
+export interface CompilationRepairApplyReq {
+  repairId: string
+}
+export type CompilationRepairApplyRes = { item: CompilationItem; repair: CompilationRepair }
 
 /** 导出资料汇编为 .docx（生成汇编功能区，2026-09） */
 export interface CompilationExportDocxReq { compilationId: string }
@@ -721,9 +719,8 @@ export interface IpcMapping {
   [IPC.COMPILATION_UNDO_STATE]: { _req: CompilationUndoReq; _res: ApiResult<CompilationUndoStateRes> }
   [IPC.COMPILATION_RECYCLE_BIN_LIST]: { _req: CompilationRecycleBinListReq; _res: ApiResult<CompilationRecycleBinListRes> }
   [IPC.COMPILATION_RECYCLE_BIN_RESTORE]: { _req: CompilationRecycleBinRestoreReq; _res: ApiResult<CompilationRecycleBinRestoreRes> }
-  [IPC.COMPILATION_REPAIR_SCAN]: { _req: CompilationRepairScanReq; _res: ApiResult<CompilationRepairScanRes> }
-  [IPC.COMPILATION_REPAIRS_LIST]: { _req: CompilationRepairsListReq; _res: ApiResult<CompilationRepairsListRes> }
-  [IPC.COMPILATION_REPAIR_DECIDE]: { _req: CompilationRepairDecideReq; _res: ApiResult<CompilationRepairDecideRes> }
+  [IPC.COMPILATION_REPAIR_REVERT]: { _req: CompilationRepairRevertReq; _res: ApiResult<CompilationRepairRevertRes> }
+  [IPC.COMPILATION_REPAIR_APPLY]: { _req: CompilationRepairApplyReq; _res: ApiResult<CompilationRepairApplyRes> }
   [IPC.STYLE_GUIDE_LIST]: { _req: void; _res: ApiResult<StyleGuideListRes> }
   [IPC.STYLE_GUIDE_SAVE]: { _req: StyleGuideSaveReq; _res: ApiResult<StyleGuideSaveRes> }
   [IPC.STYLE_GUIDE_SET_DEFAULT]: { _req: StyleGuideSetDefaultReq; _res: ApiResult<StyleGuideSetDefaultRes> }

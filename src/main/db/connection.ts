@@ -195,5 +195,71 @@ if (import.meta.vitest) {
       expect(() => insert.run('legacy-again', 'a.txt', 'a.txt', 0)).not.toThrow()
       old.close()
     })
+
+    it('migration 029 turns repairs into applied/reverted, applies pending text and drops the repair recycle bin (2026-09-08)', () => {
+      // 模拟升级前状态：应用迁移 1-28（含 028 的清库，故测试数据在其后插入）
+      const old = new Database(':memory:')
+      old.exec(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `)
+      const insertMigration = old.prepare('INSERT INTO schema_migrations (version) VALUES (?)')
+      const applyAll = old.transaction(() => {
+        for (const m of MIGRATIONS.filter((x) => x.version < 29)) {
+          if (m.run) m.run(old)
+          else if (m.sql) old.exec(m.sql)
+          insertMigration.run(m.version)
+        }
+      })
+      applyAll()
+
+      // 旧数据：已采纳 / 未裁定 / 已拒绝三种修订，各对应一张卡片
+      old.prepare("INSERT INTO writing_tasks (id, title, scope_json) VALUES ('t1','汇编测试','{\"all\":true}')").run()
+      old.prepare("INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('s1','file','报告','正文','ready')").run()
+      old.prepare(
+        "INSERT INTO compilations (id, task_id, title, status, created_at, updated_at) VALUES ('c1','t1','汇编','drafting','2026-01-01','2026-01-01')"
+      ).run()
+      const insItem = old.prepare(
+        "INSERT INTO compilation_items (id, compilation_id, position, source_id, excerpt, extra_tags, kept, created_at) VALUES (?, 'c1', ?, 's1', ?, '[]', 1, '2026-01-01')"
+      )
+      insItem.run('i1', 0, '原文一')
+      insItem.run('i2', 1, '原文二')
+      insItem.run('i3', 2, '原文三')
+      const insRepair = old.prepare(
+        "INSERT INTO compilation_repairs (id, compilation_id, item_id, original_text, revised_text, reason, status, created_at, updated_at) VALUES (?, 'c1', ?, ?, ?, '理由', ?, '2026-01-01','2026-01-01')"
+      )
+      insRepair.run('r1', 'i1', '原文一', '修正一', 'accepted')
+      insRepair.run('r2', 'i2', '原文二', '修正二', 'pending')
+      insRepair.run('r3', 'i3', '原文三', '修正三', 'rejected')
+      old.prepare(
+        "INSERT INTO compilation_repair_recycle_bin (id, compilation_id, repair_id, item_id, original_text, revised_text, chosen, created_at) VALUES ('b1','c1','r1','i1','原文一','修正一','accepted','2026-01-01')"
+      ).run()
+
+      runMigrations(old)
+
+      // accepted 保留为 applied；pending 按“默认采纳”口径转为 applied；rejected 丢弃
+      const statuses = old.prepare('SELECT id, status FROM compilation_repairs ORDER BY id').all() as { id: string; status: string }[]
+      expect(statuses).toEqual([
+        { id: 'r1', status: 'applied' },
+        { id: 'r2', status: 'applied' }
+      ])
+      // pending 的修订文本写入卡片；accepted 的卡片此前已应用，不重复改写
+      expect((old.prepare('SELECT excerpt FROM compilation_items WHERE id = ?').get('i2') as { excerpt: string }).excerpt).toBe('修正二')
+      expect((old.prepare('SELECT excerpt FROM compilation_items WHERE id = ?').get('i1') as { excerpt: string }).excerpt).toBe('原文一')
+      // 回收站表已删除，不再收录该类条目
+      const tbl = old.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='compilation_repair_recycle_bin'").all()
+      expect(tbl).toHaveLength(0)
+      // 新状态约束生效：只允许 applied / reverted
+      expect(() =>
+        old
+          .prepare(
+            "INSERT INTO compilation_repairs (id, compilation_id, item_id, original_text, revised_text, reason, status, created_at, updated_at) VALUES ('x','c1','i1','a','b','c','pending','2026-01-01','2026-01-01')"
+          )
+          .run()
+      ).toThrow()
+      old.close()
+    })
   })
 }

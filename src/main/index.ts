@@ -58,12 +58,10 @@ import {
   type CompilationRecycleBinListRes,
   type CompilationRecycleBinRestoreReq,
   type CompilationRecycleBinRestoreRes,
-  type CompilationRepairScanReq,
-  type CompilationRepairScanRes,
-  type CompilationRepairsListReq,
-  type CompilationRepairsListRes,
-  type CompilationRepairDecideReq,
-  type CompilationRepairDecideRes,
+  type CompilationRepairRevertReq,
+  type CompilationRepairRevertRes,
+  type CompilationRepairApplyReq,
+  type CompilationRepairApplyRes,
   type WorkspaceSourceRemovalListRes,
   type WorkspaceSourceRemovalDecideReq,
   type WorkspaceSourceRemovalDecideRes,
@@ -100,7 +98,7 @@ import {
   listFinalizedCompilationsForImport,
   importCompilationIntoTask
 } from './db/compilations'
-import { decideRepair, listRepairsByCompilation, restoreRepairRecycleBin } from './db/compilation-repairs'
+import { setRepairApplied } from './db/compilation-repairs'
 import {
   listStyleGuides,
   saveStyleGuide,
@@ -112,7 +110,6 @@ import { ensureDemoTask } from './db/demo-task'
 import { generateCompilation, continueCompilation } from './writing/compilation-service'
 import { renderCompilationDocx, serializeCompilationArchive } from './writing/compilation-export'
 import { adjustCompilation } from './writing/compilation-adjust'
-import { scanCompilationRepairs } from './writing/repair-service'
 import {
   pushUndo,
   undoCompilation,
@@ -818,12 +815,6 @@ handleLogged(IPC.COMPILATION_RECYCLE_BIN_RESTORE, (_event, params: CompilationRe
     if (undoCid) pushUndo(undoCid)
     const contradiction = restoreRecycleBinContradiction(params.binId)
     if (contradiction) return { ok: true, data: { contradiction } }
-    const repair = restoreRepairRecycleBin(params.binId)
-    if (repair) {
-      const compilation = getCompilationById(repair.compilationId)
-      const item = compilation?.items.find((i) => i.id === repair.itemId)
-      return { ok: true, data: { repair, item } }
-    }
     const card = restoreCompilationCardRecycleBin(params.binId)
     if (card) return { ok: true, data: { card } }
     return { ok: false, error: { code: 'INVALID_PARAM', message: '回收站条目不存在' } }
@@ -832,27 +823,25 @@ handleLogged(IPC.COMPILATION_RECYCLE_BIN_RESTORE, (_event, params: CompilationRe
   }
 })
 
-// 资料卡片二次加工（语义补全/修订，Phase 6.4.3）
-handleLogged(IPC.COMPILATION_REPAIR_SCAN, (_event, params: CompilationRepairScanReq): Promise<ApiResult<CompilationRepairScanRes>> => withKeepAwake(async () => {
-  try { pushUndo(params.compilationId) } catch { /* undo 登记失败不阻断二次修改扫描 */ }
-  const res = await scanCompilationRepairs(params.compilationId)
-  return res.ok ? { ok: true, data: { repairs: res.repairs } } : { ok: false, error: res.error }
-}))
-
-handleLogged(IPC.COMPILATION_REPAIRS_LIST, (_event, params: CompilationRepairsListReq): ApiResult<CompilationRepairsListRes> => {
+// 资料卡片「大模型修正」（2026-09-08：默认已应用，卡片上以标记承载，仅剩回退 / 再次应用两个动作）
+handleLogged(IPC.COMPILATION_REPAIR_REVERT, (_event, params: CompilationRepairRevertReq): ApiResult<CompilationRepairRevertRes> => {
   try {
-    return { ok: true, data: { items: listRepairsByCompilation(params.compilationId) } }
+    const undoCid = compilationIdOfRepair(params.repairId)
+    if (undoCid) pushUndo(undoCid)
+    const res = setRepairApplied(params.repairId, false)
+    if (!res) return { ok: false, error: { code: 'INVALID_PARAM', message: '大模型修正记录不存在' } }
+    return { ok: true, data: { item: res.item, repair: res.repair } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
 })
 
-handleLogged(IPC.COMPILATION_REPAIR_DECIDE, (_event, params: CompilationRepairDecideReq): ApiResult<CompilationRepairDecideRes> => {
+handleLogged(IPC.COMPILATION_REPAIR_APPLY, (_event, params: CompilationRepairApplyReq): ApiResult<CompilationRepairApplyRes> => {
   try {
     const undoCid = compilationIdOfRepair(params.repairId)
     if (undoCid) pushUndo(undoCid)
-    const res = decideRepair(params.repairId, params.action)
-    if (!res) return { ok: false, error: { code: 'INVALID_PARAM', message: '语义补全/修订不存在' } }
+    const res = setRepairApplied(params.repairId, true)
+    if (!res) return { ok: false, error: { code: 'INVALID_PARAM', message: '大模型修正记录不存在' } }
     return { ok: true, data: { item: res.item, repair: res.repair } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
