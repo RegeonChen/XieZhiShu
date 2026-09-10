@@ -479,6 +479,10 @@ export const zhCN = {
     presetAddContentLabel: '增补内容',
     presetAddContentDesc: '补齐汇编中缺失的方面',
     presetAddContent: '目前的资料汇编中缺失了「……」方面的信息，请你从资料库中再次检索相关片段并加入资料汇编。\n详细描述：……',
+    /* 资料提纯（2026-09-08：细读之后、修正之前的大模型二次提纯；2026-09-10 收紧口径；黑箱，不保留提纯前原文） */
+    purifiedSummary: '（提纯：{fromCards} 张 / {fromChars} 字 → {toCards} 张 / {toChars} 字，保留约 {kept}%）',
+    purifyPassthrough: '其中 {count} 张未获提纯结果、已按原样保留',
+    purifyScanFailed: '资料提纯未完成（{reason}），部分卡片可能仍包含与主题无关的内容。',
     /* 大模型修正（2026-09-08：默认应用 + 卡片标记 + 可回退/再次应用；不再进入回收站） */
     repairBadge: '✎ 经过大模型修正',
     repairBadgeReverted: '↺ 已回退到修正前',

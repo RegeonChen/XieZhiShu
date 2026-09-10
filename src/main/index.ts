@@ -569,7 +569,18 @@ handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerate
     }
   }
   // 不让生成管线裸抛 reject 导致进度冻结/无反馈：任何异常都转成结构化错误
-  let res: { ok: true; compilationId: string; candidateChunks: number; contradictions: number; contradictionScan?: { ok: boolean; message?: string }; interrupted?: { stage: string; message: string; percent: number; retryable?: boolean } } | { ok: false; error: { code: string; message: string } }
+  let res:
+    | {
+        ok: true
+        compilationId: string
+        candidateChunks: number
+        contradictions: number
+        contradictionScan?: { ok: boolean; message?: string }
+        repairScan?: { ok: boolean; message?: string }
+        purifyScan?: { ok: boolean; message?: string; inputCards?: number; outputCards?: number; inputChars?: number; outputChars?: number; passthroughCards?: number }
+        interrupted?: { stage: string; message: string; percent: number; retryable?: boolean }
+      }
+    | { ok: false; error: { code: string; message: string } }
   try {
     res = await generateCompilation(params.taskId, params.title, onProgress, onAdvice)
   } catch (err) {
@@ -578,7 +589,16 @@ handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerate
   if (!res.ok) return { ok: false, error: res.error }
   const compilation = getCompilationById(res.compilationId)
   if (!compilation) return { ok: false, error: { code: 'INTERNAL_ERROR', message: '资料汇编落库失败' } }
-  return { ok: true, data: { compilation, contradictionScan: res.contradictionScan, interrupted: res.interrupted } }
+  return {
+    ok: true,
+    data: {
+      compilation,
+      contradictionScan: res.contradictionScan,
+      repairScan: res.repairScan,
+      purifyScan: res.purifyScan,
+      interrupted: res.interrupted
+    }
+  }
 }))
 
 // 中断续跑（Phase 6.x：大模型异常中断后，从断点继续生成资料汇编；仅会话内）
@@ -597,7 +617,18 @@ handleLogged(IPC.COMPILATION_CONTINUE, async (event, params: CompilationContinue
       event.sender.send(IPC_EVENTS.COMPILATION_ADVICE, { taskId: progressTaskId, kind })
     }
   }
-  let res: { ok: true; compilationId: string; candidateChunks: number; contradictions: number; contradictionScan?: { ok: boolean; message?: string }; interrupted?: { stage: string; message: string; percent: number; retryable?: boolean } } | { ok: false; error: { code: string; message: string } }
+  let res:
+    | {
+        ok: true
+        compilationId: string
+        candidateChunks: number
+        contradictions: number
+        contradictionScan?: { ok: boolean; message?: string }
+        repairScan?: { ok: boolean; message?: string }
+        purifyScan?: { ok: boolean; message?: string; inputCards?: number; outputCards?: number; inputChars?: number; outputChars?: number; passthroughCards?: number }
+        interrupted?: { stage: string; message: string; percent: number; retryable?: boolean }
+      }
+    | { ok: false; error: { code: string; message: string } }
   try {
     res = await continueCompilation(params.compilationId, onProgress, onAdvice)
   } catch (err) {
@@ -606,7 +637,16 @@ handleLogged(IPC.COMPILATION_CONTINUE, async (event, params: CompilationContinue
   if (!res.ok) return { ok: false, error: res.error }
   const compilation = getCompilationById(res.compilationId)
   if (!compilation) return { ok: false, error: { code: 'INTERNAL_ERROR', message: '资料汇编落库失败' } }
-  return { ok: true, data: { compilation, interrupted: res.interrupted } }
+  return {
+    ok: true,
+    data: {
+      compilation,
+      contradictionScan: res.contradictionScan,
+      repairScan: res.repairScan,
+      purifyScan: res.purifyScan,
+      interrupted: res.interrupted
+    }
+  }
 }))
 
 handleLogged(IPC.COMPILATION_UPDATE_ITEM, (_event, params: CompilationUpdateItemReq): ApiResult<CompilationUpdateItemRes> => {
