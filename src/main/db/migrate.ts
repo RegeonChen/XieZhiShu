@@ -652,6 +652,46 @@ ALTER TABLE llm_providers ADD COLUMN concurrency INTEGER NOT NULL DEFAULT 4;
         db.prepare("DELETE FROM " + table).run()
       }
     }
+  },
+  {
+    // 2026-09-08：资料卡片「大模型修正」（原“二次加工/语义补全”）改为**默认应用**，由卡片上的标记承载
+    // （点击标记可查看修正前原文与理由、并可回退）。因此：
+    //   ① compilation_repairs 状态由「待裁定 pending / accepted / rejected」改为「已应用 applied / 已回退 reverted」
+    //      （CHECK 约束无法就地修改，故重建表）；
+    //   ② 回收站不再收录该类条目 → 删除 compilation_repair_recycle_bin（被删卡片仍把其修正记录快照进
+    //      compilation_card_recycle_bin.extra，随卡片一起恢复）。
+    // 老数据迁移口径（用户确认）：accepted → applied（保留记录，文本此前已应用）；pending → applied 且把修订文本
+    // 写入卡片（新口径“默认采纳所有二次修改”）；rejected → 丢弃（旧语义为“不采用”，卡片文本未变，无留存痕迹）。
+    version: 29,
+    run: (db) => {
+      db.exec(`
+CREATE TABLE compilation_repairs_new (
+  id TEXT PRIMARY KEY,
+  compilation_id TEXT NOT NULL REFERENCES compilations(id) ON DELETE CASCADE,
+  item_id TEXT NOT NULL REFERENCES compilation_items(id) ON DELETE CASCADE,
+  original_text TEXT NOT NULL,
+  revised_text TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'applied' CHECK (status IN ('applied','reverted')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+INSERT INTO compilation_repairs_new (id, compilation_id, item_id, original_text, revised_text, reason, status, created_at, updated_at)
+  SELECT id, compilation_id, item_id, original_text, revised_text, reason, 'applied', created_at, updated_at
+  FROM compilation_repairs
+  WHERE status IN ('accepted', 'pending');
+UPDATE compilation_items
+   SET excerpt = (SELECT r.revised_text FROM compilation_repairs r
+                   WHERE r.item_id = compilation_items.id AND r.status = 'pending'
+                   ORDER BY r.created_at LIMIT 1)
+ WHERE id IN (SELECT item_id FROM compilation_repairs WHERE status = 'pending');
+DROP TABLE compilation_repairs;
+ALTER TABLE compilation_repairs_new RENAME TO compilation_repairs;
+CREATE INDEX IF NOT EXISTS idx_compilation_repairs_comp ON compilation_repairs(compilation_id);
+CREATE INDEX IF NOT EXISTS idx_compilation_repairs_item ON compilation_repairs(item_id);
+DROP TABLE IF EXISTS compilation_repair_recycle_bin;
+`)
+    }
   }
 ]
 

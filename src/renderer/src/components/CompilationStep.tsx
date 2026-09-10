@@ -22,7 +22,8 @@ export interface CompilationRepairView {
   originalText: string
   revisedText: string
   reason: string
-  status: 'pending' | 'accepted' | 'rejected'
+  /** applied：修正已应用到卡片（绿色标记）；reverted：用户已回退（灰色标记，可再次应用） */
+  status: 'applied' | 'reverted'
   createdAt: string
   updatedAt: string
 }
@@ -69,7 +70,8 @@ interface Props {
   onUpdateItem: (itemId: string, patch: { excerpt?: string; ts?: string | null; note?: string | null }) => void
   onDeleteItem: (itemId: string) => void
   onResolve: (contradictionId: string, action: 'resolve' | 'ignore', chosenItemId?: string) => void
-  onDecideRepair: (repairId: string, action: 'accept' | 'reject') => void
+  /** 回退（applied=true 时）或再次应用（applied=false 时）一条大模型修正 */
+  onDecideRepair: (repairId: string, applied: boolean) => void
   onReorderItems: (direction: 'asc' | 'desc') => void
   onUndo: () => void
   onRedo: () => void
@@ -103,6 +105,8 @@ function CompilationStep({
   const [ts, setTs] = useState('')
   /** 当前展开“…”菜单的卡片 id（一次只展开一张） */
   const [menuFor, setMenuFor] = useState<string | null>(null)
+  /** 当前展开「修正详情」弹窗的卡片修正记录（一次只看一张） */
+  const [fixDetail, setFixDetail] = useState<CompilationRepairView | null>(null)
   /** 矛盾窗口是否展开（默认展开，可收起） */
   const [contradictionsOpen, setContradictionsOpen] = useState(true)
 
@@ -124,10 +128,10 @@ function CompilationStep({
 
   const conflictForItem = (itemId: string): boolean => pending.some((g) => g.variants.some((v) => v.itemId === itemId))
 
-  /** 待语义补全/已采纳的修订（已拒绝的不再展示比较/按钮） */
-  const pendingRepairs = (compilation?.repairs ?? []).filter((r) => r.status === 'pending')
+  /** 大模型修正记录（应用于该卡片；回退后仍有记录，标记转为灰色） */
+  const appliedFixes = (compilation?.repairs ?? []).filter((r) => r.status === 'applied')
   const repairForItem = (itemId: string): CompilationRepairView | undefined =>
-    (compilation?.repairs ?? []).find((r) => r.itemId === itemId && r.status !== 'rejected')
+    (compilation?.repairs ?? []).find((r) => r.itemId === itemId)
 
   if (!compilation) {
     return (
@@ -142,7 +146,7 @@ function CompilationStep({
       <div className="compilation-toolbar">
         <span className="compilation-stat">{t.cards.replace('{count}', String(keptItems.length))}</span>
         {candidateChunks ? <span className="compilation-stat">{t.candidate.replace('{chunks}', String(candidateChunks))}</span> : null}
-        {pendingRepairs.length > 0 ? <span className="compilation-stat">{t.repairPending.replace('{count}', String(pendingRepairs.length))}</span> : null}
+        {appliedFixes.length > 0 ? <span className="compilation-stat">{t.repairAppliedCount.replace('{count}', String(appliedFixes.length))}</span> : null}
         <span className={cls('compilation-badge', pending.length ? 'danger' : 'ok')}>
           {pending.length ? t.pendingContradictions.replace('{count}', String(pending.length)) : t.noContradictions}
         </span>
@@ -249,15 +253,32 @@ function CompilationStep({
 
       <div className="compilation-cards">
         {keptItems.map((it) => {
-          const repair = repairForItem(it.id)
+          const fix = repairForItem(it.id)
           return (
-            <div key={it.id} className={cls('compilation-card', conflictForItem(it.id) ? 'has-conflict' : '', repair ? 'is-repair' : '')}>
+            <div
+              key={it.id}
+              className={cls(
+                'compilation-card',
+                conflictForItem(it.id) ? 'has-conflict' : '',
+                fix ? 'is-repair' : ''
+              )}
+            >
               <div className="compilation-card-head">
                 <div className="compilation-card-meta">
                   <span className="compilation-chip">{it.ts ?? '无时间'}</span>
                   <span className="compilation-chip">《{it.sourceTitle ?? it.sourceId}》</span>
                   {conflictForItem(it.id) ? <span className="compilation-chip conflict">⚠ {t.contradict}</span> : null}
-                  {repair ? <span className="compilation-chip">{t.repairTitle}</span> : null}
+                  {fix ? (
+                    <button
+                      type="button"
+                      className={cls('compilation-chip', 'compilation-chip--fix', fix.status === 'reverted' ? 'is-reverted' : '')}
+                      title={t.repairBadgeHint}
+                      aria-label={t.repairBadgeHint}
+                      onClick={() => setFixDetail(fix)}
+                    >
+                      {fix.status === 'applied' ? t.repairBadge : t.repairBadgeReverted}
+                    </button>
+                  ) : null}
                 </div>
                 <div className="compilation-card-menu">
                   <button
@@ -272,6 +293,7 @@ function CompilationStep({
                   {menuFor === it.id ? (
                     <div className="compilation-card-menu-dropdown">
                       <button type="button" onClick={() => { onOpenSource(it.sourceId); setMenuFor(null) }}>{t.openSource}</button>
+                      {fix ? <button type="button" onClick={() => { setFixDetail(fix); setMenuFor(null) }}>{t.repairDetail}</button> : null}
                       <button type="button" onClick={() => { startEdit(it); setMenuFor(null) }}>{t.edit}</button>
                       <button type="button" className="is-danger" onClick={() => { onDeleteItem(it.id); setMenuFor(null) }}>{t.delete}</button>
                     </div>
@@ -279,26 +301,49 @@ function CompilationStep({
                 </div>
               </div>
               <div className="compilation-card-text">{it.excerpt}</div>
-              {repair ? (
-                <div className="compilation-repair">
-                  <div className="compilation-repair__label">{t.repairTitle}</div>
-                  <div className="compilation-repair__original">{t.repairOriginal}：{repair.originalText}</div>
-                  <div className="compilation-repair__revised">{t.repairRevised}：{repair.revisedText}</div>
-                  {repair.reason ? <div className="compilation-repair__reason">{t.repairReason}{repair.reason}</div> : null}
-                  {repair.status === 'pending' ? (
-                    <div className="compilation-repair__actions">
-                      <button type="button" className="source-list__btn source-list__btn--primary" disabled={busy} onClick={() => onDecideRepair(repair.id, 'accept')}>{t.repairAdopt}</button>
-                      <button type="button" className="source-list__btn" disabled={busy} onClick={() => onDecideRepair(repair.id, 'reject')}>{t.repairReject}</button>
-                    </div>
-                  ) : repair.status === 'accepted' ? (
-                    <div className="compilation-repair__label">{t.repairAccepted}</div>
-                  ) : null}
-                </div>
-              ) : null}
             </div>
           )
         })}
       </div>
+
+      {fixDetail ? (
+        <div className="skills-manager__modal-backdrop" onMouseDown={() => setFixDetail(null)}>
+          <div className="skills-manager__modal compilation-fix-modal" onMouseDown={(e) => e.stopPropagation()}>
+            <h4 className="skills-manager__modal-title">{t.repairDialogTitle}</h4>
+            <div className={cls('compilation-fix-status', fixDetail.status === 'reverted' ? 'is-reverted' : '')}>
+              {fixDetail.status === 'applied' ? t.repairBadge : t.repairBadgeReverted}
+            </div>
+            <div className="compilation-fix-block">
+              <div className="compilation-fix-label">{t.repairOriginalLabel}</div>
+              <div className="compilation-fix-original">{fixDetail.originalText}</div>
+            </div>
+            {fixDetail.revisedText && fixDetail.revisedText !== fixDetail.originalText ? (
+              <div className="compilation-fix-block">
+                <div className="compilation-fix-label">{t.repairRevisedLabel}</div>
+                <div className="compilation-fix-revised">{fixDetail.revisedText}</div>
+              </div>
+            ) : null}
+            {fixDetail.reason ? (
+              <div className="compilation-fix-block">
+                <div className="compilation-fix-label">{t.repairReason}</div>
+                <div className="compilation-fix-reason">{fixDetail.reason}</div>
+              </div>
+            ) : null}
+            <p className="compilation-fix-note">{t.repairRevertHint}</p>
+            <div className="skills-manager__modal-actions">
+              <button type="button" className="source-list__btn" disabled={busy} onClick={() => setFixDetail(null)}>{t.cancel}</button>
+              <button
+                type="button"
+                className={cls('source-list__btn', fixDetail.status === 'applied' ? '' : 'source-list__btn--primary')}
+                disabled={busy}
+                onClick={() => { onDecideRepair(fixDetail.id, fixDetail.status !== 'applied'); setFixDetail(null) }}
+              >
+                {fixDetail.status === 'applied' ? t.repairRevert : t.repairReapply}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {editing ? (
         <div className="skills-manager__modal-backdrop" onMouseDown={() => setEditing(null)}>

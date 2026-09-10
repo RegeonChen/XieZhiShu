@@ -189,21 +189,17 @@ const api = {
   listCompilationRecycleBin(compilationId: string): Promise<ApiResult<{ items: unknown[] }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_RECYCLE_BIN_LIST, { compilationId })
   },
-  /** 从回收站恢复某条条目（矛盾或语义补全/修订；矛盾回到 pending，修订回退原文） */
-  restoreCompilationRecycleBin(binId: string): Promise<ApiResult<{ contradiction?: unknown; repair?: unknown; item?: unknown }>> {
+  /** 从回收站恢复某条条目（矛盾回到 pending；资料卡片还原，含其矛盾变异与大模型修正记录） */
+  restoreCompilationRecycleBin(binId: string): Promise<ApiResult<{ contradiction?: unknown; card?: unknown }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_RECYCLE_BIN_RESTORE, { binId })
   },
-  /** 扫描资料卡片二次加工（语义补全/修订）：读取卡片与原文上下文，由大模型提出补全/修订 */
-  scanCompilationRepairs(compilationId: string): Promise<ApiResult<{ repairs: unknown[] }>> {
-    return ipcRenderer.invoke(IPC.COMPILATION_REPAIR_SCAN, { compilationId })
+  /** 回退一条「大模型修正」：卡片还原为修正前文本（保留记录，可再次应用） */
+  revertCompilationRepair(repairId: string): Promise<ApiResult<{ item: unknown; repair: unknown }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_REPAIR_REVERT, { repairId })
   },
-  /** 列出某汇编的语义补全/修订 */
-  listCompilationRepairs(compilationId: string): Promise<ApiResult<{ items: unknown[] }>> {
-    return ipcRenderer.invoke(IPC.COMPILATION_REPAIRS_LIST, { compilationId })
-  },
-  /** 采纳/拒绝一条语义补全/修订（accept 会改写卡片摘录为修订文本） */
-  decideCompilationRepair(repairId: string, action: 'accept' | 'reject'): Promise<ApiResult<{ item: unknown; repair: unknown }>> {
-    return ipcRenderer.invoke(IPC.COMPILATION_REPAIR_DECIDE, { repairId, action })
+  /** 再次应用一条已回退的「大模型修正」：卡片文本回到修正后文本 */
+  applyCompilationRepair(repairId: string): Promise<ApiResult<{ item: unknown; repair: unknown }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_REPAIR_APPLY, { repairId })
   },
   // ---- 资料汇编导出/导入（生成汇编 → 撰写初稿，2026-09） ----
   /** 导出资料汇编为 .docx */

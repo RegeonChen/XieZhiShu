@@ -14,7 +14,7 @@ import type {
 } from '../../shared/types'
 import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
-import { insertRepair, listRepairRecycleBinByCompilation, listRepairsByCompilation } from './compilation-repairs'
+import { insertRepair, listRepairsByCompilation } from './compilation-repairs'
 
 interface CompilationRow {
   id: string
@@ -222,9 +222,15 @@ export interface CompilationItemInput {
   ts?: string
   note?: string
   extraTags?: string[]
+  /**
+   * 该卡片的「大模型修正」记录（生成管线在内存阶段算出，随卡片一起流转）。
+   * 与卡片**同事务**写入 compilation_repairs（status='applied'），因此在 mapOutputItemsToInputs 过滤、
+   * sortItemsByTs 重排之后仍与卡片严格对应，不会错位（这是徽标归属正确的关键）。
+   */
+  repair?: { originalText: string; revisedText: string; reason: string }
 }
 
-/** 批量写入资料卡片（事务，按传入顺序编号 position）。 */
+/** 批量写入资料卡片（事务，按传入顺序编号 position）；卡片携带的大模型修正记录一并写入。 */
 export function insertCompilationItems(compilationId: string, inputs: CompilationItemInput[]): CompilationItem[] {
   const db = getDb()
   if (inputs.length === 0) return []
@@ -234,8 +240,9 @@ export function insertCompilationItems(compilationId: string, inputs: Compilatio
   )
   const tx = db.transaction(() => {
     inputs.forEach((it, i) => {
+      const itemId = crypto.randomUUID()
       ins.run(
-        crypto.randomUUID(),
+        itemId,
         compilationId,
         i,
         it.sourceId,
@@ -245,6 +252,15 @@ export function insertCompilationItems(compilationId: string, inputs: Compilatio
         JSON.stringify(it.extraTags ?? []),
         now
       )
+      if (it.repair && it.repair.revisedText !== it.repair.originalText) {
+        insertRepair({
+          compilationId,
+          itemId,
+          originalText: it.repair.originalText,
+          revisedText: it.repair.revisedText,
+          reason: it.repair.reason
+        })
+      }
     })
   })
   tx()
@@ -322,7 +338,7 @@ interface CardBinRow {
   extra: string
 }
 
-/** 把一张卡片（及其矛盾变异、语义补全修订）快照进回收站，供恢复。返回是否成功入站。 */
+/** 把一张卡片（及其矛盾变异、大模型修正记录）快照进回收站，供恢复。返回是否成功入站。 */
 function snapshotCardToRecycleBin(itemId: string): boolean {
   const db = getDb()
   const item = db.prepare('SELECT * FROM compilation_items WHERE id = ?').get(itemId) as CompilationItemRow | undefined
@@ -337,12 +353,12 @@ function snapshotCardToRecycleBin(itemId: string): boolean {
 
 export function deleteCompilationItem(itemId: string): void {
   const db = getDb()
-  // 删除前快照进回收站（第三类：资料卡片），允许恢复
+  // 删除前快照进回收站（第二类：资料卡片），允许恢复
   snapshotCardToRecycleBin(itemId)
   db.prepare('DELETE FROM compilation_items WHERE id = ?').run(itemId)
 }
 
-/** 从回收站恢复一张被删除的资料卡片（含其矛盾变异/语义补全修订），并删除回收站条目。 */
+/** 从回收站恢复一张被删除的资料卡片（含其矛盾变异与大模型修正记录），并删除回收站条目。 */
 export function restoreCompilationCardRecycleBin(binId: string): CompilationItem | null {
   const db = getDb()
   const row = db.prepare('SELECT * FROM compilation_card_recycle_bin WHERE id = ?').get(binId) as CardBinRow | undefined
@@ -382,7 +398,7 @@ export interface DeleteSourceItemsResult {
 
 /**
  * 工作区文件被删除后的确认清理（2026-08-28）：删除某来源在**全部资料汇编**中的资料卡片，
- * 并同步删除涉及这些卡片的**矛盾分组**（及其变异/回收站）与**语义补全/修订**（及其回收站）。
+ * 并同步删除涉及这些卡片的**矛盾分组**（及其变异/回收站）与**大模型修正记录**。
  * 硬删除、**不写入回收站**；若某汇编因此清空，则把状态重置回 drafting（便于重新生成）。
  * 需要先调用方删除来源（本函数基于 source_id 匹配卡片）；来源删除后卡片 source_id 会置空，
  * 因此调用方应在删除来源前捕获 sourceId（本函数仍按传入 sourceId 检索仍存在的卡片）。
@@ -417,10 +433,7 @@ export function deleteCompilationItemsForSourceIds(sourceIds: string[]): DeleteS
         .run(...contradictionIds).changes
     }
     const deletedItems = db.prepare(`DELETE FROM compilation_items WHERE id IN (${iPlace})`).run(...itemIds).changes
-    // compilation_repairs 随 item_id 级联删除；但 compilation_repair_recycle_bin.item_id 无外键，需显式清理，
-    // 避免删除卡片后回收站残留指向已删卡片的“待恢复”修订条目（否则恢复时卡片已不存在）。
-    db.prepare(`DELETE FROM compilation_repair_recycle_bin WHERE item_id IN (${iPlace})`).run(...itemIds)
-    // 矛盾卡片随 item_id 级联删除；矛盾分组（含变异/回收站）随 contradiction_id 级联删除。
+    // compilation_repairs（大模型修正记录）随 item_id 级联删除；矛盾分组（含变异/回收站）随 contradiction_id 级联删除。
     // 若受影响汇编因此清空，重置为 drafting，解除「已确认汇编」锁定，提示用户重新生成。
     const now = new Date().toISOString()
     for (const cid of affectedCompIds) {
@@ -437,12 +450,12 @@ export function deleteCompilationItemsForSourceIds(sourceIds: string[]): DeleteS
 
 /**
  * 按卡片 id 批量删除（资料汇编调整用，2026-08-28）：删除指定卡片，并同步删除涉及这些卡片的
- * 矛盾分组（含变异/回收站）与语义补全/修订（含回收站），硬删除、不入回收站；若某汇编因此清空则回 drafting。
+ * 矛盾分组（含变异/回收站）与大模型修正记录，硬删除修正记录不入回收站；若某汇编因此清空则回 drafting。
  */
 export function deleteCompilationItemsByIds(itemIds: string[]): DeleteSourceItemsResult {
   const db = getDb()
   if (itemIds.length === 0) return { deletedItems: 0, deletedContradictions: 0, deletedRepairs: 0 }
-  // 删除前把每张卡快照进回收站（第三类：资料卡片），允许恢复
+  // 删除前把每张卡快照进回收站（第二类：资料卡片），允许恢复
   for (const id of itemIds) snapshotCardToRecycleBin(id)
   const iPlace = itemIds.map(() => '?').join(',')
   const affectedCompIds = Array.from(
@@ -468,8 +481,7 @@ export function deleteCompilationItemsByIds(itemIds: string[]): DeleteSourceItem
         .run(...contradictionIds).changes
     }
     const deletedItems = db.prepare(`DELETE FROM compilation_items WHERE id IN (${iPlace})`).run(...itemIds).changes
-    // compilation_repair_recycle_bin.item_id 无外键，删除卡片后需显式清理，避免回收站残留指向已删卡片的条目
-    db.prepare(`DELETE FROM compilation_repair_recycle_bin WHERE item_id IN (${iPlace})`).run(...itemIds)
+    // compilation_repairs 随 item_id 级联删除（无需显式清理）
     const now = new Date().toISOString()
     for (const cid of affectedCompIds) {
       const left = db.prepare('SELECT COUNT(*) AS c FROM compilation_items WHERE compilation_id = ?').get(cid) as { c: number }
@@ -601,7 +613,10 @@ export function confirmCompilation(compilationId: string): Compilation | null {
   return getCompilationById(compilationId)
 }
 
-/** 某汇编的回收站条目（矛盾 + 语义补全/修订，按时间倒序） */
+/**
+ * 某汇编的回收站条目（2026-09-08 起仅两类：被删除的资料卡片 + 已取舍的矛盾，按时间倒序）。
+ * 「大模型修正」不再进入回收站——由卡片上的标记承载（点开可查看原文/理由并回退）。
+ */
 export function listRecycleBinByCompilation(compilationId: string): CompilationRecycleBinItem[] {
   const db = getDb()
   const rows = db
@@ -622,8 +637,7 @@ export function listRecycleBinByCompilation(compilationId: string): CompilationR
       contradiction
     })
   }
-  const repairs = listRepairRecycleBinByCompilation(compilationId)
-  // 第三类：被删除的资料卡片（快照 + 恢复，含其矛盾变异/语义补全修订）
+  // 第二类：被删除的资料卡片（快照 + 恢复，含其矛盾变异与大模型修正记录）
   const cardRows = db.prepare('SELECT * FROM compilation_card_recycle_bin WHERE compilation_id = ?').all(compilationId) as CardBinRow[]
   const cards: CompilationRecycleBinItem[] = cardRows.map((c) => {
     const srcTitle = loadSourceTitles(c.source_id ? [c.source_id] : []).get(c.source_id ?? '') ?? c.source_id ?? ''
@@ -652,7 +666,7 @@ export function listRecycleBinByCompilation(compilationId: string): CompilationR
       createdAt: c.deleted_at
     }
   })
-  const all: CompilationRecycleBinItem[] = [...contradictions, ...repairs, ...cards]
+  const all: CompilationRecycleBinItem[] = [...contradictions, ...cards]
   return all.sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
 }
 
@@ -927,17 +941,14 @@ if (import.meta.vitest) {
       ])[0]
       // 让该矛盾先进入回收站（模拟已被采纳/忽略过），删除后应一并清除
       updateCompilationContradictionStatus(g.id, 'resolved', items[0].id)
-      // 给 sourceIds[0] 的卡片加一条语义补全/修订，并快照进回收站（模拟已采纳/拒绝过）
-      const repair = insertRepair({
+      // 给 sourceIds[0] 的卡片加一条大模型修正记录（已应用）
+      insertRepair({
         compilationId: c.id,
         itemId: items[0].id,
         originalText: '公办园 76 所',
         revisedText: '2021 年公办园 76 所。',
         reason: '表意不明'
       })
-      db.prepare(
-        'INSERT INTO compilation_repair_recycle_bin (id, compilation_id, repair_id, item_id, original_text, revised_text, chosen, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-      ).run(crypto.randomUUID(), c.id, repair.id, items[0].id, '公办园 76 所', '2021 年公办园 76 所。', 'accepted', new Date().toISOString())
 
       const res = deleteCompilationItemsForSourceIds([sourceIds[0]])
       expect(res.deletedItems).toBe(2) // 来源0 的两张卡
@@ -948,9 +959,59 @@ if (import.meta.vitest) {
       expect(after.items.map((i) => i.excerpt)).toEqual(['公办园 82 所']) // 来源1 的卡保留
       expect(after.contradictions).toHaveLength(0) // 涉及被删卡片的矛盾整组删除
       expect(after.repairs).toHaveLength(0)
-      // 不写入回收站：矛盾回收站为空；语义补全回收站（含已快照条目）也清空，避免残留指向已删卡片的条目
-      expect(listRepairRecycleBinByCompilation(c.id)).toHaveLength(0)
+      // 不写入回收站：矛盾回收站为空；修正记录随卡片级联删除（不再有独立回收站表）
       expect(listRecycleBinByCompilation(c.id)).toHaveLength(0)
+    })
+
+    it('recycle bin holds only deleted cards and resolved contradictions (2026-09-08: 大模型修正不再入回收站)', () => {
+      const { taskId, sourceIds } = seed()
+      const c = createCompilation({ taskId, title: '汇编' })
+      const items = insertCompilationItems(c.id, [
+        { sourceId: sourceIds[0], excerpt: '公办园 76 所', ts: '2021 年' },
+        { sourceId: sourceIds[1], excerpt: '公办园 82 所', ts: '2021 年' }
+      ])
+      insertRepair({ compilationId: c.id, itemId: items[0].id, originalText: '公办园 76 所', revisedText: '修正后', reason: '表意不明' })
+      const g = insertCompilationContradictions(c.id, [
+        {
+          topic: '2021 年公办园数量',
+          kind: 'data',
+          variants: [
+            { itemId: items[0].id, variantText: '公办园 76 所', sourceId: sourceIds[0] },
+            { itemId: items[1].id, variantText: '公办园 82 所', sourceId: sourceIds[1] }
+          ]
+        }
+      ])[0]
+      updateCompilationContradictionStatus(g.id, 'ignored')
+      deleteCompilationItem(items[0].id)
+
+      const bin = listRecycleBinByCompilation(c.id)
+      expect(bin.map((b) => b.kind).sort()).toEqual(['card', 'contradiction'])
+    })
+
+    it('writes the card repair in the same transaction, mapped to the right card (2026-09-08)', () => {
+      const { taskId, sourceIds } = seed()
+      const c = createCompilation({ taskId, title: '汇编' })
+      const items = insertCompilationItems(c.id, [
+        {
+          sourceId: sourceIds[0],
+          excerpt: '2021 年公办园 76 所',
+          ts: '2021 年',
+          repair: { originalText: '公办园 76 所', revisedText: '2021 年公办园 76 所', reason: '缺少年份' }
+        },
+        { sourceId: sourceIds[1], excerpt: '2005 年全县幼儿园 89 所。', ts: '2005 年' }
+      ])
+      const loaded = getCompilationById(c.id)!
+      const repairs = loaded.repairs ?? []
+      expect(repairs).toHaveLength(1)
+      expect(repairs[0].status).toBe('applied')
+      expect(repairs[0].itemId).toBe(items[0].id) // 修正记录与卡片严格对应
+      expect(repairs[0].originalText).toBe('公办园 76 所')
+      expect(loaded.items[0].excerpt).toBe('2021 年公办园 76 所')
+      // 卡片按时间重排后，修正记录仍指向原卡片（item id 不变）
+      reorderCompilationItemsByTs(c.id, 'desc')
+      const after = getCompilationById(c.id)!
+      expect(after.repairs![0].itemId).toBe(items[0].id)
+      expect(after.items.map((i) => i.excerpt)).toEqual(['2021 年公办园 76 所', '2005 年全县幼儿园 89 所。'])
     })
   })
 }

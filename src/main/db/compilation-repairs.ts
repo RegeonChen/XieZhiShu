@@ -1,17 +1,16 @@
 /**
- * compilation-repairs.ts —— 资料卡片二次加工（语义补全/修订）仓储（Phase 6.4.3，2026-08-25）。
- * 三步：① AI 扫描表意不明的卡片并生成 pending 修订（compilation_repairs）；
- *       ② 用户采纳/拒绝（decideRepair：采纳改写 item.excerpt + 状态 accepted；拒绝仅状态 rejected）；
- *       ③ 采纳/拒绝快照进 compilation_repair_recycle_bin 供恢复（restore 回退 pending + 恢复原文）。
- * 无 Provider / AI 失败时不阻断（additive），不修改卡片文本。
+ * compilation-repairs.ts —— 资料卡片「大模型修正」仓储（原“二次加工/语义补全”，Phase 6.4.3 → 2026-09-08 改版）。
+ *
+ * 语义（2026-09-08 用户需求变更）：
+ * - 修正由生成管线在「AI 细读」之后、「卡片矛盾扫描」之前产出，**默认直接应用到卡片**（status='applied'）；
+ * - 卡片上以「经过大模型修正」标记承载，用户点标记可查看修正前原文与理由，并可**回退**（status='reverted'，
+ *   卡片还原为 original_text）或**再次应用**（回到 revised_text）；
+ * - 不再有「待裁定」状态，也不再进入回收站（`compilation_repair_recycle_bin` 已随 Migration 029 删除）。
+ *
+ * 时间戳（ts）的自动补齐不属于修正记录（用户确认：静默补齐、无标记、不可回退），由生成管线直接写入卡片 ts。
  */
 import Database from 'better-sqlite3'
-import type {
-  CompilationItem,
-  CompilationRepair,
-  CompilationRepairStatus,
-  CompilationRecycleBinRepair
-} from '../../shared/types'
+import type { CompilationItem, CompilationRepair, CompilationRepairStatus } from '../../shared/types'
 import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
 
@@ -115,126 +114,52 @@ export interface InsertRepairInput {
   reason: string
 }
 
+/**
+ * 写入一条「大模型修正」记录（status='applied'）。
+ * 注意：本函数**只写记录、不改卡片**——卡片文本由生成管线在内存阶段改好并落库（见 db/compilations.ts
+ * 的 insertCompilationItems：卡片与修正记录在同一事务内按新 itemId 一起写入）。
+ */
 export function insertRepair(input: InsertRepairInput & { compilationId: string }): CompilationRepair {
   const db = getDb()
   const id = crypto.randomUUID()
   const now = new Date().toISOString()
   db.prepare(
     `INSERT INTO compilation_repairs (id, compilation_id, item_id, original_text, revised_text, reason, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, 'applied', ?, ?)`
   ).run(id, input.compilationId, input.itemId, input.originalText, input.revisedText, input.reason, now, now)
   return getRepairById(id)!
 }
 
-/** 批量写入候选修订（事务）；返回写入后的修订列表 */
-export function insertRepairs(compilationId: string, items: InsertRepairInput[]): CompilationRepair[] {
-  const db = getDb()
-  if (items.length === 0) return []
-  const now = new Date().toISOString()
-  const ins = db.prepare(
-    `INSERT INTO compilation_repairs (id, compilation_id, item_id, original_text, revised_text, reason, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`
-  )
-  const tx = db.transaction(() => {
-    for (const it of items) {
-      ins.run(crypto.randomUUID(), compilationId, it.itemId, it.originalText, it.revisedText, it.reason, now, now)
-    }
-  })
-  tx()
-  return listRepairsByCompilation(compilationId)
-}
-
 /**
- * 用户对某条修订做取舍：
- * - accept：卡片 excerpt 改写为 revised_text；修订状态 accepted；快照进回收站（chosen='accepted'）。
- * - reject：修订状态 rejected；卡片文本不变；快照进回收站（chosen='rejected'）。
- * 返回更新后的卡片与修订；不存在返回 null。
+ * 应用 / 回退一条修正（卡片文本与状态在同一事务内切换）：
+ * - applied=true（再次应用）：卡片 excerpt ← revised_text，状态 applied；
+ * - applied=false（回退到修正前）：卡片 excerpt ← original_text，状态 reverted。
+ * 幂等：已是目标状态时也返回当前结果；修正或卡片不存在返回 null。
  */
-export function decideRepair(
+export function setRepairApplied(
   repairId: string,
-  action: 'accept' | 'reject'
+  applied: boolean
 ): { item: CompilationItem; repair: CompilationRepair } | null {
   const db = getDb()
   const repair = getRepairById(repairId)
   if (!repair) return null
-  const status: CompilationRepairStatus = action === 'accept' ? 'accepted' : 'rejected'
   const now = new Date().toISOString()
-
   const tx = db.transaction(() => {
-    if (action === 'accept') {
-      db.prepare('UPDATE compilation_items SET excerpt = ? WHERE id = ?').run(
-        repair.revisedText,
-        repair.itemId
-      )
-    }
-    db.prepare("UPDATE compilation_repairs SET status = ?, updated_at = ? WHERE id = ?").run(status, now, repairId)
-    db.prepare(
-      `INSERT INTO compilation_repair_recycle_bin (id, compilation_id, repair_id, item_id, original_text, revised_text, chosen, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(crypto.randomUUID(), repair.compilationId, repairId, repair.itemId, repair.originalText, repair.revisedText, action === 'accept' ? 'accepted' : 'rejected', now)
+    db.prepare('UPDATE compilation_items SET excerpt = ? WHERE id = ?').run(
+      applied ? repair.revisedText : repair.originalText,
+      repair.itemId
+    )
+    db.prepare('UPDATE compilation_repairs SET status = ?, updated_at = ? WHERE id = ?').run(
+      applied ? 'applied' : 'reverted',
+      now,
+      repairId
+    )
   })
   tx()
-
   const updatedRepair = getRepairById(repairId)
   const item = getItemById(repair.itemId)
   if (!updatedRepair || !item) return null
   return { item, repair: updatedRepair }
-}
-
-export function deleteRepairsForCompilation(compilationId: string): void {
-  getDb().prepare('DELETE FROM compilation_repairs WHERE compilation_id = ?').run(compilationId)
-}
-
-/** 某汇编的「语义补全/修订」回收站条目（按时间倒序） */
-export function listRepairRecycleBinByCompilation(compilationId: string): CompilationRecycleBinRepair[] {
-  const db = getDb()
-  const rows = db
-    .prepare('SELECT * FROM compilation_repair_recycle_bin WHERE compilation_id = ? ORDER BY created_at DESC')
-    .all(compilationId) as {
-    id: string
-    compilation_id: string
-    repair_id: string
-    item_id: string
-    original_text: string
-    revised_text: string
-    chosen: 'accepted' | 'rejected'
-    created_at: string
-  }[]
-  const out: CompilationRecycleBinRepair[] = []
-  for (const r of rows) {
-    const repair = getRepairById(r.repair_id)
-    if (!repair) continue
-    out.push({
-      id: r.id,
-      compilationId: r.compilation_id,
-      kind: 'repair',
-      repairId: r.repair_id,
-      itemId: r.item_id,
-      originalText: r.original_text,
-      revisedText: r.revised_text,
-      chosen: r.chosen,
-      createdAt: r.created_at,
-      repair
-    })
-  }
-  return out
-}
-
-/** 从回收站恢复某条语义补全/修订：修订状态回到 pending，卡片摘录恢复为 originalText，并删除回收站条目 */
-export function restoreRepairRecycleBin(binId: string): CompilationRepair | null {
-  const db = getDb()
-  const row = db
-    .prepare('SELECT * FROM compilation_repair_recycle_bin WHERE id = ?')
-    .get(binId) as { id: string; repair_id: string; item_id: string; original_text: string } | undefined
-  if (!row) return null
-  const now = new Date().toISOString()
-  const tx = db.transaction(() => {
-    db.prepare("UPDATE compilation_repairs SET status = 'pending', updated_at = ? WHERE id = ?").run(now, row.repair_id)
-    db.prepare('UPDATE compilation_items SET excerpt = ? WHERE id = ?').run(row.original_text, row.item_id)
-    db.prepare('DELETE FROM compilation_repair_recycle_bin WHERE id = ?').run(binId)
-  })
-  tx()
-  return getRepairById(row.repair_id)
 }
 
 // ---- vitest inline test ----
@@ -253,7 +178,7 @@ if (import.meta.vitest) {
     const taskId = crypto.randomUUID()
     const sourceId = crypto.randomUUID()
     const compilationId = crypto.randomUUID()
-    db.prepare(`INSERT INTO writing_tasks (id, title, scope_json) VALUES (?, '语义补全测试', '{"all":true}')`).run(taskId)
+    db.prepare(`INSERT INTO writing_tasks (id, title, scope_json) VALUES (?, '大模型修正测试', '{"all":true}')`).run(taskId)
     db.prepare("INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES (?, 'file', '统计表', '正文', 'ready')").run(sourceId)
     db.prepare(`INSERT INTO compilations (id, task_id, title, status, created_at, updated_at) VALUES (?, ?, '汇编', 'drafting', ?, ?)`).run(compilationId, taskId, new Date().toISOString(), new Date().toISOString())
     const itemId = crypto.randomUUID()
@@ -264,54 +189,44 @@ if (import.meta.vitest) {
     return { compilationId, itemId }
   }
 
-  describe('compilation repairs store (Phase 6.4.3)', () => {
-    it('inserts and lists repairs by compilation', () => {
+  describe('compilation repairs store (2026-09-08 默认应用改版)', () => {
+    it('inserts repairs as applied and lists them by compilation', () => {
       const { compilationId, itemId } = seed()
-      const r = insertRepair({ compilationId, itemId, originalText: '原文', revisedText: '补全文本', reason: '表意不明' })
-      expect(r.status).toBe('pending')
+      const r = insertRepair({ compilationId, itemId, originalText: '原文', revisedText: '修正文本', reason: '表意不明' })
+      expect(r.status).toBe('applied')
       const list = listRepairsByCompilation(compilationId)
       expect(list).toHaveLength(1)
-      expect(list[0].revisedText).toBe('补全文本')
+      expect(list[0].revisedText).toBe('修正文本')
     })
 
-    it('accept writes revised text to item and snapshots to repair recycle bin', () => {
+    it('reverts a repair: item excerpt back to original, status reverted', () => {
       const { compilationId, itemId } = seed()
-      const r = insertRepair({ compilationId, itemId, originalText: '原文', revisedText: '补全文本', reason: '表意不明' })
-      const res = decideRepair(r.id, 'accept')!
-      expect(res.item.excerpt).toBe('补全文本')
-      expect(res.repair.status).toBe('accepted')
-      const bin = listRepairRecycleBinByCompilation(compilationId)
-      expect(bin).toHaveLength(1)
-      expect(bin[0].chosen).toBe('accepted')
-      expect(bin[0].kind).toBe('repair')
-    })
-
-    it('reject keeps item unchanged and snapshots with chosen rejected', () => {
-      const { compilationId, itemId } = seed()
-      const r = insertRepair({ compilationId, itemId, originalText: '原文', revisedText: '补全文本', reason: '表意不明' })
-      const res = decideRepair(r.id, 'reject')!
+      // 管线落库时卡片文本已是修正后文本
+      db.prepare('UPDATE compilation_items SET excerpt = ? WHERE id = ?').run('修正文本', itemId)
+      const r = insertRepair({ compilationId, itemId, originalText: '原文', revisedText: '修正文本', reason: '表意不明' })
+      const res = setRepairApplied(r.id, false)!
+      expect(res.repair.status).toBe('reverted')
       expect(res.item.excerpt).toBe('原文')
-      expect(res.repair.status).toBe('rejected')
-      const bin = listRepairRecycleBinByCompilation(compilationId)
-      expect(bin[0].chosen).toBe('rejected')
+      expect(getItemById(itemId)!.excerpt).toBe('原文')
     })
 
-    it('restores a repair to pending and reverts item excerpt', () => {
+    it('re-applies a reverted repair', () => {
       const { compilationId, itemId } = seed()
-      const r = insertRepair({ compilationId, itemId, originalText: '原文', revisedText: '补全文本', reason: '表意不明' })
-      decideRepair(r.id, 'accept')
-      const bin = listRepairRecycleBinByCompilation(compilationId)[0]
-      const restored = restoreRepairRecycleBin(bin.id)!
-      expect(restored.status).toBe('pending')
-      const item = getItemById(itemId)!
-      expect(item.excerpt).toBe('原文')
-      expect(listRepairRecycleBinByCompilation(compilationId)).toHaveLength(0)
+      const r = insertRepair({ compilationId, itemId, originalText: '原文', revisedText: '修正文本', reason: '表意不明' })
+      setRepairApplied(r.id, false)
+      const res = setRepairApplied(r.id, true)!
+      expect(res.repair.status).toBe('applied')
+      expect(res.item.excerpt).toBe('修正文本')
     })
 
-    it('deletes repairs for compilation', () => {
+    it('returns null for unknown repair id', () => {
+      expect(setRepairApplied('not-exist', false)).toBeNull()
+    })
+
+    it('cascades repairs when the card is deleted', () => {
       const { compilationId, itemId } = seed()
-      insertRepair({ compilationId, itemId, originalText: '原文', revisedText: '补全文本', reason: '表意不明' })
-      deleteRepairsForCompilation(compilationId)
+      insertRepair({ compilationId, itemId, originalText: '原文', revisedText: '修正文本', reason: '表意不明' })
+      db.prepare('DELETE FROM compilation_items WHERE id = ?').run(itemId)
       expect(listRepairsByCompilation(compilationId)).toHaveLength(0)
     })
   })

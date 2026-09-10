@@ -1,7 +1,11 @@
 /**
  * compilation-service.ts —— 资料汇编生成服务（Phase 6.1，2026-08-25）。
- * 三步：① 本地宽召回（宁多勿漏）→ ② AI 细读候选并产出卡片/矛盾 → ③ 落库为 compilations/items/contradictions。
+ * 四步：① 本地宽召回（宁多勿漏）→ ② AI 细读候选并产出卡片/矛盾 → ③ **大模型修正卡片**
+ * （语义补全/补齐时间戳，默认直接应用、卡片上留标记）→ ④ 卡片矛盾扫描 → 落库。
  * 无 Provider / AI 调用失败时降级为「本地候选直接成卡片」，不阻断。
+ *
+ * 2026-09-08：大模型修正阶段由“生成完成后独立扫描”改为**管线内、矛盾扫描之前**，
+ * 使提交给矛盾检测的卡片内容更清晰完整。
  */
 import type { RetrievedChunk } from '../../shared/types'
 import { ErrorCodes } from '../../shared/types'
@@ -15,7 +19,19 @@ import { getSettings } from '../db/settings'
 import { getProviderSecret } from '../llm/provider-store'
 import { safeStorageCodec } from '../llm/secret'
 import { chatCompletion, type ChatMessage } from '../llm/chat'
+import { logMain } from '../logger'
 import { fetchRelatedSiteSources, extractTopicTerms, expandDomainHints } from '../web-source/site-crawler'
+import {
+  applyRepairOutcome,
+  buildRepairCandidates,
+  remapRepairedVariantExcerpts,
+  REPAIR_ETA_PER_CALL_S,
+  REPAIR_PHASE_BUDGET_MS,
+  scanRepairBatch,
+  splitRepairBatches,
+  type RepairCandidate,
+  type RepairFix
+} from './repair-service'
 import {
   createCompilation,
   insertCompilationItems,
@@ -60,6 +76,8 @@ const PHASE_WEB_ETA_S = 30
 const PHASE_RECALL_ETA_S = 60
 const PHASE_GATE_ETA_S = 20
 const PHASE_CONTRADICTION_ETA_S = 30
+/** 大模型修正阶段的先验（秒）——单批约 REPAIR_ETA_PER_CALL_S，批数在卡片确定后才知，故先用保守先验 */
+const PHASE_REPAIR_ETA_S = 90
 /** 窗口细读阶段每个窗口的默认先验（秒），随后用已完成窗口实测均速不断校正（A） */
 const WINDOW_ETA_DEFAULT_S = 20
 /** 均速 EMA 灵敏度（越低越平滑，避免单窗口抖动拉大误差） */
@@ -99,7 +117,16 @@ export interface CompilationProgress {
 }
 
 export type GenerateCompilationResult =
-  | { ok: true; compilationId: string; candidateChunks: number; contradictions: number; contradictionScan?: { ok: boolean; message?: string }; interrupted?: CompilationInterrupt }
+  | {
+      ok: true
+      compilationId: string
+      candidateChunks: number
+      contradictions: number
+      contradictionScan?: { ok: boolean; message?: string }
+      /** 大模型修正阶段的情况：ok=false 表示因时间预算未跑完（可能存在未修正的卡片） */
+      repairScan?: { ok: boolean; message?: string }
+      interrupted?: CompilationInterrupt
+    }
   | { ok: false; error: { code: string; message: string } };
 
 /** 生成资料汇编时大模型异常中断的可视化信息（供前端展示「尝试继续」） */
@@ -116,15 +143,15 @@ export interface CompilationInterrupt {
 
 /**
  * 会话级断点续传状态（内存，不落库）：
- * 记录窗口细读与矛盾扫描到哪个环节，续跑时从该处继续，复用已完成的窗口/卡片。
- * 仅对「AI 窗口细读」与「卡片矛盾扫描」两个 LLM 环节启用；关键词提取/网页检索保持原有回退。
+ * 记录窗口细读、大模型修正与矛盾扫描到哪个环节，续跑时从该处继续，复用已完成的窗口/修正/卡片。
+ * 三个阶段（窗口细读 / 大模型修正 / 卡片矛盾扫描）均支持中断续跑。
  */
 interface CompilationResumeState {
   taskId: string
   compilationId: string
   title: string
   provider: ProviderInfo
-  phase: 'window' | 'contradiction'
+  phase: 'window' | 'repair' | 'contradiction'
   chunks: RetrievedChunk[]
   refs: SourceRefEntry[]
   windows: RetrievedChunk[][]
@@ -132,6 +159,20 @@ interface CompilationResumeState {
   doneSet: Set<number>
   /** 各窗口的细读输出（按下标；null=该窗口无产出但已完成），合并顺序确定 */
   windowOutputsByIndex: (CompilationOutput | null)[]
+  /** 大模型修正：待修正候选与分批方案（卡片确定后算一次，续跑复用） */
+  repairCandidates?: RepairCandidate[]
+  repairBatches?: number[][]
+  /** 已累积的修正结果与时间戳补齐（跨批次累积；续跑不重复已完成批次） */
+  repairFixes?: RepairFix[]
+  repairTsFills?: { index: number; ts: string }[]
+  /** 已完成的修正批次数（断点续跑时跳过） */
+  repairBatchDone?: number
+  /** 修正阶段开始时间（用于整阶段时间预算） */
+  repairStartedAt?: number
+  /** 修正阶段未跑完的原因（超出时间预算时置位，随 repairScan 透出给前端提示） */
+  repairIncomplete?: { message: string }
+  /** 修正应用后的卡片（矛盾扫描与落库都用它；未跑修正阶段时为空） */
+  repairedItems?: CompilationOutputItem[]
   /** 矛盾扫描已推进到的卡片偏移（在合并后 items 中的偏移） */
   scanOffset: number
   /** 已成功扫描批次的矛盾分组 */
@@ -421,6 +462,12 @@ export interface CompilationOutputItem {
   position: string
   excerpt: string
   ts: string | null
+  /**
+   * 管线内附加：该卡片被大模型修正过（由 repair 阶段写入；**不来自 LLM 输出的 JSON 解析**）。
+   * 它随卡片对象一起流经合并/过滤/按时间排序，最终由 insertCompilationItems 与卡片同事务写入
+   * compilation_repairs，从而保证「修正标记」与卡片的对应关系不错位。
+   */
+  repair?: { originalText: string; revisedText: string; reason: string }
 }
 
 export interface CompilationOutputVariant {
@@ -624,7 +671,7 @@ export function mergeContradictionGroups(
   }
   return out
 }
-/** 把 #N 来源编号映射回 sourceId，丢弃无法解析的卡片 */
+/** 把 #N 来源编号映射回 sourceId，丢弃无法解析的卡片；大模型修正记录随卡片一起带走 */
 export function mapOutputItemsToInputs(
   items: CompilationOutputItem[],
   refs: SourceRefEntry[]
@@ -634,7 +681,7 @@ export function mapOutputItemsToInputs(
   for (const it of items) {
     const sourceId = byRef.get(it.sourceRef)
     if (!sourceId) continue
-    out.push({ sourceId, excerpt: it.excerpt, ts: it.ts ?? undefined, note: it.position || undefined })
+    out.push({ sourceId, excerpt: it.excerpt, ts: it.ts ?? undefined, note: it.position || undefined, repair: it.repair })
   }
   return out
 }
@@ -777,7 +824,8 @@ export async function generateCompilation(
   const prov = resolveProvider()
   // A+C：预计剩余时间——窗口细读用实测均速（EMA）外推；窗口块未算出前用占位预算，让前置阶段预估不至于明显失真
   let windowsBudgetSec = WINDOWS_PRIOR_PLACEHOLDER_S
-  const preWindowEta = (remainingSinglePhaseSec: number): number => remainingSinglePhaseSec + windowsBudgetSec + PHASE_CONTRADICTION_ETA_S
+  const preWindowEta = (remainingSinglePhaseSec: number): number =>
+    remainingSinglePhaseSec + windowsBudgetSec + PHASE_REPAIR_ETA_S + PHASE_CONTRADICTION_ETA_S
 
   let scopeIds = resolveScopeSourceIds(task, { getSourceIdsByTag, getAllSourceIds })
   if (scopeIds.length === 0) return fail(ErrorCodes.TASK_NO_SCOPE, '资料库中没有可用资料')
@@ -880,22 +928,45 @@ export async function generateCompilation(
     return finalizeCompilationLocalInto(state.compilationId, allChunks)
   }
 
+  // 大模型修正（2026-09-08：提前到矛盾扫描之前，使矛盾检测面对的是语义完整的卡片）
+  state.phase = 'repair'
+  phaseRes = await runWithRateLimitAutoResume(
+    state,
+    (s, p) => runRepairPhase(s, merged.items, p),
+    onProgress,
+    onAdvice
+  )
+  if (phaseRes === 'interrupted') {
+    await persistPartialCompilation(state)
+    resumeStore.set(state.compilationId, state)
+    return interruptedResult(state)
+  }
+  const repairedItems = state.repairedItems ?? merged.items
+  // 窗口级矛盾中引用被修正卡片的说法要同步改写，否则落库时按 excerpt 匹配不到卡片、整组矛盾会被丢弃
+  const windowGroups = remapRepairedVariantExcerpts(merged.contradictions, state.repairFixes ?? [])
+
   state.phase = 'contradiction'
-  phaseRes = await runWithRateLimitAutoResume(state, runContradictionPhase, onProgress, onAdvice)
+  phaseRes = await runWithRateLimitAutoResume(
+    state,
+    (s, p) => runContradictionPhase(s, repairedItems, p),
+    onProgress,
+    onAdvice
+  )
   if (phaseRes === 'interrupted') {
     await persistPartialCompilation(state)
     resumeStore.set(state.compilationId, state)
     return interruptedResult(state)
   }
 
-  // 全部完成：清除断点，落库（替换为最终卡片 + 矛盾）
+  // 全部完成：清除断点，落库（替换为最终卡片 + 矛盾 + 修正记录）
   resumeStore.delete(state.compilationId)
   return finalizeCompilationInto(
     state.compilationId,
-    { items: merged.items, contradictions: mergeContradictionGroups(merged.contradictions, state.scanGroups) },
+    { items: repairedItems, contradictions: mergeContradictionGroups(windowGroups, state.scanGroups) },
     refs,
     chunks.length,
-    state.scanIncomplete ? { ok: false, message: state.scanIncomplete.message } : { ok: true }
+    state.scanIncomplete ? { ok: false, message: state.scanIncomplete.message } : { ok: true },
+    state.repairIncomplete ? { ok: false, message: state.repairIncomplete.message } : { ok: true }
   )
 }
 
@@ -1089,10 +1160,95 @@ async function runWindowPhase(state: CompilationResumeState, onProgress?: (p: Co
   return interrupted ? 'interrupted' : 'done'
 }
 
+/**
+ * 大模型修正阶段（2026-09-08 新增，位于窗口细读之后、卡片矛盾扫描之前；可中断/可续跑）：
+ * 找出表意不明/疑似残缺的卡片并**默认应用**修正（同时静默补齐缺失时间戳），
+ * 使随后交给矛盾检测的卡片内容更清晰完整。修正记录随卡片落库，供卡片上的标记展示与回退。
+ * - 无 Provider / 无可解析输出 → 视为无修正，不阻断；
+ * - 大模型异常 → 置中断标志（429 可自动续传），续跑只重跑本阶段未完成的批次；
+ * - 超出整阶段时间预算 → 停止剩余批次，把结果标为未完成（不阻断后续矛盾扫描）。
+ */
+async function runRepairPhase(
+  state: CompilationResumeState,
+  items: CompilationOutputItem[],
+  onProgress?: (p: CompilationProgress) => void
+): Promise<'done' | 'interrupted'> {
+  if (items.length === 0) {
+    state.repairedItems = items
+    return 'done'
+  }
+  // 候选与分批只算一次（续跑复用同一方案，保证断点稳定）
+  if (!state.repairBatches) {
+    const candidates = buildRepairCandidates(items, state.refs, state.chunks)
+    state.repairCandidates = candidates
+    state.repairBatches = splitRepairBatches(candidates)
+    state.repairFixes = state.repairFixes ?? []
+    state.repairTsFills = state.repairTsFills ?? []
+    state.repairBatchDone = state.repairBatchDone ?? 0
+    state.repairStartedAt = Date.now()
+  }
+  const batches = state.repairBatches
+  const fixes = state.repairFixes ?? (state.repairFixes = [])
+  const tsFills = state.repairTsFills ?? (state.repairTsFills = [])
+  const candidates = state.repairCandidates ?? []
+  const applyAll = (): void => {
+    state.repairedItems = applyRepairOutcome(items, fixes, tsFills)
+  }
+  if (batches.length === 0) {
+    onProgress?.({ stage: '无需修正的资料卡片，已跳过修正阶段', percent: 87, etaSeconds: 0 })
+    applyAll()
+    return 'done'
+  }
+
+  for (let bi = state.repairBatchDone ?? 0; bi < batches.length; bi++) {
+    if (Date.now() - (state.repairStartedAt ?? Date.now()) > REPAIR_PHASE_BUDGET_MS) {
+      state.repairIncomplete = {
+        message: '大模型修正超出时间预算，已完成 ' + bi + '/' + batches.length + ' 批；部分卡片可能未做修正/补齐时间戳。'
+      }
+      break
+    }
+    onProgress?.({
+      stage: '正在修正资料卡片（第 ' + (bi + 1) + '/' + batches.length + ' 批：补全语义、补齐时间戳）…',
+      percent: 80 + Math.round((bi / batches.length) * 7),
+      etaSeconds: (batches.length - bi) * REPAIR_ETA_PER_CALL_S
+    })
+    const batchCards = batches[bi].map((i) => candidates[i]).filter((c): c is RepairCandidate => !!c)
+    const res = await scanRepairBatch(state.provider, batchCards, state.taskId).catch((e) => ({
+      ok: false,
+      fixes: [] as RepairFix[],
+      tsFills: [] as { index: number; ts: string }[],
+      message: e instanceof Error ? e.message : String(e),
+      rateLimited: false
+    }))
+    if (!res.ok) {
+      state.interrupted = {
+        stage: '正在修正资料卡片（第 ' + (bi + 1) + '/' + batches.length + ' 批）',
+        message: res.message ?? '大模型调用异常中断',
+        percent: 80 + Math.round((bi / batches.length) * 7),
+        retryable: res.rateLimited === true
+      }
+      return 'interrupted'
+    }
+    fixes.push(...res.fixes)
+    tsFills.push(...res.tsFills)
+    state.repairBatchDone = bi + 1
+  }
+  applyAll()
+  logMain('repair', '修正阶段完成 汇编=' + state.compilationId + ' 卡片=' + items.length + ' 修正=' + fixes.length + ' 补时间戳=' + tsFills.length)
+  onProgress?.({
+    stage: '资料卡片修正完成（修正 ' + fixes.length + ' 张、补齐时间戳 ' + tsFills.length + ' 张）',
+    percent: 87,
+    etaSeconds: 0
+  })
+  return 'done'
+}
+
 /** 卡片矛盾扫描（可中断/可续跑）：从 scanOffset 继续扫剩余批次；任一批大模型异常 → 置中断标志 */
-async function runContradictionPhase(state: CompilationResumeState, onProgress?: (p: CompilationProgress) => void): Promise<'done' | 'interrupted'> {
-  const merged = mergeCompilationOutputs(state.windowOutputsByIndex.filter((o): o is CompilationOutput => o !== null))
-  const items = merged.items
+async function runContradictionPhase(
+  state: CompilationResumeState,
+  items: CompilationOutputItem[],
+  onProgress?: (p: CompilationProgress) => void
+): Promise<'done' | 'interrupted'> {
   if (items.length === 0) {
     state.scanOffset = 0
     state.scanGroups = []
@@ -1160,9 +1316,11 @@ function finalizeCompilationInto(
   output: CompilationOutput,
   refs: SourceRefEntry[],
   candidateChunks: number,
-  contradictionScan?: { ok: boolean; message?: string }
+  contradictionScan?: { ok: boolean; message?: string },
+  repairScan?: { ok: boolean; message?: string }
 ): GenerateCompilationResult {
   const items = sortItemsByTs(mapOutputItemsToInputs(output.items, refs))
+  // 卡片携带的 repair 字段会与卡片同事务写入 compilation_repairs（status='applied'），故排序/过滤后仍严格对应
   const insertedItems = replaceCompilationItems(compilationId, items)
 
   // 矛盾分组：把 variant 的 excerpt 精确匹配到卡片
@@ -1188,7 +1346,7 @@ function finalizeCompilationInto(
     }
   }
   const contradictions = insertCompilationContradictions(compilationId, groups)
-  return { ok: true, compilationId, candidateChunks, contradictions: contradictions.length, contradictionScan }
+  return { ok: true, compilationId, candidateChunks, contradictions: contradictions.length, contradictionScan, repairScan }
 }
 
 /** 无 Provider / AI 无产出时的本地降级（替换到已创建的汇编） */
@@ -1208,8 +1366,8 @@ function finalizeCompilationLocalInto(compilationId: string, chunks: RetrievedCh
 
 /**
  * 中断续跑（Phase 6.x）：从断点继续生成资料汇编。
- * 仅会话内（内存 resumeStore，应用重启后清空）。复用已完成窗口/卡片输出，重读失败或未完成的窗口，
- * 并继续扫描剩余矛盾批次；再次异常仍返回 interrupted（可再点「尝试继续」）。
+ * 仅会话内（内存 resumeStore，应用重启后清空）。复用已完成窗口/修正批次，重读失败或未完成的窗口、
+ * 重跑未完成的修正批次，并继续扫描剩余矛盾批次；再次异常仍返回 interrupted（可再点「尝试继续」）。
  */
 export async function continueCompilation(compilationId: string, onProgress?: (p: CompilationProgress) => void, onAdvice?: (message: string) => void): Promise<GenerateCompilationResult> {
   const state = resumeStore.get(compilationId)
@@ -1222,18 +1380,40 @@ export async function continueCompilation(compilationId: string, onProgress?: (p
       await persistPartialCompilation(state)
       return interruptedResult(state)
     }
-    state.phase = 'contradiction'
+    state.phase = 'repair'
     state.scanOffset = 0
   }
 
-  // 矛盾阶段
   const merged = mergeCompilationOutputs(state.windowOutputsByIndex.filter((o): o is CompilationOutput => o !== null))
   if (merged.items.length === 0) {
     // AI 无产出 → 本地降级（复用已创建的汇编）；清除断点
     resumeStore.delete(compilationId)
     return finalizeCompilationLocalInto(state.compilationId, state.chunks)
   }
-  const pr = await runWithRateLimitAutoResume(state, runContradictionPhase, onProgress, onAdvice)
+
+  // 大模型修正阶段：续跑未完成的批次（已完成批次结果保留在 state.repairFixes 中）
+  if (state.phase === 'repair') {
+    const prRepair = await runWithRateLimitAutoResume(
+      state,
+      (s, p) => runRepairPhase(s, merged.items, p),
+      onProgress,
+      onAdvice
+    )
+    if (prRepair === 'interrupted') {
+      await persistPartialCompilation(state)
+      return interruptedResult(state)
+    }
+    state.phase = 'contradiction'
+  }
+  const repairedItems = state.repairedItems ?? merged.items
+  const windowGroups = remapRepairedVariantExcerpts(merged.contradictions, state.repairFixes ?? [])
+
+  const pr = await runWithRateLimitAutoResume(
+    state,
+    (s, p) => runContradictionPhase(s, repairedItems, p),
+    onProgress,
+    onAdvice
+  )
   if (pr === 'interrupted') {
     await persistPartialCompilation(state)
     return interruptedResult(state)
@@ -1241,9 +1421,10 @@ export async function continueCompilation(compilationId: string, onProgress?: (p
   resumeStore.delete(compilationId)
   return finalizeCompilationInto(
     state.compilationId,
-    { items: merged.items, contradictions: mergeContradictionGroups(merged.contradictions, state.scanGroups) },
+    { items: repairedItems, contradictions: mergeContradictionGroups(windowGroups, state.scanGroups) },
     state.refs,
     state.chunks.length,
-    state.scanIncomplete ? { ok: false, message: state.scanIncomplete.message } : { ok: true }
+    state.scanIncomplete ? { ok: false, message: state.scanIncomplete.message } : { ok: true },
+    state.repairIncomplete ? { ok: false, message: state.repairIncomplete.message } : { ok: true }
   )
 }

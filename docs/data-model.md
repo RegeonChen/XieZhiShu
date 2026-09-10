@@ -319,18 +319,20 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 - 矛盾取舍只在汇编阶段发生（初稿生成不再扫描矛盾）；`pending` 未处理完时前端阻止进入下一步。
 - 回收站：采纳/忽略某组矛盾时快照进 `compilation_recycle_bin`（Migration 017，引用 contradiction_id，随 compilation 级联），恢复=所有 variant 卡片改回 `kept=1`、矛盾状态回 pending、删除回收站条目；**用软删除代替硬删除，恢复不重建卡片**。
 
-### 2.24 compilation_repairs 与 compilation_repair_recycle_bin（资料卡片二次加工，Migration 021，Phase 6.4.3）
+### 2.24 compilation_repairs（资料卡片「大模型修正」，Migration 021 → 029 改版）
 
-Step-1 生成汇编后追加 LLM 语义补全/修订扫描：对表意不明/疑似残缺的卡片读取来源原文上下文，生成 pending 修订，用户可「采纳 / 不用」，均快照进回收站供恢复。
+生成汇编时由**生成管线内**的大模型修正阶段产出（位置：AI 分窗细读之后、卡片矛盾扫描之前——先让卡片内容清晰完整，再交给矛盾检测），**默认直接应用到卡片**，卡片上以「✎ 经过大模型修正」标记承载：点击可查看修正前原文与理由，并可「回退到修正前」（标记转灰「↺ 已回退」）或「再次应用修正」。**不再有「待裁定」状态，也不再进入回收站**（`compilation_repair_recycle_bin` 已随 Migration 029 删除）。
 
-- `compilation_repairs`：id PK、compilation_id FK CASCADE、item_id REFERENCES compilation_items(id) ON DELETE CASCADE、original_text、revised_text、reason、status CHECK('pending','accepted','rejected')、created_at/updated_at；索引 (compilation_id)、(item_id)。
-- `compilation_repair_recycle_bin`：id PK、compilation_id FK CASCADE、repair_id、item_id、original_text、revised_text、chosen CHECK('accepted','rejected')、created_at；索引 (compilation_id)。
+- `compilation_repairs`：id PK、compilation_id FK CASCADE、item_id REFERENCES compilation_items(id) ON DELETE CASCADE、original_text（修正前）、revised_text（修正后）、reason、status CHECK('applied','reverted')、created_at/updated_at；索引 (compilation_id)、(item_id)。
+- 生成侧由 `insertCompilationItems` 与卡片**同事务**写入（status='applied'）：修正记录随卡片对象（`CompilationItemInput.repair`）一起经过来源过滤与按时间排序，故与卡片严格对应、不会错位。
+- 修正阶段**分批**（`REPAIR_BATCH_MAX` 30 张 / `REPAIR_BATCH_CHARS` 12000 字，`splitRepairBatches`）串行调用，单批超时 300s、整阶段预算 900s；大模型异常 → 中断并由断点续传「尝试继续」（只重跑未完成批次）；超预算 → 标为未完成但不阻断矛盾扫描。
+- **时间戳（ts）自动补齐不属于修正记录**：对缺 ts 的卡片静默补齐（无标记、不可回退），因管线内已提前，落库时按时间排序自然正确。
 
-> 二次修改扫描还会对**缺失时间戳的卡片结合原文上下文推断年份并自动补全 `ts`**（无需用户采纳）。
+> 卡片被删除时修正记录随 `item_id` 级联删除；被删卡片快照进 `compilation_card_recycle_bin` 时，其修正记录一并存入 `extra` JSON，恢复卡片时连带还原。
 
-### 2.25 compilation_card_recycle_bin（资料卡片回收站，Migration 023，Phase 6.4.3）
+### 2.25 compilation_card_recycle_bin（资料卡片回收站，Migration 023）
 
-被删除的资料卡片（单卡删除、汇编调整批量删除）快照进该表，含卡片行 + 其矛盾变异/语义补全修订 JSON（`extra`）。回收站统一含**资料卡片 / 语义补全修订 / 矛盾**三类，按删除时间倒序（栈式，最近删除在前）；恢复卡片连同其矛盾变异/语义补全修订一起还原。**来源级联清理仍为硬删除不入回收站**（来源已删，恢复外键悬空）。
+被删除的资料卡片（单卡删除、汇编调整批量删除）快照进该表，含卡片行 + 其矛盾变异与大模型修正记录 JSON（`extra`）。回收站自 2026-09-08 起含**资料卡片 / 矛盾两类**（大模型修正改由卡片标记承载，不再入回收站），按删除时间倒序（栈式，最近删除在前）；恢复卡片连同其矛盾变异与修正记录一起还原。**来源级联清理仍为硬删除不入回收站**（来源已删，恢复外键悬空）。
 
 - 字段：id PK、compilation_id FK CASCADE、item_id、position、source_id、excerpt、ts、note、extra_tags、kept、created_at、deleted_at、extra（默认 '{}'）。
 

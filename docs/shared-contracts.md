@@ -129,7 +129,7 @@ interface CompilationContradiction {
 type CompilationRepairStatus = 'pending' | 'accepted' | 'rejected';
 interface CompilationRepair {
   id: string; compilationId: string; itemId: string; originalText: string;
-  revisedText: string; reason: string; status: CompilationRepairStatus;
+  revisedText: string; reason: string; status: 'applied' | 'reverted';   // 2026-09-08 起：默认应用，可回退/再次应用
   createdAt: string; updatedAt: string;
 }
 interface Compilation {
@@ -137,10 +137,9 @@ interface Compilation {
   createdAt: string; updatedAt: string;
   items: CompilationItem[]; contradictions: CompilationContradiction[]; repairs?: CompilationRepair[];
 }
-/** 汇编回收站条目（判别联合：资料卡片 / 语义补全修订 / 矛盾） */
+/** 汇编回收站条目（判别联合：资料卡片 / 矛盾；大模型修正不再入回收站，改由卡片标记承载） */
 type CompilationRecycleBinItem =
   | { kind: 'contradiction'; id: string; contradiction: CompilationContradiction }
-  | { kind: 'repair'; id: string; repair: CompilationRepair }
   | { kind: 'card'; id: string; item: CompilationItem };
 
 /** 规范文档库（Phase 6.4.1） */
@@ -197,15 +196,15 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 
 ### 2.3.1 资料汇编（compilation，Phase 6.0，2026-08-25）
 
-三段式撰写第一步的资料汇编契约。`compilation:generate` / `compilation:regenerate` 在 Phase 6.1 已接入生成服务（本地宽召回宁多勿漏 + AI 细读 + 矛盾标注；无 Provider / 失败降级为本地候选卡片）；生成进度经事件 `compilation:progress` 推送。CRUD / 矛盾取舍 / 确认已实现。
+三段式撰写第一步的资料汇编契约。`compilation:generate` / `compilation:regenerate` 在 Phase 6.1 已接入生成服务（本地宽召回宁多勿漏 + AI 细读 + 大模型修正 + 矛盾标注；无 Provider / 失败降级为本地候选卡片）；生成进度经事件 `compilation:progress` 推送。CRUD / 矛盾取舍 / 确认已实现。
 
 | 通道 | 请求 → 响应 data | 说明 |
 |---|---|---|
 | `compilation:list` | `{ taskId }` → `{ compilations: Compilation[] }` | 任务的全部资料汇编（按时间倒序，含卡片与矛盾） |
 | `compilation:get` | `{ compilationId }` → `{ compilation: Compilation }` | 读取一次资料汇编 |
-| `compilation:generate` | `{ taskId, title }` → `{ compilation: Compilation, interrupted? }` | 生成资料汇编（本地宽召回 + AI 细读 + 矛盾标注；无 Provider/失败降级本地候选）。大模型异常中断时返回 `interrupted:{stage,message,percent}` 且 `compilation` 为已完成窗口的部分卡片（`drafting`），供前端展示「尝试继续」 |
+| `compilation:generate` | `{ taskId, title }` → `{ compilation: Compilation, contradictionScan?, repairScan?, interrupted? }` | 生成资料汇编（本地宽召回 + AI 细读 + **大模型修正** + 矛盾标注；无 Provider/失败降级本地候选）。大模型异常中断时返回 `interrupted:{stage,message,percent}` 且 `compilation` 为已完成窗口的部分卡片（`drafting`），供前端展示「尝试继续」 |
 | `compilation:regenerate` | `{ taskId, title }` → `{ compilation: Compilation }` | 重新生成资料汇编 |
-| `compilation:continue` | `{ compilationId }` → `{ compilation: Compilation, interrupted? }` | 中断续跑（Phase 6.x，会话内）：从断点继续窗口细读/矛盾扫描，复用已完成窗口/卡片，不重复读取；再次异常仍返回 `interrupted`（可再点「尝试继续」） |
+| `compilation:continue` | `{ compilationId }` → `{ compilation: Compilation, interrupted? }` | 中断续跑（Phase 6.x，会话内）：从断点继续窗口细读 / **大模型修正（只重跑未完成批次）** / 矛盾扫描，复用已完成结果，不重复读取；再次异常仍返回 `interrupted`（可再点「尝试继续」） |
 
 > **整段化切片（Phase A/B）**：切片以**整段**为基本单元——`chunkByParagraphs`（默认上限 `CHUNK_PARAGRAPH_MAX=1000`）按换行切段；超长段仅按句号折成 ≤上限 的子块并共存同一 `paragraphIndex`；**粗细筛以整段为单位做“保留/剔除”**（段内任一子块有信号 → 整段所有子块一起保留，避免“一整段相关却被误筛”）。**资料卡片=整段/整子块**（AI 不再按时间/事实切分，excerpt=该段原文）。
 > **429 自动续传（Phase A/B）**：窗口细读/矛盾扫描遇到**限流（HTTP 429）**时，主进程自动降本次生成并发数（`reduceConcurrency` 减半、最小 1，**不写回 Provider 设置**，仅本次生效）、退避后从断点自动续跑（`runWithRateLimitAutoResume`，默认上限 `RATE_LIMIT_RESUME_LIMIT=2`）；降并发时经事件 **``compilation:advice`（`{ taskId, kind:'reduce-concurrency' }`）** 推送建议，渲染层翻译为「建议降低当前大模型的并发数」存为对话消息。若仍限流，`interrupted.retryable=true` 供前端自动续传兜底（前端最多 2 次、间隔递增），其余异常 `retryable` 缺省，仅提供手动「尝试继续」。`CompilationInterrupt` 增加 `retryable?: boolean`。
@@ -214,13 +213,14 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `compilation:resolveContradiction` | `{ contradictionId, action: 'resolve'\|'ignore', chosenItemId? }` → `{ contradiction: CompilationContradiction }` | 汇编矛盾取舍：resolve 须传保留的卡片 id（属于该矛盾）；ignore 清空已选 |
 | `compilation:confirm` | `{ compilationId }` → `{ compilation: Compilation }` | 确认汇编（finalize），进入下一步 |
 | `compilation:reorder` | `{ compilationId, direction: 'asc'|'desc' }` → `{ compilation: Compilation }` | 资料汇编卡片按时间标签重新排序并重写 position（asc 正序 / desc 反序；无时间戳排最后），返回最新汇编 |
-| `compilation:undo` / `compilation:redo` | `{ compilationId }` → `{ compilation, undoAvailable, redoAvailable }` | 撤销/恢复资料汇编操作（快照机制：编辑/删除/调整/矛盾取舍/二次修改/回收站恢复/排序/确认等，会话内） |
+| `compilation:undo` / `compilation:redo` | `{ compilationId }` → `{ compilation, undoAvailable, redoAvailable }` | 撤销/恢复资料汇编操作（快照机制：编辑/删除/调整/矛盾取舍/大模型修正回退或应用/回收站恢复/排序/确认等，会话内） |
 | `compilation:undoState` | `{ compilationId }` → `{ undoAvailable, redoAvailable }` | 查询当前汇编可撤销/可恢复步数 |
-| `compilation:recycleBin:list` | `{ compilationId }` → `{ items: CompilationRecycleBinItem[] }` | 回收站条目（资料卡片 + 语义补全/修订 + 矛盾，按删除时间倒序 = 最近删除在前） |
-| `compilation:recycleBin:restore` | `{ binId }` → `{ contradiction?, repair?, item?, card? }` | 恢复条目：矛盾回到 pending；语义补全回退 pending + 原文摘录；资料卡片还原（含其矛盾变异/语义补全修订，映射为 card 返回） |
-| `compilation:repairScan` | `{ compilationId }` → `{ repairs: CompilationRepair[] }` | 扫描表意不明的卡片并生成语义补全/修订（additive，无 Provider/失败返回空，绝不阻断） |
-| `compilation:repairs:list` | `{ compilationId }` → `{ items: CompilationRepair[] }` | 列出某汇编的语义补全/修订 |
-| `compilation:repairs:decide` | `{ repairId, action: 'accept'\|'reject' }` → `{ item, repair }` | 采纳/拒绝修订；accept 改写卡片摘录为修订文本并快照进回收站，reject 不改写 |
+| `compilation:recycleBin:list` | `{ compilationId }` → `{ items: CompilationRecycleBinItem[] }` | 回收站条目（资料卡片 + 矛盾两类，按删除时间倒序 = 最近删除在前） |
+| `compilation:recycleBin:restore` | `{ binId }` → `{ contradiction?, item?, card? }` | 恢复条目：矛盾回到 pending；资料卡片还原（含其矛盾变异与大模型修正记录，映射为 card 返回） |
+| `compilation:repairs:revert` | `{ repairId }` → `{ item, repair }` | **回退**一条大模型修正（卡片还原为修正前文本，状态 applied→reverted；登记撤销栈） |
+| `compilation:repairs:apply` | `{ repairId }` → `{ item, repair }` | **再次应用**一条已回退的修正（卡片回到修正后文本，状态 reverted→applied；登记撤销栈） |
+
+> **大模型修正（2026-09-08 改版）**：修正由生成管线在「AI 细读」之后、「卡片矛盾扫描」之前产出并**默认应用**（不再有 `repairScan`/`repairs:list`/`repairs:decide` 三个旧通道），卡片上以「经过大模型修正」标记承载；渲染层点标记弹窗查看修正前原文与理由并选择回退/再次应用。修正阶段异常 → `interrupted`（429 置 `retryable`），`compilation:continue` 续跑只重跑未完成批次；超出阶段预算 → 结果带 `repairScan:{ok:false,message}` 提示「修正未完成」。生成结果新增该字段。
 
 
 

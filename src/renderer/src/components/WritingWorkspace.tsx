@@ -34,6 +34,27 @@ interface DraftItem {
 type BusyState = 'generating' | 'chatting' | null
 type DraftPhase = 'import' | 'style' | 'write'
 
+/** 生成/续跑完成后的对话汇总：卡片数 + 大模型修正数 + 矛盾数 + 各阶段未完成提示 */
+function buildGeneratedSummary(
+  prefix: string,
+  comp: CompilationView,
+  scans: { contradictionScan?: { ok: boolean; message?: string }; repairScan?: { ok: boolean; message?: string } }
+): string {
+  const pendingCount = comp.contradictions.filter((c) => c.status === 'pending').length
+  const fixCount = (comp.repairs ?? []).filter((r) => r.status === 'applied').length
+  const parts: string[] = [prefix + comp.items.length + ' 张卡片']
+  if (fixCount > 0) parts.push(fixCount + ' 张经过大模型修正（卡片上有标记，可点开查看修正前原文与理由并回退）')
+  parts.push(pendingCount > 0 ? pendingCount + ' 组矛盾待处理' : '无未处理矛盾')
+  let text = parts.join('，') + '。请审阅' + (pendingCount > 0 ? '并处理后' : '后') + '点击「确认汇编」。'
+  if (scans.contradictionScan && scans.contradictionScan.ok === false) {
+    text += ' 注意：' + zhCN.compilation.contradictionScanFailed.replace('{reason}', scans.contradictionScan.message ?? '未知')
+  }
+  if (scans.repairScan && scans.repairScan.ok === false) {
+    text += ' 注意：' + zhCN.compilation.repairScanFailed.replace('{reason}', scans.repairScan.message ?? '未知')
+  }
+  return text
+}
+
 /** 撰写工作台的「生成中」临时状态（跨任务切换用模块级 Map 快照恢复） */
 interface WritingTransient {
   busy: BusyState
@@ -289,17 +310,6 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     }
   }
 
-  /** 生成/重新生成汇编后：扫描语义补全/修订（additive）并重载汇编，让修订出现在卡片上 */
-  const scanRepairsAndReload = useCallback(async (compilationId: string) => {
-    try {
-      await window.api.scanCompilationRepairs(compilationId)
-    } catch (e) {
-      // 扫描失败是 additive，不阻断；但记日志便于排查为何二次修改没跑
-      void window.api.appendLog('WARN', 'repair', '二次修改扫描失败（已忽略）：' + (e instanceof Error ? e.message : String(e)))
-    }
-    await refreshCompilation(compilationId)
-  }, [refreshCompilation])
-
   const resetBusy = () => {
     setBusy(null)
     setBusyText(null)
@@ -330,7 +340,7 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
         const comp = data.compilation
         setCompilation(comp)
         if (data.interrupted) {
-          // 大模型异常中断：保留进度（冻结在中断处），展示「尝试继续」，不运行语义补全扫描
+          // 大模型异常中断：保留进度（冻结在中断处），展示「尝试继续」
           keepProgress = true
           setCompilationProgress({ percent: data.interrupted.percent })
           setCompilationInterrupt(data.interrupted)
@@ -345,16 +355,9 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           }
         } else {
           setCompilationInterrupt(null)
-          const pendingCount = comp.contradictions.filter((c) => c.status === 'pending').length
-          const scanFailed = data.contradictionScan && data.contradictionScan.ok === false
-          const summary = pendingCount > 0
-            ? '已生成资料汇编：' + comp.items.length + ' 张卡片，' + pendingCount + ' 组矛盾待处理。请审阅并处理后点击「确认汇编」。'
-            : scanFailed
-              ? '已生成资料汇编：' + comp.items.length + ' 张卡片。注意：' + zhCN.compilation.contradictionScanFailed.replace('{reason}', data.contradictionScan?.message ?? '未知') + '请审阅并酌情复核。'
-              : '已生成资料汇编：' + comp.items.length + ' 张卡片，无未处理矛盾。请审阅后点击「确认汇编」。'
+          const summary = buildGeneratedSummary('已生成资料汇编：', comp, data)
           appendAssistant(summary)
           void window.api.addTaskMessage(taskId, 'assistant', summary, 'notice')
-          void scanRepairsAndReload(comp.id)
           // 生成时主进程可能已把任务标题从「新建任务」自动改为大模型提取的标题，此处刷新任务列表以同步显示新标题
           onChanged()
         }
@@ -411,13 +414,9 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
         } else {
           autoResumeAttemptRef.current = 0
           setCompilationInterrupt(null)
-          const pendingCount = comp.contradictions.filter((c) => c.status === 'pending').length
-          const summary = pendingCount > 0
-            ? '已继续生成资料汇编：' + comp.items.length + ' 张卡片，' + pendingCount + ' 组矛盾待处理。请审阅并处理后点击「确认汇编」。'
-            : '已继续生成资料汇编：' + comp.items.length + ' 张卡片，无未处理矛盾。请审阅后点击「确认汇编」。'
+          const summary = buildGeneratedSummary('已继续生成资料汇编：', comp, {})
           appendAssistant(summary)
           void window.api.addTaskMessage(taskId, 'assistant', summary, 'notice')
-          void scanRepairsAndReload(comp.id)
           onChanged()
         }
       } else {
@@ -459,7 +458,6 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
         const summary = (parts.length ? '已调整资料汇编：' + parts.join('，') + '。' : '资料汇编未发生改动。') + (res.data.explain ? '\n' + res.data.explain : '')
         appendAssistant(summary)
         void window.api.addTaskMessage(taskId, 'assistant', summary, 'notice')
-        void scanRepairsAndReload(compilation.id)
       } else {
         const msg = '调整资料汇编失败：' + (res.error?.message ?? '')
         appendAssistant(msg)
@@ -640,16 +638,19 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     }
   }
 
-  // ---- 语义补全/修订（Phase 6.4.3）----
+  // ---- 资料卡片大模型修正（2026-09-08：默认已应用，卡片标记承载，可回退 / 再次应用）----
 
-  const handleDecideRepair = async (repairId: string, action: 'accept' | 'reject') => {
-    const res = await window.api.decideCompilationRepair(repairId, action)
+  const handleDecideRepair = async (repairId: string, applied: boolean) => {
+    const res = applied
+      ? await window.api.applyCompilationRepair(repairId)
+      : await window.api.revertCompilationRepair(repairId)
     if (res.ok && res.data) {
       if (compilation) {
+        // 重新加载汇编（useEffect 会随之刷新撤销/恢复步数）
         await refreshCompilation(compilation.id)
       }
     } else {
-      appendAssistant('处理语义补全失败：' + (res.error?.message ?? ''))
+      appendAssistant('处理大模型修正失败：' + (res.error?.message ?? ''))
     }
   }
 
@@ -1081,19 +1082,11 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
                 {recycleBinItems.map((item) => (
                   <div key={item.id} className="recycle-bin-item">
                     <div className="recycle-bin-item-head">
-                      {item.kind === 'contradiction' ? (
-                        <b>⚠ {item.topic}</b>
-                      ) : item.kind === 'card' ? (
-                        <b>{zhCN.compilation.recycleBinCard}</b>
-                      ) : (
-                        <b>✎ {zhCN.compilation.recycleBinRepair}</b>
-                      )}
+                      {item.kind === 'contradiction' ? <b>⚠ {item.topic}</b> : <b>{zhCN.compilation.recycleBinCard}</b>}
                       <span>
                         {item.kind === 'contradiction'
                           ? (item.status === 'resolved' ? zhCN.compilation.resolved : zhCN.compilation.ignored)
-                          : item.kind === 'card'
-                            ? (item.sourceTitle ?? '来源已删除')
-                            : (item.chosen === 'accepted' ? zhCN.compilation.repairAccepted : zhCN.compilation.repairReject)}
+                          : (item.sourceTitle ?? '来源已删除')}
                       </span>
                     </div>
                     <div className="recycle-bin-item-variants">
@@ -1101,15 +1094,10 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
                         item.contradiction.variants.map((v) => (
                           <div key={v.id} className="recycle-bin-variant">《{v.sourceTitle ?? v.sourceId}》 {v.variantText}</div>
                         ))
-                      ) : item.kind === 'card' ? (
+                      ) : (
                         <div className="recycle-bin-variant">
                           {item.sourceTitle ? <div>《{item.sourceTitle}》</div> : null}
                           <div>{item.excerpt}</div>
-                        </div>
-                      ) : (
-                        <div className="recycle-bin-variant">
-                          <div className="compilation-repair__original">{zhCN.compilation.repairOriginal}：{item.originalText}</div>
-                          <div className="compilation-repair__revised">{zhCN.compilation.repairRevised}：{item.revisedText}</div>
                         </div>
                       )}
                     </div>
