@@ -16,6 +16,8 @@ import {
   pickRemainingWindows,
   nextContradictionBatch,
   splitCardScans,
+  clusterCandidateCards,
+  packCandidateCalls,
   reduceConcurrency
 } from '../src/main/writing/compilation-service'
 
@@ -199,6 +201,41 @@ describe('card contradiction scan (Phase 6.1 优化)', () => {
     // count 预算优先
     const byCount = splitCardScans([mk(1), mk(1), mk(1), mk(1)], 0, 2, 100)
     expect(byCount).toEqual([{ start: 0, end: 2 }, { start: 2, end: 4 }])
+  })
+
+  it('clusterCandidateCards keeps only cards that plausibly describe the same fact (本地预筛/阻断法)', () => {
+    const mk = (excerpt: string): { sourceRef: string; position: string; excerpt: string; ts: string | null } => ({
+      sourceRef: '#1',
+      position: '第1段',
+      excerpt,
+      ts: null
+    })
+    const items = [
+      mk('2021年，全市普通高中录取 2599 人。'),
+      mk('2021年，全市普通高中录取 2657 人。'),
+      mk('全市幼儿园教职工总数 1.2 万人。'),
+      mk('今天天气晴朗，适合出行。')
+    ]
+    const clusters = clusterCandidateCards(items)
+    // 只有“同一事实的两种说法”进入候选簇；孤立卡片（不可能与其它卡片冲突）被跳过
+    expect(clusters).toHaveLength(1)
+    expect([...clusters[0]].sort((a, b) => a - b)).toEqual([0, 1])
+  })
+
+  it('packCandidateCalls keeps each cluster intact and respects count/char budgets (少调用)', () => {
+    const mk = (excerpt: string): { sourceRef: string; position: string; excerpt: string; ts: string | null } => ({
+      sourceRef: '#1',
+      position: '第1段',
+      excerpt,
+      ts: null
+    })
+    const items = Array.from({ length: 6 }, () => mk('x'.repeat(100)))
+    // 数量预算：每簇 2 张、上限 3 张 → 每簇单独一批（同簇不拆）
+    expect(packCandidateCalls(items, [[0, 1], [2, 3], [4, 5]], 3, 100000)).toEqual([[0, 1], [2, 3], [4, 5]])
+    // 字符预算：每张 100 字 → 每簇约 280 字，上限 300 → 每簇一批
+    expect(packCandidateCalls(items, [[0, 1], [2, 3]], 100, 300)).toEqual([[0, 1], [2, 3]])
+    // 预算充足 → 合并成一次调用（尽量减少调用次数）
+    expect(packCandidateCalls(items, [[0, 1], [2, 3]], 100, 100000)).toEqual([[0, 1, 2, 3]])
   })
 
   it('reduceConcurrency halves (min 1) on rate limit (仅本次生成生效，不写回 Provider)', () => {
