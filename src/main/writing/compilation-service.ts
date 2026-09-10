@@ -1,11 +1,15 @@
 /**
  * compilation-service.ts —— 资料汇编生成服务（Phase 6.1，2026-08-25）。
- * 四步：① 本地宽召回（宁多勿漏）→ ② AI 细读候选并产出卡片/矛盾 → ③ **大模型修正卡片**
- * （语义补全/补齐时间戳，默认直接应用、卡片上留标记）→ ④ 卡片矛盾扫描 → 落库。
+ * 五步：① 本地宽召回（宁多勿漏）→ ② AI 细读候选并产出卡片/矛盾 → ③ **提纯**
+ * （大模型逐字摘录与主题相关的句段，舍弃无关内容）→ ④ **大模型修正**
+ * （语义补全/补齐时间戳，默认直接应用、卡片上留标记）→ ⑤ 卡片矛盾扫描 → 落库。
  * 无 Provider / AI 调用失败时降级为「本地候选直接成卡片」，不阻断。
  *
- * 2026-09-08：大模型修正阶段由“生成完成后独立扫描”改为**管线内、矛盾扫描之前**，
- * 使提交给矛盾检测的卡片内容更清晰完整。
+ * 2026-09-08：① 大模型修正由“生成完成后独立扫描”改为管线内、矛盾扫描之前；
+ * ② 新增「提纯」阶段并置于修正之前 —— 实测「整段成卡」会让卡片夹带大量与主题无关的内容
+ * （真实数据：191 张卡 48,063 字中相关句仅约 31%），先提纯可显著降低噪声，
+ * 且修正的输入从整篇降到约 1/3，净增成本有限。提纯为黑箱（不保留提纯前原文、不可单独回退，
+ * 需要退回时用「重新生成汇编」），修正的「标记 + 回退」语义因此仍与最终卡片一对一。
  */
 import type { RetrievedChunk } from '../../shared/types'
 import { ErrorCodes } from '../../shared/types'
@@ -32,6 +36,21 @@ import {
   type RepairCandidate,
   type RepairFix
 } from './repair-service'
+import {
+  applyPurifyOutcome,
+  buildPurifyCandidates,
+  emptyPurifyStats,
+  logPurify,
+  logPurifyBatchStats,
+  mapVariantThroughPurify,
+  passthroughSpans,
+  PURIFY_ETA_PER_CALL_S,
+  PURIFY_PHASE_BUDGET_MS,
+  purifyBatch,
+  splitPurifyBatches,
+  type PurifiedSpan,
+  type PurifyCandidate
+} from './purify-service'
 import {
   createCompilation,
   insertCompilationItems,
@@ -78,6 +97,8 @@ const PHASE_GATE_ETA_S = 20
 const PHASE_CONTRADICTION_ETA_S = 30
 /** 大模型修正阶段的先验（秒）——单批约 REPAIR_ETA_PER_CALL_S，批数在卡片确定后才知，故先用保守先验 */
 const PHASE_REPAIR_ETA_S = 90
+/** 大模型提纯阶段的先验（秒）——同上，先按一批估算 */
+const PHASE_PURIFY_ETA_S = 90
 /** 窗口细读阶段每个窗口的默认先验（秒），随后用已完成窗口实测均速不断校正（A） */
 const WINDOW_ETA_DEFAULT_S = 20
 /** 均速 EMA 灵敏度（越低越平滑，避免单窗口抖动拉大误差） */
@@ -125,6 +146,17 @@ export type GenerateCompilationResult =
       contradictionScan?: { ok: boolean; message?: string }
       /** 大模型修正阶段的情况：ok=false 表示因时间预算未跑完（可能存在未修正的卡片） */
       repairScan?: { ok: boolean; message?: string }
+      /** 提纯阶段的情况与统计（供生成汇总展示：卡片数/保留字数变化、未被成功提纯的卡片数） */
+      purifyScan?: {
+        ok: boolean
+        message?: string
+        inputCards?: number
+        outputCards?: number
+        inputChars?: number
+        outputChars?: number
+        /** 提纯后仍按原样保留的卡片数（漏答/校验失败/超预算未跑） */
+        passthroughCards?: number
+      }
       interrupted?: CompilationInterrupt
     }
   | { ok: false; error: { code: string; message: string } };
@@ -143,15 +175,15 @@ export interface CompilationInterrupt {
 
 /**
  * 会话级断点续传状态（内存，不落库）：
- * 记录窗口细读、大模型修正与矛盾扫描到哪个环节，续跑时从该处继续，复用已完成的窗口/修正/卡片。
- * 三个阶段（窗口细读 / 大模型修正 / 卡片矛盾扫描）均支持中断续跑。
+ * 记录窗口细读、大模型提纯、大模型修正与矛盾扫描到哪个环节，续跑时从该处继续。
+ * 四个阶段（窗口细读 / 提纯 / 修正 / 卡片矛盾扫描）均支持中断续跑。
  */
 interface CompilationResumeState {
   taskId: string
   compilationId: string
   title: string
   provider: ProviderInfo
-  phase: 'window' | 'repair' | 'contradiction'
+  phase: 'window' | 'purify' | 'repair' | 'contradiction'
   chunks: RetrievedChunk[]
   refs: SourceRefEntry[]
   windows: RetrievedChunk[][]
@@ -159,6 +191,23 @@ interface CompilationResumeState {
   doneSet: Set<number>
   /** 各窗口的细读输出（按下标；null=该窗口无产出但已完成），合并顺序确定 */
   windowOutputsByIndex: (CompilationOutput | null)[]
+  /** 大模型提纯：待提纯候选与分批方案（卡片确定后算一次，续跑复用） */
+  purifyCandidates?: PurifyCandidate[]
+  purifyBatches?: number[][]
+  /** 已累积的提纯片段（跨批次累积；续跑不重复已完成批次） */
+  purifySpans?: PurifiedSpan[]
+  /** 已完成的提纯批次下标（并行执行，故用集合而非计数；断点续跑时跳过） */
+  purifyDoneBatches?: Set<number>
+  /** 提纯阶段开始时间（用于整阶段时间预算） */
+  purifyStartedAt?: number
+  /** 提纯未跑完/未生效的原因（超预算或调用失败时置位，随 purifyScan 透出） */
+  purifyIncomplete?: { message: string }
+  /** 提纯统计（落库前透出给前端汇总） */
+  purifyStats?: { inputCards: number; outputCards: number; inputChars: number; outputChars: number }
+  /** 提纯后仍按原样保留（未被成功提纯）的卡片数——含漏答、校验失败、超预算未跑的批次 */
+  purifyPassthroughCards?: number
+  /** 提纯后的卡片（修正阶段与矛盾扫描、落库都用它；未跑提纯时为空） */
+  purifiedItems?: CompilationOutputItem[]
   /** 大模型修正：待修正候选与分批方案（卡片确定后算一次，续跑复用） */
   repairCandidates?: RepairCandidate[]
   repairBatches?: number[][]
@@ -825,7 +874,7 @@ export async function generateCompilation(
   // A+C：预计剩余时间——窗口细读用实测均速（EMA）外推；窗口块未算出前用占位预算，让前置阶段预估不至于明显失真
   let windowsBudgetSec = WINDOWS_PRIOR_PLACEHOLDER_S
   const preWindowEta = (remainingSinglePhaseSec: number): number =>
-    remainingSinglePhaseSec + windowsBudgetSec + PHASE_REPAIR_ETA_S + PHASE_CONTRADICTION_ETA_S
+    remainingSinglePhaseSec + windowsBudgetSec + PHASE_PURIFY_ETA_S + PHASE_REPAIR_ETA_S + PHASE_CONTRADICTION_ETA_S
 
   let scopeIds = resolveScopeSourceIds(task, { getSourceIdsByTag, getAllSourceIds })
   if (scopeIds.length === 0) return fail(ErrorCodes.TASK_NO_SCOPE, '资料库中没有可用资料')
@@ -928,11 +977,12 @@ export async function generateCompilation(
     return finalizeCompilationLocalInto(state.compilationId, allChunks)
   }
 
-  // 大模型修正（2026-09-08：提前到矛盾扫描之前，使矛盾检测面对的是语义完整的卡片）
-  state.phase = 'repair'
+  // 大模型提纯（2026-09-08 新增：置于修正之前——先摘出与主题相关的句段，得到更细粒度、更纯净的
+  // 卡片集；修正的「标记 + 回退」因此仍与最终卡片一对一，无需迁移修正记录）
+  state.phase = 'purify'
   phaseRes = await runWithRateLimitAutoResume(
     state,
-    (s, p) => runRepairPhase(s, merged.items, p),
+    (s, p) => runPurifyPhase(s, merged.items, p),
     onProgress,
     onAdvice
   )
@@ -941,9 +991,27 @@ export async function generateCompilation(
     resumeStore.set(state.compilationId, state)
     return interruptedResult(state)
   }
-  const repairedItems = state.repairedItems ?? merged.items
-  // 窗口级矛盾中引用被修正卡片的说法要同步改写，否则落库时按 excerpt 匹配不到卡片、整组矛盾会被丢弃
-  const windowGroups = remapRepairedVariantExcerpts(merged.contradictions, state.repairFixes ?? [])
+  const purifiedItems = state.purifiedItems ?? merged.items
+
+  // 大模型修正（作用于提纯后的片段：补全残缺表述、静默补齐缺失时间戳）
+  state.phase = 'repair'
+  phaseRes = await runWithRateLimitAutoResume(
+    state,
+    (s, p) => runRepairPhase(s, purifiedItems, p),
+    onProgress,
+    onAdvice
+  )
+  if (phaseRes === 'interrupted') {
+    await persistPartialCompilation(state)
+    resumeStore.set(state.compilationId, state)
+    return interruptedResult(state)
+  }
+  const repairedItems = state.repairedItems ?? purifiedItems
+  // 窗口级矛盾的说法先经提纯映射（整段 → 片段），再按修正结果改写，否则落库时按 excerpt 匹配不到卡片、整组会被丢弃
+  const windowGroups = remapRepairedVariantExcerpts(
+    mapWindowGroupsThroughPurify(merged.contradictions, merged.items, purifiedItems),
+    state.repairFixes ?? []
+  )
 
   state.phase = 'contradiction'
   phaseRes = await runWithRateLimitAutoResume(
@@ -966,7 +1034,16 @@ export async function generateCompilation(
     refs,
     chunks.length,
     state.scanIncomplete ? { ok: false, message: state.scanIncomplete.message } : { ok: true },
-    state.repairIncomplete ? { ok: false, message: state.repairIncomplete.message } : { ok: true }
+    state.repairIncomplete ? { ok: false, message: state.repairIncomplete.message } : { ok: true },
+    {
+      ok: !state.purifyIncomplete,
+      message: state.purifyIncomplete?.message,
+      inputCards: state.purifyStats?.inputCards,
+      outputCards: state.purifyStats?.outputCards,
+      inputChars: state.purifyStats?.inputChars,
+      outputChars: state.purifyStats?.outputChars,
+      passthroughCards: state.purifyPassthroughCards
+    }
   )
 }
 
@@ -1057,10 +1134,12 @@ function finalizeCompilationLocal(taskId: string, title: string, chunks: Retriev
   return { ok: true, compilationId: compilation.id, candidateChunks: chunks.length, contradictions: 0 }
 }
 
-/** 把「已完成窗口」的部分卡片落库（替换为当前部分结果），供中断时展示并可续跑 */
+/** 把「已完成阶段」的部分卡片落库（替换为当前部分结果），供中断时展示并可续跑 */
 async function persistPartialCompilation(state: CompilationResumeState): Promise<void> {
   const merged = mergeCompilationOutputs(state.windowOutputsByIndex.filter((o): o is CompilationOutput => o !== null))
-  const items = mapOutputItemsToInputs(merged.items, state.refs)
+  // 已经跑过提纯/修正时，落库部分结果也用最新的卡片形态（提纯后的片段 / 已修正文本）
+  const source = state.repairedItems ?? state.purifiedItems ?? merged.items
+  const items = mapOutputItemsToInputs(source, state.refs)
   replaceCompilationItems(state.compilationId, sortItemsByTs(items))
 }
 
@@ -1129,7 +1208,7 @@ async function runWindowPhase(state: CompilationResumeState, onProgress?: (p: Co
         state.interrupted = {
           stage: '正在由 AI 细读资料（' + (state.doneSet.size + 1) + '/' + total + ' 个窗口）',
           message: r.message ?? '大模型调用异常中断',
-          percent: Math.round(12 + (state.doneSet.size / total) * 68),
+          percent: Math.round(12 + (state.doneSet.size / total) * 54),
           retryable: r.rateLimited === true
         }
       } else {
@@ -1144,12 +1223,13 @@ async function runWindowPhase(state: CompilationResumeState, onProgress?: (p: Co
         const windowEta = warm
           ? (total - done) * WINDOW_ETA_DEFAULT_S
           : Math.round((secPerChar > 0 ? secPerChar : state.avgSecPerChar) * remainingChars)
-        // 矛盾扫描阶段：本地预筛后通常只剩 1~2 次串行调用，每次实测 ~150~250s
+        // 后续单次调用阶段（提纯 + 修正）与矛盾扫描阶段的先验
+        const postWindowEta = PHASE_PURIFY_ETA_S + PHASE_REPAIR_ETA_S
         const contradictionEta = warm ? PHASE_CONTRADICTION_ETA_S : Math.min(600, CARD_SCAN_ETA_PER_CALL_S * 2)
         onProgress?.({
           stage: '正在由 AI 细读资料（' + done + '/' + total + ' 个窗口）…',
-          percent: Math.round(12 + (done / total) * 68),
-          etaSeconds: Math.max(0, Math.round(windowEta + contradictionEta)),
+          percent: Math.round(12 + (done / total) * 54),
+          etaSeconds: Math.max(0, Math.round(windowEta + postWindowEta + contradictionEta)),
           candidateChunks: state.chunks.length,
           candidateSources: state.refs.length
         })
@@ -1161,7 +1241,182 @@ async function runWindowPhase(state: CompilationResumeState, onProgress?: (p: Co
 }
 
 /**
- * 大模型修正阶段（2026-09-08 新增，位于窗口细读之后、卡片矛盾扫描之前；可中断/可续跑）：
+ * 大模型提纯阶段（2026-09-08 新增，位于窗口细读之后、修正之前；可中断/可续跑）：
+ * 把细读产出的「整段卡片」交给大模型逐字摘录与主题相关的句段，舍弃无关内容，得到更细粒度、
+ * 更纯净的卡片集。约束见 purify-service（严格子串 + 本地校验 + 句读吸附；写通测试口径）。
+ * - **按 Provider 并发数并行批次**（2026-09-10 优化：实测串行 8 批耗时 610s，而细读阶段 4 路并行墙钟只有其 1/3）；
+ * - 无可解析输出 / 片段全部校验失败 / 未获结果的卡片 → 保留原卡（降级，绝不丢材料）；
+ * - 大模型异常 → 置中断标志（429 可自动续传），续跑只重跑本阶段未完成的批次；
+ * - 超出整阶段时间预算 → 剩余批次按「保留原卡」处理并标为未完成，不阻断后续阶段。
+ */
+async function runPurifyPhase(
+  state: CompilationResumeState,
+  items: CompilationOutputItem[],
+  onProgress?: (p: CompilationProgress) => void
+): Promise<'done' | 'interrupted'> {
+  if (items.length === 0) {
+    state.purifiedItems = items
+    return 'done'
+  }
+  if (!state.purifyBatches) {
+    state.purifyCandidates = buildPurifyCandidates(items, state.refs)
+    state.purifyBatches = splitPurifyBatches(state.purifyCandidates)
+    state.purifySpans = state.purifySpans ?? []
+    state.purifyDoneBatches = state.purifyDoneBatches ?? new Set<number>()
+    state.purifyStartedAt = Date.now()
+  }
+  const batches = state.purifyBatches
+  const candidates = state.purifyCandidates ?? []
+  const spans = state.purifySpans ?? (state.purifySpans = [])
+  const done = state.purifyDoneBatches ?? (state.purifyDoneBatches = new Set<number>())
+  const applied = new Set(spans.map((s) => s.parentIndex))
+  const agg = emptyPurifyStats()
+  const finish = (incomplete?: string): void => {
+    const res = applyPurifyOutcome(items, spans)
+    state.purifiedItems = res.items
+    state.purifyStats = res.stats
+    state.purifyPassthroughCards = agg.passthroughCards
+    if (incomplete) state.purifyIncomplete = { message: incomplete }
+    logPurify(
+      '完成',
+      '汇编=' +
+        state.compilationId +
+        ' 卡片 ' +
+        res.stats.inputCards +
+        ' → ' +
+        res.stats.outputCards +
+        '，字数 ' +
+        res.stats.inputChars +
+        ' → ' +
+        res.stats.outputChars +
+        '（' +
+        Math.round((res.stats.outputChars / Math.max(1, res.stats.inputChars)) * 100) +
+        '%）' +
+        '，原样保留 ' +
+        agg.passthroughCards +
+        ' 张（漏答 ' +
+        agg.omittedCards +
+        '），校验失败片段 ' +
+        agg.invalid +
+        ' 条，句读吸附 ' +
+        agg.snapExpanded +
+        ' 处，重试 ' +
+        agg.retried +
+        ' 次' +
+        (incomplete ? '；未完成：' + incomplete : '')
+    )
+  }
+  if (batches.length === 0) {
+    onProgress?.({ stage: '无需提纯的资料卡片，已跳过提纯阶段', percent: 77, etaSeconds: 0 })
+    finish()
+    return 'done'
+  }
+
+  const startedAt = state.purifyStartedAt ?? Date.now()
+  const queue = batches.map((_, i) => i).filter((i) => !done.has(i))
+  let cursor = 0
+  let dispatched = 0
+  let halt = false
+  let interrupted = false
+  let budgetHit = false
+  const nextBatch = (): number | undefined => {
+    while (!halt && cursor < queue.length) {
+      const bi = queue[cursor++]
+      if (!done.has(bi)) return bi
+    }
+    return undefined
+  }
+  const workers = Array.from({ length: Math.min(Math.max(1, state.concurrency), queue.length) }, async () => {
+    while (!halt) {
+      const bi = nextBatch()
+      if (bi === undefined) return
+      if (Date.now() - startedAt > PURIFY_PHASE_BUDGET_MS) {
+        budgetHit = true
+        halt = true
+        return
+      }
+      const remaining = batches.length - done.size
+      dispatched += 1
+      onProgress?.({
+        stage: '正在提纯资料（第 ' + dispatched + '/' + batches.length + ' 批：筛除与主题无关的句段）…',
+        percent: 67 + Math.round((done.size / batches.length) * 10),
+        etaSeconds: Math.max(1, Math.ceil(remaining / Math.max(1, state.concurrency))) * PURIFY_ETA_PER_CALL_S
+      })
+      const batchCards = batches[bi].map((i) => candidates[i]).filter((c): c is PurifyCandidate => !!c)
+      const res = await purifyBatch(state.provider, batchCards, state.title, state.taskId).catch((e) => ({
+        ok: false,
+        spans: [] as PurifiedSpan[],
+        stats: emptyPurifyStats(batchCards.length, 0),
+        message: e instanceof Error ? e.message : String(e),
+        rateLimited: false
+      }))
+      if (!res.ok) {
+        halt = true
+        interrupted = true
+        state.interrupted = {
+          stage: '正在提纯资料（第 ' + dispatched + '/' + batches.length + ' 批）',
+          message: res.message ?? '大模型调用异常中断',
+          percent: 67 + Math.round((done.size / batches.length) * 10),
+          retryable: res.rateLimited === true
+        }
+        return
+      }
+      for (const s of res.spans) {
+        if (!applied.has(s.parentIndex)) {
+          spans.push(s)
+          applied.add(s.parentIndex)
+        }
+      }
+      logPurifyBatchStats(bi + 1, batches.length, res.stats)
+      agg.passthroughCards += res.stats.passthroughCards
+      agg.omittedCards += res.stats.omittedCards
+      agg.invalid += res.stats.invalid
+      agg.snapExpanded += res.stats.snapExpanded
+      agg.retried += res.stats.retried
+      agg.retainedCards += res.stats.retainedCards
+      agg.retainedChars += res.stats.retainedChars
+      done.add(bi)
+    }
+  })
+  await Promise.all(workers)
+
+  if (interrupted) return 'interrupted'
+
+  const completed = done.size
+  if (budgetHit) {
+    // 剩余批次保留原卡（不丢材料），并标记为未完成
+    for (let k = 0; k < batches.length; k++) {
+      if (done.has(k)) continue
+      for (const idx of batches[k]) {
+        const c = candidates[idx]
+        if (c && !applied.has(c.index)) {
+          spans.push(...passthroughSpans([c]))
+          applied.add(c.index)
+        }
+      }
+      agg.passthroughCards += batches[k].length
+      done.add(k)
+    }
+    finish('提纯超出时间预算，已完成 ' + completed + '/' + batches.length + ' 批；其余卡片按原样保留。')
+    onProgress?.({ stage: '提纯超出时间预算，未提纯的卡片已按原样保留', percent: 77, etaSeconds: 0 })
+    return 'done'
+  }
+  finish()
+  onProgress?.({
+    stage:
+      '资料提纯完成（卡片 ' +
+      (state.purifyStats?.inputCards ?? items.length) +
+      ' → ' +
+      (state.purifyStats?.outputCards ?? items.length) +
+      ' 张）',
+    percent: 77,
+    etaSeconds: 0
+  })
+  return 'done'
+}
+
+/**
+ * 大模型修正阶段（2026-09-08 新增，位于提纯之后、卡片矛盾扫描之前；可中断/可续跑）：
  * 找出表意不明/疑似残缺的卡片并**默认应用**修正（同时静默补齐缺失时间戳），
  * 使随后交给矛盾检测的卡片内容更清晰完整。修正记录随卡片落库，供卡片上的标记展示与回退。
  * - 无 Provider / 无可解析输出 → 视为无修正，不阻断；
@@ -1191,6 +1446,8 @@ async function runRepairPhase(
   const fixes = state.repairFixes ?? (state.repairFixes = [])
   const tsFills = state.repairTsFills ?? (state.repairTsFills = [])
   const candidates = state.repairCandidates ?? []
+  /** 模型给出但不含年份、被本地拒绝的时间戳条数（诊断：用于确认「缺年份 ts」补全是否真的生效） */
+  let tsRejected = 0
   const applyAll = (): void => {
     state.repairedItems = applyRepairOutcome(items, fixes, tsFills)
   }
@@ -1209,7 +1466,7 @@ async function runRepairPhase(
     }
     onProgress?.({
       stage: '正在修正资料卡片（第 ' + (bi + 1) + '/' + batches.length + ' 批：补全语义、补齐时间戳）…',
-      percent: 80 + Math.round((bi / batches.length) * 7),
+      percent: 78 + Math.round((bi / batches.length) * 9),
       etaSeconds: (batches.length - bi) * REPAIR_ETA_PER_CALL_S
     })
     const batchCards = batches[bi].map((i) => candidates[i]).filter((c): c is RepairCandidate => !!c)
@@ -1217,6 +1474,7 @@ async function runRepairPhase(
       ok: false,
       fixes: [] as RepairFix[],
       tsFills: [] as { index: number; ts: string }[],
+      tsRejected: 0,
       message: e instanceof Error ? e.message : String(e),
       rateLimited: false
     }))
@@ -1224,17 +1482,29 @@ async function runRepairPhase(
       state.interrupted = {
         stage: '正在修正资料卡片（第 ' + (bi + 1) + '/' + batches.length + ' 批）',
         message: res.message ?? '大模型调用异常中断',
-        percent: 80 + Math.round((bi / batches.length) * 7),
+        percent: 78 + Math.round((bi / batches.length) * 9),
         retryable: res.rateLimited === true
       }
       return 'interrupted'
     }
     fixes.push(...res.fixes)
     tsFills.push(...res.tsFills)
+    tsRejected += res.tsRejected ?? 0
     state.repairBatchDone = bi + 1
   }
   applyAll()
-  logMain('repair', '修正阶段完成 汇编=' + state.compilationId + ' 卡片=' + items.length + ' 修正=' + fixes.length + ' 补时间戳=' + tsFills.length)
+  logMain(
+    'repair',
+    '修正阶段完成 汇编=' +
+      state.compilationId +
+      ' 卡片=' +
+      items.length +
+      ' 修正=' +
+      fixes.length +
+      ' 补时间戳=' +
+      tsFills.length +
+      (tsRejected > 0 ? ' 拒绝无年份时间戳=' + tsRejected : '')
+  )
   onProgress?.({
     stage: '资料卡片修正完成（修正 ' + fixes.length + ' 张、补齐时间戳 ' + tsFills.length + ' 张）',
     percent: 87,
@@ -1310,6 +1580,43 @@ async function runContradictionPhase(
   onProgress?.({ stage: '卡片矛盾扫描完成', percent: 99, etaSeconds: 0 })
   return 'done'
 }
+/**
+ * 窗口级矛盾的说法经「提纯映射」：细读阶段的窗口级矛盾引用的是提纯前的整段原文，
+ * 提纯后卡片已变成片段，若不改写则落库时按 excerpt 匹配不到卡片、整组矛盾会被丢弃。
+ * 说法对应的内容已被提纯舍弃时（映射为 null），该说法一并丢弃（材料已不在汇编中）。
+ */
+export function mapWindowGroupsThroughPurify(
+  groups: CompilationOutputGroup[],
+  parents: CompilationOutputItem[],
+  purified: CompilationOutputItem[]
+): CompilationOutputGroup[] {
+  if (groups.length === 0) return groups
+  const parentsText = parents.map((p) => p.excerpt)
+  // 由「提纯后卡片」重建 父下标 → 片段文本 的映射：片段是父卡的子串，故可用包含关系定位其父卡
+  const spansByParent = new Map<number, string[]>()
+  for (const frag of purified) {
+    let parentIndex = parents.findIndex((p) => p.excerpt.includes(frag.excerpt))
+    if (parentIndex < 0) parentIndex = parents.findIndex((p) => frag.excerpt.includes(p.excerpt))
+    if (parentIndex < 0) continue
+    const list = spansByParent.get(parentIndex) ?? []
+    list.push(frag.excerpt)
+    spansByParent.set(parentIndex, list)
+  }
+  const out: CompilationOutputGroup[] = []
+  for (const g of groups) {
+    const variants: CompilationOutputVariant[] = []
+    const seen = new Set<string>()
+    for (const v of g.variants) {
+      const mapped = mapVariantThroughPurify(v.excerpt, parentsText, spansByParent)
+      if (!mapped || seen.has(mapped)) continue
+      seen.add(mapped)
+      variants.push({ excerpt: mapped, sourceRefs: v.sourceRefs })
+    }
+    if (variants.length >= 2) out.push({ topic: g.topic, kind: g.kind, variants })
+  }
+  return out
+}
+
 /** 使用已创建的汇编整体替换为最终卡片 + 矛盾（供正常完成 / 续跑完成调用） */
 function finalizeCompilationInto(
   compilationId: string,
@@ -1317,7 +1624,16 @@ function finalizeCompilationInto(
   refs: SourceRefEntry[],
   candidateChunks: number,
   contradictionScan?: { ok: boolean; message?: string },
-  repairScan?: { ok: boolean; message?: string }
+  repairScan?: { ok: boolean; message?: string },
+  purifyScan?: {
+    ok: boolean
+    message?: string
+    inputCards?: number
+    outputCards?: number
+    inputChars?: number
+    outputChars?: number
+    passthroughCards?: number
+  }
 ): GenerateCompilationResult {
   const items = sortItemsByTs(mapOutputItemsToInputs(output.items, refs))
   // 卡片携带的 repair 字段会与卡片同事务写入 compilation_repairs（status='applied'），故排序/过滤后仍严格对应
@@ -1346,7 +1662,15 @@ function finalizeCompilationInto(
     }
   }
   const contradictions = insertCompilationContradictions(compilationId, groups)
-  return { ok: true, compilationId, candidateChunks, contradictions: contradictions.length, contradictionScan, repairScan }
+  return {
+    ok: true,
+    compilationId,
+    candidateChunks,
+    contradictions: contradictions.length,
+    contradictionScan,
+    repairScan,
+    purifyScan
+  }
 }
 
 /** 无 Provider / AI 无产出时的本地降级（替换到已创建的汇编） */
@@ -1366,8 +1690,8 @@ function finalizeCompilationLocalInto(compilationId: string, chunks: RetrievedCh
 
 /**
  * 中断续跑（Phase 6.x）：从断点继续生成资料汇编。
- * 仅会话内（内存 resumeStore，应用重启后清空）。复用已完成窗口/修正批次，重读失败或未完成的窗口、
- * 重跑未完成的修正批次，并继续扫描剩余矛盾批次；再次异常仍返回 interrupted（可再点「尝试继续」）。
+ * 仅会话内（内存 resumeStore，应用重启后清空）。复用已完成窗口/提纯批次/修正批次，重读失败或未完成的
+ * 窗口、重跑未完成的提纯与修正批次，并继续扫描剩余矛盾批次；再次异常仍返回 interrupted（可再点「尝试继续」）。
  */
 export async function continueCompilation(compilationId: string, onProgress?: (p: CompilationProgress) => void, onAdvice?: (message: string) => void): Promise<GenerateCompilationResult> {
   const state = resumeStore.get(compilationId)
@@ -1380,7 +1704,7 @@ export async function continueCompilation(compilationId: string, onProgress?: (p
       await persistPartialCompilation(state)
       return interruptedResult(state)
     }
-    state.phase = 'repair'
+    state.phase = 'purify'
     state.scanOffset = 0
   }
 
@@ -1391,11 +1715,27 @@ export async function continueCompilation(compilationId: string, onProgress?: (p
     return finalizeCompilationLocalInto(state.compilationId, state.chunks)
   }
 
-  // 大模型修正阶段：续跑未完成的批次（已完成批次结果保留在 state.repairFixes 中）
+  // 提纯阶段：续跑未完成的批次（已完成批次片段保留在 state.purifySpans 中）
+  if (state.phase === 'purify') {
+    const prPurify = await runWithRateLimitAutoResume(
+      state,
+      (s, p) => runPurifyPhase(s, merged.items, p),
+      onProgress,
+      onAdvice
+    )
+    if (prPurify === 'interrupted') {
+      await persistPartialCompilation(state)
+      return interruptedResult(state)
+    }
+    state.phase = 'repair'
+  }
+  const purifiedItems = state.purifiedItems ?? merged.items
+
+  // 修正阶段：续跑未完成的批次（已完成批次结果保留在 state.repairFixes 中）
   if (state.phase === 'repair') {
     const prRepair = await runWithRateLimitAutoResume(
       state,
-      (s, p) => runRepairPhase(s, merged.items, p),
+      (s, p) => runRepairPhase(s, purifiedItems, p),
       onProgress,
       onAdvice
     )
@@ -1405,8 +1745,12 @@ export async function continueCompilation(compilationId: string, onProgress?: (p
     }
     state.phase = 'contradiction'
   }
-  const repairedItems = state.repairedItems ?? merged.items
-  const windowGroups = remapRepairedVariantExcerpts(merged.contradictions, state.repairFixes ?? [])
+  const repairedItems = state.repairedItems ?? purifiedItems
+  // 窗口级矛盾的说法先经提纯映射（整段 → 片段），再按修正结果改写
+  const windowGroups = remapRepairedVariantExcerpts(
+    mapWindowGroupsThroughPurify(merged.contradictions, merged.items, purifiedItems),
+    state.repairFixes ?? []
+  )
 
   const pr = await runWithRateLimitAutoResume(
     state,
@@ -1425,6 +1769,15 @@ export async function continueCompilation(compilationId: string, onProgress?: (p
     state.refs,
     state.chunks.length,
     state.scanIncomplete ? { ok: false, message: state.scanIncomplete.message } : { ok: true },
-    state.repairIncomplete ? { ok: false, message: state.repairIncomplete.message } : { ok: true }
+    state.repairIncomplete ? { ok: false, message: state.repairIncomplete.message } : { ok: true },
+    {
+      ok: !state.purifyIncomplete,
+      message: state.purifyIncomplete?.message,
+      inputCards: state.purifyStats?.inputCards,
+      outputCards: state.purifyStats?.outputCards,
+      inputChars: state.purifyStats?.inputChars,
+      outputChars: state.purifyStats?.outputChars,
+      passthroughCards: state.purifyPassthroughCards
+    }
   )
 }

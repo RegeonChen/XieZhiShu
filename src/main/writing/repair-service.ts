@@ -9,6 +9,15 @@
  * - 同时记录「修正前原文 + 修正理由」，落库后由卡片上的「经过大模型修正」标记承载，用户可点开查看并回退/再次应用；
  * - 缺少时间戳的卡片仍**静默补齐 ts**（用户确认：不算“修正”，不落修正记录、无标记、不可回退）。
  *
+ * 2026-09-10 实测复盘（任务「高中教育4」）后的两项收紧：
+ * - **时间戳必须含年份**：实测 253 张卡中有 12 张 ts 只有月日（如「5 月 19 日」「7—9 日」「十三五规划期间」），
+ *   且**全部没有修正记录**——根因是旧提示词只处理「时间为『无』」，把「有月日无年份」当成了有时间戳。
+ *   现改为：时间为「无」**或时间缺少年份**都要求补齐，且本地只接受**含 4 位年份**的结果（模型给不出年份则保持原样，不编造）。
+ * - **补全残缺句/缺主语/指代不明**：旧提示词只列了「表格切片、孤立短语、缺主谓宾」，未覆盖「句子起点/终点不完整」
+ *   与「指代不明」，实测因此漏掉了 43 张起点不在句读边界、11 张结尾半句的卡片（提纯阶段已加本地句读吸附，
+ *   残留的缺主语/指代不明由本阶段补全）。同时明确**能补全就补全，确实无法补全时才允许删除**（旧实现里模型
+ *   多次直接删掉残缺数据，等于丢材料）。
+ *
  * 失败：大模型异常（超时/网络/429）→ 返回 interrupted，交由生成管线的断点续传「尝试继续」，
  * 续跑只重跑本阶段（已完成批次结果保留，不重复烧钱）。
  * 无 Provider / 无法解析输出 → 视为「无修正」，不阻断（additive）。
@@ -29,6 +38,25 @@ export const REPAIR_PHASE_BUDGET_MS = 900000
 const CONTEXT_NEIGHBOR_CHARS = 200
 /** 单批修正的预计耗时（秒，用于剩余时间展示） */
 export const REPAIR_ETA_PER_CALL_S = 90
+
+/**
+ * 时间戳是否含 4 位年份（用户要求 2026-09-10：志书时间标注必须含年份，如「2022 年 5 月 19 日」）。
+ * 用于两道本地校验：① ts 只有月日/时段（如「5 月 19 日」「7—9 日」）视为**缺年份**、需要补齐；
+ * ② 模型给出的 ts 不含年份时**不予采纳**（宁可保持原样，也不写进一个没有年份的时间）。
+ */
+export function hasYear(ts: string | null | undefined): boolean {
+  return !!ts && /(?:18|19|20)\d{2}/.test(ts)
+}
+
+/**
+ * 判定模型给出的 ts 是否可以采纳（纯函数，可测试）：必须含年份、与原值不同、且原值不含年份。
+ * 卡片已有含年份的时间戳时一律不动（避免模型把「2018 年 5 月」改写成别的年份）。
+ */
+export function shouldFillTs(cardTs: string | null | undefined, modelTs: string | null | undefined): boolean {
+  if (!modelTs || !hasYear(modelTs)) return false
+  if (cardTs === modelTs) return false
+  return !hasYear(cardTs)
+}
 
 /** 管线的来源编号表（与 compilation-service 的 SourceRefEntry 结构一致，避免循环依赖） */
 export interface RepairSourceRef {
@@ -64,6 +92,8 @@ export interface RepairBatchOutcome {
   fixes: RepairFix[]
   /** 静默补齐的时间戳：index → ts（不算“修正”，不落修正记录） */
   tsFills: { index: number; ts: string }[]
+  /** 模型给出但不含年份、被本地拒绝的时间戳条数（诊断用） */
+  tsRejected?: number
   message?: string
   rateLimited?: boolean
 }
@@ -193,16 +223,27 @@ export function buildRepairMessages(batch: RepairCandidate[]): ChatMessage[] {
   const sys = [
     '你是一名地方志资料整理专家。下面给出一批已筛选出的【资料卡片】（每条含 itemId、来源、时间、摘录、原文上下文）。',
     '请先通读所有卡片，然后：',
-    '1. 对缺少时间戳（时间显示为“无”）的卡片，结合【原文上下文】推断其年份/时间（如项目完工年份、资料所属年份），并给出 ts 字段（如 "2005 年"）；若上下文确无年份依据，则不给 ts。',
-    '2. 对「表意不明」或「疑似残缺」的卡片（例如表格单元格被切片后丢失列名/行名含义、孤立的短语、缺少主谓宾的残缺句、脱离上下文不知所云的句子），结合【原文上下文】给出语义完整、可直接入库的修正文本（revised），并简要说明原因（reason）。',
+    '1. **补齐时间戳**——以下两种情形都要处理，并给出 ts 字段：',
+    '   （a）时间为「无」（完全没有时间标注）；',
+    '   （b）时间**缺少年份**（如只有「5 月 19 日」「7—9 日」「9 月 13 日」，或「十三五规划期间」这类没有年份的表述）。',
+    '   志书的时间标注**必须含年份**，请结合【原文上下文】与来源文献年份（如来源为《长乐年鉴2019》，其记述的年度通常为 2018 年）推断，写成含年份的形式，如 "2018 年 5 月 19 日"、"2018 年 7—9 日"。',
+    '   若上下文确实没有任何年份依据，则**不要给 ts**（不得编造年份）。',
+    '2. **修正表意不明或残缺的卡片**，结合【原文上下文】给出语义完整、可直接入库的修正文本（revised），并简要说明原因（reason）。需要修正的典型情形：',
+    '   （a）句子起点或终点不完整（从词中间/半句话开始、以半句话结束）；',
+    '   （b）缺少主语、谓语或宾语；',
+    '   （c）指代不明——句中出现「他/其/该校/该年/其中」等代词或省略，但摘录内看不出指代对象；',
+    '   （d）表格单元格被切片后丢失列名/行名含义、孤立的短语；',
+    '   （e）脱离上下文不知所云的句子。',
+    '   **优先补全，不要删**：能依据原文上下文补出主语、指代对象或不完整成分的，就补全；',
+    '   只有确实无法补全（例如无法判定所属项目的孤立表格残片）时，才可以在 revised 中删去该残缺部分，并在 reason 中说明为何无法补全。',
     '3. revised 必须忠于原文事实：只能补全原文已有信息的表述，**不得添加原文中不存在的信息、不得推测或补充史实、不得改变数字与结论**。',
     '同一张卡片可以同时给出 ts 和 revised（补齐时间戳 + 修正文本）。',
-    '已经表意清晰、完整且已有时间戳的卡片不要输出。',
+    '已经表意清晰、完整且时间标注含年份的卡片不要输出。',
     '',
     '只输出一个 JSON 对象，不要输出其他文字或代码块围栏，且保持在一行：',
     '{"repairs":[{"itemId":"c1","ts":"2005 年","revised":"...","reason":"..."}]}'
   ].join('\n')
-  const user = '【资料卡片】\n' + cardList + '\n\n请按上述要求输出需要补齐时间戳或修正的卡片；ts 字段仅在能依据原文推断出年份/时间时给出。'
+  const user = '【资料卡片】\n' + cardList + '\n\n请按上述要求输出需要补齐时间戳或修正的卡片；ts 字段仅在能依据原文推断出年份/时间时给出（必须含年份）。'
   return [
     { role: 'system', content: sys },
     { role: 'user', content: user }
@@ -245,15 +286,19 @@ export async function scanRepairBatch(
   const byKey = new Map(batch.map((c) => [c.key, c]))
   const fixes: RepairFix[] = []
   const tsFills: { index: number; ts: string }[] = []
+  let tsRejected = 0
   for (const p of parsed) {
     const card = byKey.get(p.itemId)
     if (!card) continue
-    if (p.ts && !card.ts) tsFills.push({ index: card.index, ts: p.ts })
+    if (p.ts && p.ts !== card.ts) {
+      if (shouldFillTs(card.ts, p.ts)) tsFills.push({ index: card.index, ts: p.ts })
+      else if (!hasYear(p.ts)) tsRejected += 1
+    }
     if (p.revised && p.revised !== card.excerpt) {
       fixes.push({ index: card.index, originalText: card.excerpt, revisedText: p.revised, reason: p.reason })
     }
   }
-  return { ok: true, fixes, tsFills }
+  return { ok: true, fixes, tsFills, tsRejected }
 }
 
 /**
@@ -290,7 +335,9 @@ export function remapRepairedVariantExcerpts<T extends { variants: { excerpt: st
   }
   for (const t of tsFills) {
     const it = out[t.index]
-    if (!it || it.ts) continue
+    if (!it) continue
+    // 只接受含年份的 ts；卡片已有含年份的 ts 时不覆盖（缺年份的旧值允许被覆盖）
+    if (!shouldFillTs(it.ts, t.ts)) continue
     it.ts = t.ts
   }
   return out
@@ -403,6 +450,58 @@ if (import.meta.vitest) {
     it('does not overwrite an existing ts', () => {
       const out = applyRepairOutcome([{ sourceRef: '#1', excerpt: 'a', ts: '2005 年' }], [], [{ index: 0, ts: '2021 年' }])
       expect(out[0].ts).toBe('2005 年')
+    })
+
+    it('detects a missing year in ts and accepts only year-bearing fills (2026-09-10 缺年份 ts)', () => {
+      expect(hasYear('2018 年 5 月 19 日')).toBe(true)
+      expect(hasYear('5 月 19 日')).toBe(false)
+      expect(hasYear('7—9 日')).toBe(false)
+      expect(hasYear('十三五规划期间')).toBe(false)
+      expect(hasYear(null)).toBe(false)
+
+      // 原值含年份 → 一律不动
+      expect(shouldFillTs('2018 年', '2019 年')).toBe(false)
+      expect(shouldFillTs('2018 年 5 月', '2018 年 5 月')).toBe(false)
+      // 原值缺年份 / 为空 → 接受含年份的结果
+      expect(shouldFillTs('5 月 19 日', '2018 年 5 月 19 日')).toBe(true)
+      expect(shouldFillTs(null, '2005 年')).toBe(true)
+      // 模型给不出年份 → 不采纳（不编造）
+      expect(shouldFillTs('5 月 19 日', '5 月 20 日')).toBe(false)
+      expect(shouldFillTs(null, '当年')).toBe(false)
+
+      // 应用时同样只认含年份的 ts，并可覆盖缺年份的旧值
+      const out = applyRepairOutcome(
+        [
+          { sourceRef: '#1', excerpt: 'a', ts: '5 月 19 日' },
+          { sourceRef: '#2', excerpt: 'b', ts: null },
+          { sourceRef: '#3', excerpt: 'c', ts: '2019 年' }
+        ] as { sourceRef: string; excerpt: string; ts: string | null }[],
+        [],
+        [
+          { index: 0, ts: '2018 年 5 月 19 日' },
+          { index: 1, ts: '（无年份）' },
+          { index: 2, ts: '2020 年' }
+        ]
+      )
+      expect(out[0].ts).toBe('2018 年 5 月 19 日')
+      expect(out[1].ts).toBeNull()
+      expect(out[2].ts).toBe('2019 年')
+    })
+
+    it('instructs the model to complete missing years, incomplete sentences and unclear referents', () => {
+      const sys = buildRepairMessages([
+        { index: 0, key: 'c1', sourceRef: '#1', sourceTitle: '长乐年鉴2019', excerpt: '摘录', ts: '5 月 19 日', context: '' }
+      ])[0].content
+      // 缺年份必须补齐，且要求含年份
+      expect(sys).toContain('缺少年份')
+      expect(sys).toContain('必须含年份')
+      expect(sys).toContain('不得编造年份')
+      // 残缺判定覆盖「句子起点或终点不完整」「指代不明」「缺少主语」
+      expect(sys).toContain('句子起点或终点不完整')
+      expect(sys).toContain('指代不明')
+      expect(sys).toContain('缺少主语')
+      // 优先补全而非删除
+      expect(sys).toContain('优先补全，不要删')
     })
 
     it('remaps window-level contradiction variants that quote a repaired card', () => {

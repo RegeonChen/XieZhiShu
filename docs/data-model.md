@@ -321,7 +321,11 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 
 ### 2.24 compilation_repairs（资料卡片「大模型修正」，Migration 021 → 029 改版）
 
-生成汇编时由**生成管线内**的大模型修正阶段产出（位置：AI 分窗细读之后、卡片矛盾扫描之前——先让卡片内容清晰完整，再交给矛盾检测），**默认直接应用到卡片**，卡片上以「✎ 经过大模型修正」标记承载：点击可查看修正前原文与理由，并可「回退到修正前」（标记转灰「↺ 已回退」）或「再次应用修正」。**不再有「待裁定」状态，也不再进入回收站**（`compilation_repair_recycle_bin` 已随 Migration 029 删除）。
+生成汇编时由**生成管线内**的大模型修正阶段产出（位置：**提纯**之后、卡片矛盾扫描之前——先摘出与主题相关的句段、再由修正补全语义/补齐时间戳，最后交给矛盾检测），**默认直接应用到卡片**，卡片上以「✎ 经过大模型修正」标记承载：点击可查看修正前原文与理由，并可「回退到修正前」（标记转灰「↺ 已回退」）或「再次应用修正」。**不再有「待裁定」状态，也不再进入回收站**（`compilation_repair_recycle_bin` 已随 Migration 029 删除）。
+
+> **提纯阶段（2026-09-08）不新增表**：提纯只是把细读产出的整段卡片**替换**为「与主题相关句段」的片段（仍是 `compilation_items` 行，继承原 `source_id`/`ts`/`note`），因此无需迁移；提纯前原文不落库（黑箱），需要退回时用「重新生成汇编」。提纯先于修正，故修正记录（`compilation_repairs.item_id`）始终与最终卡片一对一，不涉及记录迁移。
+>
+> **2026-09-10 提纯口径与实现调整（仍无 schema 变化）**：判定口径由「只要有可能的联系就保留」改为**写通测试**（这段文字会不会写进题为《主题》的志稿正文）；片段额外经**本地句读吸附**（起点左扩到句读边界、终点右扩到句末标点，只外向不内向）；批次 50 张 / 18000 字、整阶段预算 900s、按 Provider 并发并行；输出不再包含 `reason` 字段（提纯是黑箱，理由从不展示也不落库），`PurifyBatchStats` 仅用于日志与 `purifyScan.passthroughCards`。修正阶段的 ts 补齐规则同步收紧为**必须含 4 位年份**（缺年份的旧值可被覆盖，已有年份的不覆盖，模型给不出年份则不采纳）。
 
 - `compilation_repairs`：id PK、compilation_id FK CASCADE、item_id REFERENCES compilation_items(id) ON DELETE CASCADE、original_text（修正前）、revised_text（修正后）、reason、status CHECK('applied','reverted')、created_at/updated_at；索引 (compilation_id)、(item_id)。
 - 生成侧由 `insertCompilationItems` 与卡片**同事务**写入（status='applied'）：修正记录随卡片对象（`CompilationItemInput.repair`）一起经过来源过滤与按时间排序，故与卡片严格对应、不会错位。

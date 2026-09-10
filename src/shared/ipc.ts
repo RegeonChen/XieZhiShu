@@ -295,12 +295,40 @@ export interface CompilationGenerateReq {
   taskId: string
   title: string
 }
-export type CompilationGenerateRes = { compilation: Compilation; contradictionScan?: { ok: boolean; message?: string }; interrupted?: CompilationInterrupt }
+/**
+ * 生成管线内各「后置阶段」的结果摘要（供渲染层在生成汇总里提示/统计）：
+ * - purifyScan：提纯阶段（卡片数 / 保留字数变化、未被成功提纯而按原样保留的卡片数；
+ *   ok=false 表示超预算未跑完，剩余卡片按原样保留）
+ * - repairScan：修正阶段（ok=false 表示超预算未跑完）
+ * - contradictionScan：卡片矛盾扫描（ok=false 表示超预算未扫完，可能存在遗漏）
+ */
+export type CompilationStageScan = { ok: boolean; message?: string }
+export type CompilationPurifyScan = CompilationStageScan & {
+  inputCards?: number
+  outputCards?: number
+  inputChars?: number
+  outputChars?: number
+  /** 提纯后仍按原样保留的卡片数（漏答 / 片段校验失败 / 超预算未跑的批次） */
+  passthroughCards?: number
+}
+export type CompilationGenerateRes = {
+  compilation: Compilation
+  contradictionScan?: CompilationStageScan
+  repairScan?: CompilationStageScan
+  purifyScan?: CompilationPurifyScan
+  interrupted?: CompilationInterrupt
+}
 /** 中断续跑（Phase 6.x：会话内断点续传） */
 export interface CompilationContinueReq {
   compilationId: string
 }
-export type CompilationContinueRes = { compilation: Compilation; interrupted?: CompilationInterrupt }
+export type CompilationContinueRes = {
+  compilation: Compilation
+  contradictionScan?: CompilationStageScan
+  repairScan?: CompilationStageScan
+  purifyScan?: CompilationPurifyScan
+  interrupted?: CompilationInterrupt
+}
 /** 资料汇编调整（2026-08-28，Phase 6.4.4）：首条消息生成汇编后续每条消息都是对汇编的调整（批量删除/增补/自定义编辑） */
 export interface CompilationAdjustReq {
   taskId: string

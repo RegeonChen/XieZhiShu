@@ -18,7 +18,8 @@ import {
   splitCardScans,
   clusterCandidateCards,
   packCandidateCalls,
-  reduceConcurrency
+  reduceConcurrency,
+  mapWindowGroupsThroughPurify
 } from '../src/main/writing/compilation-service'
 
 let db: Database.Database
@@ -97,8 +98,45 @@ describe('compilation service (Phase 6.1)', () => {
     expect(items[0].repair).toEqual({ originalText: '其中预科班 30 人。', revisedText: '预科班 30 人。', reason: '缺少主语' })
   })
 
-  it('recallCandidateChunks returns empty for empty query or scope', () => {
-    expect(recallCandidateChunks([], '园所设置')).toEqual([])
+  it('mapWindowGroupsThroughPurify rewrites window-level variant excerpts onto purified fragments (2026-09-08 提纯)', () => {
+    // 细读产出的两张整段卡片（提纯前）
+    const parents = [
+      { sourceRef: '#1', position: '', excerpt: '【社会事业】财政支出 46.91 亿元。普通中学 30 所，独立高中 1 所。', ts: '2019 年' },
+      { sourceRef: '#2', position: '', excerpt: '2020 年，全区普通中学 28 所，独立高中 1 所。', ts: '2020 年' }
+    ]
+    // 提纯后：只保留与「高中」相关的片段
+    const purified = [
+      { sourceRef: '#1', position: '', excerpt: '普通中学 30 所，独立高中 1 所。', ts: '2019 年' },
+      { sourceRef: '#2', position: '', excerpt: '2020 年，全区普通中学 28 所，独立高中 1 所。', ts: '2020 年' }
+    ]
+    const groups = [
+      {
+        topic: '普通中学数量',
+        kind: 'data',
+        variants: [
+          { excerpt: '【社会事业】财政支出 46.91 亿元。普通中学 30 所，独立高中 1 所。', sourceRefs: ['#1'] },
+          { excerpt: '2020 年，全区普通中学 28 所，独立高中 1 所。', sourceRefs: ['#2'] }
+        ]
+      },
+      {
+        topic: '已被提纯舍弃的事实',
+        kind: 'data',
+        variants: [
+          { excerpt: '【社会事业】财政支出 46.91 亿元。普通中学 30 所，独立高中 1 所。', sourceRefs: ['#1'] },
+          { excerpt: '民生支出逐年增长', sourceRefs: ['#2'] }
+        ]
+      }
+    ]
+    const out = mapWindowGroupsThroughPurify(groups, parents, purified)
+    // 第一组：两说法都被映射到提纯后的片段文本（落库时才能匹配到卡片）
+    expect(out).toHaveLength(1)
+    expect(out[0].topic).toBe('普通中学数量')
+    expect(out[0].variants.map((v) => v.excerpt)).toEqual(['普通中学 30 所，独立高中 1 所。', '2020 年，全区普通中学 28 所，独立高中 1 所。'])
+    // 第二组：其中一个说法对应的内容已被提纯舍弃（映射为 null），剩余不足 2 条 → 整组丢弃
+    expect(out.some((g) => g.topic === '已被提纯舍弃的事实')).toBe(false)
+  })
+
+  it('recallCandidateChunks returns empty for empty query or scope', () => {    expect(recallCandidateChunks([], '园所设置')).toEqual([])
     expect(recallCandidateChunks(['s1'], '   ')).toEqual([])
   })
 

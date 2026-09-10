@@ -196,17 +196,20 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 
 ### 2.3.1 资料汇编（compilation，Phase 6.0，2026-08-25）
 
-三段式撰写第一步的资料汇编契约。`compilation:generate` / `compilation:regenerate` 在 Phase 6.1 已接入生成服务（本地宽召回宁多勿漏 + AI 细读 + 大模型修正 + 矛盾标注；无 Provider / 失败降级为本地候选卡片）；生成进度经事件 `compilation:progress` 推送。CRUD / 矛盾取舍 / 确认已实现。
+三段式撰写第一步的资料汇编契约。`compilation:generate` / `compilation:regenerate` 在 Phase 6.1 已接入生成服务（本地宽召回宁多勿漏 + AI 细读 + **大模型提纯** + 大模型修正 + 矛盾标注；无 Provider / 失败降级为本地候选卡片）；生成进度经事件 `compilation:progress` 推送。CRUD / 矛盾取舍 / 确认已实现。
+
+> **生成管线阶段顺序（2026-09-08）**：`关键词提取 → 网页检索 → 本地宽召回 → 保守闸门 → AI 分窗细读 → 提纯（purify）→ 修正（repair）→ 卡片矛盾扫描（contradiction）→ 落库`。提纯位于修正之前，使修正的「标记 + 回退」与最终卡片保持一对一（无需迁移修正记录），而修正与矛盾扫描都在「更纯净、更短」的片段上进行。
 
 | 通道 | 请求 → 响应 data | 说明 |
 |---|---|---|
 | `compilation:list` | `{ taskId }` → `{ compilations: Compilation[] }` | 任务的全部资料汇编（按时间倒序，含卡片与矛盾） |
 | `compilation:get` | `{ compilationId }` → `{ compilation: Compilation }` | 读取一次资料汇编 |
-| `compilation:generate` | `{ taskId, title }` → `{ compilation: Compilation, contradictionScan?, repairScan?, interrupted? }` | 生成资料汇编（本地宽召回 + AI 细读 + **大模型修正** + 矛盾标注；无 Provider/失败降级本地候选）。大模型异常中断时返回 `interrupted:{stage,message,percent}` 且 `compilation` 为已完成窗口的部分卡片（`drafting`），供前端展示「尝试继续」 |
+| `compilation:generate` | `{ taskId, title }` → `{ compilation: Compilation, contradictionScan?, repairScan?, purifyScan?, interrupted? }` | 生成资料汇编（本地宽召回 + AI 细读 + **提纯** + **大模型修正** + 矛盾标注；无 Provider/失败降级本地候选）。大模型异常中断时返回 `interrupted:{stage,message,percent}` 且 `compilation` 为已完成阶段的部分卡片（`drafting`），供前端展示「尝试继续」 |
 | `compilation:regenerate` | `{ taskId, title }` → `{ compilation: Compilation }` | 重新生成资料汇编 |
-| `compilation:continue` | `{ compilationId }` → `{ compilation: Compilation, interrupted? }` | 中断续跑（Phase 6.x，会话内）：从断点继续窗口细读 / **大模型修正（只重跑未完成批次）** / 矛盾扫描，复用已完成结果，不重复读取；再次异常仍返回 `interrupted`（可再点「尝试继续」） |
+| `compilation:continue` | `{ compilationId }` → `{ compilation: Compilation, contradictionScan?, repairScan?, purifyScan?, interrupted? }` | 中断续跑（Phase 6.x，会话内）：从断点继续窗口细读 / **提纯（只重跑未完成批次）** / **修正（只重跑未完成批次）** / 矛盾扫描，复用已完成结果，不重复读取；再次异常仍返回 `interrupted`（可再点「尝试继续」） |
 
-> **整段化切片（Phase A/B）**：切片以**整段**为基本单元——`chunkByParagraphs`（默认上限 `CHUNK_PARAGRAPH_MAX=1000`）按换行切段；超长段仅按句号折成 ≤上限 的子块并共存同一 `paragraphIndex`；**粗细筛以整段为单位做“保留/剔除”**（段内任一子块有信号 → 整段所有子块一起保留，避免“一整段相关却被误筛”）。**资料卡片=整段/整子块**（AI 不再按时间/事实切分，excerpt=该段原文）。
+> **整段化切片（Phase A/B）**：切片以**整段**为基本单元——`chunkByParagraphs`（默认上限 `CHUNK_PARAGRAPH_MAX=1000`）按换行切段；超长段仅按句号折成 ≤上限 的子块并共存同一 `paragraphIndex`；**粗细筛以整段为单位做“保留/剔除”**（段内任一子块有信号 → 整段所有子块一起保留，避免“一整段相关却被误筛”）。**资料卡片=整段/整子块**（AI 不再按时间/事实切分，excerpt=该段原文，随后由管线内的**提纯**阶段摘出与主题相关的句段）。
+> **提纯阶段（2026-09-08；2026-09-10 收紧）**：`purifyScan:{ok, message?, inputCards?, outputCards?, inputChars?, outputChars?, passthroughCards?}`——提纯把细读产出的整段卡片交给大模型**逐字摘录**与主题相关的句段（严格子串 + 本地校验 + 句读吸附；**写通测试**口径，不做内容拦截）；卡片数/字数变化供渲染层在生成汇总里展示，`passthroughCards` 为「未获提纯结果而按原样保留」的卡片数（漏答 / 片段全部校验失败 / 超预算未跑的批次）。`ok=false` 表示超出阶段时间预算（900s），剩余卡片**按原样保留**（绝不丢材料）。提纯是黑箱：不保留提纯前原文、不支持单独回退（需退回时用「重新生成汇编」）。批次 50 张 / 18000 字、按 Provider 并发并行、漏答卡片重问一次、解析失败换温度重试一次。
 > **429 自动续传（Phase A/B）**：窗口细读/矛盾扫描遇到**限流（HTTP 429）**时，主进程自动降本次生成并发数（`reduceConcurrency` 减半、最小 1，**不写回 Provider 设置**，仅本次生效）、退避后从断点自动续跑（`runWithRateLimitAutoResume`，默认上限 `RATE_LIMIT_RESUME_LIMIT=2`）；降并发时经事件 **``compilation:advice`（`{ taskId, kind:'reduce-concurrency' }`）** 推送建议，渲染层翻译为「建议降低当前大模型的并发数」存为对话消息。若仍限流，`interrupted.retryable=true` 供前端自动续传兜底（前端最多 2 次、间隔递增），其余异常 `retryable` 缺省，仅提供手动「尝试继续」。`CompilationInterrupt` 增加 `retryable?: boolean`。
 | `compilation:updateItem` | `{ itemId, excerpt?, ts?, note?, extraTags?, kept? }` → `{ item: CompilationItem }` | 编辑资料卡片 |
 | `compilation:deleteItem` | `{ itemId }` → `{ ok: true }` | 删除资料卡片 |
@@ -220,7 +223,7 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `compilation:repairs:revert` | `{ repairId }` → `{ item, repair }` | **回退**一条大模型修正（卡片还原为修正前文本，状态 applied→reverted；登记撤销栈） |
 | `compilation:repairs:apply` | `{ repairId }` → `{ item, repair }` | **再次应用**一条已回退的修正（卡片回到修正后文本，状态 reverted→applied；登记撤销栈） |
 
-> **大模型修正（2026-09-08 改版）**：修正由生成管线在「AI 细读」之后、「卡片矛盾扫描」之前产出并**默认应用**（不再有 `repairScan`/`repairs:list`/`repairs:decide` 三个旧通道），卡片上以「经过大模型修正」标记承载；渲染层点标记弹窗查看修正前原文与理由并选择回退/再次应用。修正阶段异常 → `interrupted`（429 置 `retryable`），`compilation:continue` 续跑只重跑未完成批次；超出阶段预算 → 结果带 `repairScan:{ok:false,message}` 提示「修正未完成」。生成结果新增该字段。
+> **大模型修正（2026-09-08 改版；2026-09-10 收紧）**：修正由生成管线在「提纯」之后、「卡片矛盾扫描」之前产出并**默认应用**（不再有 `repairScan`/`repairs:list`/`repairs:decide` 三个旧通道），卡片上以「经过大模型修正」标记承载；渲染层点标记弹窗查看修正前原文与理由并选择回退/再次应用。修正阶段异常 → `interrupted`（429 置 `retryable`），`compilation:continue` 续跑只重跑未完成批次；超出阶段预算 → 结果带 `repairScan:{ok:false,message}` 提示「修正未完成」。**时间戳规则（2026-09-10）**：需要补齐的情形为「时间为『无』**或时间缺少年份**（如 `5 月 19 日`、`7—9 日`）」，提示词要求时间标注**必须含年份**、依据上下文与来源年鉴年份推断、**不得编造**；本地以 `hasYear`（4 位年份）取舍——模型给的 ts 不含年份一律不采纳，卡片已有含年份的 ts 一律不覆盖，缺年份的旧值允许被覆盖（`tsFills` 仍属静默补齐，不落 `compilation_repairs`、无标记、不可回退）。残缺判定补充「句子起点/终点不完整、缺少主谓宾、指代不明」，并要求**优先补全而非删除**。
 
 
 
