@@ -4288,6 +4288,20 @@ textarea:focus-visible {
   color: var(--fg-soft);
   white-space: nowrap;
 }
+.compilation-variant-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.compilation-variant-locate {
+  color: var(--accent);
+}
+.compilation-variant-hint {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--danger);
+}
 
 .compilation-cards {
   flex: 1;
@@ -4309,6 +4323,23 @@ textarea:focus-visible {
 .compilation-card.has-conflict {
   border-color: var(--danger);
   box-shadow: 0 0 0 1px var(--danger-soft);
+}
+/* 「定位到该段」命中：短暂高亮卡片，便于用户在长列表中一眼找到（规则须在 has-conflict 之后，保证同优先级下后者生效） */
+.compilation-card.is-located {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  animation: compilation-card-locate 1.8s ease-out;
+}
+@keyframes compilation-card-locate {
+  0% {
+    box-shadow: 0 0 0 0 var(--accent-soft);
+  }
+  25% {
+    box-shadow: 0 0 0 6px var(--accent-soft);
+  }
+  100% {
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
 }
 .compilation-card-meta {
   display: flex;

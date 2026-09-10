@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { zhCN } from '../i18n/zh-CN'
 
 export interface CompilationItemView {
@@ -109,6 +109,22 @@ function CompilationStep({
   const [fixDetail, setFixDetail] = useState<CompilationRepairView | null>(null)
   /** 矛盾窗口是否展开（默认展开，可收起） */
   const [contradictionsOpen, setContradictionsOpen] = useState(true)
+  /** 刚被「定位到该段」命中的卡片（短暂高亮，便于用户在下方列表中找到） */
+  const [locatedId, setLocatedId] = useState<string | null>(null)
+  /** 定位失败提示（该说法对应的卡片已不在当前列表中） */
+  const [locateMiss, setLocateMiss] = useState(false)
+  /** 下方资料卡片列表容器（定位时在其内部滚动） */
+  const cardsRef = useRef<HTMLDivElement | null>(null)
+  const locateTimerRef = useRef<number | null>(null)
+  const missTimerRef = useRef<number | null>(null)
+
+  useEffect(
+    () => () => {
+      if (locateTimerRef.current !== null) window.clearTimeout(locateTimerRef.current)
+      if (missTimerRef.current !== null) window.clearTimeout(missTimerRef.current)
+    },
+    []
+  )
 
   const pending = compilation?.contradictions.filter((c) => c.status === 'pending') ?? []
   // 只展示未被软删除（采纳后未恢复）的卡片
@@ -127,6 +143,28 @@ function CompilationStep({
   }
 
   const conflictForItem = (itemId: string): boolean => pending.some((g) => g.variants.some((v) => v.itemId === itemId))
+
+  /**
+   * 「定位到该段」：滚动下方资料卡片列表到矛盾说法对应的卡片并短暂高亮，便于用户直接编辑。
+   * 卡片不在当前列表（已被删除 / 已随矛盾取舍被排除）时给出明确提示，而不是静默无反应。
+   */
+  const locateItem = (itemId: string): void => {
+    if (missTimerRef.current !== null) window.clearTimeout(missTimerRef.current)
+    if (!keptItems.some((it) => it.id === itemId)) {
+      setLocateMiss(true)
+      missTimerRef.current = window.setTimeout(() => setLocateMiss(false), 3000)
+      return
+    }
+    setLocateMiss(false)
+    setLocatedId(itemId)
+    // 等 React 把高亮类渲染到卡片上再滚动，避免目标元素尚未更新导致定位偏移
+    window.requestAnimationFrame(() => {
+      const el = cardsRef.current?.querySelector<HTMLElement>(`[data-card-id="${itemId}"]`)
+      el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+    if (locateTimerRef.current !== null) window.clearTimeout(locateTimerRef.current)
+    locateTimerRef.current = window.setTimeout(() => setLocatedId(null), 1800)
+  }
 
   /** 大模型修正记录（应用于该卡片；回退后仍有记录，标记转为灰色） */
   const appliedFixes = (compilation?.repairs ?? []).filter((r) => r.status === 'applied')
@@ -210,14 +248,24 @@ function CompilationStep({
                   <div key={v.id} className="compilation-variant">
                     <div className="compilation-variant-text">{v.variantText}</div>
                     <div className="compilation-variant-src">来源：《{v.sourceTitle ?? v.sourceId}》</div>
-                    <button
-                      type="button"
-                      className="source-list__btn source-list__btn--primary"
-                      disabled={busy}
-                      onClick={() => onResolve(g.id, 'resolve', v.itemId)}
-                    >
-                      {t.resolve}
-                    </button>
+                    <div className="compilation-variant-actions">
+                      <button
+                        type="button"
+                        className="source-list__btn compilation-variant-locate"
+                        title={t.locateHint}
+                        onClick={() => locateItem(v.itemId)}
+                      >
+                        {t.locate}
+                      </button>
+                      <button
+                        type="button"
+                        className="source-list__btn source-list__btn--primary"
+                        disabled={busy}
+                        onClick={() => onResolve(g.id, 'resolve', v.itemId)}
+                      >
+                        {t.resolve}
+                      </button>
+                    </div>
                   </div>
                 ))}
                 <button type="button" className="source-list__btn" disabled={busy} onClick={() => onResolve(g.id, 'ignore')}>
@@ -227,6 +275,7 @@ function CompilationStep({
             </div>
           ))}
           </div>
+          {locateMiss ? <div className="compilation-variant-hint">{t.locateMissing}</div> : null}
           <div className="compilation-contradictions__footer">
             <button
               type="button"
@@ -251,16 +300,18 @@ function CompilationStep({
         </button>
       ) : null}
 
-      <div className="compilation-cards">
+      <div className="compilation-cards" ref={cardsRef}>
         {keptItems.map((it) => {
           const fix = repairForItem(it.id)
           return (
             <div
               key={it.id}
+              data-card-id={it.id}
               className={cls(
                 'compilation-card',
                 conflictForItem(it.id) ? 'has-conflict' : '',
-                fix ? 'is-repair' : ''
+                fix ? 'is-repair' : '',
+                locatedId === it.id ? 'is-located' : ''
               )}
             >
               <div className="compilation-card-head">
