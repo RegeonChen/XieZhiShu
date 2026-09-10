@@ -178,6 +178,18 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 - **生成侧**：`generateDraft` 生成初稿时读取当前默认规范（`getDefaultStyleGuide()?.content`，无则回退 `DEFAULT_STYLE_GUIDE`）注入 prompt，不再使用硬编码常量。
 - **验收**：可新建/覆盖/重命名/删除多篇规范；默认规范可切换并真正注入生成；导入底稿有二次确认；保存流程符合「覆盖 / 另存」二选一；typecheck/单测/构建通过。
 
+### Phase 6.4.3 资料卡片「大模型修正」（原「二次加工/语义补全」，2026-09-08 改版，已完成）
+
+> 用户需求变更：① 修正不必再由用户逐条裁定「采纳/不用」，改为**默认全部应用**，只在卡片上留标记，用户点标记查看修正前原文与理由并决定是否回退；② 修正流程**提前到矛盾检索与归集之前**，使提交给大模型做矛盾检测的卡片内容更清晰完整；③ 回收站不再包含该类条目（改由卡片标记承载）。
+
+- **流程位置**：生成管线内串行 —— `关键词提取 → 网页检索 → 本地宽召回 → 保守闸门 → AI 分窗细读 → 【大模型修正】 → 卡片矛盾扫描 → 落库`；`CompilationResumeState.phase` 扩为 `window | repair | contradiction`，异常中断由 `compilation:continue`（「尝试继续」）续跑，**只重跑未完成的修正批次**（已完成批次结果保留在 state 中）。
+- **默认应用**：修正文本直接在管线内写入卡片（`applyRepairOutcome`），矛盾的候选预筛/扫描因此面对语义完整、时间戳齐备的卡片；缺失时间戳仍在同一阶段**静默补齐**（用户确认：不算“修正”，无标记、不可回退——但随管线前移，落库按时间排序自然正确）。
+- **落库**：`compilation_repairs`（Migration 029 重建，status CHECK `('applied','reverted')`）由 `insertCompilationItems` 与卡片**同事务**写入；修正记录以 `CompilationItemInput.repair` 随卡片流经来源过滤与按时间排序，保证标记与卡片严格对应。Migration 029 同时 `DROP TABLE compilation_repair_recycle_bin`，并把老数据迁移为：accepted→applied；pending→applied 且写入卡片；rejected→丢弃。
+- **IPC**：删除 `compilation:repairScan` / `compilation:repairs:list` / `compilation:repairs:decide`，新增 `compilation:repairs:revert`（回退到修正前）与 `compilation:repairs:apply`（重新应用）；二者均登记撤销栈。`compilation:generate` 结果新增 `repairScan:{ok,message}`（超出阶段时间预算时提示「修正未完成」）。
+- **可靠性**：分批（30 张 / 12000 字，`splitRepairBatches`）串行 + 单批 300s 超时 + 整阶段 900s 预算；上下文改用**同来源相邻段落**（卡片本身即整段，旧的「来源全文 ±120 字」窗口等价于无上下文）；窗口级矛盾的 variant 文本同步改写（`remapRepairedVariantExcerpts`），否则落库按 excerpt 匹配不到卡片会整组丢失。
+- **前端**：卡片 meta 行新增可点击标记「✎ 经过大模型修正」（回退后转灰「↺ 已回退到修正前」），点开「大模型修正详情」弹窗（修正前原文[灰/删除线] / 修正后文本[绿] / 修正理由 + 回退或重新应用按钮），卡片「…」菜单也提供入口；回收站弹窗由三类降为两类（资料卡片 / 矛盾）；生成完成汇总提示「N 张经过大模型修正」。
+- **验收**：typecheck 零错误、214 项单测通过（1 项 watcher chokidar 环境失败为既有问题）、生产构建成功；修正阶段位于矛盾扫描之前（进度条顺序体现）；卡片标记可查看/回退/再次应用；回收站仅剩两类。**真实 Provider 下的修正质量与回退体验待用户实测。**
+
 ### Phase 6.4.2 第二步「添加范本」（2026-08-25 构思）
 
 > 在第二步「指定行文规范」中增加一个**可选的「添加范本」**：用户可录入一段自己的志书示例正文，作为第三步生成初稿时的**体例与行文风格参考**，与行文规范、资料汇编一并作为提交物。
