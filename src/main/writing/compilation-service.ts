@@ -29,17 +29,26 @@ const COMPILATION_TIMEOUT_MS = 600000
 const WINDOW_MAX_CHARS = 30000
 const TEMPERATURES = [0, 0.3]
 const KEYWORD_EXTRACT_TIMEOUT_MS = 60000
-// 方案 C 后资料卡片常为整段/较长的完整事实，单次扫描需兼顾“输入大小可控 + 不快超时”：
-// 单批卡片数上限（较原 200 下调，降低模型逐两两比对同一批卡片的推理负载与超时风险）
-const CARD_SCAN_TIMEOUT_MS = 420000
-/** 卡片级矛盾扫描单次最多扫描的卡片数（方案 C 后卡片变长，下调以控制单次输入与耗时） */
-const CARD_SCAN_MAX = 60
-/** 卡片级矛盾扫描单批累计字符上限（进一步约束长卡片批次，避免上下文过大/响应过慢） */
-const CARD_SCAN_CHARS = 6000
+// 卡片级矛盾扫描：实测（llm_call_logs）单次调用耗时主要来自“找矛盾”的推理本身，与输入量弱相关
+// （3.4k 输入也要 34~132s，20k 约 214s，54k 会超时）。因此优化目标是「尽量少的调用次数」，而不是「更小的批次」。
+/** 单次调用输入字符预算（历史上 ~20k 输入 ≈ 214s、54k 超时，故压在 15k 内） */
+const CARD_SCAN_CHARS = 15000
+/** 单次调用最多卡片数（配合字符预算，通常 1~2 次调用即可完成） */
+const CARD_SCAN_MAX = 100
+/** 单次调用超时（推理型任务，留足余量） */
+const CARD_SCAN_TIMEOUT_MS = 300000
+/** 扫描提示词中每条卡片的摘录上限（压缩输入；矛盾判定只需“同一事实的不同说法”这一小段） */
+const CARD_SCAN_EXCERPT_CHARS = 150
+/** 矛盾扫描整阶段时间预算：超时即停止并把结果标为“未完成”，不再让进度条长时间等待 */
+const CARD_SCAN_BUDGET_MS = 360000
+/** 本地预筛阈值：两张卡片 bigram 相似度 ≥ 该值即视为“可能描述同一事实”，进入候选簇 */
+const CARD_PREFILTER_DICE = 0.28
+/** 单次卡片矛盾扫描的预计耗时（秒，用于剩余时间展示；来自实测 ~150~250s） */
+const CARD_SCAN_ETA_PER_CALL_S = 180
 /** 可复现种子：传给支持 seed 的 Provider，让关键帧提取/细读/矛盾扫描在相同输入下更确定 */
 const REPRODUCIBILITY_SEED = 42
-/** 卡片级矛盾扫描的温度阶梯（低温度 + 稍高温度各扫一次后按主题并集，提升召回且成本低） */
-const CARD_SCAN_TEMPERATURES = [0, 0.3]
+/** 卡片级矛盾扫描温度（单次调用，避免双温度翻倍调用时间、更容易超时） */
+const CARD_SCAN_TEMPERATURE = 0
 /** Phase A/B：遇到限流（HTTP 429）自动续传——内部自动降并发并重试的轮数上限；降并发不写回 Provider 设置，仅本次生成生效 */
 const RATE_LIMIT_RESUME_LIMIT = 2
 /** 限流自动续传的退避延迟（毫秒，按轮次递增） */
@@ -127,6 +136,10 @@ interface CompilationResumeState {
   scanOffset: number
   /** 已成功扫描批次的矛盾分组 */
   scanGroups: CompilationOutputGroup[]
+  /** 已完成的矛盾扫描调用次数（断点续跑时跳过已完成的候选批次） */
+  scanCallDone?: number
+  /** 矛盾扫描未完成的原因（超出时间预算时置位，随 contradictionScan 透出给前端提示） */
+  scanIncomplete?: { message: string }
   /** 各窗口的字符总量（用于“每字符秒数”外推剩余时间，避免大/小窗口平均失真） */
   windowChars: number[]
   /** 每字符秒数（EMA，越低越平滑；0=未预热） */
@@ -516,73 +529,66 @@ export function mergeCompilationOutputs(outputs: CompilationOutput[]): Compilati
 async function scanCardContradictions(
   provider: ProviderInfo,
   items: CompilationOutputItem[],
+  indices: number[],
   refs: SourceRefEntry[],
   taskId: string
 ): Promise<{ groups: CompilationOutputGroup[]; ok: boolean; message?: string; rateLimited?: boolean }> {
-  if (items.length === 0) return { groups: [], ok: true }
-  const batch = items
+  if (indices.length === 0) return { groups: [], ok: true }
   const titleByRef = new Map(refs.map((r, idx) => ['#' + (idx + 1), r.title]))
-  let anyOk = false
-  let firstError: string | undefined
-  let rateLimited = false
-  const cardList = batch
-    .map((it, i) => '[' + (i + 1) + '] 来源：#' + it.sourceRef + '《' + (titleByRef.get(it.sourceRef) ?? '') + '》，时间：' + (it.ts ?? '无') + '\n' + it.excerpt)
+  // 压缩输入：只给每条卡片的前 CARD_SCAN_EXCERPT_CHARS 字（矛盾判定只需“同一事实的不同说法”这一小段）
+  const cardList = indices
+    .map((itemIdx, i) => {
+      const it = items[itemIdx]
+      const raw = it.excerpt
+      const excerpt = raw.length > CARD_SCAN_EXCERPT_CHARS ? raw.slice(0, CARD_SCAN_EXCERPT_CHARS) + '…' : raw
+      return '[' + (i + 1) + '] 来源：#' + it.sourceRef + '《' + (titleByRef.get(it.sourceRef) ?? '') + '》，时间：' + (it.ts ?? '无') + '\n' + excerpt
+    })
     .join('\n\n')
   const sys = [
-    '你是一名地方志资料整理专家。下面给出一批已经筛选出的【资料卡片】（每条含编号、来源、时间、摘录）。',
-    '请找出其中描述同一事实、但数据/时间/地点/主体/结果相左的冲突说法，归为一组矛盾。',
-    '只输出一个 JSON 对象，不得输出其他文字或代码块围栏：',
+    '你是一名地方志资料校对员。下面给出若干【资料卡片】（每条含编号、来源、时间、摘录），它们都已按“可能描述同一事实”预筛过。',
+    '请只比较同一事实的不同说法：数据、时间、地点、主体或结果相互矛盾时，归为一组矛盾。',
+    '多数卡片并不冲突；没有实质冲突时直接输出空数组。不要输出解释或其它文字。',
+    '只输出一个 JSON 对象，不得输出其它文字或代码块围栏：',
     '"contradictions":[{"topic":"事实主题","kind":"data|time|place|fact|other","cardIndices":[1,3]}]'
   ].join('\n')
   const user = [
-    '【已筛选出的资料卡片】',
+    '【资料卡片】',
     cardList,
-    '请找出矛盾，cardIndices 填所涉及卡片的编号（1 起）。'
+    '请输出矛盾分组，cardIndices 填所涉及卡片的编号（1 起）；无矛盾输出 {"contradictions":[]}。'
   ].join('\n')
   const messages: ChatMessage[] = [
     { role: 'system', content: sys },
     { role: 'user', content: user }
   ]
-  // D（低成本提升召回）：对同一卡片集用 0 与 0.3 各扫一次，按「主题」并集去重（说法并集），
-  // 一次低温度一次稍高温度，抵消单次采样的"该发现却没发现"；卡片集很小，2 次调用成本可忽略。
-  const merged = new Map<string, CompilationOutputGroup>()
-  for (const temperature of CARD_SCAN_TEMPERATURES) {
-    const result = await chatCompletion(provider, messages, CARD_SCAN_TIMEOUT_MS, { kind: 'compilation-contradiction-scan', taskId }, {
-      maxRetries: 1,
-      temperature,
-      seed: REPRODUCIBILITY_SEED
-    })
-    if (!result.ok) {
-      firstError = firstError ?? (result.error?.message ?? '矛盾扫描失败')
-      if (result.error?.code === ErrorCodes.LLM_RATE_LIMIT) rateLimited = true
-      continue
-    }
-    const groups = parseCardScanGroups(result.text)
-    if (!groups) continue
-    anyOk = true
-    for (const g of groups) {
-      const variants: CompilationOutputVariant[] = []
-      for (const ci of g.cardIndices) {
-        const it = batch[ci - 1]
-        if (!it) continue
-        variants.push({ excerpt: it.excerpt, sourceRefs: [it.sourceRef] })
-      }
-      if (variants.length < 2) continue
-      const key = g.topic.trim()
-      const existing = merged.get(key)
-      if (!existing) {
-        merged.set(key, { topic: g.topic, kind: g.kind, variants })
-      } else {
-        // 并集：补充本次扫出而上次未有的说法（按摘录去重）
-        const seen = new Set(existing.variants.map((v) => v.excerpt))
-        for (const v of variants) if (!seen.has(v.excerpt)) existing.variants.push(v)
-      }
+  // 单次调用（温度 0、不重试）：实测单次耗时主要来自推理本身，重试只会让总时长翻倍
+  const result = await chatCompletion(provider, messages, CARD_SCAN_TIMEOUT_MS, { kind: 'compilation-contradiction-scan', taskId }, {
+    maxRetries: 0,
+    temperature: CARD_SCAN_TEMPERATURE,
+    seed: REPRODUCIBILITY_SEED
+  })
+  if (!result.ok) {
+    return {
+      groups: [],
+      ok: false,
+      message: result.error?.message ?? '矛盾扫描失败',
+      rateLimited: result.error?.code === ErrorCodes.LLM_RATE_LIMIT
     }
   }
-  // 任一温度解析成功即视为本批成功（防止单个温度超时/失败把整批误判为中断；若两温度都失败才降为失败）
-  return { groups: [...merged.values()], ok: anyOk, message: anyOk ? undefined : firstError, rateLimited }
+  const groups = parseCardScanGroups(result.text) ?? []
+  const out: CompilationOutputGroup[] = []
+  for (const g of groups) {
+    const variants: CompilationOutputVariant[] = []
+    for (const ci of g.cardIndices) {
+      const itemIdx = indices[ci - 1]
+      if (itemIdx === undefined) continue
+      const it = items[itemIdx]
+      variants.push({ excerpt: it.excerpt, sourceRefs: [it.sourceRef] })
+    }
+    if (variants.length < 2) continue
+    out.push({ topic: g.topic, kind: g.kind, variants })
+  }
+  return { groups: out, ok: true }
 }
-
 /** 解析卡片级矛盾扫描输出（纯函数，可测试） */
 export function parseCardScanGroups(text: string): { topic: string; kind: string; cardIndices: number[] }[] | null {
   const raw = extractJson(text)
@@ -669,6 +675,76 @@ export function splitCardScans(items: CompilationOutputItem[], startIndex: numbe
   return ranges
 }
 
+/** 扫描阶段用：去掉空白与标点，便于 bigram 相似度比较（保留数字与汉字） */
+function normalizeCardText(text: string): string {
+  return text.replace(/[\s\p{P}\p{S}]/gu, '')
+}
+
+/** 集合版 bigram Dice 相似度（比数组版快，用于本地预筛的两两比较） */
+function setDice(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0
+  const [small, large] = a.size <= b.size ? [a, b] : [b, a]
+  let common = 0
+  for (const g of small) if (large.has(g)) common += 1
+  return (2 * common) / (a.size + b.size)
+}
+
+/**
+ * 本地预筛（阻断法 blocking）：只有“可能描述同一事实”的卡片才需要交给大模型比对矛盾。
+ * 用 bigram Dice 相似度（去掉空白/标点后）做并查集聚类，只返回 ≥2 张的候选簇——
+ * 孤立卡片不可能与其它卡片冲突，直接跳过，从而把待扫卡片数与调用次数大幅压下来。
+ */
+export function clusterCandidateCards(items: CompilationOutputItem[], threshold: number = CARD_PREFILTER_DICE): number[][] {
+  const grams = items.map((it) => new Set(bigrams(normalizeCardText(it.excerpt))))
+  const parent = items.map((_, i) => i)
+  const find = (x: number): number => {
+    let root = x
+    while (parent[root] !== root) root = parent[root]
+    while (parent[x] !== root) { const next = parent[x]; parent[x] = root; x = next }
+    return root
+  }
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      if (setDice(grams[i], grams[j]) < threshold) continue
+      const ra = find(i)
+      const rb = find(j)
+      if (ra !== rb) parent[rb] = ra
+    }
+  }
+  const byRoot = new Map<number, number[]>()
+  for (let i = 0; i < items.length; i++) {
+    const r = find(i)
+    if (!byRoot.has(r)) byRoot.set(r, [])
+    byRoot.get(r)!.push(i)
+  }
+  return [...byRoot.values()].filter((c) => c.length >= 2)
+}
+
+/** 把候选簇装进若干次调用：同一簇的卡片不拆到两次调用（拆开就看不到彼此），并按字符/数量预算切分。 */
+export function packCandidateCalls(
+  items: CompilationOutputItem[],
+  clusters: number[][],
+  maxCount: number,
+  maxChars: number
+): number[][] {
+  const calls: number[][] = []
+  let cur: number[] = []
+  let curChars = 0
+  const cardChars = (idx: number): number =>
+    Math.min(items[idx].excerpt.length, CARD_SCAN_EXCERPT_CHARS) + 40 // +40 ≈ 编号/来源/年份前缀
+  for (const cluster of clusters) {
+    const clusterChars = cluster.reduce((n, i) => n + cardChars(i), 0)
+    if (cur.length > 0 && (cur.length + cluster.length > maxCount || curChars + clusterChars > maxChars)) {
+      calls.push(cur)
+      cur = []
+      curChars = 0
+    }
+    cur.push(...cluster)
+    curChars += clusterChars
+  }
+  if (cur.length > 0) calls.push(cur)
+  return calls
+}
 /** 提取年份用于时间排序（无时间排最后） */
 function yearOf(ts: string | undefined): number | null {
   if (!ts) return null
@@ -814,7 +890,13 @@ export async function generateCompilation(
 
   // 全部完成：清除断点，落库（替换为最终卡片 + 矛盾）
   resumeStore.delete(state.compilationId)
-  return finalizeCompilationInto(state.compilationId, { items: merged.items, contradictions: mergeContradictionGroups(merged.contradictions, state.scanGroups) }, refs, chunks.length)
+  return finalizeCompilationInto(
+    state.compilationId,
+    { items: merged.items, contradictions: mergeContradictionGroups(merged.contradictions, state.scanGroups) },
+    refs,
+    chunks.length,
+    state.scanIncomplete ? { ok: false, message: state.scanIncomplete.message } : { ok: true }
+  )
 }
 
 function sliceChunks(chunks: RetrievedChunk[], maxChars: number): RetrievedChunk[][] {
@@ -991,8 +1073,8 @@ async function runWindowPhase(state: CompilationResumeState, onProgress?: (p: Co
         const windowEta = warm
           ? (total - done) * WINDOW_ETA_DEFAULT_S
           : Math.round((secPerChar > 0 ? secPerChar : state.avgSecPerChar) * remainingChars)
-        // 矛盾扫描阶段按“预计卡片批数 × 批均耗时”粗估，避免总剩余时间明显偏低
-        const contradictionEta = warm ? PHASE_CONTRADICTION_ETA_S : Math.min(180, (state.chunks.length / CARD_SCAN_MAX + 1) * 8)
+        // 矛盾扫描阶段：本地预筛后通常只剩 1~2 次串行调用，每次实测 ~150~250s
+        const contradictionEta = warm ? PHASE_CONTRADICTION_ETA_S : Math.min(600, CARD_SCAN_ETA_PER_CALL_S * 2)
         onProgress?.({
           stage: '正在由 AI 细读资料（' + done + '/' + total + ' 个窗口）…',
           percent: Math.round(12 + (done / total) * 68),
@@ -1011,46 +1093,67 @@ async function runWindowPhase(state: CompilationResumeState, onProgress?: (p: Co
 async function runContradictionPhase(state: CompilationResumeState, onProgress?: (p: CompilationProgress) => void): Promise<'done' | 'interrupted'> {
   const merged = mergeCompilationOutputs(state.windowOutputsByIndex.filter((o): o is CompilationOutput => o !== null))
   const items = merged.items
-  const total = items.length
-  if (total === 0) {
+  if (items.length === 0) {
     state.scanOffset = 0
     state.scanGroups = []
+    state.scanCallDone = 0
     return 'done'
   }
-  if (state.scanOffset === 0) {
-    onProgress?.({ stage: '正在汇总卡片间的矛盾…', percent: 88, etaSeconds: PHASE_CONTRADICTION_ETA_S })
+  // ① 本地预筛（阻断法）：只有“可能描述同一事实”的卡片（bigram 聚类 ≥2 张）才需要交给模型比对；
+  //    孤立卡片不可能冲突，直接跳过 —— 这是把调用次数压下来的关键。
+  const clusters = clusterCandidateCards(items)
+  // ② 把候选簇打包成尽量少的调用（同簇不拆；按字符预算 + 数量预算），实测单次耗时与输入量弱相关，故宁可少次大一点。
+  const calls = packCandidateCalls(items, clusters, CARD_SCAN_MAX, CARD_SCAN_CHARS)
+  if (calls.length === 0) {
+    onProgress?.({ stage: '卡片间未发现可能冲突的同一事实，已跳过矛盾扫描', percent: 99, etaSeconds: 0 })
+    state.scanGroups = []
+    state.scanCallDone = 0
+    return 'done'
   }
-  // 用「卡片数 + 字符预算」切批（方案 C 后卡片较长，缩小单批输入以避免单次响应过大而超时）
-  const allRanges = splitCardScans(items, 0, CARD_SCAN_MAX, CARD_SCAN_CHARS)
-  let ri = state.scanOffset > 0 ? allRanges.findIndex((r) => r.end > state.scanOffset) : 0
-  if (ri === -1) return 'done'
-  // Phase B：按 Provider 并发数成批并行扫描卡片矛盾（每波最多 concurrency 批；任一波失败则以该波起点中断，续跑重扫该波）
-  while (ri < allRanges.length) {
-    const wave = allRanges.slice(ri, ri + state.concurrency)
-    const results = await Promise.all(
-      wave.map((range) => {
-        const batch = items.slice(range.start, range.end)
-        return scanCardContradictions(state.provider, batch, state.refs, state.taskId).catch((e) => ({ groups: [] as CompilationOutputGroup[], ok: false, message: e instanceof Error ? e.message : String(e), rateLimited: false }))
-      })
-    )
-    const failedIdx = results.findIndex((res) => !res.ok)
-    if (failedIdx !== -1) {
-      const range = wave[failedIdx]
+  const doneCalls = state.scanCallDone ?? 0
+  if (doneCalls === 0) {
+    onProgress?.({
+      stage: '正在汇总卡片间的矛盾（共 ' + calls.length + ' 批，逐一串行扫描）…',
+      percent: 88,
+      etaSeconds: calls.length * CARD_SCAN_ETA_PER_CALL_S
+    })
+  }
+  const startedAt = Date.now()
+  // ③ 串行扫描 + 时间预算：到点即停止，保留已得结果并把本阶段标为“未完成”，不再让进度条长时间无反馈地等待。
+  for (let ci = doneCalls; ci < calls.length; ci++) {
+    if (Date.now() - startedAt > CARD_SCAN_BUDGET_MS) {
+      state.scanIncomplete = {
+        message: '矛盾扫描超出时间预算，已完成 ' + ci + '/' + calls.length + ' 批；可能存在遗漏，请酌情复核或稍后重新生成。'
+      }
+      return 'done'
+    }
+    onProgress?.({
+      stage: '正在检索卡片矛盾（第 ' + (ci + 1) + '/' + calls.length + ' 批）…',
+      percent: 88 + Math.round((ci / calls.length) * 11),
+      etaSeconds: (calls.length - ci) * CARD_SCAN_ETA_PER_CALL_S
+    })
+    const res = await scanCardContradictions(state.provider, items, calls[ci], state.refs, state.taskId).catch((e) => ({
+      groups: [] as CompilationOutputGroup[],
+      ok: false,
+      message: e instanceof Error ? e.message : String(e),
+      rateLimited: false
+    }))
+    if (!res.ok) {
       state.interrupted = {
-        stage: '正在检索卡片矛盾（第 ' + (allRanges.indexOf(range) + 1) + ' 批）',
-        message: results[failedIdx].message ?? '大模型调用异常中断',
+        stage: '正在检索卡片矛盾（第 ' + (ci + 1) + '/' + calls.length + ' 批）',
+        message: res.message ?? '大模型调用异常中断',
         percent: 88,
-        retryable: results[failedIdx].rateLimited === true
+        retryable: res.rateLimited === true
       }
       return 'interrupted'
     }
-    for (const res of results) state.scanGroups.push(...res.groups)
-    ri += wave.length
-    state.scanOffset = wave[wave.length - 1].end
+    state.scanGroups.push(...res.groups)
+    state.scanCallDone = ci + 1
+    state.scanOffset = items.length
   }
+  onProgress?.({ stage: '卡片矛盾扫描完成', percent: 99, etaSeconds: 0 })
   return 'done'
 }
-
 /** 使用已创建的汇编整体替换为最终卡片 + 矛盾（供正常完成 / 续跑完成调用） */
 function finalizeCompilationInto(
   compilationId: string,
@@ -1136,5 +1239,11 @@ export async function continueCompilation(compilationId: string, onProgress?: (p
     return interruptedResult(state)
   }
   resumeStore.delete(compilationId)
-  return finalizeCompilationInto(state.compilationId, { items: merged.items, contradictions: mergeContradictionGroups(merged.contradictions, state.scanGroups) }, state.refs, state.chunks.length)
+  return finalizeCompilationInto(
+    state.compilationId,
+    { items: merged.items, contradictions: mergeContradictionGroups(merged.contradictions, state.scanGroups) },
+    state.refs,
+    state.chunks.length,
+    state.scanIncomplete ? { ok: false, message: state.scanIncomplete.message } : { ok: true }
+  )
 }
