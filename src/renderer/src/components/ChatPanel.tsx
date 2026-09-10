@@ -37,8 +37,10 @@ interface ChatPanelProps {
   primaryLabel?: string
   /** 自定义主按钮动作：提供时点击主按钮优先走此动作（用于 Step 1 生成资料汇编） */
   onPrimaryAction?: (text: string) => void
-  /** 展示「预设提示词」按钮 + 菜单（批量删除/增补内容，点击填出模板） */
+  /** 展示「预设提示词」按钮 + 弹出面板（点击把模板填入输入框） */
   showPresetButton?: boolean
+  /** 当前任务是否已有资料汇编：决定「调整现有汇编」一组预设是否可用 */
+  hasCompilation?: boolean
   /** 来源引用清单（最近一次文段来源询问），供消息内 #N 渲染为链接 */
   refs?: SourceRefItem[]
   /** 打开来源文件（系统默认软件） */
@@ -57,6 +59,74 @@ function formatEtaRange(sec: number): string {
   return `约 ${lowM} 分钟`
 }
 
+/** 预设提示词的图标（与全站一致：24×24 描边内联 SVG，随文字色） */
+function PresetIcon({ name }: { name: 'doc' | 'trash' | 'plus' }): React.ReactElement {
+  const common = {
+    width: 15,
+    height: 15,
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.8,
+    strokeLinecap: 'round' as const,
+    strokeLinejoin: 'round' as const,
+    'aria-hidden': true
+  }
+  if (name === 'trash') {
+    return (
+      <svg {...common}>
+        <path d="M3 6h18" />
+        <path d="M8 6V4.5A1.5 1.5 0 0 1 9.5 3h5A1.5 1.5 0 0 1 16 4.5V6" />
+        <path d="M18.5 6l-.9 13a2 2 0 0 1-2 1.9H8.4a2 2 0 0 1-2-1.9L5.5 6" />
+        <path d="M10 11v6M14 11v6" />
+      </svg>
+    )
+  }
+  if (name === 'plus') {
+    return (
+      <svg {...common}>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 8.5v7M8.5 12h7" />
+      </svg>
+    )
+  }
+  return (
+    <svg {...common}>
+      <path d="M14 3H7.5A1.5 1.5 0 0 0 6 4.5v15A1.5 1.5 0 0 0 7.5 21h9a1.5 1.5 0 0 0 1.5-1.5V7z" />
+      <path d="M14 3v4h4" />
+      <path d="M9.5 12.5h5M9.5 16h3.5" />
+    </svg>
+  )
+}
+
+/** 预设提示词分组（文本取自 i18n 文案资源） */
+interface PresetItem {
+  id: string
+  label: string
+  desc: string
+  text: string
+  icon: 'doc' | 'trash' | 'plus'
+}
+function presetGroups(t: typeof zhCN.compilation): { id: 'generate' | 'adjust'; title: string; items: PresetItem[] }[] {
+  return [
+    {
+      id: 'generate',
+      title: t.presetGroupGenerate,
+      items: [
+        { id: 'title-req', label: t.presetTitleReqLabel, desc: t.presetTitleReqDesc, text: t.presetTitleReq, icon: 'doc' }
+      ]
+    },
+    {
+      id: 'adjust',
+      title: t.presetGroupAdjust,
+      items: [
+        { id: 'batch-delete', label: t.presetBatchDeleteLabel, desc: t.presetBatchDeleteDesc, text: t.presetBatchDelete, icon: 'trash' },
+        { id: 'add-content', label: t.presetAddContentLabel, desc: t.presetAddContentDesc, text: t.presetAddContent, icon: 'plus' }
+      ]
+    }
+  ]
+}
+
 function ChatPanel({
   messages,
   draftExisted,
@@ -71,6 +141,7 @@ function ChatPanel({
   primaryLabel,
   onPrimaryAction,
   showPresetButton,
+  hasCompilation = false,
   refs,
   onOpenSource
 }: ChatPanelProps) {
@@ -78,6 +149,8 @@ function ChatPanel({
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
   const [presetOpen, setPresetOpen] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
+  const presetRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
   // C：对预计剩余秒数做 EMA 平滑，避免进度回调抖动；新一次生成时重置
   const smoothEtaRef = useRef<number | null>(null)
   const rawEta = progress?.etaSeconds
@@ -104,6 +177,41 @@ function ChatPanel({
       setCopiedIdx(idx)
       window.setTimeout(() => setCopiedIdx(null), 1500)
     }
+  }
+
+  /** 预设面板：点击面板外或按 Esc 关闭（与全站弹层一致的关闭预期） */
+  useEffect(() => {
+    if (!presetOpen) return
+    const onDocDown = (e: MouseEvent): void => {
+      if (presetRef.current && !presetRef.current.contains(e.target as Node)) setPresetOpen(false)
+    }
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setPresetOpen(false)
+    }
+    document.addEventListener('mousedown', onDocDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDocDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [presetOpen])
+
+  /**
+   * 填入一条预设提示词：追加到输入框（已有内容时换行追加，不覆盖用户已输入的文字），
+   * 并把光标选中第一个「……」占位符，用户可直接输入覆盖；随后聚焦输入框。
+   */
+  const applyPreset = (text: string): void => {
+    setPresetOpen(false)
+    const next = input.trim() ? input.replace(/\s+$/, '') + '\n' + text : text
+    setInput(next)
+    window.requestAnimationFrame(() => {
+      const el = inputRef.current
+      if (!el) return
+      el.focus()
+      const at = next.indexOf('……')
+      if (at >= 0) el.setSelectionRange(at, at + 2)
+      else el.setSelectionRange(next.length, next.length)
+    })
   }
 
   const submit = () => {
@@ -255,18 +363,83 @@ function ChatPanel({
       </div>
 
       {showPresetButton ? (
-        <div className="chat-panel__presets">
-          <button type="button" className="chat-panel__preset-btn" onClick={() => setPresetOpen((o) => !o)} disabled={busy}>
-            {zhCN.compilation.presetButton}
+        <div className="chat-panel__presets" ref={presetRef}>
+          <button
+            type="button"
+            className={`chat-panel__preset-trigger${presetOpen ? ' is-open' : ''}`}
+            aria-haspopup="menu"
+            aria-expanded={presetOpen}
+            disabled={busy}
+            onClick={() => setPresetOpen((o) => !o)}
+          >
+            <svg
+              className="chat-panel__preset-trigger-icon"
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M11 3.5l1.5 4.2 4.2 1.5-4.2 1.5L11 15l-1.5-4.3L5.3 9.2l4.2-1.5z" />
+              <path d="M18 15l.8 2.2 2.2.8-2.2.8L18 21l-.8-2.2-2.2-.8 2.2-.8z" />
+            </svg>
+            <span>{zhCN.compilation.presetButton}</span>
+            <svg
+              className="chat-panel__preset-trigger-chevron"
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M6 14.5l6-6 6 6" />
+            </svg>
           </button>
           {presetOpen ? (
-            <div className="chat-panel__preset-menu">
-              <button type="button" onClick={() => { setInput(zhCN.compilation.presetBatchDelete); setPresetOpen(false) }}>
-                {zhCN.compilation.presetBatchDeleteLabel}
-              </button>
-              <button type="button" onClick={() => { setInput(zhCN.compilation.presetAddContent); setPresetOpen(false) }}>
-                {zhCN.compilation.presetAddContentLabel}
-              </button>
+            <div className="chat-panel__preset-popover" role="menu">
+              <div className="chat-panel__preset-head">
+                <div className="chat-panel__preset-title">{zhCN.compilation.presetMenuTitle}</div>
+                <div className="chat-panel__preset-hint">{zhCN.compilation.presetMenuHint}</div>
+              </div>
+              {presetGroups(zhCN.compilation).map((group) => {
+                const locked = group.id === 'adjust' && !hasCompilation
+                return (
+                  <div className="chat-panel__preset-group" key={group.id}>
+                    <div className="chat-panel__preset-group-title">{group.title}</div>
+                    {group.items.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        role="menuitem"
+                        className={`chat-panel__preset-item${locked ? ' is-locked' : ''}`}
+                        disabled={locked}
+                        title={locked ? zhCN.compilation.presetLockedHint : item.text}
+                        onClick={() => applyPreset(item.text)}
+                      >
+                        <span className="chat-panel__preset-item-icon">
+                          <PresetIcon name={item.icon} />
+                        </span>
+                        <span className="chat-panel__preset-item-body">
+                          <span className="chat-panel__preset-item-name">{item.label}</span>
+                          <span className="chat-panel__preset-item-desc">{item.desc}</span>
+                          <span className="chat-panel__preset-item-preview">{item.text.replace(/\n+/g, ' ')}</span>
+                        </span>
+                        <span className="chat-panel__preset-item-badge">
+                          {locked ? zhCN.compilation.presetLockedHint : zhCN.compilation.presetInsert}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )
+              })}
             </div>
           ) : null}
         </div>
@@ -275,6 +448,7 @@ function ChatPanel({
       <div className="chat-panel__input-row">
         <textarea
           className="chat-panel__input"
+          ref={inputRef}
           rows={2}
           value={input}
           placeholder={zhCN.writingChat.inputPlaceholder}

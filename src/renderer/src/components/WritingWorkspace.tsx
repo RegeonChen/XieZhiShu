@@ -833,7 +833,8 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           onChat={(message) => void (hasComp ? handleAdjustCompilation(message) : handleGenerateCompilation(message))}
           primaryLabel={firstSent ? '↑' : zhCN.compilation.generateBtn}
           onPrimaryAction={hasComp ? undefined : (text) => void handleGenerateCompilation(text)}
-          showPresetButton={hasComp}
+          showPresetButton
+          hasCompilation={hasComp}
           refs={sourceRefs}
           onOpenSource={(sourceId) => void handleOpenSource(sourceId)}
         />
