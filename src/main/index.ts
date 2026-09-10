@@ -729,7 +729,8 @@ handleLogged(IPC.COMPILATION_IMPORT_ARCHIVE, async (_event, _params: Compilation
   return { ok: false, error: { code: 'NOT_IMPLEMENTED', message: '外部资料汇编导入功能开发中' } }
 })
 
-handleLogged(IPC.COMPILATION_ADJUST, async (_event, params: CompilationAdjustReq): Promise<ApiResult<CompilationAdjustRes>> => {
+// 汇编调整也是一次可长达数分钟的 LLM 调用：同样纳入“保持唤醒（不熄屏）”范围
+handleLogged(IPC.COMPILATION_ADJUST, async (_event, params: CompilationAdjustReq): Promise<ApiResult<CompilationAdjustRes>> => withKeepAwake(async () => {
   try {
     pushUndo(params.compilationId)
     // 用户对资料汇编的调整消息持久化到对话历史
@@ -750,7 +751,7 @@ handleLogged(IPC.COMPILATION_ADJUST, async (_event, params: CompilationAdjustReq
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
-})
+}))
 
 // 资料汇编卡片重新按时间排序（2026-08-28）：asc 正序 / desc 反序，重写 position 并返回最新汇编
 handleLogged(IPC.COMPILATION_REORDER, (_event, params: CompilationReorderReq): ApiResult<CompilationReorderRes> => {

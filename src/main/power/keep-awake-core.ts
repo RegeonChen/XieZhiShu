@@ -43,8 +43,10 @@ export function createKeepAwakeController(impl?: KeepAwakeImplLike): KeepAwakeCo
       count += 1
       if (started) return
       // 幂等：已启动（如 electron 已运行且某次 start 成功）则不重复 start
+      // 用 prevent-display-sleep：既阻止显示器休眠（不熄屏），也保持系统不休眠——
+      // 长任务（AI 细读 / 矛盾扫描与汇总 / 二次修改）全过程都要求电脑保持唤醒。
       try {
-        id = real.start('prevent-app-suspension')
+        id = real.start('prevent-display-sleep')
         started = true
       } catch {
         // 无 electron / 启动失败：降级为计数但不再尝试（避免反复抛错）
@@ -106,11 +108,11 @@ if (import.meta.vitest) {
       expect(c.active()).toBe(false)
     })
 
-    it('uses prevent-app-suspension type (屏幕可关、防睡眠)', () => {
+    it('uses prevent-display-sleep type (防熄屏 + 防睡眠，覆盖长任务全过程)', () => {
       const f = fakeImpl()
       const c = createKeepAwakeController(f.impl)
       c.start()
-      expect(f.calls[0]).toBe('start:prevent-app-suspension')
+      expect(f.calls[0]).toBe('start:prevent-display-sleep')
     })
   })
 }
