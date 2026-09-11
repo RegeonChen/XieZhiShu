@@ -833,6 +833,20 @@ function mapSourceRef(row: CompilationSourceRow): CompilationSourceRef {
   }
 }
 
+/**
+ * 只保留最近 N 个版本（默认 2 = 上一版 + 本次），更早的删除。
+ * 用户 2026-09-10 裁定：只需支持"与改动前的上一版对比"，不需要完整版本历史，
+ * 故每次写入版本后立刻裁剪，避免版本表无限增长（也让版本下拉退化为一个"与上一版对比"开关）。
+ */
+export function pruneCompilationVersions(compilationId: string, keep = 2): void {
+  const db = getDb()
+  db.prepare(
+    `DELETE FROM compilation_versions
+      WHERE compilation_id = ?
+        AND version_no < (SELECT MAX(version_no) FROM compilation_versions WHERE compilation_id = ?) - ? + 1`
+  ).run(compilationId, compilationId, keep)
+}
+
 /** 列出某汇编的来源编号表（按 ordinal 升序） */
 export function listCompilationSources(compilationId: string): CompilationSourceRef[] {
   const db = getDb()
@@ -1091,6 +1105,8 @@ export function insertCompilationVersion(input: InsertCompilationVersionInput): 
     input.baseVersionNo ?? (latest?.version_no ?? null),
     input.createdAt ?? new Date().toISOString()
   )
+  // 只保留"上一版 + 本次"（用户裁定：不需要完整版本历史）
+  pruneCompilationVersions(input.compilationId, 2)
   return {
     id,
     compilationId: input.compilationId,
