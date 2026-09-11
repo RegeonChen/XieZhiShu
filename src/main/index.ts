@@ -96,7 +96,8 @@ import {
   reorderCompilationItemsByTs,
   restoreCompilationCardRecycleBin,
   listFinalizedCompilationsForImport,
-  importCompilationIntoTask
+  importCompilationIntoTask,
+  snapshotCompilationVersion
 } from './db/compilations'
 import { setRepairApplied } from './db/compilation-repairs'
 import {
@@ -684,6 +685,15 @@ handleLogged(
       const contradiction = updateCompilationContradictionStatus(params.contradictionId, status, params.chosenItemId)
       if (!contradiction) {
         return { ok: false, error: { code: 'INVALID_PARAM', message: '矛盾不存在，或保留的卡片不属于该矛盾' } }
+      }
+      // Phase 7.3：采纳/忽略会在文档里删除（软化）其它说法所在的段落，按 D6「以版本为准」记一个版本，
+      // 使这次改动可对比、可回滚（撤销栈是进程内的，重启即失；版本历史是落库的）。
+      if (undoCid) {
+        try {
+          snapshotCompilationVersion(undoCid, 'contradiction')
+        } catch (err) {
+          logMain('compilation', '矛盾取舍后记录版本失败（不影响取舍结果）：' + String(err))
+        }
       }
       return { ok: true, data: { contradiction } }
     } catch (err) {
