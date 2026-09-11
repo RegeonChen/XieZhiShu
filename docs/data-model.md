@@ -297,20 +297,42 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 | status | TEXT NOT NULL DEFAULT 'drafting' CHECK('drafting','reviewing','finalized') | drafting=生成中/待审阅；reviewing=审阅中；finalized=已确认 |
 | created_at / updated_at | TEXT NOT NULL | |
 
-### 2.22 compilation_items（资料卡片，Migration 016，Phase 6.0）
+### 2.22 compilation_items（资料卡片 → 连续文档段落，Migration 016 / 030，Phase 6.0 / 7.1）
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| id | TEXT PK | |
+| id | TEXT PK | **段 id 必须稳定**（Migration 030 起由 `upsertCompilationParagraphs` 复用，不再"先删后插"重建） |
 | compilation_id | TEXT NOT NULL REFERENCES compilations(id) ON DELETE CASCADE | 所属汇编 |
-| position | INTEGER NOT NULL | 时间升序位次 |
+| position | INTEGER NOT NULL | 文档内位次（时间升序） |
 | source_id | TEXT NULL REFERENCES sources(id) ON DELETE SET NULL | 来源资料（Migration 022：来源删除后置空，不再级联删卡；是否删卡由「来源移除确认」流程决定） |
-| excerpt | TEXT NOT NULL | 卡片正文摘录 |
-| ts | TEXT NULL | 时间标签（如「2005 年」） |
+| excerpt | TEXT NOT NULL | 段落正文（Phase 7 起为"连续文档中的一段"，段首时间不写进正文） |
+| ts | TEXT NULL | 段首显示时间标签（Phase 7 起要求含 4 位年份） |
 | note | TEXT NULL | 用户/大模型备注 |
 | extra_tags | TEXT NOT NULL DEFAULT '[]' | 附加标签（JSON 数组） |
-| kept | INTEGER NOT NULL DEFAULT 1 | 用户是否保留（编辑/删除卡片） |
+| kept | INTEGER NOT NULL DEFAULT 1 | 是否纳入初稿素材 |
 | created_at | TEXT NOT NULL | |
+| **year / month / day** | INTEGER NULL | **Migration 030 新增**：结构化时间（排序键，不再从 `ts` 正则现抽年份；无年份者为 NULL） |
+| **time_confidence** | TEXT NOT NULL DEFAULT 'unknown' CHECK('exact','inferred','unknown') | **Migration 030 新增**：时间可信度；`unknown` = 界面显示「时间待核」 |
+| **source_ordinal** | INTEGER NULL | **Migration 030 新增**：段尾来源圆标数字（指向 `compilation_sources.ordinal`） |
+| **evidence** | TEXT NULL | **Migration 030 新增**：该段的原文证据引文（逐字校验 + 「查看出处」） |
+| **origin** | TEXT NOT NULL DEFAULT 'generate' CHECK('generate','llm-edit','user-edit','contradiction','import') | **Migration 030 新增**：该段最近一次产生方式 |
+| **revision** | INTEGER NOT NULL DEFAULT 1 | **Migration 030 新增**：段级修订号（diff 辅助键） |
+| **kind** | TEXT NOT NULL DEFAULT 'paragraph' CHECK('paragraph','heading') | **Migration 030 新增**：段类型（`heading` 用于按年份分节渲染） |
+
+### 2.22b compilation_sources（汇编来源编号表，Migration 030，Phase 7.1）
+
+- id PK、compilation_id FK CASCADE、source_id REFERENCES sources(id) ON DELETE SET NULL、ordinal NOT NULL、title NOT NULL、cited_count DEFAULT 0、created_at；UNIQUE(compilation_id, ordinal)，索引 (compilation_id, ordinal)。
+- **ordinal = 段尾圆标数字**，按该来源在文档中**首次被引用**的顺序编号 1..N；由 `ensureCompilationSources` 维护，**编号只增不回收**（删除段落不释放编号），以保证历史版本与正文中的编号不漂移。`cited_count` 用于「删除来源影响多少段」的提示。
+
+### 2.22c compilation_versions（版本历史，Migration 030，Phase 7.1）
+
+- id PK、compilation_id FK CASCADE、version_no NOT NULL、paragraphs（段落数组 JSON 快照）、markdown（一段一行的渲染快照）、origin CHECK('generate','llm-edit','user-edit','restore','contradiction','import')、instruction、reply、change_summary（JSON：added/removed/modified/moved + paragraphIds）、base_version_no、created_at；UNIQUE(compilation_id, version_no)。
+- 取代原**进程内**撤销栈（`compilation-undo.ts` 的 5 表快照，重启即失）：版本**落库**、可对比、可回滚，撤销/恢复按钮语义变为「上一版/下一版」。存储策略为**内联**（未做内容寻址/压缩去重，体量可忽略）。
+
+### 2.22d compilation_messages（汇编级人机对话，Migration 030，Phase 7.1）
+
+- id PK、compilation_id FK CASCADE、role CHECK('user','assistant')、content、version_no、applied（JSON）、rejected（JSON）、created_at；索引 (compilation_id, created_at)。
+- 悬浮对话框的历史记录与该轮编辑产生的版本号；属于**汇编**（随导入/导出一起走），与任务级 `task_messages` 区分。
 
 ### 2.23 compilation_contradictions / compilation_contradiction_variants（汇编矛盾，Migration 016，Phase 6.0）
 

@@ -385,7 +385,7 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 - **降级开关**：差异比例过大或计算超时（jsdiff `timeout`/`maxEditLength`）→ 只标"整段变更"，不做字级；UI 明确提示"差异过大，已降级为整块标记"。
 - **呈现**：默认统一视图（新增=绿、修改=黄、删除=红色划线占位，可展开看原文；段落左侧色条）；「仅看改动段落」开关（同时把渲染量降到变更数）；「并排对比」视图（左旧右新、按段对齐，用 `react-diff-view`（MIT，`viewType="split"` + 行内高亮）或自研对齐列表）。
 - **存储规范化**：版本快照的 `markdown` **一段一行**（段内换行转空格）——使"行级 diff ≈ 段落级 diff"，并让并排视图与第三方 diff 组件可直接复用。
-- **版本存储**：`compilation_versions` 存 `paragraphs`(JSON) + `markdown` 快照；另建**内容寻址去重表** `compilation_version_blobs(hash PK, codec, blob)`（gzip 压缩，中文 markdown 压缩比通常 >5:1），版本行只存 `markdown_hash` 引用——版本链占用可忽略，且便于后续按 hash 去重比较。
+- **版本存储**：`compilation_versions` 直接内联存 `paragraphs`(JSON) + `markdown` 快照（体量估算 250 段 ≈ 60KB/版本，100 版 ≈ 6MB，可忽略）；**内容寻址 + gzip 去重（`blob(hash, codec, payload)` + 版本行只存 hash）暂不实现**——调研建议的这层优化留到版本数确实影响体积时再加，避免过早增加一次间接寻址（7.1 已按内联方案落地）。
 - **与旧撤销栈的关系（D6 已裁定）**：现行 `compilation-undo.ts` 是**进程内** 5 表快照（重启即失、整表重插会重建 id）。**以版本为准**：撤销/恢复按钮语义改为"上一版/下一版"，内存快照栈在 7.7 删除。
 
 ### 7.5 悬浮对话框与人机协同编辑协议（最关键）
