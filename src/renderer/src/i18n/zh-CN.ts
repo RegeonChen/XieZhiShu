@@ -445,6 +445,7 @@ export const zhCN = {
     versionPrev: '查看更早的版本',
     versionRestore: '恢复到 v{no}',
     versionOnlyChanged: '仅看改动',
+    versionNoChanges: '本次改动没有差异段落（上一版与当前内容一致）',
     versionDiffSummary: '对比：+{added} 段 / ~{modified} 段 / −{removed} 段',
     versionRemovedTag: '已删除',
     emptyDoc: '（暂无资料段落：本次生成没有筛出与主题相关的内容，可调整标题后重新生成）',
