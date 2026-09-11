@@ -1,5 +1,20 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react'
 import { zhCN } from '../i18n/zh-CN'
+
+/**
+ * 极简行内 Markdown 渲染（Phase 7.3）：只处理段落正文里常见的 `**加粗**`，
+ * 其余按纯文本渲染。资料汇编的段落是志书散文，含复杂 Markdown 的概率很低；
+ * 若将来确实需要完整 Markdown（表格/引用/列表），再按调研结论接入 react-markdown + remark-gfm。
+ */
+function renderInlineMarkdown(text: string): ReactNode[] {
+  const parts = (text ?? '').split(/(\*\*[^*]+\*\*)/g)
+  return parts.map((part, i) => {
+    if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
+      return <strong key={i}>{part.slice(2, -2)}</strong>
+    }
+    return part
+  })
+}
 
 export interface CompilationItemView {
   id: string
@@ -111,8 +126,10 @@ function CompilationStep({
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
   const [excerpt, setExcerpt] = useState('')
   const [ts, setTs] = useState('')
-  /** 当前展开“…”菜单的卡片 id（一次只展开一张） */
-  const [menuFor, setMenuFor] = useState<string | null>(null)
+  /** 当前悬停的段落 id（悬停才显示段级操作，保持"连续文档"观感） */
+  const [hoverId, setHoverId] = useState<string | null>(null)
+  /** 当前打开「来源小卡」的来源编号（点击段尾圆标） */
+  const [sourceCardFor, setSourceCardFor] = useState<number | null>(null)
   /** 当前展开「修正详情」弹窗的卡片修正记录（一次只看一张） */
   const [fixDetail, setFixDetail] = useState<CompilationRepairView | null>(null)
   /** 矛盾窗口是否展开（默认展开，可收起） */
@@ -206,9 +223,8 @@ function CompilationStep({
   return (
     <div className="compilation-step">
       <div className="compilation-toolbar">
-        <span className="compilation-stat">{t.cards.replace('{count}', String(keptItems.length))}</span>
+        <span className="compilation-stat">{t.docStats.replace('{paragraphs}', String(keptItems.length)).replace('{sources}', String(sourceCount))}</span>
         {candidateChunks ? <span className="compilation-stat">{t.candidate.replace('{chunks}', String(candidateChunks))}</span> : null}
-        {sourceCount > 0 ? <span className="compilation-stat">{t.sourcesStat.replace('{count}', String(sourceCount))}</span> : null}
         {pendingTimeCount > 0 ? (
           <span
             className="compilation-stat is-warn"
@@ -334,41 +350,50 @@ function CompilationStep({
         </button>
       ) : null}
 
-      <div className="compilation-cards" ref={cardsRef}>
-        {keptItems.map((it) => {
-          const fix = repairForItem(it.id)
-          return (
-            <div
-              key={it.id}
-              data-card-id={it.id}
-              className={cls(
-                'compilation-card',
-                conflictForItem(it.id) ? 'has-conflict' : '',
-                fix ? 'is-repair' : '',
-                locatedId === it.id ? 'is-located' : ''
-              )}
-            >
-              <div className="compilation-card-head">
-                <div className="compilation-card-meta">
+      {/* Phase 7.3：右栏由「卡片列表」改为**连续文档查看器**——段首时间徽标 + 正文 + 段尾来源圆标，
+          按年份分节（用户裁定 D4）；段落悬停才显示段级操作，避免把连续文本切成一格格卡片。 */}
+      <div className="compilation-doc" ref={cardsRef}>
+        {keptItems.length === 0 ? (
+          <div className="compilation-empty">{t.emptyDoc}</div>
+        ) : (
+          keptItems.map((it, index) => {
+            const fix = repairForItem(it.id)
+            const year = it.year ?? null
+            const prevYear = index > 0 ? (keptItems[index - 1].year ?? null) : null
+            const pendingTime = (it.timeConfidence ?? (it.year != null ? 'exact' : 'unknown')) === 'unknown'
+            return (
+              <Fragment key={it.id}>
+                {year != null && year !== prevYear ? (
+                  <h3 className="compilation-doc__year">{t.yearHeading.replace('{year}', String(year))}</h3>
+                ) : null}
+                <div
+                  data-card-id={it.id}
+                  className={cls(
+                    'compilation-para',
+                    conflictForItem(it.id) ? 'has-conflict' : '',
+                    fix ? 'is-repair' : '',
+                    locatedId === it.id ? 'is-located' : ''
+                  )}
+                  onMouseEnter={() => setHoverId(it.id)}
+                  onMouseLeave={() => setHoverId((cur) => (cur === it.id ? null : cur))}
+                >
+                  <span className={cls('compilation-doc__time', pendingTime ? 'is-pending' : '')}>
+                    {it.ts ?? t.noTime}
+                    {pendingTime ? t.pendingYearSuffix : ''}
+                  </span>
+                  <span className="compilation-doc__text">{renderInlineMarkdown(it.excerpt)}</span>
                   {it.sourceOrdinal != null ? (
-                    /* Phase 7.3 第一步（用户明确要求）：段尾来源圆标**可点击** → 直接打开该来源原文。
-                       正式版会在查看器里改为弹出「来源小卡（标题 / 该来源在本汇编中的全部段落 / 打开原文）」。 */
                     <button
                       type="button"
                       className="compilation-src-badge"
                       aria-label={t.sourceBadgeTitle.replace('{n}', String(it.sourceOrdinal))}
-                      onClick={() => onOpenSource(it.sourceId)}
+                      onClick={() => setSourceCardFor(it.sourceOrdinal ?? null)}
                       onMouseEnter={(e) => showHint(e.currentTarget, t.sourceBadgeTitle.replace('{n}', String(it.sourceOrdinal)))}
                       onMouseLeave={() => setHint(null)}
                     >
                       {it.sourceOrdinal}
                     </button>
                   ) : null}
-                  <span className={cls('compilation-chip', (it.timeConfidence ?? (it.year != null ? 'exact' : 'unknown')) === 'unknown' ? 'is-pending' : '')}>
-                    {it.ts ?? t.noTime}
-                    {(it.timeConfidence ?? (it.year != null ? 'exact' : 'unknown')) === 'unknown' ? t.pendingYearSuffix : ''}
-                  </span>
-                  <span className="compilation-chip">《{it.sourceTitle ?? it.sourceId}》</span>
                   {conflictForItem(it.id) ? <span className="compilation-chip conflict">⚠ {t.contradict}</span> : null}
                   {fix ? (
                     <button
@@ -381,32 +406,65 @@ function CompilationStep({
                       {fix.status === 'applied' ? t.repairBadge : t.repairBadgeReverted}
                     </button>
                   ) : null}
-                </div>
-                <div className="compilation-card-menu">
-                  <button
-                    type="button"
-                    className="compilation-card-menu-btn"
-                    aria-label={t.more}
-
-                    onClick={() => setMenuFor((cur) => (cur === it.id ? null : it.id))}
-                  >
-                    …
-                  </button>
-                  {menuFor === it.id ? (
-                    <div className="compilation-card-menu-dropdown">
-                      <button type="button" onClick={() => { onOpenSource(it.sourceId); setMenuFor(null) }}>{t.openSource}</button>
-                      {fix ? <button type="button" onClick={() => { setFixDetail(fix); setMenuFor(null) }}>{t.repairDetail}</button> : null}
-                      <button type="button" onClick={() => { startEdit(it); setMenuFor(null) }}>{t.edit}</button>
-                      <button type="button" className="is-danger" onClick={() => { onDeleteItem(it.id); setMenuFor(null) }}>{t.delete}</button>
-                    </div>
+                  {hoverId === it.id ? (
+                    <span className="compilation-para__actions">
+                      <button type="button" onClick={() => startEdit(it)}>{t.edit}</button>
+                      <button type="button" className="is-danger" onClick={() => onDeleteItem(it.id)}>{t.delete}</button>
+                    </span>
                   ) : null}
                 </div>
-              </div>
-              <div className="compilation-card-text">{it.excerpt}</div>
-            </div>
-          )
-        })}
+              </Fragment>
+            )
+          })
+        )}
       </div>
+
+      {/* 来源小卡：点段尾圆标弹出（来源标题 / 该来源在本汇编中的全部段落 / 打开原文） */}
+      {sourceCardFor != null ? (
+        <div className="skills-manager__modal-backdrop" onMouseDown={() => setSourceCardFor(null)}>
+          <div className="skills-manager__modal compilation-source-card" onMouseDown={(e) => e.stopPropagation()}>
+            <h4 className="skills-manager__modal-title">
+              {t.sourceCardTitle.replace('{n}', String(sourceCardFor))}
+              {(() => {
+                const title = keptItems.find((x) => x.sourceOrdinal === sourceCardFor)?.sourceTitle
+                return title ? ' 《' + title + '》' : ''
+              })()}
+            </h4>
+            <div className="compilation-source-card__list">
+              {keptItems
+                .filter((x) => x.sourceOrdinal === sourceCardFor)
+                .map((x) => (
+                  <button
+                    key={x.id}
+                    type="button"
+                    className="compilation-source-card__item"
+                    onClick={() => {
+                      setSourceCardFor(null)
+                      locateItem(x.id)
+                    }}
+                  >
+                    <span className="compilation-doc__time">{x.ts ?? t.noTime}</span>
+                    <span>{x.excerpt.replace(/\s+/g, ' ').slice(0, 60)}</span>
+                  </button>
+                ))}
+            </div>
+            <div className="skills-manager__modal-actions">
+              <button type="button" className="source-list__btn" onClick={() => setSourceCardFor(null)}>{t.cancel}</button>
+              <button
+                type="button"
+                className="source-list__btn source-list__btn--primary"
+                onClick={() => {
+                  const item = keptItems.find((x) => x.sourceOrdinal === sourceCardFor)
+                  setSourceCardFor(null)
+                  if (item) onOpenSource(item.sourceId)
+                }}
+              >
+                {t.openSource}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {fixDetail ? (
         <div className="skills-manager__modal-backdrop" onMouseDown={() => setFixDetail(null)}>
