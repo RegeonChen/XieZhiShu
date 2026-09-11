@@ -196,32 +196,9 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     [compilation, versions]
   )
 
-  /** 恢复到某历史版本（恢复也生成新版本，不销毁历史） */
-  const handleRestoreVersion = useCallback(
-    async (versionNo: number): Promise<void> => {
-      if (!compilation) return
-      setBusy('chatting')
-      try {
-        const res = await window.api.restoreCompilationVersion(compilation.id, versionNo)
-        if (!res.ok || !res.data) {
-          const msg = '恢复失败：' + (res.error?.message ?? '未知错误')
-          appendAssistant(msg)
-          void window.api.addTaskMessage(taskId, 'assistant', msg, 'notice')
-          return
-        }
-        setCompilation(res.data.compilation as CompilationView)
-        await loadVersions(compilation.id)
-        setCompareFrom(null)
-        setVersionDiff(null)
-        const okMsg = '已恢复到 v' + versionNo + '（该恢复动作本身也记录为一个新版本）'
-        appendAssistant(okMsg)
-        void window.api.addTaskMessage(taskId, 'assistant', okMsg, 'notice')
-      } finally {
-        setBusy(null)
-      }
-    },
-    [compilation, loadVersions]
-  )
+  /** 恢复到某历史版本——**UI 暂不提供**（用户 2026-09-10：先不做这个功能）。
+   *  主进程的 `compilation:version:restore` 仍保留可用（不记录新版本），需要时再挂上来。 */
+  void 0
   // 前端 429 自动续传兜底：限流中断时自动调用 continueCompilation（上限限制，避免无限重试）
   const autoResumeAttemptRef = useRef(0)
   // ---- 矛盾回收站（Phase 6.1 优化） ----
@@ -1012,7 +989,6 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           versionDiff={versionDiff}
           onlyChanged={onlyChanged}
           onSelectVersion={(no) => void handleSelectVersion(no)}
-          onRestoreVersion={(no) => void handleRestoreVersion(no)}
           onToggleOnlyChanged={setOnlyChanged}
         />
       )

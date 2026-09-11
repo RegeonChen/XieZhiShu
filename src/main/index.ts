@@ -865,11 +865,8 @@ handleLogged(IPC.COMPILATION_VERSION_RESTORE, (_event, params: CompilationVersio
     pushUndo(params.compilationId)
     const restored = restoreCompilationFromVersion(params.compilationId, params.versionNo)
     if (!restored) return { ok: false, error: { code: 'INVALID_PARAM', message: '版本不存在' } }
-    // 恢复也生成新版本（不销毁历史）：新版本内容 = 目标版本，origin='restore'
-    snapshotCompilationVersion(params.compilationId, 'restore', {
-      baseVersionNo: params.versionNo,
-      reply: '已恢复到 v' + params.versionNo
-    })
+    // 恢复动作**不记录新版本**（用户 2026-09-10 裁定）：恢复只是把文档退回上一版内容，
+    // 不是一次"改动"，若也记版本会让"上一版"的含义变得混乱。UI 上的「恢复到上一版」按钮暂不提供。
     const compilation = getCompilationById(params.compilationId)
     if (!compilation) return { ok: false, error: { code: 'INTERNAL_ERROR', message: '资料汇编不存在' } }
     return { ok: true, data: { compilation, restoredFrom: params.versionNo } }
