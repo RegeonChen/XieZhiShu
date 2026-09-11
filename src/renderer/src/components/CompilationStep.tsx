@@ -181,6 +181,20 @@ function CompilationStep({
     }
   }
   const removedSegments = removedAtEnd
+  /**
+   * 「仅看改动」时的可见段落：有差异的段落 + **删除占位的锚点段落**（否则被删段落的占位无处可插）。
+   * 年份小标题随后按"可见列表"重算，避免出现"有的段落带年份标题、有的不带"的不一致（用户 2026-09-10 要求）。
+   */
+  const visibleItems =
+    onlyChanged === true && versionDiff
+      ? (compilation?.items ?? [])
+          .filter((it) => it.kept !== false)
+          .filter((it) => {
+            if (removedBefore.has(it.id)) return true
+            const d = diffById.get(it.id)
+            return !!d && d.kind !== 'unchanged'
+          })
+      : (compilation?.items ?? []).filter((it) => it.kept !== false)
   /** 被删除段落的占位渲染（插回原位用） */
   const renderRemoved = (segment: CompilationVersionDiffView['segments'][number]): ReactNode => (
     <div key={segment.id} className="compilation-para diff-removed">
@@ -485,18 +499,16 @@ function CompilationStep({
       {/* Phase 7.3：右栏由「卡片列表」改为**连续文档查看器**——段首时间徽标 + 正文 + 段尾来源圆标，
           按年份分节（用户裁定 D4）；段落悬停才显示段级操作，避免把连续文本切成一格格卡片。 */}
       <div className="compilation-doc" ref={cardsRef}>
-        {keptItems.length === 0 ? (
-          <div className="compilation-empty">{t.emptyDoc}</div>
+        {visibleItems.length === 0 ? (
+          <div className="compilation-empty">{keptItems.length === 0 ? t.emptyDoc : t.versionNoChanges}</div>
         ) : (
-          keptItems.map((it, index) => {
+          visibleItems.map((it, index) => {
             const fix = repairForItem(it.id)
             const year = it.year ?? null
-            const prevYear = index > 0 ? (keptItems[index - 1].year ?? null) : null
+            // 年份小标题按**可见列表**计算（用户 2026-09-10：仅看改动时也要统一显示年份标题）
+            const prevYear = index > 0 ? (visibleItems[index - 1].year ?? null) : null
             const pendingTime = (it.timeConfidence ?? (it.year != null ? 'exact' : 'unknown')) === 'unknown'
             const diff = diffById.get(it.id)
-            if (onlyChanged === true && versionDiff && (!diff || diff.kind === 'unchanged')) {
-              return null
-            }
             return (
               <Fragment key={it.id}>
                 {/* 被删除的段落插回原位：紧邻它"当年的下一段"之前 */}
