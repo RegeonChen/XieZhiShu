@@ -430,7 +430,11 @@ export const zhCN = {
     candidate: '候选 {chunks} 段',
     cards: '卡片 {count} 张',
     /* Phase 7.3：连续文档查看器（段首时间 + 段尾来源圆标 + 按年份分节） */
-    /* Phase 7.4：版本管控（版本下拉 / 类型标签 / 差异摘要 / 恢复） */
+    /* Phase 7.4：版本管控（简化为「与上一版对比」；只保留上一版） */
+    versionCompareWithPrev: '与改动前的上一版对比',
+    versionCompareHint: '正在与上一版（{origin} · {time}）对比',
+    versionExitCompare: '退出对比',
+    versionRestorePrev: '恢复到上一版',
     versionOption: 'v{no} · {origin} · +{added} ~{modified} −{removed}',
     versionOriginGenerate: '生成',
     versionOriginLlmEdit: '对话修改',

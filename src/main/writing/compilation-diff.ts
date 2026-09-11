@@ -25,6 +25,11 @@ export interface ParagraphDiffSegment {
   nextText?: string
   /** 仅 modified：段内字符级差异 */
   inline?: InlineDiffPart[]
+  /**
+   * 仅 removed：该段在被删除前位于**哪个当前段落之前**（渲染时据此把它插回原位，而不是堆在文末）；
+   * 缺省表示它原本在整篇最后。
+   */
+  beforeId?: string
 }
 
 export interface ParagraphDiffSummary {
@@ -88,7 +93,8 @@ export function diffParagraphTexts(prevText: string, nextText: string): InlineDi
 /**
  * 段落级结构 diff（纯函数，可测试）：按 `id` 对齐两版段落。
  * 新出现 → added；旧版有而新版没有 → removed；同 id 但文本不同 → modified；文本相同 → unchanged。
- * 顺序以**新版**为主（视图默认展示新版本），被删除的段落插在它原先所在的前后位置之间（由调用方按需渲染）。
+ * 被删除的段落带 `beforeId`（它在旧版里紧邻其后的那个**仍然存在**的段落），
+ * 使界面能把它插回**原位**展示，而不是一股脑堆在文末（用户 2026-09-10 要求）。
  */
 export function diffParagraphVersions(
   prev: CompilationParagraph[],
@@ -96,10 +102,22 @@ export function diffParagraphVersions(
 ): ParagraphDiffSegment[] {
   const prevById = new Map(prev.map((p) => [p.id, p]))
   const nextIds = new Set(next.map((p) => p.id))
+  // ① 计算每个被删除段落的 beforeId：在旧版顺序里，向后找第一个"新版仍存在"的段落
+  const beforeIdOf = new Map<string, string | undefined>()
+  for (let i = 0; i < prev.length; i++) {
+    if (nextIds.has(prev[i].id)) continue
+    let anchor: string | undefined
+    for (let j = i + 1; j < prev.length; j++) {
+      if (nextIds.has(prev[j].id)) {
+        anchor = prev[j].id
+        break
+      }
+    }
+    beforeIdOf.set(prev[i].id, anchor)
+  }
   const segments: ParagraphDiffSegment[] = []
-  // 删除的段落先按旧版顺序集中列出（界面以"红色划线占位"呈现）
   for (const p of prev) {
-    if (!nextIds.has(p.id)) segments.push({ kind: 'removed', id: p.id, prevText: p.text })
+    if (!nextIds.has(p.id)) segments.push({ kind: 'removed', id: p.id, prevText: p.text, beforeId: beforeIdOf.get(p.id) })
   }
   for (const p of next) {
     const before = prevById.get(p.id)
@@ -155,6 +173,11 @@ if (import.meta.vitest) {
       const summary = summarizeParagraphDiff(segs)
       expect(summary).toEqual({ added: 1, removed: 1, modified: 1, unchanged: 1 })
       expect(segs.find((s) => s.kind === 'removed')!.id).toBe('p2')
+      // 被删除的段落带 beforeId（它旧版里后面第一个仍存在的段落）→ 界面据此插回原位，而不是堆到文末
+      expect(segs.find((s) => s.kind === 'removed')!.beforeId).toBe('p3')
+      // 删掉的是最后一段时 → beforeId 缺省（原本就在最后）
+      const tailRemoved = diffParagraphVersions([para('q1', '甲'), para('q2', '乙')], [para('q1', '甲')])
+      expect(tailRemoved.find((s) => s.kind === 'removed')!.beforeId).toBeUndefined()
       expect(segs.find((s) => s.kind === 'added')!.id).toBe('p4')
       const modified = segs.find((s) => s.kind === 'modified')!
       expect(modified.prevText).toBe('丙')

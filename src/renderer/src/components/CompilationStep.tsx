@@ -132,6 +132,8 @@ export interface CompilationVersionDiffView {
     prevText?: string
     nextText?: string
     inline?: { type: 'same' | 'add' | 'del'; text: string }[]
+    /** 仅 removed：渲染时插回"该段被删除前紧邻的下一段"之前（缺省 = 原本在最后） */
+    beforeId?: string
   }[]
   summary: { added: number; removed: number; modified: number; unchanged: number }
 }
@@ -165,7 +167,30 @@ function CompilationStep({
   const t = zhCN.compilation
   /** 差异段按段 id 建索引（渲染时给段落上色 / 段内高亮） */
   const diffById = new Map((versionDiff?.segments ?? []).map((s) => [s.id, s]))
-  const removedSegments = (versionDiff?.segments ?? []).filter((s) => s.kind === 'removed')
+  /** 被删除的段落按 beforeId 归组：渲染时插回"它被删除前所在的位置"（用户 2026-09-10 要求） */
+  const removedBefore = new Map<string, CompilationVersionDiffView['segments']>()
+  const removedAtEnd: CompilationVersionDiffView['segments'] = []
+  for (const s of versionDiff?.segments ?? []) {
+    if (s.kind !== 'removed') continue
+    if (s.beforeId) {
+      const list = removedBefore.get(s.beforeId) ?? []
+      list.push(s)
+      removedBefore.set(s.beforeId, list)
+    } else {
+      removedAtEnd.push(s)
+    }
+  }
+  const removedSegments = removedAtEnd
+  /** 被删除段落的占位渲染（插回原位用） */
+  const renderRemoved = (segment: CompilationVersionDiffView['segments'][number]): ReactNode => (
+    <div key={segment.id} className="compilation-para diff-removed">
+      <span className="compilation-doc__time">{t.versionRemovedTag}</span>
+      <span className="compilation-doc__text">
+        <del className="diff-del">{segment.prevText}</del>
+      </span>
+    </div>
+  )
+  /** 版本来源标签（对比模式下在工具栏提示里显示） */
   const originLabel = (origin: CompilationVersionView['origin']): string =>
     ({
       generate: t.versionOriginGenerate,
@@ -175,6 +200,12 @@ function CompilationStep({
       contradiction: t.versionOriginContradiction,
       import: t.versionOriginImport
     })[origin]
+  const compareHint =
+    compareFrom != null && versions && versions.length > 1
+      ? t.versionCompareHint
+          .replace('{origin}', originLabel(versions[versions.length - 2].origin))
+          .replace('{time}', new Date(versions[versions.length - 2].createdAt).toLocaleTimeString('zh-CN'))
+      : ''
   const [editing, setEditing] = useState<CompilationItemView | null>(null)
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
   const [excerpt, setExcerpt] = useState('')
@@ -285,6 +316,7 @@ function CompilationStep({
                 .replace('{modified}', String(versionDiff.summary.modified))
                 .replace('{removed}', String(versionDiff.summary.removed))}
             </span>
+            {compareHint ? <span className="compilation-stat">{compareHint}</span> : null}
             <label className="compilation-diff-toggle">
               <input
                 type="checkbox"
@@ -310,44 +342,23 @@ function CompilationStep({
           {pending.length ? t.pendingContradictions.replace('{count}', String(pending.length)) : t.noContradictions}
         </span>
         <div className="compilation-actions">
-          {/* Phase 7.4：版本管控 —— 选历史版本进入对比模式、上一版/下一版、恢复到该版本 */}
+          {/* Phase 7.4（用户 2026-09-10 简化）：只支持"与改动前的上一版对比"，故不再需要版本下拉——
+              仅保留一个对比开关；上一版之后的历史不再保留。 */}
           {versions && versions.length > 1 ? (
             <>
               <button
                 type="button"
-                className="compilation-round-btn"
-                disabled={busy || (compareFrom ?? versions[versions.length - 1].versionNo) <= versions[0].versionNo}
-                title={t.versionPrev}
-                aria-label={t.versionPrev}
-                onClick={() => {
-                  const cur = compareFrom ?? versions[versions.length - 1].versionNo
-                  const idx = versions.findIndex((v) => v.versionNo === cur)
-                  const prev = versions[Math.max(0, idx - 1)]
-                  onSelectVersion?.(prev.versionNo === versions[versions.length - 1].versionNo ? null : prev.versionNo)
-                }}
-              >
-                ←
-              </button>
-              <select
-                className="compilation-version-select"
-                value={String(compareFrom ?? versions[versions.length - 1].versionNo)}
+                className={cls('compilation-round-btn', compareFrom != null ? 'is-active' : '')}
                 disabled={busy}
-                onChange={(e) => {
-                  const no = Number(e.target.value)
-                  onSelectVersion?.(no === versions[versions.length - 1].versionNo ? null : no)
+                title={compareFrom != null ? t.versionExitCompare : t.versionCompareWithPrev}
+                aria-label={compareFrom != null ? t.versionExitCompare : t.versionCompareWithPrev}
+                onClick={() => {
+                  const prev = versions[versions.length - 2]
+                  onSelectVersion?.(compareFrom != null ? null : prev.versionNo)
                 }}
               >
-                {versions.map((v) => (
-                  <option key={v.versionNo} value={String(v.versionNo)}>
-                    {t.versionOption
-                      .replace('{no}', String(v.versionNo))
-                      .replace('{origin}', originLabel(v.origin))
-                      .replace('{added}', String(v.changeSummary.added))
-                      .replace('{modified}', String(v.changeSummary.modified))
-                      .replace('{removed}', String(v.changeSummary.removed))}
-                  </option>
-                ))}
-              </select>
+                &#8646;
+              </button>
               {compareFrom != null ? (
                 <button
                   type="button"
@@ -355,7 +366,7 @@ function CompilationStep({
                   disabled={busy}
                   onClick={() => onRestoreVersion?.(compareFrom)}
                 >
-                  {t.versionRestore.replace('{no}', String(compareFrom))}
+                  {t.versionRestorePrev}
                 </button>
               ) : null}
             </>
@@ -488,6 +499,8 @@ function CompilationStep({
             }
             return (
               <Fragment key={it.id}>
+                {/* 被删除的段落插回原位：紧邻它"当年的下一段"之前 */}
+                {(removedBefore.get(it.id) ?? []).map(renderRemoved)}
                 {year != null && year !== prevYear ? (
                   <h3 className="compilation-doc__year">{t.yearHeading.replace('{year}', String(year))}</h3>
                 ) : null}
@@ -556,17 +569,8 @@ function CompilationStep({
             )
           })
         )}
-        {/* 对比模式下：被删除的段落以红色划线占位列出（保留在文档末尾，便于用户判断丢掉了什么） */}
-        {versionDiff && removedSegments.length > 0
-          ? removedSegments.map((s) => (
-              <div key={s.id} className="compilation-para diff-removed">
-                <span className="compilation-doc__time">{t.versionRemovedTag}</span>
-                <span className="compilation-doc__text">
-                  <del className="diff-del">{s.prevText}</del>
-                </span>
-              </div>
-            ))
-          : null}
+        {/* 对比模式下：原本在整篇最后的被删除段落 */}
+        {versionDiff && removedSegments.length > 0 ? removedSegments.map(renderRemoved) : null}
       </div>
 
       {/* 来源小卡：点段尾圆标弹出（来源标题 / 该来源在本汇编中的全部段落 / 打开原文） */}
