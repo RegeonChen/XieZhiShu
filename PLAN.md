@@ -10,6 +10,7 @@
 - [已完成阶段摘要（Phase 1 – Phase 3.7）](#已完成阶段摘要phase-1--phase-37)
 - [Phase 6: 三段式撰写重构](#phase-6-三段式撰写重构资料汇编--行文规范--初稿2026-08-25-规划中)
 - [Phase 6.x 网页资料库后续优化](#phase-6x-网页资料库后续优化)
+- [Phase 7：生成汇编功能区重构（连续文档 + 人机协同编辑 + 版本管控）](#phase-7生成汇编功能区重构连续文档--人机协同编辑--版本管控2026-09-10-草拟决策已敲定实施中)
 - [Last Phase（收尾阶段）：Acceptance & Packaging](#last-phaseacceptance--packaging收尾阶段全项目最后执行)
 - [Project Completion Criteria](#project-completion-criteria)
 
@@ -278,6 +279,183 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 - **D8 成熟正文提取器 + 降级** ✅：新增 extractArticleText(html)——优先 article/main/正文容器，保留表格（单元格→制表符、行→换行）、去 script/style/nav/footer/aside；抓取正文用它做 cleanedText，过短自动回退浏览器净化的 stripHtml（诊断日志标注提取器=extractArticleText/stripHtml）。单篇失败保留标题+链接并跳过，不阻塞整站。
 - **E10 发布时间排序** ✅：新增 extractPublishedDate(html) 解析 meta（published_time/publishdate/pubdate/date）、<time datetime>、可见日期文本；抓取后写 web_site_articles.published_at（Migration 025），文章清单按 COALESCE(published_at, discovered_at) DESC 排序，与资料汇编时间排序一致。
 - **E11 领域词表自动化** ✅→已撤销（2026-09-01）：曾落地「用户按站点配置关键词」（parseSiteKeywords + web_sites.keywords + IPC webSource:updateKeywords + WebSourcePanel 输入），应产品要求**移除站点关键词功能**——Migration 026 删除 keywords 列，IPC/preload/UI/召回逻辑一并删除。「已抓文章标题词频/聚类自动扩充」进阶方案未实现。
+
+## Phase 7：生成汇编功能区重构（连续文档 + 人机协同编辑 + 版本管控）（2026-09-10 草拟，**决策已敲定，实施中**）
+
+> **Status**：计划已评审，7.9 的六项决策已由用户裁定（2026-09-10）；按「一阶段一验收」推进。本阶段**推翻 Phase 6 的「资料卡片」模型**：把「生成汇编」功能区从"卡片列表 + 事后批量调整"改造为"**连续文档（Markdown）+ 悬浮对话框人机协同编辑 + 版本差异管控**"。
+
+### 7.0 需求与设计总纲
+
+**用户需求（2026-09-10，六点）**：
+
+1. **汇编形态**：前端呈现为**一篇连续文本**；每段**开头注明时间（必须含年份）**，每段**末尾带来源标记**（含数字的小圆形 = 该段来自资料库中的第几篇文章）。
+2. **放宽提取限制**：允许大模型主动**裁剪、整合**每个候选文段中"能够写进《撰写标题》志稿"的内容（不再要求整段保留、不再禁止组织与提炼）——现行管线为保文本完整性做的约束，正是"每段掺入大量无关内容"的根因。
+3. **交互模式改变**：右栏为**文本查看器**（展示当前汇编）；一个**悬浮圆按钮**唤出与大模型的对话框，用户提出修改要求 → 大模型修改汇编 → 查看器自动更新为修改后状态。
+4. **查看器的特殊渲染**：Markdown 呈现 + 段尾来源标记；并计划**版本管控**（直观看到当前版本相较上一版有哪些修改）。
+5. **时间排序**：汇编仍须按时间排序（需在"每段必须含年份"的前提下定义排序机制）。
+6. **交互协议**：规定软件 ↔ 大模型之间"以什么格式返回修改、以什么格式返回回答、软件如何校验与应用"。
+
+**设计总纲（职责重划）**：
+
+- **细读 = 只筛选**：宁多勿漏地挑出"可能相关"的候选文段，保留来源归属（不再让它产出终稿素材）。
+- **整合提取 = 裁剪 + 补全 + 整合**（新增阶段，吸收原「提纯」+「修正」）：产出可直接作为志稿素材的**干净段落**——每段**单一来源**、段首**含年份的时间**、段尾**来源编号**；允许删减无关内容、允许同来源内的合并与语序调整、允许补全主语/指代（「他/该校」→具体名称）。
+- **矛盾扫描 = 不变**：在干净段落上比对同一事实的不同说法。
+- **所有修改统一走「版本 + 操作协议」**：无论大模型对话编辑、矛盾采纳还是（若保留）用户手动编辑，都产生**一个新版本**——"可对比、可回滚、可审计"由版本体系天然提供，替代现行的内存快照式撤销栈。
+
+### 7.1 数据模型与迁移（Migration 030–032）
+
+> **Status（2026-09-10）**：**已完成**（Migration 030 新增列/表 + 031 JS 回填；破坏性 032 按计划推迟到 7.7）。
+> 交付：`compilation_items` 段落元数据 9 列、`compilation_sources` / `compilation_versions` / `compilation_messages` 三张新表；
+> 新增纯函数模块 `src/main/writing/compilation-document.ts`（`parseTimeLabel` / `renderDocumentMarkdown` /
+> `buildParagraphSnapshot` / `summarizeParagraphChange` / `sortParagraphsByTime`，5 项内联单测）；
+> 仓储层新增 `ensureCompilationSources`（编号只增不回收）、**`upsertCompilationParagraphs`（保留段 id）**、
+> `listCompilationSources` / `insertCompilationVersion` / `snapshotCompilationVersion` / `getCompilationVersion` /
+> `listCompilationVersions` / `insertCompilationMessage` / `listCompilationMessages`（4 项内联单测）；
+> `connection.ts` 新增 030/031 迁移回归测试（覆盖「有年份/只有月日/日区间/无年份」四种时间形态）。
+> **真实库副本演练结果**：迁移前 `maxVersion=29`、5 份汇编、646 张卡片、无 `year` 列 →
+> 迁移后 `maxVersion=31`，**无编号段 0 条**、有年份段 611 条、时间待核段 35 条、来源编号行 24 条、
+> 版本 5 个（= 有卡片的汇编数）、数据零丢失、`PRAGMA integrity_check = ok`、抽样校验"版本段落数 = 汇编段落数"
+> 且"markdown 行数 = 段落数"（一段一行）且段落 id 与卡片 id 完全一致。
+> 验证：typecheck 零错误、**238/239 单测通过**（1 项 watcher chokidar 环境失败为既有问题）、生产构建成功。
+> **界面未改动**（仍旧卡片视图，无功能退化），符合 7.1 的独立验收口径。
+
+**7.1.1 `compilation_items` 升级为「段落」**（保留表名与既有列，新增列；沿用 `excerpt` 作为段落正文，`ts` 作为段首显示时间）：
+
+| 新列 | 语义 |
+|---|---|
+| `year` / `month` / `day` INTEGER（月日可空） | 结构化排序键（不再从 `ts` 正则抽年份） |
+| `time_confidence` TEXT CHECK('exact','inferred','unknown') | 时间依据强度；`unknown` = 段首显示「时间待核」并在 UI 汇总提示 |
+| `source_ordinal` INTEGER | 段尾圆标数字（指向 `compilation_sources.ordinal`）；空 = 无来源段（旧数据/降级段） |
+| `evidence` TEXT | 该段的原文证据引文（本地逐字校验用；"查看出处"也用它） |
+| `origin` TEXT CHECK('generate','llm-edit','user-edit','contradiction','import') | 该段的最近一次产生方式 |
+| `revision` INTEGER DEFAULT 1 | 段级修订号（diff 的稳定辅助键） |
+| `kind` TEXT DEFAULT 'paragraph' CHECK('paragraph','heading') | 预留分节标题（年份分节渲染时使用） |
+
+**7.1.2 新表 `compilation_sources`（每汇编一份来源编号表）**：
+`id, compilation_id FK CASCADE, source_id FK SET NULL, ordinal INTEGER NOT NULL, title TEXT NOT NULL, cited_count INTEGER DEFAULT 0`，`UNIQUE(compilation_id, ordinal)`。**编号生成规则**：按该来源在文档中**首次被引用**的顺序编号 1..N；新增段落引用新来源时**追加**编号；删除段落**不回收**编号（保证历史版本与正文里的编号不漂移）。
+
+**7.1.3 新表 `compilation_versions`（版本历史，落库而非内存）**：
+`id, compilation_id FK CASCADE, version_no INTEGER, paragraphs TEXT(JSON 段落数组快照), markdown TEXT(渲染快照), origin CHECK('generate','llm-edit','user-edit','restore','contradiction','import'), instruction TEXT, reply TEXT, change_summary TEXT(JSON: {added,removed,modified,moved,paragraphIds[]}), base_version_no INTEGER, created_at`，`UNIQUE(compilation_id, version_no)`。
+存储策略：**段落数组 + markdown 双份快照**（markdown 可推导，冗余存储换取 diff/导出的确定性）；体量估算 250 段 ≈ 60KB/版本，100 版 ≈ 6MB，可接受；**不引入 Yjs/CRDT**（单人使用、无实时协作需求）。
+
+**7.1.4 新表 `compilation_messages`（汇编级对话历史）**：
+`id, compilation_id FK CASCADE, role CHECK('user','assistant'), content, version_no, applied TEXT(JSON), rejected TEXT(JSON), created_at`。
+理由：对话属于**汇编**（随导入/导出一起走），而 `task_messages` 属于任务且其 `kind` 有 CHECK 约束（SQLite 改 CHECK 需重建表）；左侧任务对话继续承担"生成/重新生成"，右侧悬浮对话框使用 `compilation_messages`。
+
+**7.1.5 段落 id 稳定性（硬要求）**：生成期由本地分配稳定 id（如 `p{w}-{seq}`）并**落库后不再变化**；`replaceCompilationItems`（先删后插、id 每次全变）改为 **`upsertCompilationParagraphs`**（按 id upsert、缺失者删除、重写 position）——矛盾 variants、`evidence`、版本快照都依赖段 id 稳定。
+
+**7.1.6 迁移与老数据回填**：
+- **Migration 030（纯新增，不动既有数据）**：`compilation_items` 新增列、`compilation_sources` / `compilation_versions` / `compilation_messages` 三张新表 + 索引。此迁移执行后**旧界面仍完全可用**（卡片视图继续工作），保证 7.1 可独立验收、不出现半截状态。
+- **Migration 031（JS 回填，用迁移框架的 `run(db)` 钩子）**：为既有汇编——按段落首次出现顺序分配 `ordinal` 与 `compilation_sources` 行；从 `ts` 解析 `year/month`（无年份 → `time_confidence='unknown'`）；按 `source_id` 反查写 `source_ordinal`；`origin='generate'`、`revision=1`、`kind='paragraph'`；并为每个汇编生成 **v1 版本**（origin='generate'，`paragraphs` + `markdown` 双快照，`change_summary` 记为初始版本）。
+- **Migration 032（破坏性清理）推迟到 7.7**：`DROP TABLE compilation_repairs`、删卡片回收站、移除内存撤销栈——必须等 7.3/7.5 的新界面与版本机制上线、旧界面不再依赖它们之后再执行，避免中途 UI 断裂。
+- **演练要求**：在**真实库副本**（`%APPDATA%\xie-zhishu\xie-zhishu.db` 的复制品）上跑迁移，断言旧汇编可正常打开、编号/年份回填正确、v1 版本可对比；并补迁移回归单测（沿用 `connection.ts` 既有 029 迁移测试的写法）。
+
+### 7.2 生成管线改造：细读筛选 → 整合提取 → 矛盾扫描
+
+- **细读阶段（小改）**：提示词从"相关则整段成卡"改为"挑出可能相关的段落/条目（可整段或整条），**宁可多留**；裁剪交给后续整合提取"；保留现有窗口并发、ETA、断点续跑。
+- **新增 `extract-service.ts`**（替换 `purify-service.ts` + `repair-service.ts`）：输入窗口内候选文段（带 `#N` 来源编号与来源标题），输出：
+  `{"paragraphs":[{"sourceRef":"#3","text":"<整合后的段落正文>","timeLabel":"2018 年 5 月","year":2018,"month":5,"confidence":"exact|inferred|unknown","evidence":"<原文逐字引文>","reason":"…"}],"dropped":[{"sourceRef":"#4","why":"…"}]}`
+- **硬约束（提示词 + 本地校验双重）**：
+  1. **每段只能来自单一来源**（禁止跨来源拼接）→ 保证圆标唯一、矛盾可检；
+  2. **事实不可改写**：数字/日期/人名/地名/机构名必须逐字来自 `evidence`；
+  3. **不得合并互相矛盾的说法**——发现冲突时保留为**多段**，交给矛盾扫描（防止"自由整合"把矛盾和谐掉）；
+  4. 允许在同一来源内裁剪、合并、调整语序、补全主语与指代；
+  5. 每段必须给出含 **4 位年份**的 `timeLabel`，且与 `year` 一致；确实推断不出 → `timeLabel:"时间待核"` + `confidence:"unknown"`（本地汇总并在 UI 提示，供用户用对话框补）；
+  6. `evidence` 必须是来源原文中**逐字连续**出现的一段——沿用现有「去空白归一化子串匹配」校验；**校验失败的段落降级为原文整段保留**（不丢材料，并计入诊断）。
+- **本地处理**：同批次相邻/包含段合并；跨窗口**近似重复检测**（bigram 相似度高且数字一致 → 保留信息更全的一段；数字不一致 → 都保留，作为矛盾候选）；按 `(year, month, 来源序号, 生成序)` **稳定排序**；编号分配见 7.1.2。
+- **失败/降级**：无 Provider、解析失败、超预算 → 该批候选按原文整段保留（沿用现行降级与 `passthroughCards` 式统计）。
+- **提纯/修正的遗留物**：`hasYear`/`shouldFillTs` 等年份校验逻辑迁入整合提取的本地校验；`purify-service`/`repair-service` 于 7.7 删除。
+
+### 7.3 连续文档查看器 + 来源编号圆标（右栏主体切换）
+
+- **右栏布局**：顶部工具栏（段数/字数、**「时间待核」计数**、来源编号总览、版本下拉、按时间重排、导出）+ 矛盾面板（保留）+ **文档查看器**（滚动区）+ **右下悬浮圆按钮**（机器人图标，7.5 接管）。
+- **段落渲染**：`〔2018 年 5 月〕` 时间标签 chip + 正文 + 段末圆标 `③`（数字 = 该来源在本汇编中的编号，点击弹出小卡：来源标题 / 该来源在本汇编中的全部段落 / 「打开原文」跳来源查看器）。无来源段落显示「来源待补」。
+- **矛盾面板联动**：`定位到该段` 从"卡片锚点"改为"段落锚点"（滚动 + 高亮，复用现有 `.is-located` 动效）；`采纳该说法` 从"把其他卡片 `kept=0`"改为**把该段改写为采纳文本**（生成新版本，origin='contradiction'）。
+- **Markdown 支持**：段落正文支持行内 Markdown（加粗/引用等）与 `remark-gfm` 表格；表格段同样带段首时间与段尾圆标。
+- **渲染架构（调研结论，2026-09-10）**：**按段落渲染，不做全文单次 parse**——每段用自己的 markdown 片段渲染（`react-markdown@10` + `remark-gfm` + `remark-cjk-friendly`，MIT），段落身份即持久化的 `pid`，因此**不需要** offset↔pid 映射（调研提示的最大坑）；段落组件 `React.memo` + `key=pid`，版本切换只重渲染变化段（天然与 diff 结果对齐）。段内 Markdown（加粗/引用/列表/表格）按段渲染，避免块级元素跨段。
+- **时间标签不由 markdown 源承载**：时间标签来自段落元数据 `ts`（渲染成 chip），正文里不重复写时间，避免"改源文本破坏标记"。
+- **备选方案（仅在实测不达标时启用）**：`CodeMirror 6` 只读视图（`Decoration.widget` 挂圆标 + `Decoration.line` 上色 + `scrollIntoView`），它是唯一"天生虚拟化"的方案；**不采用 TipTap 做审阅视图**（markdown round-trip 产生格式噪音、每个 React NodeView = 一个 React root，且官方 Tracked Changes 是付费 add-on）。
+- **Spike 前置**：开工前先花小成本取三个数字——(a) 真实 10 万字文档的渲染/换版耗时；(b) 段落级 + 段内字级 diff 耗时（含中文 `Intl.Segmenter`，Electron 43 内置 full-ICU 可用）；(c) 300+ 段 memo 渲染下点击/滚动/高亮是否掉帧。数字决定是否需要虚拟滚动或切 CodeMirror 6。
+
+### 7.4 版本管控与差异高亮
+
+- **建版本时机**：生成完成（v1）、每次对话编辑、矛盾采纳、手动编辑（若保留）、恢复历史版本、导入。
+- **版本下拉**：列出`版本号 / 时间 / 来源（生成·对话·手动·矛盾·恢复）/ 变更统计（+N 段 ~M 段 −K 段）`；选中某个历史版本进入**只读对比模式**（与当前版本 diff）；提供「恢复到该版本」（**恢复也生成新版本**，不销毁历史）。
+- **diff 计算（两级，调研结论）**：① **段落级结构 diff**——本地算，不信任模型：以 `pid` / 内容哈希做 `diffArrays` 比对（added / removed / modified / moved），相邻"一删一增"用字符级相似度配对判定为 modified；② **段内字级 diff**——仅对 modified 段跑；中文用 `diffWords` + `Intl.Segmenter('zh')`（Electron 43 内置 full-ICU），结果不合直觉则回退 `diffChars`（jsdiff v6+ 按 code point，最保真）。库选型 **`diff@9`（jsdiff，BSD-3-Clause，7.9 KB gzip）为主**；**不引入 Monaco**（体积/worker 打包成本高、收益低）、**不引入 CRDT/Yjs**（单人串行版本链属过度设计）。
+- **降级开关**：差异比例过大或计算超时（jsdiff `timeout`/`maxEditLength`）→ 只标"整段变更"，不做字级；UI 明确提示"差异过大，已降级为整块标记"。
+- **呈现**：默认统一视图（新增=绿、修改=黄、删除=红色划线占位，可展开看原文；段落左侧色条）；「仅看改动段落」开关（同时把渲染量降到变更数）；「并排对比」视图（左旧右新、按段对齐，用 `react-diff-view`（MIT，`viewType="split"` + 行内高亮）或自研对齐列表）。
+- **存储规范化**：版本快照的 `markdown` **一段一行**（段内换行转空格）——使"行级 diff ≈ 段落级 diff"，并让并排视图与第三方 diff 组件可直接复用。
+- **版本存储**：`compilation_versions` 存 `paragraphs`(JSON) + `markdown` 快照；另建**内容寻址去重表** `compilation_version_blobs(hash PK, codec, blob)`（gzip 压缩，中文 markdown 压缩比通常 >5:1），版本行只存 `markdown_hash` 引用——版本链占用可忽略，且便于后续按 hash 去重比较。
+- **与旧撤销栈的关系（D6 已裁定）**：现行 `compilation-undo.ts` 是**进程内** 5 表快照（重启即失、整表重插会重建 id）。**以版本为准**：撤销/恢复按钮语义改为"上一版/下一版"，内存快照栈在 7.7 删除。
+
+### 7.5 悬浮对话框与人机协同编辑协议（最关键）
+
+**UI**：右下悬浮圆按钮（机器人简笔）+ 可拖动/可最小化的对话面板（约 380px，覆盖在查看器上，不遮挡正文时为半透明）；展示 `compilation_messages` 历史（用户/助手气泡）；底部输入框 + 发送；编辑进行中禁用发送并显示"正在修改汇编…"；错误态明确（未配置第 1 步模型 / 调用失败 / 格式无法解析）。
+
+**协议（软件 → 大模型）**：提交物 = 用户要求 + **id 化的当前文档**（每行 `p12 | 2018 年 | 《长乐年鉴2019》 | 段落正文`）+ 允许的来源编号清单（1..N 与标题）。
+
+**协议（大模型 → 软件）**：只返回一个 JSON：`{"reply":"给用户看的回答","ops":[…]}`；支持的操作：
+
+| op | 参数 | 说明 |
+|---|---|---|
+| `delete` | `ids[]` | 删除段落 |
+| `replace` | `id, text, timeLabel?, evidence?` | 改写某段正文（时间可一并修正） |
+| `insertAfter` | `afterId, text, timeLabel, sourceOrdinal, evidence` | 在某段后插入新段（须指定来源编号，禁止新增"无来源"内容） |
+| `move` | `ids[], afterId` | 移动段落（用户可用对话调整时间顺序） |
+| `merge` | `ids[]` | 合并相邻段（**仅允许同一来源**） |
+| `split` | `id, at` | 拆分段落 |
+| `setTime` | `id, timeLabel` | 只改段首时间（用户说"这段应该是 2019 年"） |
+| `replaceAll` | `paragraphs[]` | 逃生舱：整篇重写（仅在用户明确要求"重写/统一文风/整体重排"时使用） |
+
+**本地校验（不可跳过，逐条失败即整条 op 拒绝并记入 `rejected[]`）**：id 必须存在；`sourceOrdinal` 必须在 `1..N`；插入/改写的正文中出现的**年份与数字必须能在该来源全文（或提供的 evidence）中找到**（防幻觉硬校验）；`merge` 仅同一来源；`replace`/`replaceAll` 必须保留段尾来源归属（缺来源的段落要有明确标记）；删除不得清空全部段落（除非用户明确要求清空）；`ops` 解析失败 → **文档不变**、报错并保留用户消息。
+
+**应用（单事务）**：应用 ops → upsert 段落 + 编号表 → 生成新版本（origin='llm-edit'，记 `instruction`/`reply`/`change_summary`）→ 写两条 `compilation_messages` → 返回 `{document, version, diff, reply, applied[], rejected[]}`。**并发保护**：请求带 `baseVersionNo`，若版本已变化则拒绝并提示重试（乐观锁）。
+
+**前端反馈**：查看器自动刷新 + 高亮本次改动段落 + 滚动到首个改动段；对话框显示 `reply` 与「已修改 N 段（新增 a / 修改 b / 删除 c）」；若 `rejected` 非空，追加说明（如"有 1 项被拒绝：引用了不存在的段落"）。
+
+**手动编辑的解锁条件（用户补充裁定 D5，2026-09-10）**：**在汇编最终确定之前，用户只能通过对话框向大模型提出修改要求**，查看器不提供任何直接编辑入口。只有当用户**确认汇编（finalized）**之后，工具栏才出现 **「开始人工修改」** 按钮；点击弹出**二次确认弹窗**，明确告知"进入人工修改模式后，将直接改写当前资料汇编，此操作不可逆"（文案入 i18n），用户确认后才进入手动编辑模式。进入后可逐段编辑正文/时间标签、删除、插入；此阶段的每次操作同样**生成新版本**（origin='user-edit'）——"不可逆"指不再受"只能由大模型改动"的约束，一旦手改就不提供"退出编辑模式并回滚全部手改"的额外兜底，误操作只能靠版本历史逐版恢复。"开始人工修改"按钮出现前的状态（`drafting`/`reviewing`）在 UI 上明确标注为"仅可对话修改"。
+
+**与旧链路的关系**：`compilation:adjust`（`compilation-adjust.ts` 的 `editActions`/`cardId` 协议）被本协议**取代并删除**（其 `cardId` 寻址在文档模型下不成立；顺带修掉其中 `parseEditActions` 的围栏正则笔误与"`update` 缺省字段写 null"问题）；左侧任务对话框的"调整现有汇编"预设文案改为引导用户使用右侧对话框（或直接路由到同一 `doc:edit` 后端，避免两条竞争链路）。
+
+### 7.6 导出 / 第三步 / 回收站 / 来源删除的重新定义
+
+- **`.docx`**：标题 + 正文（段首时间 + 正文 + **上标编号**）+ **附：来源清单（编号 ↔《标题》）** + 矛盾说明；替代现行"一卡两头两段"。
+- **`.xzsc`**：文档（段落数组）+ 来源编号表 + 版本历史（可裁剪）+ 对话历史；保留 `version:1` 旧格式的**读取兼容**。
+- **第三步（撰写初稿）**：素材改为**段落数组**（含时间与来源标题），提示词按年份分组呈现；`draft_generation_sources` 落痕继续（`chunk_text` = 段落正文）；`kept` 语义改为"是否纳入素材"（默认全部纳入）。
+- **来源删除与级联**：引用计数从"卡片数"改为"**被引用段数**"；删除来源后段落标记「来源已删除」并保留（或按用户选择一并删除），UI 明确提示影响 N 段。
+- **回收站（待裁定 D6）**：建议收缩为「仅矛盾」；段落删除由版本历史恢复（少一套并行机制）。
+
+### 7.7 收尾（端到端、性能、文档、清理）
+
+- 真实 Provider 端到端：生成 → 浏览（时间/编号/来源）→ 多轮对话编辑 → 版本对比与恢复 → 导出 → 导入到新任务 → 第三步生成初稿。
+- 性能基线记录：生成耗时（对比现行三阶段）、查看器滚动、diff 计算（两版本间）、单轮对话编辑耗时。
+- 删除死代码（`purify-service.ts`、`repair-service.ts`、`compilation-adjust.ts`、`compilation-undo.ts` 快照栈、`compilation_repairs` 相关仓储与 IPC）。
+- 文档全量同步：`AGENTS.md`、`PLAN.md`、`README.md`、`docs/{data-model,shared-contracts,ui-architecture}.md`；更新演示任务种子（`demo-task.ts`）与新手教程文案（若含"卡片"表述）；更新验证基线数字。
+
+### 7.8 阶段验收标准（每阶段均需"可直观验收"）
+
+| 阶段 | 可直观验收的产品行为 | 工程验收 |
+|---|---|---|
+| **7.1** 数据模型与迁移 | 打开**旧汇编**仍能正常显示（界面不变、无功能退化），底层已为每段分配好来源编号与年份 | Migration 030/031 在**真实库副本**上跑通 + 迁移回归单测；编号/年份回填断言；`upsertCompilationParagraphs` 保持段 id 稳定；typecheck / 单测 / 构建通过 |
+| **7.2** 管线（细读→整合提取→矛盾） | 同一标题重新生成后：**每段都含年份、每段都带来源编号**；无关内容大幅减少（字数明显下降） | 相关字占比、最终字数、"时间待核"段数、evidence 校验通过率、矛盾组数对比旧管线；耗时对比；新增单测（校验/排序/编号/降级） |
+| **7.3** 文档查看器 | 右栏是一篇**连续文本**；段首时间、段尾圆标可见且点击能打开对应来源；矛盾面板「定位到该段」能滚动高亮 | 三种主题样式一致；500 段以上滚动流畅；旧汇编同样正常渲染；单测/构建 |
+| **7.4** 版本与差异 | 做一次修改后，**改动段落被高亮**（绿/黄/红）；可在版本下拉里查看历史、对比差异、一键恢复；**重启后版本历史仍在** | diff 正确性单测（新增/删除/修改/移动/段内字符级）；恢复后生成新版本且与目标版本内容一致 |
+| **7.5** 对话框协同编辑 | 用户示例场景跑通：输入「校区建设不属于这方面的内容，请你把校区建设相关内容都删掉」→ 相关段被删除、查看器即时更新、对话框回「已按你的要求删除 N 段」；**未确认汇编前查看器无任何编辑入口**，确认后才出现「开始人工修改」并弹不可逆确认 | 错误路径：坏 JSON → 文档不变 + 明确报错；幻觉 id → 该 op 被拒并说明；跨来源 merge → 拒绝；乐观锁冲突 → 提示重试；单测（协议解析/校验/应用/回滚） |
+| **7.6** 导出与下游 | 导出的 docx 段落连续、上标编号与附录来源清单对应；导入到新任务后文档/编号/版本一致；第三步用它生成初稿 | 导出单测（含编号↔来源映射）；第三步素材构造单测；来源删除影响段数提示正确 |
+| **7.7** 收尾 | 全流程演示通过；文档与实现一致 | typecheck 0 / 单测全通过（除既有 chokidar 环境项）/ 生产构建成功；死代码清理确认；基线数字更新 |
+
+### 7.9 已裁定事项（用户敲定，2026-09-10）
+
+| # | 事项 | 裁定 |
+|---|---|---|
+| **D1** | 管线顺序 | **A**：合并为一趟 —— `细读筛选 → 整合提取（裁剪 + 补全 + 整合）→ 矛盾扫描`；原「提纯」「修正」两阶段被整合提取取代 |
+| **D2** | 圆标数字的含义 | **A**：**本汇编内**按首次引用顺序编号 1..N（同一篇文章的多段共用同一编号；编号只增不回收） |
+| **D3** | 大模型编辑协议 | **A**：ops 引用段 id（`delete/replace/insertAfter/move/merge/split/setTime`）+ `replaceAll` 逃生舱；本地逐条校验后应用 |
+| **D4** | 时间排序 | **C + D**：结构化 `year/month` + 本地稳定多键排序（年→月→来源序号→生成序）+ **按年份分节渲染**（`## 2018 年`）+ 允许用对话"移动段落" |
+| **D5** | 手动编辑 | **用户补充裁定（覆盖面超出原三选项）**：**确认汇编（finalized）之前查看器无任何直接编辑入口，只能通过对话框让大模型改**；确认后工具栏出现 **「开始人工修改」** 按钮，点击弹**不可逆二次确认**，确认后进入手动编辑模式（详见 7.5）。后期如需调整再议 |
+| **D6** | 旧机制处置 | **A**：废弃「大模型修正」记录（`compilation_repairs`）与卡片回收站，撤销/恢复改为"上一版/下一版"；破坏性清理放在 7.7（新界面与版本机制上线后） |
+
+> **实施节奏（用户敲定）**：**按阶段推进，每完成一阶段停下来等用户验收**（每阶段完成即提交，遵守"一个提交一个目的"）。开工顺序：7.1 → 7.2 → 7.3 → 7.4 → 7.5 → 7.6 → 7.7。
 
 ## Last Phase（收尾阶段）: Acceptance & Packaging（待进行）
 

@@ -261,5 +261,94 @@ if (import.meta.vitest) {
       ).toThrow()
       old.close()
     })
+
+    it('migration 030/031 adds the paragraph model and backfills ordinals, years and a v1 version (2026-09-10, Phase 7.1)', () => {
+      // 模拟升级前状态：应用迁移 1-29（含 028 清库，故测试数据在其后插入）
+      const old = new Database(':memory:')
+      old.exec(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `)
+      const insertMigration = old.prepare('INSERT INTO schema_migrations (version) VALUES (?)')
+      const applyAll = old.transaction(() => {
+        for (const m of MIGRATIONS.filter((x) => x.version < 30)) {
+          if (m.run) m.run(old)
+          else if (m.sql) old.exec(m.sql)
+          insertMigration.run(m.version)
+        }
+      })
+      applyAll()
+
+      // 旧数据：两张来源、四条卡片（含「只有月日没有年份」与「完全无年份」两种缺年份情形）
+      old.prepare("INSERT INTO writing_tasks (id, title, scope_json) VALUES ('t1','汇编测试','{\"all\":true}')").run()
+      old.prepare("INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('s1','file','长乐年鉴2019','正文','ready')").run()
+      old.prepare("INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('s2','file','教育发展报告','正文','ready')").run()
+      old.prepare(
+        "INSERT INTO compilations (id, task_id, title, status, created_at, updated_at) VALUES ('c1','t1','高中教育','reviewing','2026-01-01','2026-02-02')"
+      ).run()
+      const insItem = old.prepare(
+        "INSERT INTO compilation_items (id, compilation_id, position, source_id, excerpt, ts, extra_tags, kept, created_at) VALUES (?, 'c1', ?, ?, ?, ?, '[]', 1, '2026-01-01')"
+      )
+      // 第一段来自 s2（首次引用 → ordinal 1）；第二段来自 s1（→ ordinal 2）；第三段回到 s2（复用 1）
+      insItem.run('i1', 0, 's2', '2018 年，普通中学 30 所。', '2018 年 5 月')
+      insItem.run('i2', 1, 's1', '1999 年，被省教育厅评为先进。', '1999 年')
+      insItem.run('i3', 2, 's2', '7—9 日开展招生宣传。', '7—9 日')
+      insItem.run('i4', 3, 's1', '十三五规划期间完成改扩建。', '十三五规划期间')
+
+      runMigrations(old)
+
+      // ① 来源编号按首次引用顺序 1..N，引用计数正确
+      const sources = old
+        .prepare('SELECT source_id, ordinal, title, cited_count FROM compilation_sources WHERE compilation_id = ? ORDER BY ordinal')
+        .all('c1') as { source_id: string; ordinal: number; title: string; cited_count: number }[]
+      expect(sources).toEqual([
+        { source_id: 's2', ordinal: 1, title: '教育发展报告', cited_count: 2 },
+        { source_id: 's1', ordinal: 2, title: '长乐年鉴2019', cited_count: 2 }
+      ])
+      // ② 每段回填来源编号与结构化时间；无年份的时间标为 unknown（不能当“有时间戳”放过）
+      const items = old
+        .prepare('SELECT id, source_ordinal, year, month, day, time_confidence, origin, revision, kind FROM compilation_items WHERE compilation_id = ? ORDER BY position')
+        .all('c1') as {
+        id: string
+        source_ordinal: number | null
+        year: number | null
+        month: number | null
+        day: number | null
+        time_confidence: string
+        origin: string
+        revision: number
+        kind: string
+      }[]
+      expect(items).toEqual([
+        { id: 'i1', source_ordinal: 1, year: 2018, month: 5, day: null, time_confidence: 'exact', origin: 'generate', revision: 1, kind: 'paragraph' },
+        { id: 'i2', source_ordinal: 2, year: 1999, month: null, day: null, time_confidence: 'exact', origin: 'generate', revision: 1, kind: 'paragraph' },
+        // 「7—9 日」是**日**区间而非月份：month 必须为 null（否则会被排到 7 月），day 取末位数字
+        { id: 'i3', source_ordinal: 1, year: null, month: null, day: 9, time_confidence: 'unknown', origin: 'generate', revision: 1, kind: 'paragraph' },
+        { id: 'i4', source_ordinal: 2, year: null, month: null, day: null, time_confidence: 'unknown', origin: 'generate', revision: 1, kind: 'paragraph' }
+      ])
+      // ③ v1 版本：段落快照 + 一段一行的 markdown + 全部计为新增
+      const version = old
+        .prepare('SELECT version_no, origin, markdown, change_summary, paragraphs FROM compilation_versions WHERE compilation_id = ?')
+        .get('c1') as { version_no: number; origin: string; markdown: string; change_summary: string; paragraphs: string }
+      expect(version.version_no).toBe(1)
+      expect(version.origin).toBe('generate')
+      expect(version.markdown.split('\n')).toEqual([
+        '2018 年 5 月　2018 年，普通中学 30 所。',
+        '1999 年　1999 年，被省教育厅评为先进。',
+        '7—9 日　7—9 日开展招生宣传。',
+        '十三五规划期间　十三五规划期间完成改扩建。'
+      ])
+      const snapshot = JSON.parse(version.paragraphs) as { id: string; sourceOrdinal?: number; year?: number; timeConfidence: string }[]
+      expect(snapshot).toHaveLength(4)
+      expect(snapshot[0]).toMatchObject({ id: 'i1', sourceOrdinal: 1, year: 2018, timeConfidence: 'exact' })
+      expect(snapshot[3]).toMatchObject({ id: 'i4', timeConfidence: 'unknown' })
+      expect(JSON.parse(version.change_summary)).toMatchObject({ added: 4, removed: 0, modified: 0, moved: 0 })
+      // ④ 空汇编不建版本（避免噪声版本）
+      old.prepare("INSERT INTO compilations (id, task_id, title, status, created_at, updated_at) VALUES ('c2','t1','空汇编','drafting','2026-01-01','2026-01-01')").run()
+      expect(old.prepare('SELECT COUNT(*) AS c FROM compilation_versions WHERE compilation_id = ?').get('c2')).toEqual({ c: 0 })
+      old.close()
+    })
   })
 }

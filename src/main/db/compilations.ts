@@ -6,15 +6,26 @@
 import Database from 'better-sqlite3'
 import type {
   Compilation,
+  CompilationChangeSummary,
   CompilationContradiction,
   CompilationContradictionStatus,
   CompilationItem,
+  CompilationMessage,
+  CompilationParagraph,
+  CompilationParagraphKind,
+  CompilationParagraphOrigin,
+  CompilationSourceRef,
   CompilationStatus,
+  CompilationTimeConfidence,
+  CompilationVersion,
+  CompilationVersionOrigin,
+  CompilationVersionSummary,
   CompilationRecycleBinItem
 } from '../../shared/types'
 import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
 import { insertRepair, listRepairsByCompilation } from './compilation-repairs'
+import { buildParagraphSnapshot, renderDocumentMarkdown, summarizeParagraphChange } from '../writing/compilation-document'
 
 interface CompilationRow {
   id: string
@@ -36,6 +47,16 @@ interface CompilationItemRow {
   extra_tags: string
   kept: number
   created_at: string
+  /* ---- Phase 7.1（Migration 030）新增列：旧数据迁移后同样存在 ---- */
+  year: number | null
+  month: number | null
+  day: number | null
+  time_confidence: CompilationTimeConfidence | null
+  source_ordinal: number | null
+  evidence: string | null
+  origin: CompilationParagraphOrigin | null
+  revision: number | null
+  kind: CompilationParagraphKind | null
 }
 
 interface CompilationContradictionRow {
@@ -92,7 +113,16 @@ function mapItem(row: CompilationItemRow, titles: Map<string, string>): Compilat
     extraTags: parseJsonArray(row.extra_tags),
     kept: row.kept === 1,
     sourceTitle: titles.get(row.source_id) ?? row.source_id,
-    createdAt: row.created_at
+    createdAt: row.created_at,
+    year: row.year ?? undefined,
+    month: row.month ?? undefined,
+    day: row.day ?? undefined,
+    timeConfidence: row.time_confidence ?? undefined,
+    sourceOrdinal: row.source_ordinal ?? undefined,
+    evidence: row.evidence ?? undefined,
+    origin: row.origin ?? undefined,
+    revision: row.revision ?? undefined,
+    kind: row.kind ?? undefined
   }
 }
 
@@ -737,6 +767,393 @@ export function importCompilationIntoTask(taskId: string, source: Compilation): 
   return getCompilationById(newCompId)!
 }
 
+// ============================================================
+// Phase 7.1（2026-09-10）：连续文档模型 —— 来源编号表 / 段落 upsert / 版本历史 / 汇编级对话
+// ============================================================
+
+/** 段落写入入参（含可选 id：给了就复用，**段 id 稳定**是新模型的硬前提） */
+export interface CompilationParagraphInput {
+  id?: string
+  sourceId: string
+  text: string
+  timeLabel?: string
+  year?: number
+  month?: number
+  day?: number
+  timeConfidence?: CompilationTimeConfidence
+  sourceOrdinal?: number
+  evidence?: string
+  origin?: CompilationParagraphOrigin
+  revision?: number
+  kind?: CompilationParagraphKind
+  note?: string
+  extraTags?: string[]
+  kept?: boolean
+}
+
+interface CompilationSourceRow {
+  id: string
+  compilation_id: string
+  source_id: string | null
+  ordinal: number
+  title: string
+  cited_count: number
+}
+
+function mapSourceRef(row: CompilationSourceRow): CompilationSourceRef {
+  return {
+    id: row.id,
+    compilationId: row.compilation_id,
+    sourceId: row.source_id ?? undefined,
+    ordinal: row.ordinal,
+    title: row.title,
+    citedCount: row.cited_count
+  }
+}
+
+/** 列出某汇编的来源编号表（按 ordinal 升序） */
+export function listCompilationSources(compilationId: string): CompilationSourceRef[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM compilation_sources WHERE compilation_id = ? ORDER BY ordinal ASC')
+    .all(compilationId) as CompilationSourceRow[]
+  return rows.map(mapSourceRef)
+}
+
+/**
+ * 按「文档中首次被引用」的顺序补齐来源编号（纯函数逻辑 + 落库）：
+ * 已有编号的来源保持不变（**编号只增不回收**，避免历史版本与正文中的编号漂移），
+ * 新出现的来源追加到末尾。返回最新的编号表。
+ */
+export function ensureCompilationSources(compilationId: string, ordered: { sourceId: string; title: string }[]): CompilationSourceRef[] {
+  const db = getDb()
+  const existing = listCompilationSources(compilationId)
+  const bySource = new Map(existing.filter((s) => s.sourceId).map((s) => [s.sourceId as string, s]))
+  let nextOrdinal = existing.reduce((max, s) => Math.max(max, s.ordinal), 0)
+  const ins = db.prepare(
+    'INSERT INTO compilation_sources (id, compilation_id, source_id, ordinal, title, cited_count, created_at) VALUES (?,?,?,?,?,0,?)'
+  )
+  const now = new Date().toISOString()
+  const tx = db.transaction(() => {
+    for (const o of ordered) {
+      if (!o.sourceId || bySource.has(o.sourceId)) continue
+      nextOrdinal += 1
+      const id = crypto.randomUUID()
+      ins.run(id, compilationId, o.sourceId, nextOrdinal, o.title || o.sourceId, now)
+      bySource.set(o.sourceId, { id, compilationId, sourceId: o.sourceId, ordinal: nextOrdinal, title: o.title || o.sourceId, citedCount: 0 })
+    }
+    // 引用计数（用于"删除来源影响多少段"的提示）
+    db.prepare(
+      'UPDATE compilation_sources SET cited_count = (SELECT COUNT(*) FROM compilation_items i WHERE i.compilation_id = compilation_sources.compilation_id AND i.source_id = compilation_sources.source_id) WHERE compilation_id = ?'
+    ).run(compilationId)
+  })
+  tx()
+  return listCompilationSources(compilationId)
+}
+
+/**
+ * 用目标段落整体替换某汇编的段落，但**保留段 id**（Phase 7.1 的核心改动）：
+ * - 传入 `id` 且该行仍属本汇编 → UPDATE（id 不变，矛盾 variants / evidence / 版本快照继续有效）；
+ * - 未传或已不存在 → INSERT 新行；
+ * - 目标集合中不再出现的段落 → DELETE。
+ * 与旧的 `replaceCompilationItems`（先删后插、id 全变）不同，本函数保证 id 稳定。
+ */
+export function upsertCompilationParagraphs(compilationId: string, inputs: CompilationParagraphInput[]): CompilationItem[] {
+  const db = getDb()
+  const now = new Date().toISOString()
+  const existingRows = db
+    .prepare('SELECT id FROM compilation_items WHERE compilation_id = ?')
+    .all(compilationId) as { id: string }[]
+  const existingIds = new Set(existingRows.map((r) => r.id))
+  const keepIds = new Set<string>()
+  const ins = db.prepare(
+    `INSERT INTO compilation_items
+      (id, compilation_id, position, source_id, excerpt, ts, note, extra_tags, kept, created_at,
+       year, month, day, time_confidence, source_ordinal, evidence, origin, revision, kind)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  )
+  const upd = db.prepare(
+    `UPDATE compilation_items SET position = ?, source_id = ?, excerpt = ?, ts = ?, note = ?, extra_tags = ?, kept = ?,
+       year = ?, month = ?, day = ?, time_confidence = ?, source_ordinal = ?, evidence = ?, origin = ?, revision = ?, kind = ?
+     WHERE id = ?`
+  )
+  const tx = db.transaction(() => {
+    inputs.forEach((it, i) => {
+      const confidence = it.timeConfidence ?? (it.year != null ? 'exact' : 'unknown')
+      const origin = it.origin ?? 'generate'
+      const kind = it.kind ?? 'paragraph'
+      const revision = it.revision ?? 1
+      const note = it.note ?? null
+      const tags = JSON.stringify(it.extraTags ?? [])
+      const kept = it.kept === false ? 0 : 1
+      if (it.id && existingIds.has(it.id)) {
+        keepIds.add(it.id)
+        upd.run(
+          i,
+          it.sourceId,
+          it.text,
+          it.timeLabel ?? null,
+          note,
+          tags,
+          kept,
+          it.year ?? null,
+          it.month ?? null,
+          it.day ?? null,
+          confidence,
+          it.sourceOrdinal ?? null,
+          it.evidence ?? null,
+          origin,
+          revision,
+          kind,
+          it.id
+        )
+      } else {
+        const id = it.id ?? crypto.randomUUID()
+        keepIds.add(id)
+        ins.run(
+          id,
+          compilationId,
+          i,
+          it.sourceId,
+          it.text,
+          it.timeLabel ?? null,
+          note,
+          tags,
+          kept,
+          now,
+          it.year ?? null,
+          it.month ?? null,
+          it.day ?? null,
+          confidence,
+          it.sourceOrdinal ?? null,
+          it.evidence ?? null,
+          origin,
+          revision,
+          kind
+        )
+      }
+    })
+    for (const id of existingIds) {
+      if (!keepIds.has(id)) db.prepare('DELETE FROM compilation_items WHERE id = ?').run(id)
+    }
+  })
+  tx()
+  return getItemsByCompilation(compilationId)
+}
+
+interface CompilationVersionRow {
+  id: string
+  compilation_id: string
+  version_no: number
+  paragraphs: string
+  markdown: string
+  origin: CompilationVersionOrigin
+  instruction: string | null
+  reply: string | null
+  change_summary: string
+  base_version_no: number | null
+  created_at: string
+}
+
+function parseChangeSummary(raw: string): CompilationChangeSummary {
+  try {
+    const v = JSON.parse(raw) as Partial<CompilationChangeSummary>
+    return {
+      added: Number(v.added ?? 0),
+      removed: Number(v.removed ?? 0),
+      modified: Number(v.modified ?? 0),
+      moved: Number(v.moved ?? 0),
+      paragraphIds: Array.isArray(v.paragraphIds) ? v.paragraphIds.filter((x): x is string => typeof x === 'string') : []
+    }
+  } catch {
+    return { added: 0, removed: 0, modified: 0, moved: 0, paragraphIds: [] }
+  }
+}
+
+function mapVersionSummary(row: CompilationVersionRow): CompilationVersionSummary {
+  return {
+    id: row.id,
+    compilationId: row.compilation_id,
+    versionNo: row.version_no,
+    origin: row.origin,
+    instruction: row.instruction ?? undefined,
+    reply: row.reply ?? undefined,
+    changeSummary: parseChangeSummary(row.change_summary),
+    baseVersionNo: row.base_version_no ?? undefined,
+    createdAt: row.created_at
+  }
+}
+
+export function listCompilationVersions(compilationId: string): CompilationVersionSummary[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM compilation_versions WHERE compilation_id = ? ORDER BY version_no ASC')
+    .all(compilationId) as CompilationVersionRow[]
+  return rows.map(mapVersionSummary)
+}
+
+export function getLatestCompilationVersion(compilationId: string): CompilationVersion | null {
+  const db = getDb()
+  const row = db
+    .prepare('SELECT * FROM compilation_versions WHERE compilation_id = ? ORDER BY version_no DESC LIMIT 1')
+    .get(compilationId) as CompilationVersionRow | undefined
+  return row ? mapVersion(row) : null
+}
+
+export function getCompilationVersion(compilationId: string, versionNo: number): CompilationVersion | null {
+  const db = getDb()
+  const row = db
+    .prepare('SELECT * FROM compilation_versions WHERE compilation_id = ? AND version_no = ?')
+    .get(compilationId, versionNo) as CompilationVersionRow | undefined
+  return row ? mapVersion(row) : null
+}
+
+function mapVersion(row: CompilationVersionRow): CompilationVersion {
+  let paragraphs: CompilationParagraph[] = []
+  try {
+    const v = JSON.parse(row.paragraphs) as unknown
+    if (Array.isArray(v)) paragraphs = v as CompilationParagraph[]
+  } catch {
+    paragraphs = []
+  }
+  return { ...mapVersionSummary(row), paragraphs, markdown: row.markdown }
+}
+
+export interface InsertCompilationVersionInput {
+  compilationId: string
+  paragraphs: CompilationParagraph[]
+  origin: CompilationVersionOrigin
+  instruction?: string
+  reply?: string
+  /** 基线版本号（乐观锁与"相对哪一版"的记录） */
+  baseVersionNo?: number
+  /** 省略时按 `paragraphs` 与上一版本自动统计 */
+  changeSummary?: CompilationChangeSummary
+  createdAt?: string
+}
+
+/** 追加一个版本（version_no 自增）；markdown 由段落渲染（一段一行）。返回新版本摘要。 */
+export function insertCompilationVersion(input: InsertCompilationVersionInput): CompilationVersionSummary {
+  const db = getDb()
+  const latest = db
+    .prepare('SELECT version_no, paragraphs FROM compilation_versions WHERE compilation_id = ? ORDER BY version_no DESC LIMIT 1')
+    .get(input.compilationId) as { version_no: number; paragraphs: string } | undefined
+  const versionNo = (latest?.version_no ?? 0) + 1
+  let summary = input.changeSummary
+  if (!summary) {
+    let prev: CompilationParagraph[] = []
+    try {
+      const v = JSON.parse(latest?.paragraphs ?? '[]') as unknown
+      if (Array.isArray(v)) prev = v as CompilationParagraph[]
+    } catch {
+      prev = []
+    }
+    summary = summarizeParagraphChange(prev, input.paragraphs)
+  }
+  const id = crypto.randomUUID()
+  const markdown = renderDocumentMarkdown(input.paragraphs)
+  db.prepare(
+    `INSERT INTO compilation_versions
+      (id, compilation_id, version_no, paragraphs, markdown, origin, instruction, reply, change_summary, base_version_no, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+  ).run(
+    id,
+    input.compilationId,
+    versionNo,
+    JSON.stringify(input.paragraphs),
+    markdown,
+    input.origin,
+    input.instruction ?? null,
+    input.reply ?? null,
+    JSON.stringify(summary),
+    input.baseVersionNo ?? (latest?.version_no ?? null),
+    input.createdAt ?? new Date().toISOString()
+  )
+  return {
+    id,
+    compilationId: input.compilationId,
+    versionNo,
+    origin: input.origin,
+    instruction: input.instruction,
+    reply: input.reply,
+    changeSummary: summary,
+    baseVersionNo: input.baseVersionNo ?? (latest?.version_no ?? undefined),
+    createdAt: input.createdAt ?? new Date().toISOString()
+  }
+}
+
+/** 以当前段落为内容建版本（供生成/编辑落库后统一调用） */
+export function snapshotCompilationVersion(
+  compilationId: string,
+  origin: CompilationVersionOrigin,
+  extra?: { instruction?: string; reply?: string; baseVersionNo?: number }
+): CompilationVersionSummary | null {
+  const items = getItemsByCompilation(compilationId)
+  if (items.length === 0) return null
+  const sources = listCompilationSources(compilationId)
+  const refsBySourceId = new Map(sources.filter((s) => s.sourceId).map((s) => [s.sourceId as string, s]))
+  return insertCompilationVersion({
+    compilationId,
+    paragraphs: buildParagraphSnapshot(items, refsBySourceId),
+    origin,
+    instruction: extra?.instruction,
+    reply: extra?.reply,
+    baseVersionNo: extra?.baseVersionNo
+  })
+}
+
+interface CompilationMessageRow {
+  id: string
+  compilation_id: string
+  role: 'user' | 'assistant'
+  content: string
+  version_no: number | null
+  applied: string | null
+  rejected: string | null
+  created_at: string
+}
+
+export function listCompilationMessages(compilationId: string): CompilationMessage[] {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT * FROM compilation_messages WHERE compilation_id = ? ORDER BY created_at ASC, rowid ASC')
+    .all(compilationId) as CompilationMessageRow[]
+  return rows.map((r) => ({
+    id: r.id,
+    compilationId: r.compilation_id,
+    role: r.role,
+    content: r.content,
+    versionNo: r.version_no ?? undefined,
+    createdAt: r.created_at
+  }))
+}
+
+export function insertCompilationMessage(input: {
+  compilationId: string
+  role: 'user' | 'assistant'
+  content: string
+  versionNo?: number
+  applied?: unknown
+  rejected?: unknown
+}): CompilationMessage {
+  const db = getDb()
+  const id = crypto.randomUUID()
+  const now = new Date().toISOString()
+  db.prepare(
+    'INSERT INTO compilation_messages (id, compilation_id, role, content, version_no, applied, rejected, created_at) VALUES (?,?,?,?,?,?,?,?)'
+  ).run(
+    id,
+    input.compilationId,
+    input.role,
+    input.content,
+    input.versionNo ?? null,
+    input.applied === undefined ? null : JSON.stringify(input.applied),
+    input.rejected === undefined ? null : JSON.stringify(input.rejected),
+    now
+  )
+  return { id, compilationId: input.compilationId, role: input.role, content: input.content, versionNo: input.versionNo, createdAt: now }
+}
+
 // ---- vitest inline test ----
 if (import.meta.vitest) {
   const { describe, expect, it, beforeAll, afterAll } = import.meta.vitest
@@ -1012,6 +1429,128 @@ if (import.meta.vitest) {
       const after = getCompilationById(c.id)!
       expect(after.repairs![0].itemId).toBe(items[0].id)
       expect(after.items.map((i) => i.excerpt)).toEqual(['2021 年公办园 76 所', '2005 年全县幼儿园 89 所。'])
+    })
+  })
+
+  describe('compilation document store (Phase 7.1)', () => {
+    it('assigns source ordinals by first reference and keeps them stable on re-assign', () => {
+      const { taskId, sourceIds } = seed()
+      const c = createCompilation({ taskId, title: '高中教育' })
+      insertCompilationItems(c.id, [
+        { sourceId: sourceIds[1], excerpt: '甲', ts: '2018 年' },
+        { sourceId: sourceIds[0], excerpt: '乙', ts: '2019 年' },
+        { sourceId: sourceIds[1], excerpt: '丙', ts: '2020 年' }
+      ])
+      const first = ensureCompilationSources(c.id, [
+        { sourceId: sourceIds[1], title: '统计表' },
+        { sourceId: sourceIds[0], title: '教育发展报告' }
+      ])
+      expect(first.map((s) => [s.ordinal, s.title])).toEqual([
+        [1, '统计表'],
+        [2, '教育发展报告']
+      ])
+      expect(first[0].citedCount).toBe(2)
+      // 再次调用不会重排/回收编号，且新增来源追加到末尾
+      const s3 = crypto.randomUUID()
+      db.prepare("INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES (?, 'file', '年鉴', '正文', 'ready')").run(s3)
+      const second = ensureCompilationSources(c.id, [
+        { sourceId: sourceIds[0], title: '教育发展报告' },
+        { sourceId: s3, title: '年鉴' }
+      ])
+      expect(second.map((s) => [s.ordinal, s.title])).toEqual([
+        [1, '统计表'],
+        [2, '教育发展报告'],
+        [3, '年鉴']
+      ])
+    })
+
+    it('upserts paragraphs keeping existing ids and deleting the ones no longer present', () => {
+      const { taskId, sourceIds } = seed()
+      const c = createCompilation({ taskId, title: '高中教育' })
+      const items = insertCompilationItems(c.id, [
+        { sourceId: sourceIds[0], excerpt: '甲段', ts: '2018 年' },
+        { sourceId: sourceIds[1], excerpt: '乙段', ts: '2019 年' }
+      ])
+      const keepId = items[0].id
+      const after = upsertCompilationParagraphs(c.id, [
+        // 复用第一段 id 并改写正文 → id 必须保持不变（矛盾/证据/版本快照都依赖它）
+        {
+          id: keepId,
+          sourceId: sourceIds[0],
+          text: '甲段（已整合）',
+          timeLabel: '2018 年 5 月',
+          year: 2018,
+          month: 5,
+          timeConfidence: 'exact',
+          sourceOrdinal: 2,
+          evidence: '甲段',
+          origin: 'llm-edit',
+          revision: 2
+        },
+        // 新增一段（无 id → 新分配）
+        { sourceId: sourceIds[1], text: '丙段', timeLabel: '2020 年', year: 2020, timeConfidence: 'exact', sourceOrdinal: 1 }
+        // 第二段（乙段）不再出现 → 被删除
+      ])
+      expect(after).toHaveLength(2)
+      expect(after[0].id).toBe(keepId)
+      expect(after[0].excerpt).toBe('甲段（已整合）')
+      expect(after[0].year).toBe(2018)
+      expect(after[0].month).toBe(5)
+      expect(after[0].sourceOrdinal).toBe(2)
+      expect(after[0].origin).toBe('llm-edit')
+      expect(after[0].revision).toBe(2)
+      expect(after[1].excerpt).toBe('丙段')
+      expect(after[1].sourceOrdinal).toBe(1)
+      expect(after.map((i) => i.position)).toEqual([0, 1])
+      // 旧 id 集合里被移除的那段确实删掉了
+      expect(after.some((i) => i.id === items[1].id)).toBe(false)
+    })
+
+    it('writes versions with auto change summary and lists them in order', () => {
+      const { taskId, sourceIds } = seed()
+      const c = createCompilation({ taskId, title: '高中教育' })
+      insertCompilationItems(c.id, [{ sourceId: sourceIds[0], excerpt: '甲段', ts: '2018 年' }])
+      ensureCompilationSources(c.id, [{ sourceId: sourceIds[0], title: '教育发展报告' }])
+
+      const v1 = snapshotCompilationVersion(c.id, 'generate')!
+      expect(v1.versionNo).toBe(1)
+      expect(v1.changeSummary.added).toBe(1)
+      expect(getLatestCompilationVersion(c.id)!.paragraphs[0].text).toBe('甲段')
+      expect(getLatestCompilationVersion(c.id)!.paragraphs[0].sourceOrdinal).toBe(1)
+      expect(getLatestCompilationVersion(c.id)!.markdown).toBe('2018 年　甲段')
+
+      insertCompilationItems(c.id, [{ sourceId: sourceIds[1], excerpt: '乙段', ts: '2019 年' }])
+      const v2 = snapshotCompilationVersion(c.id, 'llm-edit', { instruction: '补一段', reply: '已补充' })!
+      expect(v2.versionNo).toBe(2)
+      expect(v2.changeSummary.added).toBe(1)
+      expect(v2.changeSummary.modified).toBe(0)
+      expect(v2.baseVersionNo).toBe(1)
+
+      const versions = listCompilationVersions(c.id)
+      expect(versions.map((v) => v.versionNo)).toEqual([1, 2])
+      expect(versions[1].origin).toBe('llm-edit')
+      expect(versions[1].instruction).toBe('补一段')
+      const loadedV1 = getCompilationVersion(c.id, 1)!
+      expect(loadedV1.paragraphs).toHaveLength(1)
+      expect(loadedV1.markdown).toBe('2018 年　甲段')
+    })
+
+    it('stores compilation-level chat messages in order', () => {
+      const { taskId } = seed()
+      const c = createCompilation({ taskId, title: '高中教育' })
+      insertCompilationMessage({ compilationId: c.id, role: 'user', content: '删掉校区建设内容' })
+      insertCompilationMessage({
+        compilationId: c.id,
+        role: 'assistant',
+        content: '已删除 3 段',
+        versionNo: 2,
+        applied: [{ op: 'delete', ids: ['p1'] }],
+        rejected: []
+      })
+      const msgs = listCompilationMessages(c.id)
+      expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant'])
+      expect(msgs[1].versionNo).toBe(2)
+      expect(msgs[0].content).toBe('删掉校区建设内容')
     })
   })
 }
