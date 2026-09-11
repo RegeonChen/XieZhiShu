@@ -6,7 +6,11 @@ import ContradictionDialog from './ContradictionDialog'
 import ResizeHandle from './ResizeHandle'
 import StyleGuideEditor from './StyleGuideEditor'
 import ChatPanel, { type ChatMessageItem, type SourceRefItem } from './ChatPanel'
-import CompilationStep, { type CompilationView } from './CompilationStep'
+import CompilationStep, {
+  type CompilationView,
+  type CompilationVersionView,
+  type CompilationVersionDiffView
+} from './CompilationStep'
 import type { Contradiction, CompilationRecycleBinItem } from '../../../shared/types'
 
 interface TaskItem {
@@ -156,6 +160,67 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   const [compilationProgress, setCompilationProgress] = useState<{ percent: number; etaSeconds?: number } | null>(null)
   const [compilationInterrupt, setCompilationInterrupt] = useState<{ stage: string; message: string; percent: number; retryable?: boolean } | null>(null)
   const [compilationInstruction, setCompilationInstruction] = useState('')
+  /* ---- Phase 7.4：版本管控 ---- */
+  const [versions, setVersions] = useState<CompilationVersionView[]>([])
+  const [compareFrom, setCompareFrom] = useState<number | null>(null)
+  const [versionDiff, setVersionDiff] = useState<CompilationVersionDiffView | null>(null)
+  const [onlyChanged, setOnlyChanged] = useState(false)
+
+  /** 读取某汇编的版本列表；有 ≥2 版时才显示版本控件 */
+  const loadVersions = useCallback(async (compilationId: string): Promise<void> => {
+    const res = await window.api.listCompilationVersions(compilationId)
+    if (res.ok && res.data) setVersions((res.data.versions ?? []) as CompilationVersionView[])
+  }, [])
+
+  // 汇编变化（生成/续跑/编辑/取舍/恢复）后刷新版本列表；每次变更都会产生新版本
+  useEffect(() => {
+    if (compilation?.id) void loadVersions(compilation.id)
+    else setVersions([])
+  }, [compilation, loadVersions])
+
+  /** 选择历史版本 → 取「该版本 → 最新版本」的差异（主进程算好，渲染层只负责画） */
+  const handleSelectVersion = useCallback(
+    async (versionNo: number | null): Promise<void> => {
+      if (!compilation) return
+      if (versionNo == null) {
+        setCompareFrom(null)
+        setVersionDiff(null)
+        return
+      }
+      const latest = versions.length > 0 ? versions[versions.length - 1].versionNo : versionNo
+      setCompareFrom(versionNo)
+      const res = await window.api.diffCompilationVersions(compilation.id, versionNo, latest)
+      if (res.ok && res.data) setVersionDiff(res.data as unknown as CompilationVersionDiffView)
+    },
+    [compilation, versions]
+  )
+
+  /** 恢复到某历史版本（恢复也生成新版本，不销毁历史） */
+  const handleRestoreVersion = useCallback(
+    async (versionNo: number): Promise<void> => {
+      if (!compilation) return
+      setBusy('chatting')
+      try {
+        const res = await window.api.restoreCompilationVersion(compilation.id, versionNo)
+        if (!res.ok || !res.data) {
+          const msg = '恢复失败：' + (res.error?.message ?? '未知错误')
+          appendAssistant(msg)
+          void window.api.addTaskMessage(taskId, 'assistant', msg, 'notice')
+          return
+        }
+        setCompilation(res.data.compilation as CompilationView)
+        await loadVersions(compilation.id)
+        setCompareFrom(null)
+        setVersionDiff(null)
+        const okMsg = '已恢复到 v' + versionNo + '（该恢复动作本身也记录为一个新版本）'
+        appendAssistant(okMsg)
+        void window.api.addTaskMessage(taskId, 'assistant', okMsg, 'notice')
+      } finally {
+        setBusy(null)
+      }
+    },
+    [compilation, loadVersions]
+  )
   // 前端 429 自动续传兜底：限流中断时自动调用 continueCompilation（上限限制，避免无限重试）
   const autoResumeAttemptRef = useRef(0)
   // ---- 矛盾回收站（Phase 6.1 优化） ----
@@ -941,6 +1006,13 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           onRedo={() => void handleRedo()}
           undoAvailable={undoAvailable}
           redoAvailable={redoAvailable}
+          versions={versions}
+          compareFrom={compareFrom}
+          versionDiff={versionDiff}
+          onlyChanged={onlyChanged}
+          onSelectVersion={(no) => void handleSelectVersion(no)}
+          onRestoreVersion={(no) => void handleRestoreVersion(no)}
+          onToggleOnlyChanged={setOnlyChanged}
         />
       )
     }
