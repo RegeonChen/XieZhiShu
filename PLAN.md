@@ -352,6 +352,21 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 
 ### 7.2 生成管线改造：细读筛选 → 整合提取 → 矛盾扫描
 
+> **Status（2026-09-10）**：**已实现，待真实 Provider 复跑验收**（用户裁定 D1：把「提纯 + 修正」合并为「整合提取」一趟）。
+> 交付：
+> - **细读提示词调轻**（用户要求）：明确"这里只做筛选、不做裁剪"，不确定是否相关一律保留，裁剪/合并/补全交给整合提取；不再要求"自包含事实"（旧要求正是"每段掺入无关内容"的另一面）。
+> - **新增 `src/main/writing/extract-service.ts`**：整合提取的提示词、解析、校验-降级流水线、分批（30 张 / 12000 字）、按 Provider 并发、漏答重问一次、解析失败换温度重试、逐批诊断日志；预算 1200s、单批先验 120s。
+> - **三道本地硬校验**（`compilation-document.ts`）：`evidence` 必须逐字来自来源卡片（`locateVerbatim`，容忍排版空格）；正文数字必须都能在来源卡片里找到（`numbersCoveredBy`，**整 token** 比较）；时间可信度由本地解析（不采信模型自报）。任一不过 → **降级保留原文整段**并按原因计数。
+> - **成文 `assembleDocument`**：完全重复去重、同来源近似重复（Dice ≥ 0.85）且数字一致才去重、**数字不一致两段都保留**（疑似矛盾）、按 年→月→生成序 稳定排序并重写 ordinal。
+> - **落库改为文档模型**：`ensureCompilationSources`（编号按排序后首次引用 1..N，只增不回收）+ `upsertCompilationParagraphs`（**保留段 id**）+ 生成 v1 版本（`snapshotCompilationVersion(..., 'generate')`）；中断时落库部分结果、续跑只重跑未完成批次（`extractDoneBatches`）。
+> - **窗口级矛盾改用「整合提取映射」**（`mapWindowGroupsThroughExtract`，取代原提纯映射 + 修正改写两道字符串兜底）：按"说法落在哪张候选卡片 → 该卡片派生段落中相似度最高的一段"映射，相似度 < 0.5 视为已被裁掉并丢弃该说法（宁丢说法不张冠李戴）。
+> - **契约同步**：`purifyScan`/`repairScan` → 单一 `extractScan`（IPC、主进程 handler、渲染层生成汇总、i18n 全部同步；进度重排为 细读 12→66%、整合提取 67→87%、矛盾 88→99%）。
+> - **旧阶段保留为 `@deprecated` 死代码**（`runPurifyPhase` / `runRepairPhase` 及其状态字段，带注释标明"Phase 7.2 起不再调用、Phase 7.7 清理时删除"）——先让新管线跑通并验收，再在 7.7 一并删除，避免一次改动同时"上新 + 拆旧"。
+> - 测试：`compilation-document` 9 项（含数字整 token 校验、成文去重/冲突保留/排序）、`extract-service` 6 项（解析、提示词约束断言、校验降级、幻觉 sourceRef、分批）、`tests/compilation-service.test.ts` 的窗口矛盾映射用例改写为 `mapWindowGroupsThroughExtract`。
+> - **测试当场抓到并修掉的三处真实缺陷**：① 数字校验原用"子串包含"，`2` 会被 `2018` 里的字符蒙混、`30` 会被 `130` 蒙混（等于给编造数字留后门）→ 改整 token 比较；② 近似重复原按"更长者胜"，会把"其中有独立高中"这类更啰嗦的写法当成"信息更全"→ 改为仅当新文本真正包含旧文本才替换；③ 只有 `dropped` 的整批"与主题无关"输出原被判为无效而整批降级 → 修正为合法输出。
+> **验证**：typecheck 零错误、**248/249 单测通过**（1 项 watcher chokidar 环境失败为既有问题）、生产构建成功。
+> **待用户用真实 Provider 复跑同一标题，核对对比表**：相关字占比、最终字数、段数、`extractScan.accepted/degraded`（校验通过率）、`时间待核` 段数、矛盾组数 vs 旧管线、总耗时。
+
 - **细读阶段（小改）**：提示词从"相关则整段成卡"改为"挑出可能相关的段落/条目（可整段或整条），**宁可多留**；裁剪交给后续整合提取"；保留现有窗口并发、ETA、断点续跑。
 - **新增 `extract-service.ts`**（替换 `purify-service.ts` + `repair-service.ts`）：输入窗口内候选文段（带 `#N` 来源编号与来源标题），输出：
   `{"paragraphs":[{"sourceRef":"#3","text":"<整合后的段落正文>","timeLabel":"2018 年 5 月","year":2018,"month":5,"confidence":"exact|inferred|unknown","evidence":"<原文逐字引文>","reason":"…"}],"dropped":[{"sourceRef":"#4","why":"…"}]}`
