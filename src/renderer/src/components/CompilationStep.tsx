@@ -351,14 +351,18 @@ function CompilationStep({
               <div className="compilation-card-head">
                 <div className="compilation-card-meta">
                   {it.sourceOrdinal != null ? (
-                    <span
+                    /* Phase 7.3 第一步（用户明确要求）：段尾来源圆标**可点击** → 直接打开该来源原文。
+                       正式版会在查看器里改为弹出「来源小卡（标题 / 该来源在本汇编中的全部段落 / 打开原文）」。 */
+                    <button
+                      type="button"
                       className="compilation-src-badge"
                       aria-label={t.sourceBadgeTitle.replace('{n}', String(it.sourceOrdinal))}
+                      onClick={() => onOpenSource(it.sourceId)}
                       onMouseEnter={(e) => showHint(e.currentTarget, t.sourceBadgeTitle.replace('{n}', String(it.sourceOrdinal)))}
                       onMouseLeave={() => setHint(null)}
                     >
                       {it.sourceOrdinal}
-                    </span>
+                    </button>
                   ) : null}
                   <span className={cls('compilation-chip', (it.timeConfidence ?? (it.year != null ? 'exact' : 'unknown')) === 'unknown' ? 'is-pending' : '')}>
                     {it.ts ?? t.noTime}

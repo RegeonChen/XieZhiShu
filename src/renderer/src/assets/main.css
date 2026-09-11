@@ -4549,6 +4549,12 @@ textarea:focus-visible {
   font-size: 11px;
   font-weight: 600;
   line-height: 1;
+  cursor: pointer;
+  font-family: inherit;
+}
+.compilation-src-badge:hover {
+  background: var(--accent);
+  color: var(--bg);
 }
 .compilation-chip.is-pending {
   color: var(--warning);
@@ -4572,9 +4578,6 @@ textarea:focus-visible {
   line-height: 1.6;
   white-space: nowrap;
   box-shadow: var(--shadow-lg, 0 6px 18px rgba(0, 0, 0, 0.18));
-}
-.compilation-src-badge {
-  cursor: help;
 }
 .compilation-card-text {
   flex: 1;
