@@ -11,6 +11,7 @@ import type {
   CompilationItem,
   CompilationRepair,
   CompilationRecycleBinItem,
+  CompilationVersionSummary,
   Contradiction,
   StyleGuide,
   Draft,
@@ -66,6 +67,10 @@ export const IPC = {
   COMPILATION_CONFIRM: 'compilation:confirm',
   COMPILATION_ADJUST: 'compilation:adjust',
   COMPILATION_REORDER: 'compilation:reorder',
+  /* Phase 7.4：版本管控（列表 / 差异 / 恢复） */
+  COMPILATION_VERSIONS: 'compilation:versions',
+  COMPILATION_VERSION_DIFF: 'compilation:version:diff',
+  COMPILATION_VERSION_RESTORE: 'compilation:version:restore',
   COMPILATION_UNDO: 'compilation:undo',
   COMPILATION_REDO: 'compilation:redo',
   COMPILATION_UNDO_STATE: 'compilation:undoState',
@@ -364,6 +369,35 @@ export interface CompilationReorderReq {
   direction: 'asc' | 'desc'
 }
 export type CompilationReorderRes = { compilation: Compilation }
+/* ---- Phase 7.4：版本管控（列表 / 两版差异 / 恢复到某版） ---- */
+export interface CompilationVersionsReq {
+  compilationId: string
+}
+export type CompilationVersionsRes = { versions: CompilationVersionSummary[] }
+export interface CompilationVersionDiffReq {
+  compilationId: string
+  fromVersionNo: number
+  toVersionNo: number
+}
+/** 差异段（主进程算好、渲染层只负责画） */
+export interface CompilationVersionDiffSegment {
+  kind: 'added' | 'removed' | 'modified' | 'unchanged'
+  id: string
+  prevText?: string
+  nextText?: string
+  inline?: { type: 'same' | 'add' | 'del'; text: string }[]
+}
+export type CompilationVersionDiffRes = {
+  fromVersionNo: number
+  toVersionNo: number
+  segments: CompilationVersionDiffSegment[]
+  summary: { added: number; removed: number; modified: number; unchanged: number }
+}
+export interface CompilationVersionRestoreReq {
+  compilationId: string
+  versionNo: number
+}
+export type CompilationVersionRestoreRes = { compilation: Compilation; restoredFrom: number }
 /** 资料汇编操作撤销/恢复（2026-08-28）：undo/redo 返回最新汇编与各自可用步数 */
 export interface CompilationUndoReq {
   compilationId: string
@@ -758,6 +792,9 @@ export interface IpcMapping {
   [IPC.COMPILATION_CONFIRM]: { _req: CompilationConfirmReq; _res: ApiResult<CompilationConfirmRes> }
   [IPC.COMPILATION_ADJUST]: { _req: CompilationAdjustReq; _res: ApiResult<CompilationAdjustRes> }
   [IPC.COMPILATION_REORDER]: { _req: CompilationReorderReq; _res: ApiResult<CompilationReorderRes> }
+  [IPC.COMPILATION_VERSIONS]: { _req: CompilationVersionsReq; _res: ApiResult<CompilationVersionsRes> }
+  [IPC.COMPILATION_VERSION_DIFF]: { _req: CompilationVersionDiffReq; _res: ApiResult<CompilationVersionDiffRes> }
+  [IPC.COMPILATION_VERSION_RESTORE]: { _req: CompilationVersionRestoreReq; _res: ApiResult<CompilationVersionRestoreRes> }
   [IPC.COMPILATION_UNDO]: { _req: CompilationUndoReq; _res: ApiResult<CompilationUndoRes> }
   [IPC.COMPILATION_REDO]: { _req: CompilationUndoReq; _res: ApiResult<CompilationUndoRes> }
   [IPC.COMPILATION_UNDO_STATE]: { _req: CompilationUndoReq; _res: ApiResult<CompilationUndoStateRes> }
