@@ -4556,6 +4556,25 @@ textarea:focus-visible {
 }
 .compilation-stat.is-warn {
   color: var(--warning);
+  cursor: help;
+}
+/* 自绘提示气泡（Phase 7.1）：fixed 定位，不会被卡片列表的滚动容器裁剪，瞬时出现 */
+.compilation-hint {
+  position: fixed;
+  transform: translate(-50%, -100%);
+  z-index: 9999;
+  pointer-events: none;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--fg);
+  color: var(--bg);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+  box-shadow: var(--shadow-lg, 0 6px 18px rgba(0, 0, 0, 0.18));
+}
+.compilation-src-badge {
+  cursor: help;
 }
 .compilation-card-text {
   flex: 1;

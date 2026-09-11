@@ -125,6 +125,16 @@ function CompilationStep({
   const cardsRef = useRef<HTMLDivElement | null>(null)
   const locateTimerRef = useRef<number | null>(null)
   const missTimerRef = useRef<number | null>(null)
+  /**
+   * 自绘提示气泡（Phase 7.1 验收展示）：原生 `title` 在本应用的滚动容器里不可靠
+   * （卡片列表是滚动容器，浏览器原生 tooltip 出现慢且用户在长列表里很难命中 18px 的小圆标），
+   * 故用一个 `position: fixed` 的气泡：瞬时出现、不会被滚动容器裁剪。
+   */
+  const [hint, setHint] = useState<{ x: number; y: number; text: string } | null>(null)
+  const showHint = (el: HTMLElement, text: string): void => {
+    const r = el.getBoundingClientRect()
+    setHint({ x: r.left + r.width / 2, y: r.top, text })
+  }
 
   useEffect(
     () => () => {
@@ -200,7 +210,11 @@ function CompilationStep({
         {candidateChunks ? <span className="compilation-stat">{t.candidate.replace('{chunks}', String(candidateChunks))}</span> : null}
         {sourceCount > 0 ? <span className="compilation-stat">{t.sourcesStat.replace('{count}', String(sourceCount))}</span> : null}
         {pendingTimeCount > 0 ? (
-          <span className="compilation-stat is-warn" title={t.pendingTimeHint}>
+          <span
+            className="compilation-stat is-warn"
+            onMouseEnter={(e) => showHint(e.currentTarget, t.pendingTimeHint)}
+            onMouseLeave={() => setHint(null)}
+          >
             {t.pendingTimeStat.replace('{count}', String(pendingTimeCount))}
           </span>
         ) : null}
@@ -337,7 +351,12 @@ function CompilationStep({
               <div className="compilation-card-head">
                 <div className="compilation-card-meta">
                   {it.sourceOrdinal != null ? (
-                    <span className="compilation-src-badge" title={t.sourceBadgeTitle.replace('{n}', String(it.sourceOrdinal))}>
+                    <span
+                      className="compilation-src-badge"
+                      aria-label={t.sourceBadgeTitle.replace('{n}', String(it.sourceOrdinal))}
+                      onMouseEnter={(e) => showHint(e.currentTarget, t.sourceBadgeTitle.replace('{n}', String(it.sourceOrdinal)))}
+                      onMouseLeave={() => setHint(null)}
+                    >
                       {it.sourceOrdinal}
                     </span>
                   ) : null}
@@ -441,6 +460,13 @@ function CompilationStep({
               <button type="button" className="source-list__btn source-list__btn--primary" onClick={saveEdit}>{t.save}</button>
             </div>
           </div>
+        </div>
+      ) : null}
+
+      {/* 自绘提示气泡：fixed 定位，不受卡片列表滚动容器裁剪（原生 title 在长滚动列表里不可靠） */}
+      {hint ? (
+        <div className="compilation-hint" style={{ left: hint.x, top: hint.y - 10 }} role="tooltip">
+          {hint.text}
         </div>
       ) : null}
     </div>
