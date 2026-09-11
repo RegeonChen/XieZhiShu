@@ -49,9 +49,15 @@ function buildGeneratedSummary(
       outputChars?: number
       accepted?: number
       degraded?: number
+      invalidNumbers?: number
+      invalidEvidence?: number
+      degradedFromEvidence?: number
+      degradedWholeCard?: number
       droppedCards?: number
       omitted?: number
       passthrough?: number
+      duplicatesDropped?: number
+      conflictsKept?: number
     }
   }
 ): string {
@@ -69,9 +75,20 @@ function buildGeneratedSummary(
         .replace('{toChars}', String(ps.outputChars ?? 0))
         .replace('{kept}', String(keptPct))
     )
-    if (ps.degraded && ps.degraded > 0) {
-      parts.push(zhCN.compilation.extractDegraded.replace('{count}', String(ps.degraded)))
+    // 诊断细分：本地校验通过/降级（数字无据 · 证据非原文），以及降级粒度（evidence 片段 / 整卡原文）
+    if (ps.accepted != null || ps.degraded != null) {
+      parts.push(
+        zhCN.compilation.extractDiagnostics
+          .replace('{accepted}', String(ps.accepted ?? 0))
+          .replace('{degraded}', String(ps.degraded ?? 0))
+          .replace('{numbers}', String(ps.invalidNumbers ?? 0))
+          .replace('{evidence}', String(ps.invalidEvidence ?? 0))
+          .replace('{fromEvidence}', String(ps.degradedFromEvidence ?? 0))
+          .replace('{wholeCard}', String(ps.degradedWholeCard ?? 0))
+      )
     }
+    if (ps.droppedCards) parts.push(zhCN.compilation.extractDropped.replace('{count}', String(ps.droppedCards)))
+    if (ps.conflictsKept) parts.push(zhCN.compilation.extractConflictsKept.replace('{count}', String(ps.conflictsKept)))
   }
   if (fixCount > 0) parts.push(fixCount + ' 张经过大模型修正（卡片上有标记，可点开查看修正前原文与理由并回退）')
   parts.push(pendingCount > 0 ? pendingCount + ' 组矛盾待处理' : '无未处理矛盾')

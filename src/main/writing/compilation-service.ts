@@ -72,6 +72,7 @@ import {
   insertCompilationItems,
   insertCompilationContradictions,
   replaceCompilationItems,
+  setCompilationExtractScan,
   snapshotCompilationVersion,
   upsertCompilationParagraphs,
   type CompilationItemInput,
@@ -1653,6 +1654,8 @@ async function runExtractPhase(
       degraded: agg.unverified,
       invalidNumbers: agg.invalidNumbers,
       invalidEvidence: agg.invalidEvidence,
+      degradedFromEvidence: agg.degradedFromEvidence,
+      degradedWholeCard: agg.degradedWholeCard,
       droppedCards: agg.droppedCards,
       omitted: agg.omitted,
       passthrough: agg.passthrough,
@@ -1757,6 +1760,8 @@ async function runExtractPhase(
       agg.invalidNumbers += res.stats.invalidNumbers
       agg.invalidEvidence += res.stats.invalidEvidence
       agg.emptyText += res.stats.emptyText
+      agg.degradedFromEvidence += res.stats.degradedFromEvidence
+      agg.degradedWholeCard += res.stats.degradedWholeCard
       agg.droppedCards += res.stats.droppedCards
       agg.omitted += res.stats.omitted
       agg.passthrough += res.stats.passthrough
@@ -1934,9 +1939,15 @@ function finalizeCompilationInto(
     outputChars?: number
     accepted?: number
     degraded?: number
+    invalidNumbers?: number
+    invalidEvidence?: number
+    degradedFromEvidence?: number
+    degradedWholeCard?: number
     droppedCards?: number
     omitted?: number
     passthrough?: number
+    duplicatesDropped?: number
+    conflictsKept?: number
   }
 ): GenerateCompilationResult {
   const { itemIdByText } = persistDocument(compilationId, output.paragraphs, refs)
@@ -1962,6 +1973,8 @@ function finalizeCompilationInto(
   const contradictions = insertCompilationContradictions(compilationId, groups)
   // v1 版本：生成完成即建立基线（后续每次编辑都会追加新版本）
   snapshotCompilationVersion(compilationId, 'generate')
+  // 整合提取诊断落库（便于事后复盘：通过校验/降级原因/降级粒度各占多少）
+  setCompilationExtractScan(compilationId, extractScan ?? null)
   return {
     ok: true,
     compilationId,

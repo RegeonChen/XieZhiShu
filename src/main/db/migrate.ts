@@ -870,6 +870,15 @@ CREATE INDEX IF NOT EXISTS idx_compilation_messages_comp ON compilation_messages
         )
       }
     }
+  },
+  {
+    // 2026-09-10（Phase 7.2 诊断增强）：把生成时「整合提取」阶段的诊断汇总（ExtractScanStats JSON）落库，
+    // 便于事后复盘"通过校验 / 降级（数字无据 / 证据非原文）/ 整卡丢弃 / 漏答 / 重复合并"各占多少，
+    // 不必再靠临时脚本反推（本轮就吃过这个亏）。
+    version: 32,
+    sql: `
+ALTER TABLE compilations ADD COLUMN extract_scan TEXT;
+`
   }
 ]
 

@@ -62,8 +62,10 @@ export interface ExtractedDraft {
   /** 时间可信度：exact=原文明确；inferred=按来源标题兜底推断（年鉴年份 −1）；unknown=仍未确定 */
   timeConfidence?: CompilationTimeConfidence
   evidence?: string
-  /** true = 校验未通过、已降级为原文整段 */
+  /** true = 校验未通过、已降级为原文（优先 evidence 片段，定位不到才用整张卡片原文） */
   degraded?: boolean
+  /** true = 降级时用的是 evidence 片段（粒度细）；false = 退回整张卡片原文 */
+  degradedFromEvidence?: boolean
 }
 
 export interface ExtractBatchStats {
@@ -73,18 +75,22 @@ export interface ExtractBatchStats {
   returned: number
   /** 通过全部本地校验的段落数 */
   accepted: number
-  /** 校验失败而降级为原文整段的段落/卡片数 */
+  /** 校验失败而降级的段落数 */
   unverified: number
   /** 其中因"数字在来源中找不到"降级（幻觉嫌疑） */
   invalidNumbers: number
   /** 其中因"证据引文不是原文"降级 */
   invalidEvidence: number
   emptyText: number
+  /** 降级时只保留 evidence 片段（粒度细）的段数 */
+  degradedFromEvidence: number
+  /** 降级时退回整张卡片原文的段数 */
+  degradedWholeCard: number
   /** 模型判定"该卡片与主题无关"而整体丢弃的卡片数 */
   droppedCards: number
   /** 模型始终未回答的卡片数（重问后仍未答） */
   omitted: number
-  /** 最终按原文整段保留的卡片数（漏答 / 解析失败整批降级） */
+  /** 最终按原文保留的卡片数（漏答 / 解析失败整批降级） */
   passthrough: number
   retainedChars: number
   retried: number
@@ -100,6 +106,8 @@ export function emptyExtractStats(input = 0, inputChars = 0): ExtractBatchStats 
     invalidNumbers: 0,
     invalidEvidence: 0,
     emptyText: 0,
+    degradedFromEvidence: 0,
+    degradedWholeCard: 0,
     droppedCards: 0,
     omitted: 0,
     passthrough: 0,
@@ -124,10 +132,16 @@ export interface ExtractScanStats {
   outputChars: number
   /** 通过本地校验的段落数 */
   accepted: number
-  /** 校验失败而降级为原文整段的卡片数 */
+  /** 校验失败而降级的段落数 */
   degraded: number
+  /** 降级原因细分：数字在来源中找不到（幻觉嫌疑） */
   invalidNumbers: number
+  /** 降级原因细分：证据引文不是原文 */
   invalidEvidence: number
+  /** 降级粒度细分：只保留 evidence 片段 */
+  degradedFromEvidence?: number
+  /** 降级粒度细分：退回整张卡片原文 */
+  degradedWholeCard?: number
   /** 模型判定与主题无关而整卡丢弃 */
   droppedCards: number
   /** 模型始终未回答、按原文保留的卡片数 */
@@ -221,7 +235,7 @@ export function buildExtractMessages(batch: ExtractCandidate[], topic: string): 
     '2. **每段只能来自一张卡片**（即一个来源）：不得把不同卡片的文字拼成一段；不同来源的内容必须分成不同段落。',
     '3. 允许的加工：删掉无关内容；在同一张卡片内部调整语序、合并同一事实的多句表述、把省略的主语或指代补全（「他」「该校」→ 具体人名/校名）；去掉或改写「【概况】」这类栏目名。',
     '4. **不得合并互相矛盾的说法**：若两张卡片（或同一卡片内两处）对同一事实给出不同数字、时间或说法，必须**分别保留为不同段落**，不要取其中一种，也不要折中。',
-    '5. 每段必须给出 `timeLabel`（段首时间，**必须含 4 位年份**，如「2018 年」「2018 年 5 月」）：依据正文、卡片时间与来源文献年份推断（来源为《长乐年鉴2019》通常记述 2018 年）。确实推断不出年份时，照原文的时间写法给出（如「5 月 19 日」），**不要编造年份**。',
+    '5. 每段必须给出 `timeLabel`（段首时间，**必须含 4 位年份**，如「2018 年」「2018 年 5 月」「2018 年 5 月 19 日」；不要写「5 月 19 日」这种缺年份的写法）：依据正文、卡片时间与来源文献年份推断（**年鉴惯例**：来源为《长乐年鉴2019》时，其正文通常记述 2018 年，即年鉴年份减 1）。确实推断不出年份时也必须给出一个含年份的时间（按上述惯例推定），不要留空。',
     '6. 每段必须给出 `evidence`：从该卡片原文中**逐字连续**摘出的一段（不得改写、不得拼接、不得跨卡片拼），作为这段的事实依据。',
     '7. 某张卡片里确实没有与主题相关的内容时，把它放进 `dropped` 并简述原因。',
     '8. 不要输出任何解释性文字或代码块围栏，只输出一个 JSON 对象。',
@@ -272,15 +286,24 @@ export function logExtractBatchStats(batchNo: number, total: number, stats: Extr
 
 // ---------------------------------------------------------------- 批次处理（核心，可测试）
 
-/** 降级：保留该卡片原文整段（不丢材料），时间标签沿用卡片自身；缺年份时用来源标题兜底推断 */
-function degraded(candidate: ExtractCandidate): ExtractedDraft {
+/**
+ * 降级（用户 2026-09-10 收窄粒度）：
+ * - 若能定位到 `evidence`（说明该段确实出自这张卡片）→ **只保留 evidence 那段逐字原文**，
+ *   而不是整张卡片原文——实测降级段平均 247 字/段、把整体相关性从 91% 拖到 76%，粒度太粗是主因；
+ * - 定位不到 evidence → 才退回整张卡片原文（真正无法定位，只能整体保留）。
+ * 两条路径都做段首时间兜底（缺年份时按来源标题推断，年鉴年份 −1）。
+ */
+function degraded(candidate: ExtractCandidate, evidence?: string): ExtractedDraft {
+  const located = evidence ? locateVerbatim(candidate.excerpt, evidence) : null
+  const text = located ? candidate.excerpt.slice(located.start, located.end) : candidate.excerpt
   const time = withFallbackYear(candidate.ts, candidate.sourceTitle)
   return {
     parentIndex: candidate.index,
-    text: candidate.excerpt,
+    text,
     timeLabel: time.timeLabel,
     timeConfidence: time.timeConfidence,
-    degraded: true
+    degraded: true,
+    degradedFromEvidence: located !== null
   }
 }
 
@@ -320,7 +343,11 @@ export function collectExtractResults(
       if (reason === 'number-not-in-source') stats.invalidNumbers += 1
       else if (reason === 'evidence-not-found') stats.invalidEvidence += 1
       else stats.emptyText += 1
-      drafts.push(degraded(group[0]))
+      // 降级：优先只保留 evidence 片段（粒度细），定位不到才退回整张卡片原文
+      const fallback = degraded(group[0], (draft.evidence ?? '').trim() || undefined)
+      if (fallback.degradedFromEvidence) stats.degradedFromEvidence += 1
+      else stats.degradedWholeCard += 1
+      drafts.push(fallback)
       continue
     }
     // 段落归属：优先归到 evidence 所在的那张卡片（用于矛盾说法映射与诊断），否则归该来源第一张
@@ -434,7 +461,7 @@ export async function extractBatch(
       stats.passthrough = batch.length
       stats.omitted = batch.length
       logMain('extract', '整批 ' + batch.length + ' 张卡片的输出无法解析，已按原文整段保留')
-      return { ok: true, drafts: batch.map(degraded), stats }
+      return { ok: true, drafts: batch.map((c) => degraded(c)), stats }
     }
   }
 
@@ -500,9 +527,10 @@ if (import.meta.vitest) {
       expect(sys).toContain('不得合并互相矛盾的说法')
       // evidence 必须逐字
       expect(sys).toContain('逐字连续')
-      // 时间必须含年份，且不得编造年份
+      // 时间必须含年份，且给出年鉴惯例（用户裁定：时间只靠提示词规范，不再本地复核）
       expect(sys).toContain('必须含 4 位年份')
-      expect(sys).toContain('不要编造年份')
+      expect(sys).toContain('年鉴惯例')
+      expect(sys).toContain('年鉴年份减 1')
       // 输出格式
       expect(sys).toContain('"paragraphs"')
       expect(sys).toContain('"dropped"')
@@ -550,10 +578,14 @@ if (import.meta.vitest) {
       expect(stats.invalidNumbers).toBe(1)
       expect(drafts).toHaveLength(2)
       expect(drafts.every((d) => d.degraded === true)).toBe(true)
-      // 降级保留的是原文整段，而不是模型改写的文本
+      // 粒度收窄（用户裁定）：evidence 能定位 → 只保留证据片段；定位不到 → 才退回整张卡片原文
+      expect(drafts[0].degradedFromEvidence).toBe(false)
       expect(drafts[0].text).toBe(batch[0].excerpt)
       expect(drafts[0].timeLabel).toBe('2018 年')
-      expect(drafts[1].text).toBe(batch[2].excerpt)
+      expect(drafts[1].degradedFromEvidence).toBe(true)
+      expect(drafts[1].text).toBe('全区幼儿园 212 所')
+      expect(stats.degradedFromEvidence).toBe(1)
+      expect(stats.degradedWholeCard).toBe(1)
     })
 
     it('ignores hallucinated source refs and leaves unanswered cards for the caller', () => {

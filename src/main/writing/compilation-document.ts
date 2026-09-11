@@ -325,11 +325,27 @@ export type ParagraphValidation =
   | { ok: false; reason: ParagraphRejectReason }
 
 /**
+ * 时间可信度**采信大模型自报**（用户 2026-09-10 裁定：去掉"本地再校验时间"这一条）：
+ * 模型给出可识别的取值就照用（精确/exact、推断/inferred、未知/unknown 及常见中文写法），
+ * 给不出时按"有标签即 exact、无标签即 unknown"兜底。本地不再用解析结果去覆盖模型的判断，
+ * 解析只服务于**排序**（结构化 year/month/day）与界面提示（标签里到底有没有年份）。
+ */
+export function mapModelConfidence(raw: string | undefined, timeLabel: string | undefined): CompilationTimeConfidence {
+  const v = (raw ?? '').trim().toLowerCase()
+  if (v) {
+    if (/exact|精确|明确|确定|explicit/.test(v)) return 'exact'
+    if (/infer|推断|推定|inferred|estimated/.test(v)) return 'inferred'
+    if (/unknown|未知|无|未定|none|missing/.test(v)) return 'unknown'
+  }
+  return (timeLabel ?? '').trim() ? 'exact' : 'unknown'
+}
+
+/**
  * 校验一段整合提取结果（纯函数）：
  * ① 正文非空；② `evidence` 必须是来源原文中逐字连续的一段；③ 正文里的数字必须都能在来源原文中找到。
- * 任一条不过 → 返回失败原因，调用方**降级保留原文整段**（不丢材料），而不是丢弃。
- * 说明：时间可信度由本地解析 `timeLabel` 决定（模型自报的 confidence 不采信），
- * 因此「每段必须含年份」这条约束不会因模型自称 exact 而被绕过。
+ * **时间不再参与校验**（用户裁定：只靠提示词规范时间格式，不再本地复核），仅解析出结构化 year/month/day 供排序，
+ * 并把模型自报的 confidence 原样透出。
+ * 任一条不过 → 返回失败原因，调用方**降级保留可定位的原文**（见 extract-service，优先 evidence 片段）。
  */
 export function validateExtractedParagraph(draft: ExtractedParagraphDraft, sourceText: string): ParagraphValidation {
   const text = (draft.text ?? '').trim()
@@ -343,7 +359,7 @@ export function validateExtractedParagraph(draft: ExtractedParagraphDraft, sourc
     ok: true,
     text,
     timeLabel: timeLabel || undefined,
-    timeConfidence: parsed.confidence,
+    timeConfidence: mapModelConfidence(draft.confidence, timeLabel),
     year: parsed.year,
     month: parsed.month,
     day: parsed.day,
@@ -576,16 +592,31 @@ if (import.meta.vitest) {
         expect(ok.timeConfidence).toBe('exact')
         expect(ok.evidence).toBe('全区普通中学 30 所')
       }
-      // 缺年份的时间标签：保留标签但标为 unknown（不能因模型自称 exact 就放行）
+      // 时间**不再本地复核**：模型自报的 confidence 一律采信（用户裁定），解析只用于排序与界面提示
       const pending = validateExtractedParagraph(
         { sourceRef: '#1', text: '7—9 日开展招生宣传。', timeLabel: '7—9 日', confidence: 'exact', evidence: '7—9 日' },
         '7—9 日开展招生宣传。'
       )
       expect(pending.ok).toBe(true)
       if (pending.ok) {
-        expect(pending.timeConfidence).toBe('unknown')
+        expect(pending.timeConfidence).toBe('exact')
         expect(pending.year).toBeUndefined()
+        expect(pending.timeLabel).toBe('7—9 日')
       }
+      const inferred = validateExtractedParagraph(
+        { sourceRef: '#1', text: '2018 年，全区普通中学 30 所。', timeLabel: '2018 年', confidence: '推断', evidence: '全区普通中学 30 所' },
+        src
+      )
+      if (inferred.ok) {
+        expect(inferred.timeConfidence).toBe('inferred')
+        expect(inferred.year).toBe(2018)
+      }
+      // 模型没给 confidence 但有标签 → 视为 exact
+      const noConfidence = validateExtractedParagraph(
+        { sourceRef: '#1', text: '2018 年，全区普通中学 30 所。', timeLabel: '2018 年', evidence: '全区普通中学 30 所' },
+        src
+      )
+      if (noConfidence.ok) expect(noConfidence.timeConfidence).toBe('exact')
       expect(validateExtractedParagraph({ sourceRef: '#1', text: '  ' }, src)).toEqual({ ok: false, reason: 'empty-text' })
       expect(
         validateExtractedParagraph({ sourceRef: '#1', text: '普通中学 30 所。', evidence: '这段原文里没有' }, src)

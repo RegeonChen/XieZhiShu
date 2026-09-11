@@ -309,13 +309,25 @@ export type CompilationExtractScan = CompilationStageScan & {
   outputChars?: number
   /** 通过本地校验（证据逐字 + 数字有据）的段落数 */
   accepted?: number
-  /** 校验失败而降级为原文整段的卡片数 */
+  /** 校验失败而降级的段落数 */
   degraded?: number
+  /** 降级原因细分：正文里的数字在来源中找不到（幻觉嫌疑） */
+  invalidNumbers?: number
+  /** 降级原因细分：证据引文不是来源原文 */
+  invalidEvidence?: number
+  /** 降级粒度细分：只保留了 evidence 片段（粒度细） */
+  degradedFromEvidence?: number
+  /** 降级粒度细分：退回整张卡片原文（无法定位） */
+  degradedWholeCard?: number
   /** 模型判定与主题无关而整卡丢弃 */
   droppedCards?: number
   /** 模型始终未回答、按原文保留的卡片数 */
   omitted?: number
   passthrough?: number
+  /** 成文阶段被判为重复而合并掉的段数 */
+  duplicatesDropped?: number
+  /** 疑似同一事实但数字不一致、特意保留的段数（矛盾候选） */
+  conflictsKept?: number
 }
 export type CompilationGenerateRes = {
   compilation: Compilation

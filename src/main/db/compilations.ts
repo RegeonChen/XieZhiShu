@@ -1154,6 +1154,31 @@ export function insertCompilationMessage(input: {
   return { id, compilationId: input.compilationId, role: input.role, content: input.content, versionNo: input.versionNo, createdAt: now }
 }
 
+/** 记录本次生成「整合提取」阶段的诊断汇总（JSON），供事后复盘与验收查询 */
+export function setCompilationExtractScan(compilationId: string, scan: unknown): void {
+  const db = getDb()
+  db.prepare('UPDATE compilations SET extract_scan = ?, updated_at = ? WHERE id = ?').run(
+    scan === undefined ? null : JSON.stringify(scan),
+    new Date().toISOString(),
+    compilationId
+  )
+}
+
+/** 读取上次生成的整合提取诊断（无记录返回 null） */
+export function getCompilationExtractScan(compilationId: string): Record<string, unknown> | null {
+  const db = getDb()
+  const row = db.prepare('SELECT extract_scan FROM compilations WHERE id = ?').get(compilationId) as
+    | { extract_scan: string | null }
+    | undefined
+  if (!row?.extract_scan) return null
+  try {
+    const v = JSON.parse(row.extract_scan) as unknown
+    return v && typeof v === 'object' ? (v as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
+
 // ---- vitest inline test ----
 if (import.meta.vitest) {
   const { describe, expect, it, beforeAll, afterAll } = import.meta.vitest

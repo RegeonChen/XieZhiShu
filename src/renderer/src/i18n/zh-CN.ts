@@ -486,9 +486,12 @@ export const zhCN = {
     presetAddContentLabel: '增补内容',
     presetAddContentDesc: '补齐汇编中缺失的方面',
     presetAddContent: '目前的资料汇编中缺失了「……」方面的信息，请你从资料库中再次检索相关片段并加入资料汇编。\n详细描述：……',
-    /* 整合提取（Phase 7.2：细读筛选之后、矛盾扫描之前；允许裁剪/补全/整合，本地三道校验兜底） */
+    /* 整合提取（Phase 7.2：细读筛选之后、矛盾扫描之前；允许裁剪/补全/整合，本地两道校验兜底） */
     extractSummary: '（整合提取：{fromCards} 张卡片 / {fromChars} 字 → {toParagraphs} 段 / {toChars} 字，保留约 {kept}%）',
-    extractDegraded: '其中 {count} 张未通过本地校验、已按原文整段保留',
+    extractDiagnostics:
+      '（校验：通过 {accepted} 段；降级 {degraded} 段 —— 其中数字在来源中找不到 {numbers} 段、证据引文非原文 {evidence} 段；降级粒度：保留证据片段 {fromEvidence} 段、退回整卡原文 {wholeCard} 段）',
+    extractDropped: '模型判定与主题无关而整卡丢弃 {count} 张',
+    extractConflictsKept: '{count} 段因「疑似同一事实但数字不一致」特意保留（交给矛盾扫描）',
     extractScanFailed: '整合提取未完成（{reason}），部分卡片可能仍按原文原样保留、未做裁剪整合。',
     /* 大模型修正（2026-09-08：默认应用 + 卡片标记 + 可回退/再次应用；不再进入回收站） */
     repairBadge: '✎ 经过大模型修正',
