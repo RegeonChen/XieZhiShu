@@ -51,6 +51,12 @@ import {
   type CompilationAdjustRes,
   type CompilationReorderReq,
   type CompilationReorderRes,
+  type CompilationVersionsReq,
+  type CompilationVersionsRes,
+  type CompilationVersionDiffReq,
+  type CompilationVersionDiffRes,
+  type CompilationVersionRestoreReq,
+  type CompilationVersionRestoreRes,
   type CompilationUndoReq,
   type CompilationUndoRes,
   type CompilationUndoStateRes,
@@ -97,8 +103,12 @@ import {
   restoreCompilationCardRecycleBin,
   listFinalizedCompilationsForImport,
   importCompilationIntoTask,
-  snapshotCompilationVersion
+  snapshotCompilationVersion,
+  listCompilationVersions,
+  getCompilationVersion,
+  restoreCompilationFromVersion
 } from './db/compilations'
+import { diffParagraphVersions, summarizeParagraphDiff } from './writing/compilation-diff'
 import { setRepairApplied } from './db/compilation-repairs'
 import {
   listStyleGuides,
@@ -797,8 +807,57 @@ handleLogged(IPC.COMPILATION_ADJUST, async (_event, params: CompilationAdjustReq
 }))
 
 // 资料汇编卡片重新按时间排序（2026-08-28）：asc 正序 / desc 反序，重写 position 并返回最新汇编
-handleLogged(IPC.COMPILATION_REORDER, (_event, params: CompilationReorderReq): ApiResult<CompilationReorderRes> => {
+// Phase 7.4：版本管控 —— 列表 / 两版差异 / 恢复到某版
+handleLogged(IPC.COMPILATION_VERSIONS, (_event, params: CompilationVersionsReq): ApiResult<CompilationVersionsRes> => {
   try {
+    if (!params.compilationId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
+    return { ok: true, data: { versions: listCompilationVersions(params.compilationId) } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.COMPILATION_VERSION_DIFF, (_event, params: CompilationVersionDiffReq): ApiResult<CompilationVersionDiffRes> => {
+  try {
+    if (!params.compilationId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
+    const from = getCompilationVersion(params.compilationId, params.fromVersionNo)
+    const to = getCompilationVersion(params.compilationId, params.toVersionNo)
+    if (!from || !to) return { ok: false, error: { code: 'INVALID_PARAM', message: '版本不存在' } }
+    const segments = diffParagraphVersions(from.paragraphs, to.paragraphs)
+    return {
+      ok: true,
+      data: {
+        fromVersionNo: params.fromVersionNo,
+        toVersionNo: params.toVersionNo,
+        segments,
+        summary: summarizeParagraphDiff(segments)
+      }
+    }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.COMPILATION_VERSION_RESTORE, (_event, params: CompilationVersionRestoreReq): ApiResult<CompilationVersionRestoreRes> => {
+  try {
+    if (!params.compilationId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
+    pushUndo(params.compilationId)
+    const restored = restoreCompilationFromVersion(params.compilationId, params.versionNo)
+    if (!restored) return { ok: false, error: { code: 'INVALID_PARAM', message: '版本不存在' } }
+    // 恢复也生成新版本（不销毁历史）：新版本内容 = 目标版本，origin='restore'
+    snapshotCompilationVersion(params.compilationId, 'restore', {
+      baseVersionNo: params.versionNo,
+      reply: '已恢复到 v' + params.versionNo
+    })
+    const compilation = getCompilationById(params.compilationId)
+    if (!compilation) return { ok: false, error: { code: 'INTERNAL_ERROR', message: '资料汇编不存在' } }
+    return { ok: true, data: { compilation, restoredFrom: params.versionNo } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.COMPILATION_REORDER, (_event, params: CompilationReorderReq): ApiResult<CompilationReorderRes> => {  try {
     if (!params.compilationId || (params.direction !== 'asc' && params.direction !== 'desc')) {
       return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
     }

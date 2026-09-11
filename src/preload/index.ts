@@ -161,6 +161,19 @@ const api = {
   undoCompilation(compilationId: string): Promise<ApiResult<{ compilation: unknown; undoAvailable: number; redoAvailable: number }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_UNDO, { compilationId })
   },
+  /* Phase 7.4：版本管控（列表 / 两版差异 / 恢复到某版） */
+  listCompilationVersions(compilationId: string): Promise<ApiResult<{ versions: unknown[] }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_VERSIONS, { compilationId })
+  },
+  diffCompilationVersions(compilationId: string, fromVersionNo: number, toVersionNo: number): Promise<ApiResult<unknown>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_VERSION_DIFF, { compilationId, fromVersionNo, toVersionNo })
+  },
+  restoreCompilationVersion(
+    compilationId: string,
+    versionNo: number
+  ): Promise<ApiResult<{ compilation: unknown; restoredFrom: number }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_VERSION_RESTORE, { compilationId, versionNo })
+  },
   /** 恢复被撤销的资料汇编操作 */
   redoCompilation(compilationId: string): Promise<ApiResult<{ compilation: unknown; undoAvailable: number; redoAvailable: number }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_REDO, { compilationId })

@@ -1180,6 +1180,35 @@ export function insertCompilationMessage(input: {
   return { id, compilationId: input.compilationId, role: input.role, content: input.content, versionNo: input.versionNo, createdAt: now }
 }
 
+/**
+ * 用某个历史版本的段落重建当前文档（Phase 7.4「恢复到该版本」）：
+ * 复用版本快照里的**段 id**（矛盾变体/来源编号仍指向它们），全部置为 kept，并让调用方随后记一个新版本。
+ * 返回 null 表示该版本不存在。
+ */
+export function restoreCompilationFromVersion(compilationId: string, versionNo: number): CompilationItem[] | null {
+  const version = getCompilationVersion(compilationId, versionNo)
+  if (!version) return null
+  return upsertCompilationParagraphs(
+    compilationId,
+    version.paragraphs.map((p) => ({
+      id: p.id,
+      sourceId: p.sourceId ?? '',
+      text: p.text,
+      timeLabel: p.timeLabel,
+      year: p.year,
+      month: p.month,
+      day: p.day,
+      timeConfidence: p.timeConfidence,
+      sourceOrdinal: p.sourceOrdinal,
+      evidence: p.evidence,
+      origin: 'import' as const,
+      revision: p.revision + 1,
+      kind: p.kind,
+      kept: true
+    }))
+  )
+}
+
 /** 记录本次生成「整合提取」阶段的诊断汇总（JSON），供事后复盘与验收查询 */
 export function setCompilationExtractScan(compilationId: string, scan: unknown): void {
   const db = getDb()
