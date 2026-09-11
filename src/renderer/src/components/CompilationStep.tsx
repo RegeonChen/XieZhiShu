@@ -13,6 +13,14 @@ export interface CompilationItemView {
   kept: boolean
   sourceTitle?: string
   createdAt: string
+  /* ---- Phase 7.1：段落元数据（迁移回填 / 后续生成管线填充） ---- */
+  /** 结构化年份（由时间标签解析而来，用于稳定排序） */
+  year?: number
+  month?: number
+  /** exact=含年份；inferred=推断；unknown=未能确定（缺年份，界面提示「待补年份」） */
+  timeConfidence?: 'exact' | 'inferred' | 'unknown'
+  /** 段尾来源圆标数字（指向本汇编的来源编号 1..N） */
+  sourceOrdinal?: number
 }
 
 export interface CompilationRepairView {
@@ -129,6 +137,12 @@ function CompilationStep({
   const pending = compilation?.contradictions.filter((c) => c.status === 'pending') ?? []
   // 只展示未被软删除（采纳后未恢复）的卡片
   const keptItems = (compilation?.items ?? []).filter((it) => it.kept !== false)
+  /**
+   * Phase 7.1 验收用（7.3 由正式查看器取代）：把迁移回填的段落元数据显示出来——
+   * 本汇编的来源编号数量、缺年份（时间待核）的段落数，以及每张卡片所属的来源编号。
+   */
+  const sourceCount = new Set(keptItems.map((it) => it.sourceOrdinal).filter((n): n is number => n != null)).size
+  const pendingTimeCount = keptItems.filter((it) => (it.timeConfidence ?? (it.year != null ? 'exact' : 'unknown')) === 'unknown').length
 
   const startEdit = (it: CompilationItemView): void => {
     setEditing(it)
@@ -184,6 +198,12 @@ function CompilationStep({
       <div className="compilation-toolbar">
         <span className="compilation-stat">{t.cards.replace('{count}', String(keptItems.length))}</span>
         {candidateChunks ? <span className="compilation-stat">{t.candidate.replace('{chunks}', String(candidateChunks))}</span> : null}
+        {sourceCount > 0 ? <span className="compilation-stat">{t.sourcesStat.replace('{count}', String(sourceCount))}</span> : null}
+        {pendingTimeCount > 0 ? (
+          <span className="compilation-stat is-warn" title={t.pendingTimeHint}>
+            {t.pendingTimeStat.replace('{count}', String(pendingTimeCount))}
+          </span>
+        ) : null}
         {appliedFixes.length > 0 ? <span className="compilation-stat">{t.repairAppliedCount.replace('{count}', String(appliedFixes.length))}</span> : null}
         <span className={cls('compilation-badge', pending.length ? 'danger' : 'ok')}>
           {pending.length ? t.pendingContradictions.replace('{count}', String(pending.length)) : t.noContradictions}
@@ -316,7 +336,15 @@ function CompilationStep({
             >
               <div className="compilation-card-head">
                 <div className="compilation-card-meta">
-                  <span className="compilation-chip">{it.ts ?? '无时间'}</span>
+                  {it.sourceOrdinal != null ? (
+                    <span className="compilation-src-badge" title={t.sourceBadgeTitle.replace('{n}', String(it.sourceOrdinal))}>
+                      {it.sourceOrdinal}
+                    </span>
+                  ) : null}
+                  <span className={cls('compilation-chip', (it.timeConfidence ?? (it.year != null ? 'exact' : 'unknown')) === 'unknown' ? 'is-pending' : '')}>
+                    {it.ts ?? t.noTime}
+                    {(it.timeConfidence ?? (it.year != null ? 'exact' : 'unknown')) === 'unknown' ? t.pendingYearSuffix : ''}
+                  </span>
                   <span className="compilation-chip">《{it.sourceTitle ?? it.sourceId}》</span>
                   {conflictForItem(it.id) ? <span className="compilation-chip conflict">⚠ {t.contradict}</span> : null}
                   {fix ? (

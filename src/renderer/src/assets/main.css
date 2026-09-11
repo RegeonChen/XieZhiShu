@@ -4533,6 +4533,30 @@ textarea:focus-visible {
   color: var(--danger);
   background: var(--danger-soft);
 }
+/* Phase 7.1 验收展示（7.3 由正式文档查看器的段尾圆标取代）：
+   段尾来源编号小圆标 + 「缺年份」提示芯片 */
+.compilation-src-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+.compilation-chip.is-pending {
+  color: var(--warning);
+  background: var(--bg-elevated);
+}
+.compilation-stat.is-warn {
+  color: var(--warning);
+}
 .compilation-card-text {
   flex: 1;
   font-size: 13px;
