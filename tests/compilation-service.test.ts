@@ -19,7 +19,7 @@ import {
   clusterCandidateCards,
   packCandidateCalls,
   reduceConcurrency,
-  mapWindowGroupsThroughPurify
+  mapWindowGroupsThroughExtract
 } from '../src/main/writing/compilation-service'
 
 let db: Database.Database
@@ -98,16 +98,16 @@ describe('compilation service (Phase 6.1)', () => {
     expect(items[0].repair).toEqual({ originalText: '其中预科班 30 人。', revisedText: '预科班 30 人。', reason: '缺少主语' })
   })
 
-  it('mapWindowGroupsThroughPurify rewrites window-level variant excerpts onto purified fragments (2026-09-08 提纯)', () => {
-    // 细读产出的两张整段卡片（提纯前）
+  it('mapWindowGroupsThroughExtract rewrites window-level variant excerpts onto extracted paragraphs (Phase 7.2 整合提取)', () => {
+    // 细读产出的两张整段卡片（整合提取前）
     const parents = [
       { sourceRef: '#1', position: '', excerpt: '【社会事业】财政支出 46.91 亿元。普通中学 30 所，独立高中 1 所。', ts: '2019 年' },
       { sourceRef: '#2', position: '', excerpt: '2020 年，全区普通中学 28 所，独立高中 1 所。', ts: '2020 年' }
     ]
-    // 提纯后：只保留与「高中」相关的片段
-    const purified = [
-      { sourceRef: '#1', position: '', excerpt: '普通中学 30 所，独立高中 1 所。', ts: '2019 年' },
-      { sourceRef: '#2', position: '', excerpt: '2020 年，全区普通中学 28 所，独立高中 1 所。', ts: '2020 年' }
+    // 整合提取后：只保留与「高中」相关的内容（无关的民生支出已被裁掉）
+    const paragraphs = [
+      { ordinal: 0, text: '2019 年，全区普通中学 30 所，独立高中 1 所。', timeLabel: '2019 年', timeConfidence: 'exact' as const, sourceId: 's1', kind: 'paragraph' as const, revision: 1, origin: 'generate' as const, kept: true, parentIndex: 0 },
+      { ordinal: 1, text: '2020 年，全区普通中学 28 所，独立高中 1 所。', timeLabel: '2020 年', timeConfidence: 'exact' as const, sourceId: 's2', kind: 'paragraph' as const, revision: 1, origin: 'generate' as const, kept: true, parentIndex: 1 }
     ]
     const groups = [
       {
@@ -119,7 +119,7 @@ describe('compilation service (Phase 6.1)', () => {
         ]
       },
       {
-        topic: '已被提纯舍弃的事实',
+        topic: '已被裁掉的事实',
         kind: 'data',
         variants: [
           { excerpt: '【社会事业】财政支出 46.91 亿元。普通中学 30 所，独立高中 1 所。', sourceRefs: ['#1'] },
@@ -127,13 +127,16 @@ describe('compilation service (Phase 6.1)', () => {
         ]
       }
     ]
-    const out = mapWindowGroupsThroughPurify(groups, parents, purified)
-    // 第一组：两说法都被映射到提纯后的片段文本（落库时才能匹配到卡片）
+    const out = mapWindowGroupsThroughExtract(groups, parents, paragraphs)
+    // 第一组：两说法都被映射到提取后的段落文本（落库时才能匹配到段落）
     expect(out).toHaveLength(1)
     expect(out[0].topic).toBe('普通中学数量')
-    expect(out[0].variants.map((v) => v.excerpt)).toEqual(['普通中学 30 所，独立高中 1 所。', '2020 年，全区普通中学 28 所，独立高中 1 所。'])
-    // 第二组：其中一个说法对应的内容已被提纯舍弃（映射为 null），剩余不足 2 条 → 整组丢弃
-    expect(out.some((g) => g.topic === '已被提纯舍弃的事实')).toBe(false)
+    expect(out[0].variants.map((v) => v.excerpt)).toEqual([
+      '2019 年，全区普通中学 30 所，独立高中 1 所。',
+      '2020 年，全区普通中学 28 所，独立高中 1 所。'
+    ])
+    // 第二组：其中一个说法与任何段落都不像（内容已被裁掉），剩余不足 2 条 → 整组丢弃
+    expect(out.some((g) => g.topic === '已被裁掉的事实')).toBe(false)
   })
 
   it('recallCandidateChunks returns empty for empty query or scope', () => {    expect(recallCandidateChunks([], '园所设置')).toEqual([])

@@ -198,18 +198,23 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 
 三段式撰写第一步的资料汇编契约。`compilation:generate` / `compilation:regenerate` 在 Phase 6.1 已接入生成服务（本地宽召回宁多勿漏 + AI 细读 + **大模型提纯** + 大模型修正 + 矛盾标注；无 Provider / 失败降级为本地候选卡片）；生成进度经事件 `compilation:progress` 推送。CRUD / 矛盾取舍 / 确认已实现。
 
-> **生成管线阶段顺序（2026-09-08）**：`关键词提取 → 网页检索 → 本地宽召回 → 保守闸门 → AI 分窗细读 → 提纯（purify）→ 修正（repair）→ 卡片矛盾扫描（contradiction）→ 落库`。提纯位于修正之前，使修正的「标记 + 回退」与最终卡片保持一对一（无需迁移修正记录），而修正与矛盾扫描都在「更纯净、更短」的片段上进行。
+> **生成管线阶段顺序（Phase 7.2，2026-09-10）**：`关键词提取 → 网页检索 → 本地宽召回 → 保守闸门 → AI 分窗细读（**只做筛选**）→ **整合提取（extract）** → 卡片矛盾扫描（contradiction）→ 落库`。
+> 原「提纯（purify）」与「修正（repair）」两个阶段已被**整合提取**取代（用户裁定 D1）：细读阶段放宽为"只挑可能相关的、宁多勿漏、整段保留"，
+> 由整合提取统一完成**裁剪 + 补全 + 整合**，产出志稿素材段落（段首含年份的时间 + 段尾来源编号 + **每段单一来源**）。
+> 三道本地硬校验兜住自由度：① `evidence` 必须是来源卡片原文中逐字连续的一段；② 正文里的数字必须都能在来源卡片原文中找到（**整 token** 比较，拦住编造/推算）；③ 时间可信度由本地解析 `timeLabel` 决定（不采信模型自报）。任一不过 → **降级保留原文整段**（不丢材料）并计入 `extractScan.degraded`。
+> 提示词另禁两条：**不得跨卡片拼接**（跨来源）与**不得合并互相矛盾的说法**（冲突必须保留为不同段落，否则"自由整合"会把矛盾抹平、矛盾扫描形同虚设）。
+> 成文阶段（`assembleDocument`）再做去重与排序：同一来源的近似重复且**数字一致**才去重，**数字不一致则两段都保留**（疑似矛盾）；按 年→月→生成序 稳定排序后分配来源编号 1..N。`compilation:continue` 续跑只重跑未完成的提取批次（`extractDoneBatches`）。
 
 | 通道 | 请求 → 响应 data | 说明 |
 |---|---|---|
 | `compilation:list` | `{ taskId }` → `{ compilations: Compilation[] }` | 任务的全部资料汇编（按时间倒序，含卡片与矛盾） |
 | `compilation:get` | `{ compilationId }` → `{ compilation: Compilation }` | 读取一次资料汇编 |
-| `compilation:generate` | `{ taskId, title }` → `{ compilation: Compilation, contradictionScan?, repairScan?, purifyScan?, interrupted? }` | 生成资料汇编（本地宽召回 + AI 细读 + **提纯** + **大模型修正** + 矛盾标注；无 Provider/失败降级本地候选）。大模型异常中断时返回 `interrupted:{stage,message,percent}` 且 `compilation` 为已完成阶段的部分卡片（`drafting`），供前端展示「尝试继续」 |
+| `compilation:generate` | `{ taskId, title }` → `{ compilation: Compilation, contradictionScan?, extractScan?, interrupted? }` | 生成资料汇编（本地宽召回 + AI 细读筛选 + **整合提取** + 矛盾标注；无 Provider/失败降级本地候选）。大模型异常中断时返回 `interrupted:{stage,message,percent}` 且 `compilation` 为已完成阶段的部分卡片（`drafting`），供前端展示「尝试继续」 |
 | `compilation:regenerate` | `{ taskId, title }` → `{ compilation: Compilation }` | 重新生成资料汇编 |
-| `compilation:continue` | `{ compilationId }` → `{ compilation: Compilation, contradictionScan?, repairScan?, purifyScan?, interrupted? }` | 中断续跑（Phase 6.x，会话内）：从断点继续窗口细读 / **提纯（只重跑未完成批次）** / **修正（只重跑未完成批次）** / 矛盾扫描，复用已完成结果，不重复读取；再次异常仍返回 `interrupted`（可再点「尝试继续」） |
+| `compilation:continue` | `{ compilationId }` → `{ compilation: Compilation, contradictionScan?, extractScan?, interrupted? }` | 中断续跑（Phase 6.x，会话内）：从断点继续窗口细读 / **整合提取（只重跑未完成批次）** / 矛盾扫描，复用已完成结果，不重复读取；再次异常仍返回 `interrupted`（可再点「尝试继续」） |
 
-> **整段化切片（Phase A/B）**：切片以**整段**为基本单元——`chunkByParagraphs`（默认上限 `CHUNK_PARAGRAPH_MAX=1000`）按换行切段；超长段仅按句号折成 ≤上限 的子块并共存同一 `paragraphIndex`；**粗细筛以整段为单位做“保留/剔除”**（段内任一子块有信号 → 整段所有子块一起保留，避免“一整段相关却被误筛”）。**资料卡片=整段/整子块**（AI 不再按时间/事实切分，excerpt=该段原文，随后由管线内的**提纯**阶段摘出与主题相关的句段）。
-> **提纯阶段（2026-09-08；2026-09-10 收紧）**：`purifyScan:{ok, message?, inputCards?, outputCards?, inputChars?, outputChars?, passthroughCards?}`——提纯把细读产出的整段卡片交给大模型**逐字摘录**与主题相关的句段（严格子串 + 本地校验 + 句读吸附；**写通测试**口径，不做内容拦截）；卡片数/字数变化供渲染层在生成汇总里展示，`passthroughCards` 为「未获提纯结果而按原样保留」的卡片数（漏答 / 片段全部校验失败 / 超预算未跑的批次）。`ok=false` 表示超出阶段时间预算（900s），剩余卡片**按原样保留**（绝不丢材料）。提纯是黑箱：不保留提纯前原文、不支持单独回退（需退回时用「重新生成汇编」）。批次 50 张 / 18000 字、按 Provider 并发并行、漏答卡片重问一次、解析失败换温度重试一次。
+> **整段化切片（Phase A/B）**：切片以**整段**为基本单元——`chunkByParagraphs`（默认上限 `CHUNK_PARAGRAPH_MAX=1000`）按换行切段；超长段仅按句号折成 ≤上限 的子块并共存同一 `paragraphIndex`；**粗细筛以整段为单位做“保留/剔除”**（段内任一子块有信号 → 整段所有子块一起保留，避免“一整段相关却被误筛”）。**资料卡片=整段/整子块**（AI 不再按时间/事实切分，excerpt=该段原文，随后由管线内的**整合提取**阶段裁剪/补全/整合为志稿段落）。
+> **整合提取阶段（Phase 7.2）**：`extractScan:{ok, message?, inputCards?, outputParagraphs?, inputChars?, outputChars?, accepted?, degraded?, droppedCards?, omitted?, passthrough?}`——卡片 → 段落与字数变化供生成汇总展示；`accepted` 为通过本地校验的段落数，`degraded` 为校验失败而降级按原文整段保留的卡片数，`droppedCards` 为模型判定与主题无关而整卡丢弃，`omitted/passthrough` 为漏答与按原文保留。`ok=false` 表示超出阶段时间预算（1200s），其余卡片**按原文整段保留**（绝不丢材料）。
 > **429 自动续传（Phase A/B）**：窗口细读/矛盾扫描遇到**限流（HTTP 429）**时，主进程自动降本次生成并发数（`reduceConcurrency` 减半、最小 1，**不写回 Provider 设置**，仅本次生效）、退避后从断点自动续跑（`runWithRateLimitAutoResume`，默认上限 `RATE_LIMIT_RESUME_LIMIT=2`）；降并发时经事件 **``compilation:advice`（`{ taskId, kind:'reduce-concurrency' }`）** 推送建议，渲染层翻译为「建议降低当前大模型的并发数」存为对话消息。若仍限流，`interrupted.retryable=true` 供前端自动续传兜底（前端最多 2 次、间隔递增），其余异常 `retryable` 缺省，仅提供手动「尝试继续」。`CompilationInterrupt` 增加 `retryable?: boolean`。
 | `compilation:updateItem` | `{ itemId, excerpt?, ts?, note?, extraTags?, kept? }` → `{ item: CompilationItem }` | 编辑资料卡片 |
 | `compilation:deleteItem` | `{ itemId }` → `{ ok: true }` | 删除资料卡片 |

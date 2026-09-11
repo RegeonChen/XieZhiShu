@@ -34,40 +34,43 @@ interface DraftItem {
 type BusyState = 'generating' | 'chatting' | null
 type DraftPhase = 'import' | 'style' | 'write'
 
-/** 生成/续跑完成后的对话汇总：卡片数 + 提纯统计 + 大模型修正数 + 矛盾数 + 各阶段未完成提示 */
+/** 生成/续跑完成后的对话汇总：段落数 + 整合提取统计 + 大模型修正数 + 矛盾数 + 各阶段未完成提示 */
 function buildGeneratedSummary(
   prefix: string,
   comp: CompilationView,
   scans: {
     contradictionScan?: { ok: boolean; message?: string }
-    repairScan?: { ok: boolean; message?: string }
-    purifyScan?: {
+    extractScan?: {
       ok: boolean
       message?: string
       inputCards?: number
-      outputCards?: number
+      outputParagraphs?: number
       inputChars?: number
       outputChars?: number
-      passthroughCards?: number
+      accepted?: number
+      degraded?: number
+      droppedCards?: number
+      omitted?: number
+      passthrough?: number
     }
   }
 ): string {
   const pendingCount = comp.contradictions.filter((c) => c.status === 'pending').length
   const fixCount = (comp.repairs ?? []).filter((r) => r.status === 'applied').length
   const parts: string[] = [prefix + comp.items.length + ' 张卡片']
-  const ps = scans.purifyScan
-  if (ps && ps.inputCards != null && ps.outputCards != null) {
+  const ps = scans.extractScan
+  if (ps && ps.inputCards != null && ps.outputParagraphs != null) {
     const keptPct = Math.round(((ps.outputChars ?? 0) / Math.max(1, ps.inputChars ?? 1)) * 100)
     parts.push(
-      zhCN.compilation.purifiedSummary
+      zhCN.compilation.extractSummary
         .replace('{fromCards}', String(ps.inputCards))
         .replace('{fromChars}', String(ps.inputChars ?? 0))
-        .replace('{toCards}', String(ps.outputCards))
+        .replace('{toParagraphs}', String(ps.outputParagraphs))
         .replace('{toChars}', String(ps.outputChars ?? 0))
         .replace('{kept}', String(keptPct))
     )
-    if (ps.passthroughCards && ps.passthroughCards > 0) {
-      parts.push(zhCN.compilation.purifyPassthrough.replace('{count}', String(ps.passthroughCards)))
+    if (ps.degraded && ps.degraded > 0) {
+      parts.push(zhCN.compilation.extractDegraded.replace('{count}', String(ps.degraded)))
     }
   }
   if (fixCount > 0) parts.push(fixCount + ' 张经过大模型修正（卡片上有标记，可点开查看修正前原文与理由并回退）')
@@ -76,11 +79,8 @@ function buildGeneratedSummary(
   if (scans.contradictionScan && scans.contradictionScan.ok === false) {
     text += ' 注意：' + zhCN.compilation.contradictionScanFailed.replace('{reason}', scans.contradictionScan.message ?? '未知')
   }
-  if (scans.repairScan && scans.repairScan.ok === false) {
-    text += ' 注意：' + zhCN.compilation.repairScanFailed.replace('{reason}', scans.repairScan.message ?? '未知')
-  }
   if (ps && ps.ok === false) {
-    text += ' 注意：' + zhCN.compilation.purifyScanFailed.replace('{reason}', ps.message ?? '未知')
+    text += ' 注意：' + zhCN.compilation.extractScanFailed.replace('{reason}', ps.message ?? '未知')
   }
   return text
 }

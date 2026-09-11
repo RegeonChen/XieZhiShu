@@ -486,10 +486,10 @@ export const zhCN = {
     presetAddContentLabel: '增补内容',
     presetAddContentDesc: '补齐汇编中缺失的方面',
     presetAddContent: '目前的资料汇编中缺失了「……」方面的信息，请你从资料库中再次检索相关片段并加入资料汇编。\n详细描述：……',
-    /* 资料提纯（2026-09-08：细读之后、修正之前的大模型二次提纯；2026-09-10 收紧口径；黑箱，不保留提纯前原文） */
-    purifiedSummary: '（提纯：{fromCards} 张 / {fromChars} 字 → {toCards} 张 / {toChars} 字，保留约 {kept}%）',
-    purifyPassthrough: '其中 {count} 张未获提纯结果、已按原样保留',
-    purifyScanFailed: '资料提纯未完成（{reason}），部分卡片可能仍包含与主题无关的内容。',
+    /* 整合提取（Phase 7.2：细读筛选之后、矛盾扫描之前；允许裁剪/补全/整合，本地三道校验兜底） */
+    extractSummary: '（整合提取：{fromCards} 张卡片 / {fromChars} 字 → {toParagraphs} 段 / {toChars} 字，保留约 {kept}%）',
+    extractDegraded: '其中 {count} 张未通过本地校验、已按原文整段保留',
+    extractScanFailed: '整合提取未完成（{reason}），部分卡片可能仍按原文原样保留、未做裁剪整合。',
     /* 大模型修正（2026-09-08：默认应用 + 卡片标记 + 可回退/再次应用；不再进入回收站） */
     repairBadge: '✎ 经过大模型修正',
     repairBadgeReverted: '↺ 已回退到修正前',
@@ -503,7 +503,7 @@ export const zhCN = {
     repairReapply: '重新应用修正',
     repairRevertHint: '回退只影响本张卡片的文本；时间戳的自动补齐不在修正记录内。',
     repairAppliedCount: '{count} 张卡片经过大模型修正',
-    repairScanFailed: '资料卡片修正未完成（{reason}），部分卡片可能未做补全/时间戳补齐。',
+    /* repairScanFailed 已随 Phase 7.2 移除（修正阶段并入整合提取，不再单独回报未完成） */
     recycleBin: '回收站',
     recycleBinTitle: '回收站',
     recycleBinEmpty: '回收站为空。',

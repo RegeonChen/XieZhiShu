@@ -112,6 +112,30 @@ export interface ExtractBatchOutcome {
   rateLimited?: boolean
 }
 
+/** 整阶段汇总（落库前透出给前端生成汇总与诊断日志） */
+export interface ExtractScanStats {
+  inputCards: number
+  outputParagraphs: number
+  inputChars: number
+  outputChars: number
+  /** 通过本地校验的段落数 */
+  accepted: number
+  /** 校验失败而降级为原文整段的卡片数 */
+  degraded: number
+  invalidNumbers: number
+  invalidEvidence: number
+  /** 模型判定与主题无关而整卡丢弃 */
+  droppedCards: number
+  /** 模型始终未回答、按原文保留的卡片数 */
+  omitted: number
+  passthrough: number
+  /** 成文阶段被判定为重复而合并掉的段数 */
+  duplicatesDropped: number
+  /** 「疑似同一事实但数字不一致」而特意保留的段数（矛盾候选） */
+  conflictsKept: number
+  retried: number
+}
+
 // ---------------------------------------------------------------- 解析与提交物
 
 /** 解析整合提取输出（纯函数）；返回 null 表示无有效输出 */

@@ -576,8 +576,7 @@ handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerate
         candidateChunks: number
         contradictions: number
         contradictionScan?: { ok: boolean; message?: string }
-        repairScan?: { ok: boolean; message?: string }
-        purifyScan?: { ok: boolean; message?: string; inputCards?: number; outputCards?: number; inputChars?: number; outputChars?: number; passthroughCards?: number }
+        extractScan?: { ok: boolean; message?: string; inputCards?: number; outputParagraphs?: number; inputChars?: number; outputChars?: number; accepted?: number; degraded?: number; droppedCards?: number; omitted?: number; passthrough?: number }
         interrupted?: { stage: string; message: string; percent: number; retryable?: boolean }
       }
     | { ok: false; error: { code: string; message: string } }
@@ -594,8 +593,7 @@ handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerate
     data: {
       compilation,
       contradictionScan: res.contradictionScan,
-      repairScan: res.repairScan,
-      purifyScan: res.purifyScan,
+      extractScan: res.extractScan,
       interrupted: res.interrupted
     }
   }
@@ -624,8 +622,7 @@ handleLogged(IPC.COMPILATION_CONTINUE, async (event, params: CompilationContinue
         candidateChunks: number
         contradictions: number
         contradictionScan?: { ok: boolean; message?: string }
-        repairScan?: { ok: boolean; message?: string }
-        purifyScan?: { ok: boolean; message?: string; inputCards?: number; outputCards?: number; inputChars?: number; outputChars?: number; passthroughCards?: number }
+        extractScan?: { ok: boolean; message?: string; inputCards?: number; outputParagraphs?: number; inputChars?: number; outputChars?: number; accepted?: number; degraded?: number; droppedCards?: number; omitted?: number; passthrough?: number }
         interrupted?: { stage: string; message: string; percent: number; retryable?: boolean }
       }
     | { ok: false; error: { code: string; message: string } }
@@ -642,8 +639,7 @@ handleLogged(IPC.COMPILATION_CONTINUE, async (event, params: CompilationContinue
     data: {
       compilation,
       contradictionScan: res.contradictionScan,
-      repairScan: res.repairScan,
-      purifyScan: res.purifyScan,
+      extractScan: res.extractScan,
       interrupted: res.interrupted
     }
   }
