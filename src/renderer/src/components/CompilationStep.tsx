@@ -110,7 +110,6 @@ interface Props {
   /** 仅显示改动段落 */
   onlyChanged?: boolean
   onSelectVersion?: (versionNo: number | null) => void
-  onRestoreVersion?: (versionNo: number) => void
   onToggleOnlyChanged?: (value: boolean) => void
 }
 
@@ -161,7 +160,6 @@ function CompilationStep({
   versionDiff,
   onlyChanged,
   onSelectVersion,
-  onRestoreVersion,
   onToggleOnlyChanged
 }: Props) {
   const t = zhCN.compilation
@@ -373,16 +371,6 @@ function CompilationStep({
               >
                 &#8646;
               </button>
-              {compareFrom != null ? (
-                <button
-                  type="button"
-                  className="source-list__btn"
-                  disabled={busy}
-                  onClick={() => onRestoreVersion?.(compareFrom)}
-                >
-                  {t.versionRestorePrev}
-                </button>
-              ) : null}
             </>
           ) : null}
           <button
