@@ -1104,13 +1104,17 @@ export function insertCompilationVersion(input: InsertCompilationVersionInput): 
   }
 }
 
-/** 以当前段落为内容建版本（供生成/编辑落库后统一调用） */
+/**
+ * 以当前段落为内容建版本（供生成/编辑落库后统一调用）。
+ * 只快照 `kept` 的段落：版本要反映**用户看到的文档**——采纳矛盾时其它说法所在的段是被软删除（kept=0）的，
+ * 若把未保留的段也算进快照，段落集合没有变化、变更统计会全是 0（2026-09-10 实测发现的 7.4 前置问题）。
+ */
 export function snapshotCompilationVersion(
   compilationId: string,
   origin: CompilationVersionOrigin,
   extra?: { instruction?: string; reply?: string; baseVersionNo?: number }
 ): CompilationVersionSummary | null {
-  const items = getItemsByCompilation(compilationId)
+  const items = getItemsByCompilation(compilationId).filter((it) => it.kept)
   if (items.length === 0) return null
   const sources = listCompilationSources(compilationId)
   const refsBySourceId = new Map(sources.filter((s) => s.sourceId).map((s) => [s.sourceId as string, s]))
@@ -1580,6 +1584,14 @@ if (import.meta.vitest) {
       const loadedV1 = getCompilationVersion(c.id, 1)!
       expect(loadedV1.paragraphs).toHaveLength(1)
       expect(loadedV1.markdown).toBe('2018 年　甲段')
+
+      // 版本只快照 kept 的段落：软删除（kept=0，采纳矛盾时发生）应体现为「删除」，而不是变更统计全 0
+      const all = getItemsByCompilation(c.id)
+      updateCompilationItem(all[all.length - 1].id, { kept: false })
+      const v3 = snapshotCompilationVersion(c.id, 'contradiction')!
+      expect(v3.versionNo).toBe(3)
+      expect(v3.changeSummary.removed).toBe(1)
+      expect(getCompilationVersion(c.id, 3)!.paragraphs).toHaveLength(1)
     })
 
     it('stores compilation-level chat messages in order', () => {
