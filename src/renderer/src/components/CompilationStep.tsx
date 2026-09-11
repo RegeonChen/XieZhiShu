@@ -100,6 +100,40 @@ interface Props {
   onRedo: () => void
   undoAvailable: number
   redoAvailable: number
+  /* ---- Phase 7.4：版本管控 ---- */
+  /** 版本列表（含变更统计）；长度 ≤1 时不显示版本控件 */
+  versions?: CompilationVersionView[]
+  /** 对比基线版本号（null = 不对比，显示当前文档） */
+  compareFrom?: number | null
+  /** 基线 → 当前 的差异段（compareFrom != null 时由主进程算好） */
+  versionDiff?: CompilationVersionDiffView | null
+  /** 仅显示改动段落 */
+  onlyChanged?: boolean
+  onSelectVersion?: (versionNo: number | null) => void
+  onRestoreVersion?: (versionNo: number) => void
+  onToggleOnlyChanged?: (value: boolean) => void
+}
+
+export interface CompilationVersionView {
+  versionNo: number
+  origin: 'generate' | 'llm-edit' | 'user-edit' | 'restore' | 'contradiction' | 'import'
+  instruction?: string
+  reply?: string
+  changeSummary: { added: number; removed: number; modified: number; moved: number }
+  createdAt: string
+}
+
+export interface CompilationVersionDiffView {
+  fromVersionNo: number
+  toVersionNo: number
+  segments: {
+    kind: 'added' | 'removed' | 'modified' | 'unchanged'
+    id: string
+    prevText?: string
+    nextText?: string
+    inline?: { type: 'same' | 'add' | 'del'; text: string }[]
+  }[]
+  summary: { added: number; removed: number; modified: number; unchanged: number }
 }
 
 const cls = (...parts: Array<string | false | null | undefined>): string => parts.filter(Boolean).join(' ')
@@ -119,9 +153,28 @@ function CompilationStep({
   onUndo,
   onRedo,
   undoAvailable,
-  redoAvailable
+  redoAvailable,
+  versions,
+  compareFrom,
+  versionDiff,
+  onlyChanged,
+  onSelectVersion,
+  onRestoreVersion,
+  onToggleOnlyChanged
 }: Props) {
   const t = zhCN.compilation
+  /** 差异段按段 id 建索引（渲染时给段落上色 / 段内高亮） */
+  const diffById = new Map((versionDiff?.segments ?? []).map((s) => [s.id, s]))
+  const removedSegments = (versionDiff?.segments ?? []).filter((s) => s.kind === 'removed')
+  const originLabel = (origin: CompilationVersionView['origin']): string =>
+    ({
+      generate: t.versionOriginGenerate,
+      'llm-edit': t.versionOriginLlmEdit,
+      'user-edit': t.versionOriginUserEdit,
+      restore: t.versionOriginRestore,
+      contradiction: t.versionOriginContradiction,
+      import: t.versionOriginImport
+    })[origin]
   const [editing, setEditing] = useState<CompilationItemView | null>(null)
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
   const [excerpt, setExcerpt] = useState('')
@@ -224,6 +277,24 @@ function CompilationStep({
     <div className="compilation-step">
       <div className="compilation-toolbar">
         <span className="compilation-stat">{t.docStats.replace('{paragraphs}', String(keptItems.length)).replace('{sources}', String(sourceCount))}</span>
+        {versionDiff ? (
+          <>
+            <span className="compilation-stat is-diff">
+              {t.versionDiffSummary
+                .replace('{added}', String(versionDiff.summary.added))
+                .replace('{modified}', String(versionDiff.summary.modified))
+                .replace('{removed}', String(versionDiff.summary.removed))}
+            </span>
+            <label className="compilation-diff-toggle">
+              <input
+                type="checkbox"
+                checked={onlyChanged === true}
+                onChange={(e) => onToggleOnlyChanged?.(e.target.checked)}
+              />
+              <span>{t.versionOnlyChanged}</span>
+            </label>
+          </>
+        ) : null}
         {candidateChunks ? <span className="compilation-stat">{t.candidate.replace('{chunks}', String(candidateChunks))}</span> : null}
         {pendingTimeCount > 0 ? (
           <span
@@ -239,6 +310,56 @@ function CompilationStep({
           {pending.length ? t.pendingContradictions.replace('{count}', String(pending.length)) : t.noContradictions}
         </span>
         <div className="compilation-actions">
+          {/* Phase 7.4：版本管控 —— 选历史版本进入对比模式、上一版/下一版、恢复到该版本 */}
+          {versions && versions.length > 1 ? (
+            <>
+              <button
+                type="button"
+                className="compilation-round-btn"
+                disabled={busy || (compareFrom ?? versions[versions.length - 1].versionNo) <= versions[0].versionNo}
+                title={t.versionPrev}
+                aria-label={t.versionPrev}
+                onClick={() => {
+                  const cur = compareFrom ?? versions[versions.length - 1].versionNo
+                  const idx = versions.findIndex((v) => v.versionNo === cur)
+                  const prev = versions[Math.max(0, idx - 1)]
+                  onSelectVersion?.(prev.versionNo === versions[versions.length - 1].versionNo ? null : prev.versionNo)
+                }}
+              >
+                ←
+              </button>
+              <select
+                className="compilation-version-select"
+                value={String(compareFrom ?? versions[versions.length - 1].versionNo)}
+                disabled={busy}
+                onChange={(e) => {
+                  const no = Number(e.target.value)
+                  onSelectVersion?.(no === versions[versions.length - 1].versionNo ? null : no)
+                }}
+              >
+                {versions.map((v) => (
+                  <option key={v.versionNo} value={String(v.versionNo)}>
+                    {t.versionOption
+                      .replace('{no}', String(v.versionNo))
+                      .replace('{origin}', originLabel(v.origin))
+                      .replace('{added}', String(v.changeSummary.added))
+                      .replace('{modified}', String(v.changeSummary.modified))
+                      .replace('{removed}', String(v.changeSummary.removed))}
+                  </option>
+                ))}
+              </select>
+              {compareFrom != null ? (
+                <button
+                  type="button"
+                  className="source-list__btn"
+                  disabled={busy}
+                  onClick={() => onRestoreVersion?.(compareFrom)}
+                >
+                  {t.versionRestore.replace('{no}', String(compareFrom))}
+                </button>
+              ) : null}
+            </>
+          ) : null}
           <button
             type="button"
             className="compilation-round-btn"
@@ -361,6 +482,10 @@ function CompilationStep({
             const year = it.year ?? null
             const prevYear = index > 0 ? (keptItems[index - 1].year ?? null) : null
             const pendingTime = (it.timeConfidence ?? (it.year != null ? 'exact' : 'unknown')) === 'unknown'
+            const diff = diffById.get(it.id)
+            if (onlyChanged === true && versionDiff && (!diff || diff.kind === 'unchanged')) {
+              return null
+            }
             return (
               <Fragment key={it.id}>
                 {year != null && year !== prevYear ? (
@@ -372,7 +497,9 @@ function CompilationStep({
                     'compilation-para',
                     conflictForItem(it.id) ? 'has-conflict' : '',
                     fix ? 'is-repair' : '',
-                    locatedId === it.id ? 'is-located' : ''
+                    locatedId === it.id ? 'is-located' : '',
+                    /* Phase 7.4：对比模式下的差异标记 */
+                    diff ? 'diff-' + diff.kind : ''
                   )}
                   onMouseEnter={() => setHoverId(it.id)}
                   onMouseLeave={() => setHoverId((cur) => (cur === it.id ? null : cur))}
@@ -381,7 +508,19 @@ function CompilationStep({
                     {it.ts ?? t.noTime}
                     {pendingTime ? t.pendingYearSuffix : ''}
                   </span>
-                  <span className="compilation-doc__text">{renderInlineMarkdown(it.excerpt)}</span>
+                  <span className="compilation-doc__text">
+                    {diff?.kind === 'modified' && diff.inline
+                      ? diff.inline.map((part, i) =>
+                          part.type === 'same' ? (
+                            <span key={i}>{part.text}</span>
+                          ) : part.type === 'del' ? (
+                            <del key={i} className="diff-del">{part.text}</del>
+                          ) : (
+                            <ins key={i} className="diff-add">{part.text}</ins>
+                          )
+                        )
+                      : renderInlineMarkdown(it.excerpt)}
+                  </span>
                   {it.sourceOrdinal != null ? (
                     <button
                       type="button"
@@ -417,6 +556,17 @@ function CompilationStep({
             )
           })
         )}
+        {/* 对比模式下：被删除的段落以红色划线占位列出（保留在文档末尾，便于用户判断丢掉了什么） */}
+        {versionDiff && removedSegments.length > 0
+          ? removedSegments.map((s) => (
+              <div key={s.id} className="compilation-para diff-removed">
+                <span className="compilation-doc__time">{t.versionRemovedTag}</span>
+                <span className="compilation-doc__text">
+                  <del className="diff-del">{s.prevText}</del>
+                </span>
+              </div>
+            ))
+          : null}
       </div>
 
       {/* 来源小卡：点段尾圆标弹出（来源标题 / 该来源在本汇编中的全部段落 / 打开原文） */}

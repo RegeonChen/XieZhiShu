@@ -41,6 +41,10 @@ export interface AppApi {
   undoCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown; undoAvailable: number; redoAvailable: number }; error?: { code: string; message: string } }>
   redoCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown; undoAvailable: number; redoAvailable: number }; error?: { code: string; message: string } }>
   getCompilationUndoState(compilationId: string): Promise<{ ok: boolean; data?: { undoAvailable: number; redoAvailable: number }; error?: { code: string; message: string } }>
+  /* Phase 7.4：版本管控（列表 / 两版差异 / 恢复到某版） */
+  listCompilationVersions(compilationId: string): Promise<{ ok: boolean; data?: { versions: unknown[] }; error?: { code: string; message: string } }>
+  diffCompilationVersions(compilationId: string, fromVersionNo: number, toVersionNo: number): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
+  restoreCompilationVersion(compilationId: string, versionNo: number): Promise<{ ok: boolean; data?: { compilation: unknown; restoredFrom: number }; error?: { code: string; message: string } }>
   updateCompilationItem(itemId: string, patch: { excerpt?: string; ts?: string | null; note?: string | null; extraTags?: string[]; kept?: boolean }): Promise<{ ok: boolean; data?: { item: unknown }; error?: { code: string; message: string } }>
   deleteCompilationItem(itemId: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   resolveCompilationContradiction(contradictionId: string, action: 'resolve' | 'ignore', chosenItemId?: string): Promise<{ ok: boolean; data?: { contradiction: unknown }; error?: { code: string; message: string } }>
