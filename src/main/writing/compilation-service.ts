@@ -1634,6 +1634,7 @@ async function runExtractPhase(
         return {
           text: d.text,
           timeLabel: d.timeLabel,
+          timeConfidence: d.timeConfidence,
           sourceId: sourceIdByRef.get(ref) ?? '',
           sourceTitle: titleByRef.get(ref),
           evidence: d.evidence,
