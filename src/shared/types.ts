@@ -208,6 +208,136 @@ export interface Contradiction {
 export type CompilationStatus = 'drafting' | 'reviewing' | 'finalized'
 export type CompilationContradictionStatus = 'pending' | 'resolved' | 'ignored'
 
+/** 时间可信度（Phase 7.1）：exact=原文明确；inferred=由上下文推断；unknown=未能确定（界面显示「时间待核」） */
+export type CompilationTimeConfidence = 'exact' | 'inferred' | 'unknown'
+/** 段落的产生方式（用于版本记录的变更来源与审计） */
+export type CompilationParagraphOrigin = 'generate' | 'llm-edit' | 'user-edit' | 'contradiction' | 'import'
+/** 段落类型：正文段 / 分节标题（按年份分节渲染时使用） */
+export type CompilationParagraphKind = 'paragraph' | 'heading'
+/** 版本来源（与段落 origin 的差别：多出 restore=恢复到历史版本） */
+export type CompilationVersionOrigin = 'generate' | 'llm-edit' | 'user-edit' | 'restore' | 'contradiction' | 'import'
+
+/**
+ * 资料卡片 / 段落（Phase 7：资料汇编已由「卡片列表」改为「连续文档」，本类型即文档中的一段）。
+ * 兼容期说明：既有字段（excerpt/ts/position/kept…）语义不变，新增字段为**可选**，
+ * 因此旧代码（卡片视图）与迁移后的旧数据都能继续工作。
+ */
+export interface CompilationItem {
+  id: string
+  compilationId: string
+  /** 时间排序位次（= 文档内顺序） */
+  position: number
+  sourceId: string
+  excerpt: string
+  /** 时间标签（如「2005 年」/「2005—2010 年」），展示用 */
+  ts?: string
+  note?: string
+  extraTags: string[]
+  kept: boolean
+  /** 来源标题（服务端 JOIN 填充） */
+  sourceTitle?: string
+  createdAt: string
+  /* ---- Phase 7.1 新增：段落元数据 ---- */
+  /** 结构化年份（稳定排序用；缺失表示未能解析出年份） */
+  year?: number
+  month?: number
+  day?: number
+  timeConfidence?: CompilationTimeConfidence
+  /** 段尾来源圆标数字（指向 CompilationSourceRef.ordinal）；缺省 = 无来源段 */
+  sourceOrdinal?: number
+  /** 该段的原文证据引文（逐字校验 + 「查看出处」） */
+  evidence?: string
+  origin?: CompilationParagraphOrigin
+  /** 段级修订号（diff 的辅助键） */
+  revision?: number
+  kind?: CompilationParagraphKind
+}
+
+/** 文档中的一段（运行期/版本快照形状；由 CompilationItem 归一而来） */
+export interface CompilationParagraph {
+  id: string
+  /** 文档内顺序（0 起） */
+  ordinal: number
+  text: string
+  /** 段首显示时间（应含 4 位年份；未确定时为「时间待核」） */
+  timeLabel?: string
+  year?: number
+  month?: number
+  day?: number
+  timeConfidence: CompilationTimeConfidence
+  /** 段尾来源圆标数字 */
+  sourceOrdinal?: number
+  sourceId?: string
+  sourceTitle?: string
+  evidence?: string
+  kind: CompilationParagraphKind
+  revision: number
+  origin: CompilationParagraphOrigin
+  kept: boolean
+}
+
+/** 汇编内的来源编号（圆标数字 ↔ 来源） */
+export interface CompilationSourceRef {
+  id: string
+  compilationId: string
+  sourceId?: string
+  /** 1..N，按文档首次引用顺序；只增不回收 */
+  ordinal: number
+  title: string
+  citedCount: number
+}
+
+/** 一次版本变更的统计（供版本列表与差异高亮） */
+export interface CompilationChangeSummary {
+  added: number
+  removed: number
+  modified: number
+  moved: number
+  /** 本次变更涉及（新增或修改）的段落 id */
+  paragraphIds: string[]
+}
+
+/** 版本摘要（版本下拉列表用，不含正文） */
+export interface CompilationVersionSummary {
+  id: string
+  compilationId: string
+  versionNo: number
+  origin: CompilationVersionOrigin
+  instruction?: string
+  reply?: string
+  changeSummary: CompilationChangeSummary
+  baseVersionNo?: number
+  createdAt: string
+}
+
+/** 完整版本（含段落快照与 markdown 快照） */
+export interface CompilationVersion extends CompilationVersionSummary {
+  paragraphs: CompilationParagraph[]
+  markdown: string
+}
+
+/** 汇编级人机对话消息（悬浮对话框的历史记录） */
+export interface CompilationMessage {
+  id: string
+  compilationId: string
+  role: 'user' | 'assistant'
+  content: string
+  /** 该轮对话产生的版本号（assistant 消息） */
+  versionNo?: number
+  createdAt: string
+}
+
+/** 汇编文档视图（右栏查看器渲染所需的一切） */
+export interface CompilationDocument {
+  compilationId: string
+  title: string
+  status: CompilationStatus
+  paragraphs: CompilationParagraph[]
+  sources: CompilationSourceRef[]
+  /** 当前版本号（无版本时为 0） */
+  versionNo: number
+}
+
 /** 资料卡片（汇编中的一条资料摘录，可编辑/删除/取舍） */
 export interface CompilationItem {
   id: string

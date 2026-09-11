@@ -692,6 +692,184 @@ CREATE INDEX IF NOT EXISTS idx_compilation_repairs_item ON compilation_repairs(i
 DROP TABLE IF EXISTS compilation_repair_recycle_bin;
 `)
     }
+  },
+  {
+    // 2026-09-10（Phase 7.1）：「资料卡片」升级为「连续文档中的段落」——**纯新增**，不动既有数据，
+    // 因此本迁移执行后旧界面（卡片视图）仍完全可用。
+    //   ① compilation_items 增加段落元数据：结构化时间（year/month/day）、时间可信度、来源编号、
+    //      证据引文、产生方式、段级修订号、段类型；
+    //   ② compilation_sources：每份汇编的来源编号表（圆标数字 = ordinal，按文档首次引用顺序 1..N，
+    //      编号只增不回收，保证历史版本与正文中的编号不漂移）；
+    //   ③ compilation_versions：版本历史（段落数组 + markdown 双快照 + 变更统计），替代进程内撤销栈；
+    //   ④ compilation_messages：汇编级人机对话历史（跟汇编走，导入/导出一起带）。
+    version: 30,
+    sql: `
+ALTER TABLE compilation_items ADD COLUMN year INTEGER;
+ALTER TABLE compilation_items ADD COLUMN month INTEGER;
+ALTER TABLE compilation_items ADD COLUMN day INTEGER;
+ALTER TABLE compilation_items ADD COLUMN time_confidence TEXT NOT NULL DEFAULT 'unknown' CHECK (time_confidence IN ('exact','inferred','unknown'));
+ALTER TABLE compilation_items ADD COLUMN source_ordinal INTEGER;
+ALTER TABLE compilation_items ADD COLUMN evidence TEXT;
+ALTER TABLE compilation_items ADD COLUMN origin TEXT NOT NULL DEFAULT 'generate' CHECK (origin IN ('generate','llm-edit','user-edit','contradiction','import'));
+ALTER TABLE compilation_items ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE compilation_items ADD COLUMN kind TEXT NOT NULL DEFAULT 'paragraph' CHECK (kind IN ('paragraph','heading'));
+
+CREATE TABLE IF NOT EXISTS compilation_sources (
+  id TEXT PRIMARY KEY,
+  compilation_id TEXT NOT NULL REFERENCES compilations(id) ON DELETE CASCADE,
+  source_id TEXT REFERENCES sources(id) ON DELETE SET NULL,
+  ordinal INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  cited_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  UNIQUE (compilation_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS idx_compilation_sources_comp ON compilation_sources(compilation_id, ordinal);
+
+CREATE TABLE IF NOT EXISTS compilation_versions (
+  id TEXT PRIMARY KEY,
+  compilation_id TEXT NOT NULL REFERENCES compilations(id) ON DELETE CASCADE,
+  version_no INTEGER NOT NULL,
+  paragraphs TEXT NOT NULL,
+  markdown TEXT NOT NULL,
+  origin TEXT NOT NULL CHECK (origin IN ('generate','llm-edit','user-edit','restore','contradiction','import')),
+  instruction TEXT,
+  reply TEXT,
+  change_summary TEXT NOT NULL DEFAULT '{}',
+  base_version_no INTEGER,
+  created_at TEXT NOT NULL,
+  UNIQUE (compilation_id, version_no)
+);
+CREATE INDEX IF NOT EXISTS idx_compilation_versions_comp ON compilation_versions(compilation_id, version_no);
+
+CREATE TABLE IF NOT EXISTS compilation_messages (
+  id TEXT PRIMARY KEY,
+  compilation_id TEXT NOT NULL REFERENCES compilations(id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('user','assistant')),
+  content TEXT NOT NULL,
+  version_no INTEGER,
+  applied TEXT,
+  rejected TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_compilation_messages_comp ON compilation_messages(compilation_id, created_at);
+`
+  },
+  {
+    // 2026-09-10（Phase 7.1 回填）：把既有汇编的卡片数据补齐为段落模型，使旧汇编在新模型下立即可用。
+    //   - 按段落**首次出现顺序**分配来源编号 1..N，写 compilation_sources，并把编号回填到每段 source_ordinal；
+    //   - 从 ts 解析 year/month（无 4 位年份者 time_confidence='unknown'，交由 7.2 之后的整合提取或用户补齐）；
+    //   - 为每个非空汇编生成 **v1 版本**（origin='generate'），使"版本对比"从第一阶段起就有基线。
+    version: 31,
+    run: (db) => {
+      const comps = db.prepare('SELECT id, title, updated_at, created_at FROM compilations').all() as {
+        id: string
+        title: string
+        updated_at: string
+        created_at: string
+      }[]
+      const listItems = db.prepare(
+        'SELECT id, source_id, excerpt, ts FROM compilation_items WHERE compilation_id = ? ORDER BY position ASC, rowid ASC'
+      )
+      const sourceTitle = db.prepare('SELECT title FROM sources WHERE id = ?')
+      const insSource = db.prepare(
+        'INSERT OR REPLACE INTO compilation_sources (id, compilation_id, source_id, ordinal, title, cited_count, created_at) VALUES (?,?,?,?,?,?,?)'
+      )
+      const updItem = db.prepare(
+        'UPDATE compilation_items SET year = ?, month = ?, day = ?, time_confidence = ?, source_ordinal = ?, origin = ?, revision = 1, kind = ? WHERE id = ?'
+      )
+      const insVersion = db.prepare(
+        'INSERT INTO compilation_versions (id, compilation_id, version_no, paragraphs, markdown, origin, instruction, reply, change_summary, base_version_no, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)'
+      )
+      const now = new Date().toISOString()
+
+      for (const comp of comps) {
+        const items = listItems.all(comp.id) as { id: string; source_id: string; excerpt: string; ts: string | null }[]
+        if (items.length === 0) continue
+
+        // ① 来源编号表（按首次引用顺序）
+        const ordinalBySource = new Map<string, number>()
+        const citedBySource = new Map<string, number>()
+        for (const it of items) {
+          if (!it.source_id) continue
+          if (!ordinalBySource.has(it.source_id)) ordinalBySource.set(it.source_id, ordinalBySource.size + 1)
+          citedBySource.set(it.source_id, (citedBySource.get(it.source_id) ?? 0) + 1)
+        }
+        for (const [sourceId, ordinal] of ordinalBySource) {
+          const row = sourceTitle.get(sourceId) as { title: string } | undefined
+          insSource.run(
+            crypto.randomUUID(),
+            comp.id,
+            sourceId,
+            ordinal,
+            row?.title ?? sourceId,
+            citedBySource.get(sourceId) ?? 0,
+            comp.created_at || now
+          )
+        }
+
+        // ② 段落元数据回填（时间解析口径与 compilation-document.parseTimeLabel 保持一致）
+        const paragraphs: {
+          id: string
+          ordinal: number
+          text: string
+          timeLabel?: string
+          year?: number
+          month?: number
+          day?: number
+          timeConfidence: string
+          sourceOrdinal?: number
+          evidence?: string
+          kind: string
+          revision: number
+          origin: string
+        }[] = []
+        items.forEach((it, index) => {
+          const label = (it.ts ?? '').trim()
+          const yearMatch = label.match(/(?:18|19|20)\d{2}/)
+          const year = yearMatch ? Number(yearMatch[0]) : null
+          const monthMatch = label.match(/(\d{1,2})\s*月/)
+          const month = monthMatch ? Number(monthMatch[1]) : null
+          const dayMatch = label.match(/(\d{1,2})\s*日/)
+          const day = dayMatch ? Number(dayMatch[1]) : null
+          const confidence = year ? 'exact' : 'unknown'
+          const ordinal = it.source_id ? (ordinalBySource.get(it.source_id) ?? null) : null
+          updItem.run(year, month, day, confidence, ordinal, 'generate', 'paragraph', it.id)
+          paragraphs.push({
+            id: it.id,
+            ordinal: index,
+            text: it.excerpt,
+            timeLabel: label || undefined,
+            year: year ?? undefined,
+            month: month ?? undefined,
+            day: day ?? undefined,
+            timeConfidence: confidence,
+            sourceOrdinal: ordinal ?? undefined,
+            kind: 'paragraph',
+            revision: 1,
+            origin: 'generate'
+          })
+        })
+
+        // ③ v1 版本（一段一行；段内换行转空格，保证"行级 diff ≈ 段落级 diff"）
+        const markdown = paragraphs
+          .map((p) => ((p.timeLabel ? p.timeLabel + '　' : '') + p.text).replace(/\s*\n+\s*/g, ' '))
+          .join('\n')
+        insVersion.run(
+          crypto.randomUUID(),
+          comp.id,
+          1,
+          JSON.stringify(paragraphs),
+          markdown,
+          'generate',
+          null,
+          null,
+          JSON.stringify({ added: paragraphs.length, removed: 0, modified: 0, moved: 0, paragraphIds: [] }),
+          null,
+          comp.updated_at || comp.created_at || now
+        )
+      }
+    }
   }
 ]
 
