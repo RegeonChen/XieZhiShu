@@ -429,6 +429,13 @@ export const zhCN = {
     confirmedBadge: '已确认',
     candidate: '候选 {chunks} 段',
     cards: '卡片 {count} 张',
+    /* Phase 7.1 验收展示（7.3 由正式文档查看器取代）：来源编号与缺年份提示 */
+    sourcesStat: '来源 {count} 篇',
+    pendingTimeStat: '{count} 段缺年份',
+    pendingTimeHint: '这些段落的时间标签里没有年份（如「5 月 19 日」「7—9 日」），无法按时间排序，需要补齐',
+    pendingYearSuffix: '（待补年份）',
+    sourceBadgeTitle: '来自本汇编第 {n} 篇来源',
+    noTime: '无时间',
     pendingContradictions: '{count} 组矛盾待处理',
     noContradictions: '无未处理矛盾',
     openSource: '打开来源',
