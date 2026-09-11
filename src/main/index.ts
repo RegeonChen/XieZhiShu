@@ -109,6 +109,24 @@ import {
   restoreCompilationFromVersion
 } from './db/compilations'
 import { diffParagraphVersions, summarizeParagraphDiff } from './writing/compilation-diff'
+
+/**
+ * 任何**改变汇编内容**的操作之后记录一个版本（用户裁定 D6：以版本为准，取代进程内撤销栈）。
+ * 触发点与 PLAN 7.4 对齐：生成（在 finalize 内）、矛盾取舍、恢复历史版本，以及本函数覆盖的
+ * 手动编辑 / 删除 / 回收站恢复 / 修正回退与再应用 / 排序 / 汇编调整 / 确认。
+ * 失败只记日志、不影响主操作结果。
+ */
+function recordVersionAfterChange(
+  compilationId: string | null | undefined,
+  origin: 'generate' | 'llm-edit' | 'user-edit' | 'restore' | 'contradiction' | 'import'
+): void {
+  if (!compilationId) return
+  try {
+    snapshotCompilationVersion(compilationId, origin)
+  } catch (err) {
+    logMain('compilation', '记录版本失败（不影响本次操作）：' + String(err))
+  }
+}
 import { setRepairApplied } from './db/compilation-repairs'
 import {
   listStyleGuides,
@@ -668,6 +686,7 @@ handleLogged(IPC.COMPILATION_UPDATE_ITEM, (_event, params: CompilationUpdateItem
       kept: params.kept
     })
     if (!item) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料卡片不存在' } }
+    recordVersionAfterChange(undoCid, 'user-edit')
     return { ok: true, data: { item } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
@@ -679,6 +698,7 @@ handleLogged(IPC.COMPILATION_DELETE_ITEM, (_event, params: CompilationDeleteItem
     const undoCid = compilationIdOfItem(params.itemId)
     if (undoCid) pushUndo(undoCid)
     deleteCompilationItem(params.itemId)
+    recordVersionAfterChange(undoCid, 'user-edit')
     return { ok: true, data: undefined }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
@@ -791,6 +811,7 @@ handleLogged(IPC.COMPILATION_ADJUST, async (_event, params: CompilationAdjustReq
     if (inst) addTaskMessage(params.taskId, 'user', inst, 'chat')
     const res = await adjustCompilation(params.compilationId, inst)
     if (!res.ok) return { ok: false, error: res.error }
+    recordVersionAfterChange(params.compilationId, 'llm-edit')
     return {
       ok: true,
       data: {
@@ -865,6 +886,7 @@ handleLogged(IPC.COMPILATION_REORDER, (_event, params: CompilationReorderReq): A
     reorderCompilationItemsByTs(params.compilationId, params.direction)
     const compilation = getCompilationById(params.compilationId)
     if (!compilation) return { ok: false, error: { code: 'COMPILATION_NOT_FOUND', message: '资料汇编不存在' } }
+    recordVersionAfterChange(params.compilationId, 'user-edit')
     return { ok: true, data: { compilation } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
@@ -919,9 +941,15 @@ handleLogged(IPC.COMPILATION_RECYCLE_BIN_RESTORE, (_event, params: CompilationRe
     const undoCid = compilationIdOfBin(params.binId)
     if (undoCid) pushUndo(undoCid)
     const contradiction = restoreRecycleBinContradiction(params.binId)
-    if (contradiction) return { ok: true, data: { contradiction } }
+    if (contradiction) {
+      recordVersionAfterChange(undoCid, 'user-edit')
+      return { ok: true, data: { contradiction } }
+    }
     const card = restoreCompilationCardRecycleBin(params.binId)
-    if (card) return { ok: true, data: { card } }
+    if (card) {
+      recordVersionAfterChange(undoCid, 'user-edit')
+      return { ok: true, data: { card } }
+    }
     return { ok: false, error: { code: 'INVALID_PARAM', message: '回收站条目不存在' } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
@@ -935,6 +963,7 @@ handleLogged(IPC.COMPILATION_REPAIR_REVERT, (_event, params: CompilationRepairRe
     if (undoCid) pushUndo(undoCid)
     const res = setRepairApplied(params.repairId, false)
     if (!res) return { ok: false, error: { code: 'INVALID_PARAM', message: '大模型修正记录不存在' } }
+    recordVersionAfterChange(undoCid, 'user-edit')
     return { ok: true, data: { item: res.item, repair: res.repair } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
@@ -947,6 +976,7 @@ handleLogged(IPC.COMPILATION_REPAIR_APPLY, (_event, params: CompilationRepairApp
     if (undoCid) pushUndo(undoCid)
     const res = setRepairApplied(params.repairId, true)
     if (!res) return { ok: false, error: { code: 'INVALID_PARAM', message: '大模型修正记录不存在' } }
+    recordVersionAfterChange(undoCid, 'user-edit')
     return { ok: true, data: { item: res.item, repair: res.repair } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }

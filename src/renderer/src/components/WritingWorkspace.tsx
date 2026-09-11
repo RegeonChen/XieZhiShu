@@ -172,7 +172,8 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     if (res.ok && res.data) setVersions((res.data.versions ?? []) as CompilationVersionView[])
   }, [])
 
-  // 汇编变化（生成/续跑/编辑/取舍/恢复）后刷新版本列表；每次变更都会产生新版本
+  // 汇编变化后刷新版本列表（生成 / 矛盾取舍 / 手动编辑·删除·排序·回收站恢复·修正回退 / 汇编调整 / 版本恢复
+  // 都会在主进程记录一个新版本；本效果只负责把最新列表取回来）
   useEffect(() => {
     if (compilation?.id) void loadVersions(compilation.id)
     else setVersions([])
