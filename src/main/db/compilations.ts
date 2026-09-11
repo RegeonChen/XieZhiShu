@@ -375,9 +375,21 @@ function snapshotCardToRecycleBin(itemId: string): boolean {
   if (!item) return false
   const variants = db.prepare('SELECT * FROM compilation_contradiction_variants WHERE item_id = ?').all(itemId)
   const repairs = db.prepare('SELECT * FROM compilation_repairs WHERE item_id = ?').all(itemId)
+  // Phase 7.1 新增的段落元数据在回收站表里没有对应列，随 extra JSON 一起快照（恢复时写回，避免元数据丢失）
+  const doc = {
+    year: item.year,
+    month: item.month,
+    day: item.day,
+    time_confidence: item.time_confidence,
+    source_ordinal: item.source_ordinal,
+    evidence: item.evidence,
+    origin: item.origin,
+    revision: item.revision,
+    kind: item.kind
+  }
   db.prepare(
     'INSERT INTO compilation_card_recycle_bin (id, compilation_id, item_id, position, source_id, excerpt, ts, note, extra_tags, kept, created_at, deleted_at, extra) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)'
-  ).run(crypto.randomUUID(), item.compilation_id, item.id, item.position, item.source_id, item.excerpt, item.ts, item.note, item.extra_tags, item.kept, item.created_at, new Date().toISOString(), JSON.stringify({ variants, repairs }))
+  ).run(crypto.randomUUID(), item.compilation_id, item.id, item.position, item.source_id, item.excerpt, item.ts, item.note, item.extra_tags, item.kept, item.created_at, new Date().toISOString(), JSON.stringify({ variants, repairs, doc }))
   return true
 }
 
@@ -393,15 +405,25 @@ export function restoreCompilationCardRecycleBin(binId: string): CompilationItem
   const db = getDb()
   const row = db.prepare('SELECT * FROM compilation_card_recycle_bin WHERE id = ?').get(binId) as CardBinRow | undefined
   if (!row) return null
-  let extra: { variants?: Record<string, unknown>[]; repairs?: Record<string, unknown>[] } = {}
+  let extra: { variants?: Record<string, unknown>[]; repairs?: Record<string, unknown>[]; doc?: Record<string, unknown> } = {}
   try { extra = JSON.parse(row.extra || '{}') } catch { extra = {} }
+  const doc = extra.doc ?? {}
+  const docField = (key: string, fallback: unknown): unknown => (doc[key] === undefined ? fallback : doc[key])
   const fkOn = db.pragma('foreign_keys', { simple: true })
   db.pragma('foreign_keys = OFF')
   try {
     const tx = db.transaction(() => {
       db.prepare(
-        'INSERT INTO compilation_items (id, compilation_id, position, source_id, excerpt, ts, note, extra_tags, kept, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)'
-      ).run(row.item_id, row.compilation_id, row.position, row.source_id, row.excerpt, row.ts, row.note, row.extra_tags, row.kept, row.created_at)
+        `INSERT INTO compilation_items
+          (id, compilation_id, position, source_id, excerpt, ts, note, extra_tags, kept, created_at,
+           year, month, day, time_confidence, source_ordinal, evidence, origin, revision, kind)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).run(
+        row.item_id, row.compilation_id, row.position, row.source_id, row.excerpt, row.ts, row.note, row.extra_tags, row.kept, row.created_at,
+        docField('year', null), docField('month', null), docField('day', null), docField('time_confidence', 'unknown'),
+        docField('source_ordinal', null), docField('evidence', null), docField('origin', 'generate'),
+        docField('revision', 1), docField('kind', 'paragraph')
+      )
       const insVar = db.prepare('INSERT INTO compilation_contradiction_variants (id, contradiction_id, item_id, variant_text, source_id, created_at) VALUES (?,?,?,?,?,?)')
       for (const v of extra.variants ?? []) {
         insVar.run(v.id, v.contradiction_id, v.item_id, v.variant_text, v.source_id ?? null, v.created_at)

@@ -326,7 +326,8 @@ if (import.meta.vitest) {
         { id: 'i2', source_ordinal: 2, year: 1999, month: null, day: null, time_confidence: 'exact', origin: 'generate', revision: 1, kind: 'paragraph' },
         // 「7—9 日」是**日**区间而非月份：month 必须为 null（否则会被排到 7 月），day 取末位数字
         { id: 'i3', source_ordinal: 1, year: null, month: null, day: 9, time_confidence: 'unknown', origin: 'generate', revision: 1, kind: 'paragraph' },
-        { id: 'i4', source_ordinal: 2, year: null, month: null, day: null, time_confidence: 'unknown', origin: 'generate', revision: 1, kind: 'paragraph' }
+        // i4 的 ts「十三五规划期间」无年份，但来源是《长乐年鉴2019》→ Migration 033 按年鉴惯例（年份 −1）补成 2018 年 inferred
+        { id: 'i4', source_ordinal: 2, year: 2018, month: null, day: null, time_confidence: 'inferred', origin: 'generate', revision: 1, kind: 'paragraph' }
       ])
       // ③ v1 版本：段落快照 + 一段一行的 markdown + 全部计为新增
       const version = old
