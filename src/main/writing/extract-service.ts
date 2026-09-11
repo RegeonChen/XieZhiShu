@@ -17,11 +17,13 @@
  * - 每段必须给出含 4 位年份的 `timeLabel`；确实推断不出时照原文写法给出，由本地标为 `unknown`（界面「时间待核」）。
  */
 import { ErrorCodes } from '../../shared/types'
+import type { CompilationTimeConfidence } from '../../shared/types'
 import { chatCompletion, type ChatMessage } from '../llm/chat'
 import { logMain } from '../logger'
 import {
   locateVerbatim,
   validateExtractedParagraph,
+  withFallbackYear,
   type ExtractedParagraphDraft,
   type ParagraphRejectReason
 } from './compilation-document'
@@ -57,6 +59,8 @@ export interface ExtractedDraft {
   /** 段落正文（不含段首时间） */
   text: string
   timeLabel?: string
+  /** 时间可信度：exact=原文明确；inferred=按来源标题兜底推断（年鉴年份 −1）；unknown=仍未确定 */
+  timeConfidence?: CompilationTimeConfidence
   evidence?: string
   /** true = 校验未通过、已降级为原文整段 */
   degraded?: boolean
@@ -268,12 +272,14 @@ export function logExtractBatchStats(batchNo: number, total: number, stats: Extr
 
 // ---------------------------------------------------------------- 批次处理（核心，可测试）
 
-/** 降级：保留该卡片原文整段（不丢材料），时间标签沿用卡片自身 */
+/** 降级：保留该卡片原文整段（不丢材料），时间标签沿用卡片自身；缺年份时用来源标题兜底推断 */
 function degraded(candidate: ExtractCandidate): ExtractedDraft {
+  const time = withFallbackYear(candidate.ts, candidate.sourceTitle)
   return {
     parentIndex: candidate.index,
     text: candidate.excerpt,
-    timeLabel: candidate.ts ?? undefined,
+    timeLabel: time.timeLabel,
+    timeConfidence: time.timeConfidence,
     degraded: true
   }
 }
@@ -320,12 +326,15 @@ export function collectExtractResults(
     // 段落归属：优先归到 evidence 所在的那张卡片（用于矛盾说法映射与诊断），否则归该来源第一张
     const evidence = (draft.evidence ?? '').trim()
     const parent = (evidence ? group.find((c) => locateVerbatim(c.excerpt, evidence) !== null) : undefined) ?? group[0]
+    // 段首时间兜底：模型没给年份时，用来源标题推断（《长乐年鉴2019》→ 2018 年，标为 inferred）
+    const time = withFallbackYear(validation.timeLabel, parent.sourceTitle)
     stats.accepted += 1
     stats.retainedChars += validation.text.length
     drafts.push({
       parentIndex: parent.index,
       text: validation.text,
-      timeLabel: validation.timeLabel,
+      timeLabel: time.timeLabel,
+      timeConfidence: time.timeConfidence,
       evidence: validation.evidence
     })
   }

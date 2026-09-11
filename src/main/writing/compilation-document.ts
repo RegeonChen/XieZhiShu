@@ -258,6 +258,41 @@ export function numbersCoveredBy(text: string, sourceText: string): boolean {
   return true
 }
 
+/**
+ * 从来源标题推断年份（兜底）：地方志/年鉴的惯例是「《长乐年鉴2019》记述的是 2018 年」，
+ * 故取标题中的 4 位年份**减 1** 作为兜底年份（用户 2026-09-10 明确要求）。
+ * 标题里没有 4 位年份时返回 undefined（不硬凑）。
+ */
+export function inferYearFromSourceTitle(title?: string | null): number | undefined {
+  const m = (title ?? '').match(/(?:18|19|20)\d{2}/)
+  if (!m) return undefined
+  const year = Number(m[0]) - 1
+  return year >= 1900 ? year : undefined
+}
+
+/**
+ * 段首时间兜底（纯函数）：模型的 `timeLabel` 里没有年份时，用来源标题推断的年份补上，标为 `inferred`。
+ * - 原标签带月份（如「5 月 19 日」）→ 拼成「2018 年 5 月 19 日」；
+ * - 原标签只有日（如「29 日」，缺月份本身已无意义）或为空 → 只写「2018 年」；
+ * - 标题也推断不出年份 → 保持 `unknown`（界面「时间待核」），不编造。
+ */
+export function withFallbackYear(
+  timeLabel: string | undefined,
+  sourceTitle: string | undefined
+): { timeLabel?: string; year?: number; month?: number; day?: number; timeConfidence: CompilationTimeConfidence } {
+  const parsed = parseTimeLabel(timeLabel)
+  if (parsed.year) {
+    return { timeLabel: parsed.label, year: parsed.year, month: parsed.month, day: parsed.day, timeConfidence: 'exact' }
+  }
+  const inferred = inferYearFromSourceTitle(sourceTitle)
+  if (inferred == null) {
+    return { timeLabel: parsed.label, month: parsed.month, day: parsed.day, timeConfidence: 'unknown' }
+  }
+  const rest = (parsed.label ?? '').replace(/(?:18|19|20)\d{2}\s*年?/, '').trim()
+  const label = /月/.test(rest) ? String(inferred) + ' 年 ' + rest : String(inferred) + ' 年'
+  return { timeLabel: label, year: inferred, month: parsed.month, day: parsed.day, timeConfidence: 'inferred' }
+}
+
 /** 大模型「整合提取」返回的一段（本地校验前的原始形态） */
 export interface ExtractedParagraphDraft {
   /** 该段所属来源（提示词中的 `#N`） */
@@ -320,6 +355,8 @@ export function validateExtractedParagraph(draft: ExtractedParagraphDraft, sourc
 export interface AssembleInputParagraph {
   text: string
   timeLabel?: string
+  /** 时间可信度（本地已判定时传入；缺省则按 timeLabel 现解析） */
+  timeConfidence?: CompilationTimeConfidence
   /** 所属来源 id（调用方按 `#N` 解析后传入）；空串表示无来源 */
   sourceId: string
   sourceTitle?: string
@@ -369,7 +406,7 @@ export function assembleDocument(inputs: AssembleInputParagraph[]): AssembleResu
       year: parsed.year,
       month: parsed.month,
       day: parsed.day,
-      timeConfidence: parsed.confidence,
+      timeConfidence: input.timeConfidence ?? parsed.confidence,
       sourceId: input.sourceId || undefined,
       sourceTitle: input.sourceTitle,
       evidence: input.evidence,
@@ -560,6 +597,36 @@ if (import.meta.vitest) {
       expect(
         validateExtractedParagraph({ sourceRef: '#1', text: '全区普通中学 32 所。', evidence: '全区普通中学 30 所' }, src)
       ).toEqual({ ok: false, reason: 'number-not-in-source' })
+    })
+
+    it('infers a fallback year from the source title (年鉴年份 − 1) when the label has no year', () => {
+      // 年鉴惯例：《长乐年鉴2019》记述的是 2018 年
+      expect(inferYearFromSourceTitle('长乐年鉴2019')).toBe(2018)
+      expect(inferYearFromSourceTitle('长乐年鉴2023（完整版）.pdf')).toBe(2022)
+      expect(inferYearFromSourceTitle('教育发展报告')).toBeUndefined()
+      expect(inferYearFromSourceTitle(undefined)).toBeUndefined()
+
+      // 有年份 → exact，原样保留
+      expect(withFallbackYear('2018 年 5 月', '长乐年鉴2020')).toEqual({
+        timeLabel: '2018 年 5 月',
+        year: 2018,
+        month: 5,
+        day: undefined,
+        timeConfidence: 'exact'
+      })
+      // 缺年份 + 标题可推断 → inferred，并补出年份（带月份时保留月日）
+      expect(withFallbackYear('5 月 19 日', '长乐年鉴2019')).toEqual({
+        timeLabel: '2018 年 5 月 19 日',
+        year: 2018,
+        month: 5,
+        day: 19,
+        timeConfidence: 'inferred'
+      })
+      // 只有日（缺月份本身已无意义）→ 只写年份
+      expect(withFallbackYear('29 日', '长乐年鉴2019')).toMatchObject({ timeLabel: '2018 年', timeConfidence: 'inferred' })
+      expect(withFallbackYear(undefined, '长乐年鉴2019')).toMatchObject({ timeLabel: '2018 年', timeConfidence: 'inferred' })
+      // 标题也推断不出 → 保持 unknown（不编造）
+      expect(withFallbackYear('7—9 日', '教育发展报告')).toMatchObject({ timeConfidence: 'unknown' })
     })
 
     it('assembles a document: dedupes duplicates, keeps conflicting numbers, sorts and numbers sources', () => {
