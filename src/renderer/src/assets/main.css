@@ -4529,6 +4529,124 @@ textarea:focus-visible {
   color: var(--fg-soft);
   line-height: 1.7;
 }
+/* Phase 7.3：连续文档查看器 —— 段首时间徽标 + 正文 + 段尾来源圆标，按年份分节 */
+.compilation-doc {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 2px 40px;
+  max-width: 860px;
+  width: 100%;
+  margin: 0 auto;
+}
+.compilation-doc__year {
+  margin: 18px 0 6px;
+  padding-bottom: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  border-bottom: 1px solid var(--border);
+}
+.compilation-para {
+  position: relative;
+  display: block;
+  padding: 6px 10px 6px 12px;
+  margin: 0 0 6px;
+  border-left: 2px solid transparent;
+  border-radius: var(--radius);
+  font-size: 13.5px;
+  line-height: 1.9;
+  color: var(--fg);
+  transition: background 0.15s, border-color 0.15s;
+}
+.compilation-para:hover {
+  background: var(--bg-elevated);
+}
+.compilation-para.has-conflict {
+  border-left-color: var(--danger);
+}
+.compilation-para.is-repair {
+  border-left-color: var(--success);
+}
+.compilation-para.is-located {
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+  animation: compilation-card-locate 1.8s ease-out;
+}
+.compilation-doc__time {
+  display: inline-block;
+  margin-right: 8px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--fg-soft);
+  font-size: 11px;
+  line-height: 1.7;
+  white-space: nowrap;
+}
+.compilation-doc__time.is-pending {
+  color: var(--warning);
+}
+.compilation-doc__text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.compilation-para__actions {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  display: inline-flex;
+  gap: 4px;
+  padding: 2px 4px;
+  border-radius: 999px;
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-sm, 0 1px 3px rgba(0, 0, 0, 0.12));
+}
+.compilation-para__actions button {
+  border: none;
+  background: transparent;
+  color: var(--fg-soft);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-family: inherit;
+}
+.compilation-para__actions button:hover {
+  background: var(--bg-elevated);
+  color: var(--fg);
+}
+.compilation-para__actions button.is-danger:hover {
+  color: var(--danger);
+}
+.compilation-source-card {
+  max-width: 620px;
+}
+.compilation-source-card__list {
+  max-height: 46vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0;
+}
+.compilation-source-card__item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  text-align: left;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  color: var(--fg);
+  font-size: 12.5px;
+  line-height: 1.7;
+  cursor: pointer;
+  font-family: inherit;
+}
+.compilation-source-card__item:hover {
+  border-color: var(--accent);
+}
 .compilation-chip.conflict {
   color: var(--danger);
   background: var(--danger-soft);
