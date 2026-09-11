@@ -9,6 +9,12 @@ import { getDb } from '../db/connection'
 interface RowItem {
   id: string; compilation_id: string; position: number; source_id: string | null
   excerpt: string; ts: string | null; note: string | null; extra_tags: string; kept: number; created_at: string
+  /* Phase 7.1（Migration 030）新增列：**恢复快照时必须一并写回**，
+     否则每次撤销/恢复都会把段落元数据（时间、来源编号、证据等）重置为默认值——
+     2026-09-10 实测就发生过：一次撤销让整份汇编的 year/source_ordinal 全部丢失。 */
+  year: number | null; month: number | null; day: number | null
+  time_confidence: string | null; source_ordinal: number | null; evidence: string | null
+  origin: string | null; revision: number | null; kind: string | null
 }
 interface RowContra {
   id: string; compilation_id: string; topic: string; kind: string; status: string; chosen_item_id: string | null; created_at: string
@@ -75,8 +81,19 @@ export function restoreCompilationSnapshot(snapshot: CompilationSnapshot): void 
       db.prepare('UPDATE compilations SET title = ?, status = ?, updated_at = ? WHERE id = ?')
         .run(snapshot.compilation.title, snapshot.compilation.status, snapshot.compilation.updated_at, cid)
 
-      const insItem = db.prepare('INSERT INTO compilation_items (id, compilation_id, position, source_id, excerpt, ts, note, extra_tags, kept, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
-      for (const r of snapshot.items) insItem.run(r.id, r.compilation_id, r.position, r.source_id, r.excerpt, r.ts, r.note, r.extra_tags, r.kept, r.created_at)
+      const insItem = db.prepare(
+        `INSERT INTO compilation_items
+          (id, compilation_id, position, source_id, excerpt, ts, note, extra_tags, kept, created_at,
+           year, month, day, time_confidence, source_ordinal, evidence, origin, revision, kind)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      )
+      for (const r of snapshot.items) {
+        insItem.run(
+          r.id, r.compilation_id, r.position, r.source_id, r.excerpt, r.ts, r.note, r.extra_tags, r.kept, r.created_at,
+          r.year ?? null, r.month ?? null, r.day ?? null, r.time_confidence ?? 'unknown', r.source_ordinal ?? null,
+          r.evidence ?? null, r.origin ?? 'generate', r.revision ?? 1, r.kind ?? 'paragraph'
+        )
+      }
 
       const insContra = db.prepare('INSERT INTO compilation_contradictions (id, compilation_id, topic, kind, status, chosen_item_id, created_at) VALUES (?,?,?,?,?,?,?)')
       for (const r of snapshot.contradictions) insContra.run(r.id, r.compilation_id, r.topic, r.kind, r.status, r.chosen_item_id, r.created_at)

@@ -879,6 +879,59 @@ CREATE INDEX IF NOT EXISTS idx_compilation_messages_comp ON compilation_messages
     sql: `
 ALTER TABLE compilations ADD COLUMN extract_scan TEXT;
 `
+  },
+  {
+    // 2026-09-10（数据修复，Phase 7.3 验收发现）：旧「撤销/恢复」恢复快照时只重插了 10 个旧列，
+    // 把 Migration 030 新增的段落元数据（year/month/day/time_confidence/source_ordinal/evidence/origin/revision/kind）
+    // 全部重置为默认值——实测一次撤销就让某份 148 段汇编的 year 与 source_ordinal 全部丢失，
+    // 表现为界面「年份小标题消失 + 每段都显示待补年份」。
+    // 本迁移把**可从现有数据确定性重建**的部分补回来（撤销本身无法区分"被写坏"与"本来就未知"，故只补明确不一致的行）：
+    //   ① ts 含 4 位年份但 year 为空 → 按 ts 重建 year/month/day 与 confidence='exact'；
+    //   ② ts 无年份且 source_id 存在 → 用来源标题的年鉴年份 −1 兜底（confidence='inferred'）；
+    //   ③ source_id 存在但 source_ordinal 为空 → 从 compilation_sources 反查编号。
+    // evidence / origin / revision / kind 无法重建（模型引文未留存），保持默认值：不影响展示与排序。
+    version: 33,
+    run: (db) => {
+      const rows = db
+        .prepare(
+          `SELECT i.id, i.ts, i.source_id, i.compilation_id,
+                  (SELECT title FROM sources s WHERE s.id = i.source_id) AS source_title
+             FROM compilation_items i
+            WHERE i.year IS NULL OR (i.source_id IS NOT NULL AND i.source_id <> '' AND i.source_ordinal IS NULL)`
+        )
+        .all() as { id: string; ts: string | null; source_id: string | null; compilation_id: string; source_title: string | null }[]
+      const upd = db.prepare(
+        'UPDATE compilation_items SET year = ?, month = ?, day = ?, time_confidence = ?, source_ordinal = ? WHERE id = ?'
+      )
+      const ordinalOf = db.prepare('SELECT ordinal FROM compilation_sources WHERE compilation_id = ? AND source_id = ?')
+      for (const r of rows) {
+        const label = (r.ts ?? '').trim()
+        const yearMatch = label.match(/(?:18|19|20)\d{2}/)
+        let year = yearMatch ? Number(yearMatch[0]) : null
+        const monthMatch = label.match(/(\d{1,2})\s*月/)
+        const month = monthMatch ? Number(monthMatch[1]) : null
+        const dayMatch = label.match(/(\d{1,2})\s*日/)
+        const day = dayMatch ? Number(dayMatch[1]) : null
+        let confidence = year ? 'exact' : 'unknown'
+        if (!year) {
+          // 年鉴惯例兜底（与 extract-service / compilation-document 同口径）：《长乐年鉴2019》→ 2018 年
+          const titleYear = (r.source_title ?? '').match(/(?:18|19|20)\d{2}/)
+          if (titleYear) {
+            const inferred = Number(titleYear[0]) - 1
+            if (inferred >= 1900) {
+              year = inferred
+              confidence = 'inferred'
+            }
+          }
+        }
+        let ordinal: number | null = null
+        if (r.source_id) {
+          const found = ordinalOf.get(r.compilation_id, r.source_id) as { ordinal: number } | undefined
+          ordinal = found?.ordinal ?? null
+        }
+        upd.run(year, month, day, confidence, ordinal, r.id)
+      }
+    }
   }
 ]
 
