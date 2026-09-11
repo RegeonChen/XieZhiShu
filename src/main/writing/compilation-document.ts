@@ -75,10 +75,12 @@ export function paragraphTextHash(text: string): string {
   return (h1 >>> 0).toString(16).padStart(8, '0') + (h2 >>> 0).toString(16).padStart(8, '0')
 }
 
-/** 单段落渲染为一行 markdown：`时间标签　正文`（无时间则只输出正文；段内换行转空格） */
+/** 单段落渲染为一行 markdown：`时间标签　正文`（无时间则只输出正文；段内 ASCII 空白归一为单个空格） */
 export function renderParagraphLine(p: Pick<CompilationParagraph, 'timeLabel' | 'text'>): string {
-  const text = (p.text ?? '').replace(/\s*\n+\s*/g, ' ').trim()
-  const label = (p.timeLabel ?? '').trim()
+  // 注意：只归一 ASCII 空白（空格/制表/换行），保留段首时间与正文之间的全角空格 U+3000 作为稳定分隔符。
+  // 年鉴 PDF 抽出的正文里常有制表符（表格残留），归一后既能保证"一段一行"，也让 diff 不受空白噪声干扰。
+  const text = (p.text ?? '').replace(/[ \t\r\n\f\v]+/g, ' ').trim()
+  const label = (p.timeLabel ?? '').replace(/[ \t\r\n\f\v]+/g, ' ').trim()
   return label ? label + '　' + text : text
 }
 
@@ -198,8 +200,11 @@ if (import.meta.vitest) {
 
     it('renders one line per paragraph with the time label prefix', () => {
       expect(renderParagraphLine({ timeLabel: '2018 年', text: '全区普通中学 30 所。' })).toBe('2018 年　全区普通中学 30 所。')
-      // 段内换行转空格（保证一段一行）
+      // 段内换行/制表符归一为单个空格（年鉴 PDF 抽出的正文常带表格残留），保证"一段一行"
       expect(renderParagraphLine({ text: '甲\n乙' })).toBe('甲 乙')
+      expect(renderParagraphLine({ text: '【侨胞服务】 \t 2020 年，出具证明 12 份。' })).toBe('【侨胞服务】 2020 年，出具证明 12 份。')
+      // 全角空格（时间与正文之间的分隔符）必须保留
+      expect(renderParagraphLine({ timeLabel: '2018 年', text: '甲' })).toContain('　')
       const md = renderDocumentMarkdown([
         { timeLabel: '2018 年', text: '甲。', kind: 'paragraph' },
         { timeLabel: '2019 年', text: '乙。', kind: 'paragraph' }
