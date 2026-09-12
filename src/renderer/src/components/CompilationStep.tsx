@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { zhCN } from '../i18n/zh-CN'
 
 /**
@@ -111,6 +111,28 @@ interface Props {
   onlyChanged?: boolean
   onSelectVersion?: (versionNo: number | null) => void
   onToggleOnlyChanged?: (value: boolean) => void
+  /* ---- Phase 7.5：悬浮对话框（人机协同编辑）+ 人工修改解锁（D5） ---- */
+  /** 汇编级对话历史（含大模型修改记录） */
+  docMessages?: CompilationMessageView[]
+  /** 大模型正在修改汇编 */
+  docEditing?: boolean
+  /** 上一次修改的失败原因（未配置模型 / 调用失败 / 格式无法解析） */
+  docError?: string | null
+  /** 本次改动涉及的段 id（高亮 + 滚动到首个改动段） */
+  docChangedIds?: string[]
+  onDocSend?: (instruction: string) => void
+  /** 打开对话框时按需拉取历史 */
+  onDocOpen?: () => void
+  /** D5：确认汇编后才解锁的人工修改模式 */
+  manualMode?: boolean
+  onStartManualEdit?: () => void
+}
+
+export interface CompilationMessageView {
+  role: 'user' | 'assistant'
+  content: string
+  versionNo?: number
+  createdAt: string
 }
 
 export interface CompilationVersionView {
@@ -160,7 +182,15 @@ function CompilationStep({
   versionDiff,
   onlyChanged,
   onSelectVersion,
-  onToggleOnlyChanged
+  onToggleOnlyChanged,
+  docMessages,
+  docEditing,
+  docError,
+  docChangedIds,
+  onDocSend,
+  onDocOpen,
+  manualMode,
+  onStartManualEdit
 }: Props) {
   const t = zhCN.compilation
   /** 差异段按段 id 建索引（渲染时给段落上色 / 段内高亮） */
@@ -249,6 +279,63 @@ function CompilationStep({
     setHint({ x: r.left + r.width / 2, y: r.top, text })
   }
 
+  /* ---- Phase 7.5：悬浮对话框（人机协同编辑） ---- */
+  const [chatOpen, setChatOpen] = useState(false)
+  const [chatInput, setChatInput] = useState('')
+  /** D5：进入人工修改模式前的不可逆二次确认弹窗 */
+  const [manualConfirm, setManualConfirm] = useState(false)
+  /** 对话面板位置（null = 默认贴右下角；拖动后为相对 `.compilation-step` 的坐标） */
+  const [panelPos, setPanelPos] = useState<{ x: number; y: number } | null>(null)
+  const paneRef = useRef<HTMLDivElement | null>(null)
+  const panelRef = useRef<HTMLDivElement | null>(null)
+  const chatListRef = useRef<HTMLDivElement | null>(null)
+  const dragRef = useRef<{ dx: number; dy: number } | null>(null)
+  const changedSet = new Set(docChangedIds ?? [])
+  const messages = docMessages ?? []
+  const canSend = chatInput.trim().length > 0 && docEditing !== true
+
+  // 新消息/编辑中 → 对话列表滚到底部
+  useEffect(() => {
+    const el = chatListRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [messages.length, docEditing, chatOpen])
+
+  // 本次改动 → 滚动到首个改动段（用户要求"查看器自动刷新 + 高亮 + 滚动到首个改动段"）
+  useEffect(() => {
+    if (!docChangedIds || docChangedIds.length === 0) return
+    const id = docChangedIds[0]
+    const timer = window.setTimeout(() => {
+      const el = cardsRef.current?.querySelector<HTMLElement>(`[data-card-id="${id}"]`)
+      el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 80)
+    return () => window.clearTimeout(timer)
+  }, [docChangedIds])
+
+  const onPanelPointerDown = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    const panel = panelRef.current
+    const pane = paneRef.current
+    if (!panel || !pane) return
+    const pr = panel.getBoundingClientRect()
+    dragRef.current = { dx: e.clientX - pr.left, dy: e.clientY - pr.top }
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+  const onPanelPointerMove = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    const drag = dragRef.current
+    const pane = paneRef.current
+    const panel = panelRef.current
+    if (!drag || !pane || !panel) return
+    const ar = pane.getBoundingClientRect()
+    const w = panel.offsetWidth
+    const h = panel.offsetHeight
+    setPanelPos({
+      x: Math.min(Math.max(e.clientX - ar.left - drag.dx, 4), Math.max(4, ar.width - w - 4)),
+      y: Math.min(Math.max(e.clientY - ar.top - drag.dy, 4), Math.max(4, ar.height - h - 4))
+    })
+  }
+  const onPanelPointerUp = (): void => {
+    dragRef.current = null
+  }
+
   useEffect(
     () => () => {
       if (locateTimerRef.current !== null) window.clearTimeout(locateTimerRef.current)
@@ -317,7 +404,7 @@ function CompilationStep({
   }
 
   return (
-    <div className="compilation-step">
+    <div className="compilation-step" ref={paneRef}>
       <div className="compilation-toolbar">
         <span className="compilation-stat">{t.docStats.replace('{paragraphs}', String(keptItems.length)).replace('{sources}', String(sourceCount))}</span>
         {versionDiff ? (
@@ -354,6 +441,24 @@ function CompilationStep({
           {pending.length ? t.pendingContradictions.replace('{count}', String(pending.length)) : t.noContradictions}
         </span>
         <div className="compilation-actions">
+          {/* Phase 7.5 / D5：确认汇编前只允许"对话修改"，工具栏明确标注；确认后才出现「开始人工修改」 */}
+          {manualMode ? (
+            <span className="compilation-stat is-manual" title={t.manualEditHint}>
+              {t.manualEditBadge}
+            </span>
+          ) : compilation.status !== 'finalized' ? (
+            <span className="compilation-stat">{t.docChatOnlyEditHint}</span>
+          ) : (
+            <button
+              type="button"
+              className="source-list__btn"
+              disabled={busy}
+              title={t.manualEditHint}
+              onClick={() => setManualConfirm(true)}
+            >
+              {t.startManualEdit}
+            </button>
+          )}
           {/* Phase 7.4（用户 2026-09-10 简化）：只支持"与改动前的上一版对比"，故不再需要版本下拉——
               仅保留一个对比开关；上一版之后的历史不再保留。 */}
           {versions && versions.length > 1 ? (
@@ -511,6 +616,7 @@ function CompilationStep({
                     conflictForItem(it.id) ? 'has-conflict' : '',
                     fix ? 'is-repair' : '',
                     locatedId === it.id ? 'is-located' : '',
+                    changedSet.has(it.id) ? 'is-changed' : '',
                     /* Phase 7.4：对比模式下的差异标记 */
                     diff ? 'diff-' + diff.kind : ''
                   )}
@@ -558,7 +664,7 @@ function CompilationStep({
                       {fix.status === 'applied' ? t.repairBadge : t.repairBadgeReverted}
                     </button>
                   ) : null}
-                  {hoverId === it.id ? (
+                  {hoverId === it.id && manualMode === true ? (
                     <span className="compilation-para__actions">
                       <button type="button" onClick={() => startEdit(it)}>{t.edit}</button>
                       <button type="button" className="is-danger" onClick={() => onDeleteItem(it.id)}>{t.delete}</button>
@@ -683,6 +789,128 @@ function CompilationStep({
       {hint ? (
         <div className="compilation-hint" style={{ left: hint.x, top: hint.y - 10 }} role="tooltip">
           {hint.text}
+        </div>
+      ) : null}
+
+      {/* Phase 7.5：右下悬浮圆按钮（机器人简笔）——打开「与汇编对话」面板，由大模型按 ops 修改汇编 */}
+      <button
+        type="button"
+        className={cls('compilation-docchat-fab', chatOpen ? 'is-open' : '')}
+        title={t.docChatOpen}
+        aria-label={t.docChatOpen}
+        aria-expanded={chatOpen}
+        onClick={() => {
+          const next = !chatOpen
+          setChatOpen(next)
+          if (next) onDocOpen?.()
+        }}
+      >
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+          <rect x="4" y="7.5" width="16" height="12" rx="3.2" fill="none" stroke="currentColor" strokeWidth="1.6" />
+          <path d="M12 7.5V4.6" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+          <circle cx="12" cy="3.6" r="1.3" fill="currentColor" />
+          <circle cx="9.2" cy="13" r="1.4" fill="currentColor" />
+          <circle cx="14.8" cy="13" r="1.4" fill="currentColor" />
+          <path d="M9.4 16.6h5.2" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          <path d="M2.6 12.4v4.4M21.4 12.4v4.4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+        </svg>
+      </button>
+
+      {chatOpen ? (
+        <div
+          ref={panelRef}
+          className="compilation-docchat"
+          style={panelPos ? { left: panelPos.x, top: panelPos.y, right: 'auto', bottom: 'auto' } : undefined}
+        >
+          <div
+            className="compilation-docchat__head"
+            onPointerDown={onPanelPointerDown}
+            onPointerMove={onPanelPointerMove}
+            onPointerUp={onPanelPointerUp}
+            onPointerCancel={onPanelPointerUp}
+          >
+            <span className="compilation-docchat__title">{t.docChatTitle}</span>
+            <span className="compilation-docchat__drag">{t.docChatDragHint}</span>
+            <button
+              type="button"
+              className="compilation-docchat__close"
+              title={t.docChatMinimize}
+              aria-label={t.docChatMinimize}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={() => setChatOpen(false)}
+            >
+              &#8211;
+            </button>
+          </div>
+          <div className="compilation-docchat__list" ref={chatListRef}>
+            {messages.length === 0 ? (
+              <p className="compilation-docchat__empty">{t.docChatEmpty}</p>
+            ) : (
+              messages.map((m, i) => (
+                <div key={i} className={cls('compilation-docchat__msg', m.role === 'user' ? 'is-user' : 'is-assistant')}>
+                  {m.content}
+                  {m.versionNo != null ? <span className="compilation-docchat__ver">v{m.versionNo}</span> : null}
+                </div>
+              ))
+            )}
+            {docEditing ? <div className="compilation-docchat__typing">{t.docChatEditing}</div> : null}
+          </div>
+          {docError ? <div className="compilation-docchat__error">{docError}</div> : null}
+          <div className="compilation-docchat__foot">
+            <textarea
+              className="compilation-docchat__input"
+              rows={2}
+              value={chatInput}
+              placeholder={t.docChatPlaceholder}
+              disabled={docEditing === true}
+              onChange={(e) => setChatInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && canSend) {
+                  onDocSend?.(chatInput.trim())
+                  setChatInput('')
+                }
+              }}
+            />
+            <div className="compilation-docchat__actions">
+              <span className="compilation-docchat__hint">{t.docChatHint}</span>
+              <button
+                type="button"
+                className="source-list__btn source-list__btn--primary"
+                disabled={!canSend}
+                onClick={() => {
+                  onDocSend?.(chatInput.trim())
+                  setChatInput('')
+                }}
+              >
+                {docEditing ? t.docChatEditing : t.docChatSend}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* D5：进入人工修改模式的不可逆二次确认 */}
+      {manualConfirm ? (
+        <div className="skills-manager__modal-backdrop" onMouseDown={() => setManualConfirm(false)}>
+          <div className="skills-manager__modal" onMouseDown={(e) => e.stopPropagation()}>
+            <h4 className="skills-manager__modal-title">{t.manualEditConfirmTitle}</h4>
+            <p className="compilation-manual-warn">{t.manualEditConfirmBody}</p>
+            <div className="skills-manager__modal-actions">
+              <button type="button" className="source-list__btn" onClick={() => setManualConfirm(false)}>
+                {t.manualEditCancel}
+              </button>
+              <button
+                type="button"
+                className="source-list__btn source-list__btn--primary"
+                onClick={() => {
+                  setManualConfirm(false)
+                  onStartManualEdit?.()
+                }}
+              >
+                {t.manualEditConfirmOk}
+              </button>
+            </div>
+          </div>
         </div>
       ) : null}
     </div>

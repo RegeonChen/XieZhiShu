@@ -9,7 +9,8 @@ import ChatPanel, { type ChatMessageItem, type SourceRefItem } from './ChatPanel
 import CompilationStep, {
   type CompilationView,
   type CompilationVersionView,
-  type CompilationVersionDiffView
+  type CompilationVersionDiffView,
+  type CompilationMessageView
 } from './CompilationStep'
 import type { Contradiction, CompilationRecycleBinItem } from '../../../shared/types'
 
@@ -165,6 +166,13 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   const [compareFrom, setCompareFrom] = useState<number | null>(null)
   const [versionDiff, setVersionDiff] = useState<CompilationVersionDiffView | null>(null)
   const [onlyChanged, setOnlyChanged] = useState(false)
+  /* ---- Phase 7.5：悬浮对话框（人机协同编辑）+ 人工修改解锁（D5） ---- */
+  const [docMessages, setDocMessages] = useState<CompilationMessageView[]>([])
+  const [docEditing, setDocEditing] = useState(false)
+  const [docError, setDocError] = useState<string | null>(null)
+  const [docChangedIds, setDocChangedIds] = useState<string[]>([])
+  /** 确认汇编（finalized）后经不可逆二次确认解锁的人工修改模式（切换汇编时重置） */
+  const [manualMode, setManualMode] = useState(false)
 
   /** 读取某汇编的版本列表；有 ≥2 版时才显示版本控件 */
   const loadVersions = useCallback(async (compilationId: string): Promise<void> => {
@@ -199,6 +207,61 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   /** 恢复到某历史版本——**UI 暂不提供**（用户 2026-09-10：先不做这个功能）。
    *  主进程的 `compilation:version:restore` 仍保留可用（不记录新版本），需要时再挂上来。 */
   void 0
+
+  /* ---- Phase 7.5：与文档对话（大模型按 ops 修改汇编） ---- */
+  // 换汇编时清空对话/改动高亮/人工修改模式（人工修改模式是"确认后手动解锁"的会话内状态）
+  useEffect(() => {
+    setDocMessages([])
+    setDocError(null)
+    setDocChangedIds([])
+    setManualMode(false)
+    setDocEditing(false)
+  }, [compilation?.id])
+
+  const loadDocMessages = useCallback(async (compilationId: string): Promise<void> => {
+    const res = await window.api.listCompilationMessages(compilationId)
+    if (res.ok && res.data) setDocMessages((res.data.messages ?? []) as CompilationMessageView[])
+  }, [])
+
+  /**
+   * 发送一条修改要求：主进程读取当前文档 → 调大模型 → 逐条校验 ops → 应用并记一个版本。
+   * 失败（未配置模型 / 调用失败 / 格式无法解析 / 乐观锁冲突）**文档不变**，只回错误。
+   * 返回给用户看的回复文本，供左侧对话框复用（右侧悬浮面板只读 docMessages）。
+   */
+  const handleDocSend = useCallback(
+    async (instruction: string): Promise<{ ok: boolean; reply: string }> => {
+      const text = (instruction ?? '').trim()
+      if (!compilation || docEditing || !text) return { ok: false, reply: '' }
+      setDocEditing(true)
+      setDocError(null)
+      setDocChangedIds([])
+      // 用户消息先本地显示（主进程也会写入 compilation_messages，成功后整体回读覆盖，不会重复）
+      setDocMessages((prev) => [...prev, { role: 'user', content: text, createdAt: new Date().toISOString() }])
+      try {
+        const baseVersionNo = versions.length > 0 ? versions[versions.length - 1].versionNo : undefined
+        const res = await window.api.editCompilationDoc(compilation.id, text, baseVersionNo)
+        if (res.ok && res.data) {
+          setCompilation(res.data.compilation as CompilationView)
+          setDocChangedIds(res.data.changedIds ?? [])
+          await loadDocMessages(compilation.id)
+          return { ok: true, reply: res.data.reply }
+        }
+        const msg = res.error?.message ?? '调用大模型失败'
+        setDocError(msg)
+        setDocMessages((prev) => [...prev, { role: 'assistant', content: '修改失败：' + msg, createdAt: new Date().toISOString() }])
+        if (res.error?.code === 'VERSION_CONFLICT') await loadVersions(compilation.id)
+        return { ok: false, reply: '修改失败：' + msg }
+      } catch {
+        const msg = '调用主进程出错，请确认应用已完整重启'
+        setDocError(msg)
+        setDocMessages((prev) => [...prev, { role: 'assistant', content: msg, createdAt: new Date().toISOString() }])
+        return { ok: false, reply: msg }
+      } finally {
+        setDocEditing(false)
+      }
+    },
+    [compilation, docEditing, versions, loadDocMessages, loadVersions]
+  )
   // 前端 429 自动续传兜底：限流中断时自动调用 continueCompilation（上限限制，避免无限重试）
   const autoResumeAttemptRef = useRef(0)
   // ---- 矛盾回收站（Phase 6.1 优化） ----
@@ -527,7 +590,11 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     }
   }
 
-  /** 首条消息生成汇编后，后续每条消息都是对资料汇编的调整（批量删除/增补/自定义编辑） */
+  /**
+   * 首条消息生成汇编后，后续每条消息都是对**当前资料汇编**的修改要求。
+   * Phase 7.5：左侧对话框与右侧悬浮对话框走**同一个后端**（`doc:edit`，大模型按段落 id 返回 ops），
+   * 旧的 `compilation:adjust`（cardId 寻址）不再从界面进入，仅留待 Phase 7.7 清理。
+   */
   const handleAdjustCompilation = async (message: string) => {
     if (busy || !compilation) return
     const inst = message.trim()
@@ -538,23 +605,15 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     setStreamText(null)
     setCompilationProgress(null)
     try {
-      const res = await window.api.adjustCompilation(taskId, compilation.id, inst)
-      if (res.ok && res.data) {
-        setCompilation(res.data.compilation as CompilationView)
-        const parts: string[] = []
-        if (res.data.removedCards) parts.push('删除 ' + res.data.removedCards + ' 张卡片')
-        if (res.data.addedCards) parts.push('新增 ' + res.data.addedCards + ' 张卡片')
-        if (res.data.updatedCards) parts.push('修改 ' + res.data.updatedCards + ' 张卡片')
-        const summary = (parts.length ? '已调整资料汇编：' + parts.join('，') + '。' : '资料汇编未发生改动。') + (res.data.explain ? '\n' + res.data.explain : '')
-        appendAssistant(summary)
-        void window.api.addTaskMessage(taskId, 'assistant', summary, 'notice')
-      } else {
-        const msg = '调整资料汇编失败：' + (res.error?.message ?? '')
-        appendAssistant(msg)
-        void window.api.addTaskMessage(taskId, 'assistant', msg, 'notice')
+      const out = await handleDocSend(inst)
+      if (out.reply) {
+        appendAssistant(out.reply)
+        void window.api.addTaskMessage(taskId, 'assistant', out.reply, 'notice')
       }
     } catch (e) {
-      appendAssistant('调整资料汇编失败：' + String(e))
+      const msg = '调整资料汇编失败：' + String(e)
+      appendAssistant(msg)
+      void window.api.addTaskMessage(taskId, 'assistant', msg, 'notice')
     } finally {
       resetBusy()
       await reloadMessages()
@@ -990,6 +1049,16 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           onlyChanged={onlyChanged}
           onSelectVersion={(no) => void handleSelectVersion(no)}
           onToggleOnlyChanged={setOnlyChanged}
+          docMessages={docMessages}
+          docEditing={docEditing}
+          docError={docError}
+          docChangedIds={docChangedIds}
+          onDocSend={(instruction) => void handleDocSend(instruction)}
+          onDocOpen={() => {
+            if (compilation) void loadDocMessages(compilation.id)
+          }}
+          manualMode={manualMode}
+          onStartManualEdit={() => setManualMode(true)}
         />
       )
     }

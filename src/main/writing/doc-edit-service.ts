@@ -370,8 +370,45 @@ export function buildDocEditMessages(
   ]
 }
 
-/** 段首时间兜底（供 handler 在应用后重算 year/confidence，与整合提取同口径） */
-export function resolveTimeForEdit(timeLabel: string | undefined, sourceTitle: string | undefined): {
+/**
+ * 统计"本次改动"（纯函数，供 handler 组装回给前端的摘要）。
+ * 新增/改写按**文本比对**得出；只改时间/位置（文本不变，如 setTime / move / merge）按 op 目标补记，
+ * 否则这些改动在前端不会高亮、也不会被滚动到。
+ */
+export function collectDocEditChange(
+  before: DocEditParagraphRef[],
+  after: DocEditParagraphRef[],
+  accepted: DocEditOp[]
+): { changedIds: string[]; added: number; modified: number; removed: number } {
+  const prevById = new Map(before.map((r) => [r.id, r.text]))
+  const afterIds = new Set(after.map((r) => r.id))
+  const changedIds: string[] = []
+  let added = 0
+  let modified = 0
+  for (const p of after) {
+    const prev = prevById.get(p.id)
+    if (prev === undefined) {
+      added++
+      if (p.id) changedIds.push(p.id)
+    } else if (prev !== p.text) {
+      modified++
+      if (p.id) changedIds.push(p.id)
+    }
+  }
+  const removed = before.filter((r) => !afterIds.has(r.id)).length
+  const touched: string[] = []
+  for (const op of accepted) {
+    if (op.op === 'setTime' && op.id) touched.push(op.id)
+    else if (op.op === 'move' || op.op === 'merge') touched.push(...(op.ids ?? []))
+  }
+  for (const key of touched) {
+    const id = after.find((p) => p.key === key)?.id
+    if (id && !changedIds.includes(id)) changedIds.push(id)
+  }
+  return { changedIds, added, modified, removed }
+}
+
+/** 段首时间兜底（供 handler 在应用后重算 year/confidence，与整合提取同口径） */export function resolveTimeForEdit(timeLabel: string | undefined, sourceTitle: string | undefined): {
   year?: number
   month?: number
   day?: number
@@ -475,6 +512,36 @@ if (import.meta.vitest) {
       expect(sys).toContain('不得编造事实')
       expect(sys).toContain('必须给 sourceOrdinal')
       expect(buildDocEditMessages(paras, 'x', [])[1].content).toBe('x')
+    })
+
+    it('reports what changed for the UI (highlight + scroll): text diff plus setTime/move/merge targets', () => {
+      // 删除 p2 + 改写 p1
+      const delReplace = applyDocOps(paras, [
+        { op: 'delete', ids: ['p2'] },
+        { op: 'replace', id: 'p1', text: '2018 年，全区普通中学 30 所（含独立高中）。', timeLabel: '2018 年' }
+      ])
+      const r1 = collectDocEditChange(paras, delReplace, [
+        { op: 'delete', ids: ['p2'] },
+        { op: 'replace', id: 'p1', text: '2018 年，全区普通中学 30 所（含独立高中）。' }
+      ])
+      expect(r1.removed).toBe(1)
+      expect(r1.modified).toBe(1)
+      expect(r1.added).toBe(0)
+      expect(r1.changedIds).toEqual(['id1'])
+      // insertAfter：新段数据库 id 由仓储分配（此处为空），但仍计入"新增"
+      const ins = applyDocOps(paras, [{ op: 'insertAfter', afterId: 'p1', text: '新段。', sourceOrdinal: 1 }])
+      const r2 = collectDocEditChange(paras, ins, [{ op: 'insertAfter', afterId: 'p1', text: '新段。', sourceOrdinal: 1 }])
+      expect(r2.added).toBe(1)
+      expect(r2.removed).toBe(0)
+      // setTime：文本没变，也必须高亮（否则用户看不出这次改了什么）
+      const timed = applyDocOps(paras, [{ op: 'setTime', id: 'p3', timeLabel: '2021 年' }])
+      const r3 = collectDocEditChange(paras, timed, [{ op: 'setTime', id: 'p3', timeLabel: '2021 年' }])
+      expect(r3).toEqual({ changedIds: ['id3'], added: 0, modified: 0, removed: 0 })
+      // move：移动的段落要高亮，落点锚点不算改动
+      const moved = applyDocOps(paras, [{ op: 'move', ids: ['p3'], afterId: 'p1' }])
+      const r4 = collectDocEditChange(paras, moved, [{ op: 'move', ids: ['p3'], afterId: 'p1' }])
+      expect(r4.changedIds).toEqual(['id3'])
+      expect(r4.removed).toBe(0)
     })
   })
 }

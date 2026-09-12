@@ -502,11 +502,11 @@ export const zhCN = {
     presetTitleReqDesc: '一次交代撰写标题与覆盖范围',
     presetTitleReq: '本次撰写任务的标题为 「……」，具体包括 「……」',
     presetBatchDeleteLabel: '批量删除',
-    presetBatchDeleteDesc: '删除与示例高度相似的资料卡片',
-    presetBatchDelete: '请删除与「……」高度相似的资料卡片。',
+    presetBatchDeleteDesc: '删除与示例高度相似或重复的段落',
+    presetBatchDelete: '请删除资料汇编中与「……」高度相似或重复的段落。',
     presetAddContentLabel: '增补内容',
     presetAddContentDesc: '补齐汇编中缺失的方面',
-    presetAddContent: '目前的资料汇编中缺失了「……」方面的信息，请你从资料库中再次检索相关片段并加入资料汇编。\n详细描述：……',
+    presetAddContent: '目前的资料汇编中缺失了「……」方面的信息，请你根据现有来源补充相关内容并标明来源编号。\n详细描述：……',
     /* 整合提取（Phase 7.2：细读筛选之后、矛盾扫描之前；允许裁剪/补全/整合，本地两道校验兜底） */
     extractSummary: '（整合提取：{fromCards} 张卡片 / {fromChars} 字 → {toParagraphs} 段 / {toChars} 字，保留约 {kept}%）',
     extractDiagnostics:
@@ -534,7 +534,29 @@ export const zhCN = {
     recycleBinCard: '资料卡片',
     restore: '恢复',
     close: '关闭',
-    restored: '已从回收站恢复该条目，请重新选择。'
+    restored: '已从回收站恢复该条目，请重新选择。',
+    /* Phase 7.5：悬浮对话框（人机协同编辑）+ 人工修改解锁（用户裁定 D5） */
+    docChatOpen: '与汇编对话（让大模型修改）',
+    docChatTitle: '与汇编对话',
+    docChatHint: '用一句话告诉大模型要怎么改（如「把校区建设相关的内容都删掉」），它会直接修改右侧汇编。',
+    docChatPlaceholder: '例如：校区建设不属于这方面的内容，请把相关内容都删掉',
+    docChatSend: '发送',
+    docChatEmpty: '还没有对话记录。提出修改要求后，这里会显示大模型对每处改动的说明。',
+    docChatEditing: '正在修改汇编…',
+    docChatMinimize: '最小化',
+    docChatDragHint: '可拖动',
+    docChatChanged: '本次改动 {count} 段',
+    docChatOnlyEditHint: '汇编确认前只能通过本对话框让大模型修改；确认后才会出现「开始人工修改」。',
+    changeSummaryInline: '（新增 {added} 段 / 改写 {modified} 段 / 删除 {removed} 段）',
+    startManualEdit: '开始人工修改',
+    manualEditOn: '人工修改已开启',
+    manualEditBadge: '人工修改中',
+    manualEditConfirmTitle: '确认进入人工修改模式？',
+    manualEditConfirmBody:
+      '进入人工修改模式后，将直接改写当前资料汇编（可逐段编辑正文与时间标签、删除、插入段落），此操作不可逆：不再受「只能由大模型改动」的约束，也不提供「退出模式并回滚全部手改」的兜底，误操作只能靠版本历史逐版恢复。',
+    manualEditConfirmOk: '确认进入',
+    manualEditCancel: '再想想',
+    manualEditHint: '悬停段落可编辑/删除；每次改动都会记录为一个新版本。'
   },
   sourceRemoval: {
     title: '来源已删除',

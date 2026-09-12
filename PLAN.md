@@ -416,6 +416,30 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 
 ### 7.5 悬浮对话框与人机协同编辑协议（最关键）
 
+> **Status（2026-09-10）**：**已实现，待用户用真实 Provider 验收**。交付：
+> - **协议（纯函数，`doc-edit-service.ts`）**：提交物 = 系统提示（id 化文档 `[p12] 2018 年 | 来源3 | 正文` + 可引用来源编号清单 + 规则）+ 用户要求；
+>   输出 = 单个 JSON `{"reply","ops"}`（容忍围栏/夹带文字）；8 种 op（delete/replace/insertAfter/move/merge/split/setTime/replaceAll）；
+>   校验 = 段号必须存在、`sourceOrdinal` 必须 1..N、正文数字必须能在该来源原文中找到（沿用 `numbersCoveredBy` 整 token 口径，防幻觉）、
+>   `merge` 仅同来源、**不得删空整篇**；任一条不过 → 该条拒绝并记入 `rejected`，其余照常应用；解析失败 → 文档不变 + 明确报错。
+> - **编排（`doc-edit-runner.ts`）**：乐观锁（`baseVersionNo` 与最新版不一致即拒，错误码 `VERSION_CONFLICT`）→ 用户消息**先落库**（成功失败都留痕）→
+>   `chatCompletion(kind:'compilation-doc-edit', temperature 0, maxRetries 0, 240s)` → 解析 → 校验 → 应用 →
+>   **单次** `upsertCompilationParagraphs`（保留段 id；来源 id 由 ordinal 预先解析，避免"只传一段把其余段删掉"的坑）→
+>   `snapshotCompilationVersion(..., 'llm-edit')`（含 instruction/reply/baseVersionNo）→ 写助手消息（含 versionNo/applied/rejected）。
+>   **未触及的段落保留原 `origin`/`revision`**，不被一次对话刷成全篇"对话修改"。
+> - **UI（`CompilationStep`）**：右下悬浮圆按钮（自绘机器人简笔）→ 可**拖动**（指针事件 + 边界夹取）/可最小化的面板（380px，半透明 + 模糊，默认贴右下）；
+>   展示 `compilation_messages` 历史（用户/助手气泡 + 版本号）；输入框 + 发送（Ctrl/⌘+Enter）；编辑中禁用发送并显示「正在修改汇编…」；
+>   错误态红条明确（未配置第 1 步模型 / 调用失败 / 格式无法解析 / 乐观锁冲突并自动刷新版本列表）；
+>   改动后**高亮本次改动段**（`.is-changed`）并**滚动到首个改动段**；回复里附「已修改 N 处：新增 a 段 / 改写 b 段 / 删除 c 段」。
+> - **D5 手动编辑解锁**：确认汇编前，段落悬停**不出现任何编辑/删除入口**，工具栏标注「仅可对话修改」；
+>   `status === 'finalized'` 后工具栏出现「开始人工修改」→ **不可逆二次确认弹窗** → 进入人工修改模式（红色「人工修改中」标记 + 悬停编辑/删除）。
+> - **旧链路收口**：左侧任务对话框的后续消息不再走 `compilation:adjust`（cardId 寻址），改为**路由到同一 `doc:edit` 后端**（`handleDocSend`），
+>   避免两条竞争链路；「批量删除 / 增补内容」预设文案同步为段落口径。`compilation-adjust.ts` 与其 IPC 留待 **7.7 删除**。
+> - **契约**：新增 `IPC.COMPILATION_DOC_EDIT` / `IPC.COMPILATION_MESSAGES` + `CompilationDocEditReq/Res`（含 `changedIds` / `changeSummary`）/ `CompilationMessagesReq/Res`；
+>   preload 新增 `editCompilationDoc` / `listCompilationMessages`（+ `index.d.ts`）。
+> - 测试：`doc-edit-service` 6 项（原 5 项 + 新增「改动摘要：文本 diff + setTime/move/merge 目标补记」）。
+> **验证**：typecheck 零错误、**258/259 单测通过**（1 项 watcher chokidar 环境失败为既有问题）、生产构建成功。
+> **待用户实测**：配置好第 1 步模型后，在右侧对话框输入「校区建设不属于这方面的内容，请你把校区建设相关内容都删掉」→ 相关段被删除、查看器即时更新并高亮；错误路径（幻觉段号、跨来源 merge、引用了来源中不存在的数字、乐观锁冲突）。
+
 **UI**：右下悬浮圆按钮（机器人简笔）+ 可拖动/可最小化的对话面板（约 380px，覆盖在查看器上，不遮挡正文时为半透明）；展示 `compilation_messages` 历史（用户/助手气泡）；底部输入框 + 发送；编辑进行中禁用发送并显示"正在修改汇编…"；错误态明确（未配置第 1 步模型 / 调用失败 / 格式无法解析）。
 
 **协议（软件 → 大模型）**：提交物 = 用户要求 + **id 化的当前文档**（每行 `p12 | 2018 年 | 《长乐年鉴2019》 | 段落正文`）+ 允许的来源编号清单（1..N 与标题）。
