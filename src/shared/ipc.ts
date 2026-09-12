@@ -250,6 +250,29 @@ export type RagIndexStatusRes = {
   lastErrorAt: string | null
   /** 后台队列里尚未处理的资料数（>0 表示正在重建） */
   queued: number
+  /**
+   * 重建进度（持久化在 settings.index_rebuild，**跨页面/跨重启保留**）：
+   * status=running 正在跑；interrupted=上次被关软件打断（可「继续重建」）；done=已完成。
+   * percent = (totalQueued − remaining) / totalQueued，重启后仍可算。
+   */
+  rebuild: {
+    status: 'running' | 'interrupted' | 'done'
+    startedAt: string | null
+    totalQueued: number
+    remaining: number
+    processed: number
+    percent: number
+    active: boolean
+  }
+  /** 引擎自检（2026-09-12）：确认到底在跑 Worker 池多线程，还是一直在静默回退单线程 */
+  engine?: {
+    poolSize: number
+    livePool: number
+    workerThreads: number
+    workerErrors: number
+    directFallbacks: number
+    lastWorkerError: string | null
+  }
 }
 export type RagReindexRes = { queued: number; reset: number }
 export interface SourceGetSummaryReq {

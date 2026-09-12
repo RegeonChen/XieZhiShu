@@ -11,6 +11,8 @@
  * 消息在 Worker 线程内串行处理（单线程事件循环），主进程侧负责超时与故障回退。
  */
 import { parentPort } from 'node:worker_threads'
+import { cpus } from 'node:os'
+import { embedPoolSize, embedThreadsPerWorker } from './embed-config'
 import type { FeatureExtractionPipeline } from '@huggingface/transformers'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
@@ -38,14 +40,17 @@ function resolveOrtWasmPaths(): { wasm: string; mjs: string } {
 }
 
 /** 配置 ONNX Runtime WASM 后端（须直接改 ort.env.wasm，见 embed.ts 文件头注释） */
-function configureOrtWasm(): void {
+function configureOrtWasm(threads: number): void {
   const ort = nodeRequire('onnxruntime-web') as {
     env: { wasm: { numThreads: number; wasmPaths?: unknown } }
   }
   const paths = resolveOrtWasmPaths()
-  ort.env.wasm.numThreads = 1
+  ort.env.wasm.numThreads = threads
   ort.env.wasm.wasmPaths = { wasm: paths.wasm, mjs: paths.mjs }
+  lastThreads = threads
 }
+
+let lastThreads = 1
 
 async function getExtractor(): Promise<FeatureExtractionPipeline> {
   if (!extractorPromise) {
@@ -57,19 +62,38 @@ async function getExtractor(): Promise<FeatureExtractionPipeline> {
         throw new Error(`本地嵌入引擎初始化失败（onnxruntime 后端不可用）：${String(err)}`)
       }
       const { env, pipeline } = mod
-      configureOrtWasm()
       env.allowLocalModels = true
       env.allowRemoteModels = false
       env.localModelPath = modelPath
       env.useWasmCache = false
-      const pipe = await pipeline('feature-extraction', modelId, { local_files_only: true })
-      return pipe
+      const cores = cpus()?.length ?? 2
+      const wanted = embedThreadsPerWorker(cores, embedPoolSize(cores))
+      try {
+        configureOrtWasm(wanted)
+        return await pipeline('feature-extraction', modelId, { local_files_only: true })
+      } catch (err) {
+        /*
+         * 多线程不可用（少数机器上 SharedArrayBuffer/线程被禁用）时**回落单线程重试一次**：
+         * 否则每一篇资料都会失败，用户只能看到一个"重建失败"而无从下手。
+         */
+        if (wanted > 1) {
+          configureOrtWasm(1)
+          const pipe = await pipeline('feature-extraction', modelId, { local_files_only: true })
+          return pipe
+        }
+        throw err
+      }
     })().catch((err) => {
       extractorPromise = null
-      throw new Error(`本地嵌入模型加载失败（请确认 ${modelPath}/${modelId}/ 目录包含模型文件）：${String(err)}`)
+      throw new Error(`本地嵌入不可用（模型目录 ${modelPath}/${modelId}/ 或嵌入引擎 onnxruntime 后端）。原始错误：${String(err)}`)
     })
   }
   return extractorPromise
+}
+
+/** 供主进程日志/诊断：Worker 实际使用的 WASM 线程数 */
+export function workerThreads(): number {
+  return lastThreads
 }
 
 /** 文本 → 向量列表（mean pooling + L2 归一化；推理逻辑与 embed.ts 的 embedTexts 一致） */
@@ -97,7 +121,7 @@ if (port) {
         }
         if (msg.type === 'embed' && typeof msg.id === 'number' && Array.isArray(msg.texts)) {
           const vectors = await computeEmbeddings(msg.texts)
-          port.postMessage({ type: 'result', id: msg.id, vectors })
+          port.postMessage({ type: 'result', id: msg.id, vectors, threads: lastThreads })
           return
         }
         port.postMessage({ type: 'error', id: msg.id ?? 0, message: '未知的 Worker 消息' })

@@ -121,8 +121,8 @@ import { listTaskMessages, addTaskMessage } from './db/task-messages'
 import { generateDraft, regenerateDraft, retrieveForTask, chatWithTask } from './writing/generate'
 import { applyContradictionEdit } from './writing/contradiction-apply'
 import { askSourceForTask } from './writing/source-query'
-import { configureEmbedModel, stopEmbedWorker } from './rag/embed'
-import { enqueueIndex, getIndexStatus, getQueueSize, requeuePendingIndexes } from './rag/indexer'
+import { configureEmbedModel, getEmbedEngineStats, stopEmbedWorker } from './rag/embed'
+import { enqueueIndex, getIndexStatus, getQueueSize, getRebuildProgress, initIndexingState, requeuePendingIndexes } from './rag/indexer'
 import { summarizeAllPending, getSourceSummary } from './rag/summarizer'
 import { getWorkspaceDir, type ReconcileProgress } from './workspace/reconcile'
 import { startWorkspaceWatcher, restartWorkspaceWatcher, stopWorkspaceWatcher } from './workspace/watcher'
@@ -1199,7 +1199,7 @@ handleLogged(IPC.SETTINGS_UPDATE, (_event, params: { patch: Partial<AppSettings>
 // 本地向量索引状态 + 重建（2026-09-12）：语义检索失效时用户此前无从判断原因（原因只在日志里）
 handleLogged(IPC.RAG_INDEX_STATUS, (): ApiResult<RagIndexStatusRes> => {
   try {
-    return { ok: true, data: { ...getIndexStatus(), queued: getQueueSize() } }
+    return { ok: true, data: { ...getIndexStatus(), queued: getQueueSize(), rebuild: getRebuildProgress(), engine: getEmbedEngineStats() } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
@@ -1571,6 +1571,13 @@ app.whenReady().then(() => {
   configureEmbedModel({
     modelPath: app.isPackaged ? join(process.resourcesPath, 'models') : join(app.getAppPath(), 'resources', 'models')
   })
+
+  // 索引状态初始化（2026-09-12）：清理上次被强杀时停在 indexing 的资料，并把被打断的重建标为可续跑
+  try {
+    initIndexingState()
+  } catch (err) {
+    logMain('rag', '索引状态初始化失败：' + String(err))
+  }
 
   // 工作区来源移除：登记新 pending 时向所有渲染窗口推送事件（渲染层弹确认框）
   setSourceRemovalNotify((item) => {
