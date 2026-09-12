@@ -599,6 +599,17 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 
 ### 7.7 收尾（端到端、性能、文档、清理）
 
+> **Status（2026-09-10）**：**进行中**。切片 A 已提交（`a42e3a1`：删除被 7.5 取代的「汇编调整」链路——`compilation-adjust.ts` + IPC `compilation:adjust` + 类型 + preload + 文案）。
+>
+> **⚠ 对原计划的修正**：原 7.7 条目写着"删除 `compilation-undo.ts` 快照栈"，但**这条已作废**——用户在 7.5/7.6 验收中明确要求「撤销/恢复」可用，并要求**矛盾采纳/忽略也可撤销**，内存快照栈是这套能力的载体，**保留**。
+>
+> **剩余切片（按此顺序）**：
+> - **B 修正链路收尾**：删 `purify-service.ts`、`repair-service.ts` 两个文件与 `compilation-service.ts` 里已无人调用的 `runPurifyPhase`（约 1320–1485 行）、`runRepairPhase`（约 1498–1587 行）及其 import/状态字段；再删渲染层「✎ 经过大模型修正」徽标 + 修正详情弹窗、IPC `repairs:revert/apply`、preload、`Compilation.repairs` 类型与 `compilation-repairs.ts` 仓储。
+> - **C 破坏性 DB 清理（Migration 036）**：`DROP TABLE compilation_repairs`、`DROP TABLE compilation_card_recycle_bin`；回收站收缩为**仅矛盾**（保留 `compilation_recycle_bin`），同步删卡片回收站的快照/恢复代码与 `deleteCompilationItem`/`deleteCompilationItems*` 的入站逻辑、`compilation-undo.ts` 快照里的 `repairs`/`cardRecycleBin` 字段、来源移除提示里的"N 条大模型修正"。
+> - **D 无界面入口的通道清理**：`compilation:updateItem`/`compilation:deleteItem`/`compilation:version:diff`/`compilation:version:restore`（含 preload 与 d.ts）；仓储函数保留（`demo-task` 与单测仍在用）。
+> - **E 死样式与文档**：`main.css` 的 `.compilation-card*`/`.compilation-cards`；`docs/ui-architecture.md` 与 `docs/{data-model,shared-contracts}.md` 全量对齐；`demo-task.ts` 演示数据与新手教程文案若含"卡片"表述；更新验证基线数字。
+> - **F 用户侧端到端**（我无法代做，需要真实 Provider）：生成 → 浏览（时间/编号/来源）→ 多轮对话编辑 → 复核采纳/回退 → 导出 `.docx`/`.xzsc` → 导入到新任务 → 第三步生成初稿；以及性能基线（生成耗时、查看器滚动、diff、单轮对话耗时）。
+
 - 真实 Provider 端到端：生成 → 浏览（时间/编号/来源）→ 多轮对话编辑 → 版本对比与恢复 → 导出 → 导入到新任务 → 第三步生成初稿。
 - 性能基线记录：生成耗时（对比现行三阶段）、查看器滚动、diff 计算（两版本间）、单轮对话编辑耗时。
 - 删除死代码（`purify-service.ts`、`repair-service.ts`、`compilation-adjust.ts`、`compilation-undo.ts` 快照栈、`compilation_repairs` 相关仓储与 IPC）。
