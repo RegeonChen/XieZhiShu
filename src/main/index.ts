@@ -713,7 +713,7 @@ handleLogged(IPC.COMPILATION_EXPORT_ARCHIVE, async (_event, params: CompilationE
     if (!compilation) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料汇编不存在' } }
     const res = await dialog.showSaveDialog({
       title: '导出资料汇编为软件专用格式',
-      defaultPath: compilation.title + '.xzsc',
+      defaultPath: buildCompilationFileName(getTaskById(compilation.taskId)?.title, 'xzsc'),
       filters: [{ name: '志书工具资料汇编', extensions: ['xzsc'] }]
     })
     if (res.canceled || !res.filePath) return { ok: false, error: { code: 'EXPORT_CANCELED', message: '已取消导出' } }
