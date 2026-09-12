@@ -64,7 +64,7 @@ function buildGeneratedSummary(
       duplicatesDropped?: number
       conflictsKept?: number
     }
-    webScan?: { sites: number; hits: number; fetched: number; skippedByCap: number; chars: number }
+    webScan?: { sites: number; siteErrors: number; hits: number; fetched: number; skippedByCap: number; chars: number; reused?: number; newCandidates?: number }
   }
 ): string {
   const pendingCount = comp.contradictions.filter((c) => c.status === 'pending').length
@@ -98,13 +98,24 @@ function buildGeneratedSummary(
   // 网页资料本轮抓取情况（含上限截断）：让用户知道"这次用上了多少网页材料"
   const ws = scans.webScan
   if (ws && ws.sites > 0) {
-    parts.push(
-      zhCN.compilation.webScan
-        .replace('{hits}', String(ws.hits))
-        .replace('{fetched}', String(ws.fetched))
-        .replace('{chars}', String(ws.chars))
-    )
-    if (ws.skippedByCap > 0) parts.push(zhCN.compilation.webScanCapped.replace('{count}', String(ws.skippedByCap)))
+    if (ws.reused && ws.reused > 0) {
+      // A1：复用已锁定材料时本轮**没有新抓取**，不能报"实际采用 0 篇"（会读成一篇都没用上）
+      parts.push(zhCN.compilation.webScanReused.replace('{count}', String(ws.reused)))
+      if (ws.newCandidates && ws.newCandidates > 0) {
+        parts.push(zhCN.compilation.webScanNewCandidates.replace('{count}', String(ws.newCandidates)))
+      }
+    } else {
+      parts.push(
+        zhCN.compilation.webScan
+          .replace('{hits}', String(ws.hits))
+          .replace('{fetched}', String(ws.fetched))
+          .replace('{chars}', String(ws.chars))
+      )
+      if (ws.skippedByCap > 0) parts.push(zhCN.compilation.webScanCapped.replace('{count}', String(ws.skippedByCap)))
+      if (ws.fetched === 0 && ws.siteErrors === 0) parts.push(zhCN.compilation.webScanEmpty)
+    }
+    // E1：站点同步失败 → 明确告知，别让用户以为"网页资料没用上是因为没内容"
+    if (ws.siteErrors > 0) parts.push(zhCN.compilation.webScanSiteErrors.replace('{count}', String(ws.siteErrors)))
   }
   parts.push(pendingCount > 0 ? pendingCount + ' 组矛盾待处理' : '无未处理矛盾')
   let text = parts.join('，') + '。请审阅' + (pendingCount > 0 ? '并处理后' : '后') + '点击「确认汇编」。'
@@ -182,6 +193,18 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   const [docEditing, setDocEditing] = useState(false)
   const [docError, setDocError] = useState<string | null>(null)
   const [docChangedIds, setDocChangedIds] = useState<string[]>([])
+  /** 第三批 A1：最近一次生成的网页材料情况（面板据此提示"已锁定 N 篇 / 新文章 M 篇"） */
+  const [lastWebScan, setLastWebScan] = useState<{
+    sites: number
+    siteErrors: number
+    hits: number
+    fetched: number
+    skippedByCap: number
+    chars: number
+    reused?: number
+    newCandidates?: number
+  } | null>(null)
+  const [adoptingWeb, setAdoptingWeb] = useState(false)
 
   /** 读取某汇编的版本列表（用于乐观锁的 baseVersionNo；不再有版本下拉/对比开关） */
   const loadVersions = useCallback(async (compilationId: string): Promise<void> => {
@@ -502,7 +525,7 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
             duplicatesDropped?: number
             conflictsKept?: number
           }
-          webScan?: { sites: number; hits: number; fetched: number; skippedByCap: number; chars: number }
+          webScan?: { sites: number; siteErrors: number; hits: number; fetched: number; skippedByCap: number; chars: number; reused?: number; newCandidates?: number }
           interrupted?: { stage: string; message: string; percent: number; retryable?: boolean }
         }
         const comp = data.compilation
@@ -523,6 +546,7 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           }
         } else {
           setCompilationInterrupt(null)
+          setLastWebScan(data.webScan ?? null)
           const summary = buildGeneratedSummary('已生成资料汇编：', comp, data)
           appendAssistant(summary)
           void window.api.addTaskMessage(taskId, 'assistant', summary, 'notice')
@@ -788,8 +812,36 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     }
   }
 
-  // ---- 初稿生成（Phase 6.3）----
+  /**
+   * 纳入新网页材料（第三批 A1）：把站点上"新命中但未纳入"的文章抓取入库并锁定到本任务。
+   * 纳入完成后需要用户再点一次「重新生成汇编」才会用上（不自动重跑，避免意外覆盖当前汇编）。
+   */
+  const handleAdoptWebMaterials = async () => {
+    if (adoptingWeb) return
+    setAdoptingWeb(true)
+    try {
+      const query = compilationInstruction.trim() || (task?.userInstruction ?? '').trim()
+      const res = await window.api.adoptWebMaterials(taskId, query)
+      if (res.ok && res.data) {
+        const text =
+          res.data.added > 0
+            ? zhCN.compilation.webMaterialsAdopted.replace('{count}', String(res.data.added))
+            : zhCN.compilation.webMaterialsAdoptNone
+        appendAssistant(text)
+        void window.api.addTaskMessage(taskId, 'assistant', text, 'notice')
+        // 纳入后新文章数清零（重新生成时会重新统计）
+        setLastWebScan((prev) => (prev ? { ...prev, newCandidates: 0 } : prev))
+      } else {
+        appendAssistant(zhCN.compilation.webMaterialsAdoptFailed.replace('{message}', res.error?.message ?? ''))
+      }
+    } catch (e) {
+      appendAssistant(zhCN.compilation.webMaterialsAdoptFailed.replace('{message}', String(e)))
+    } finally {
+      setAdoptingWeb(false)
+    }
+  }
 
+  // ---- 初稿生成（Phase 6.3）----
   const handleGenerateDraft = async (instruction: string) => {
     if (busy) return
     setMessages((prev) => [...prev, { role: 'user', content: instruction }])
@@ -1029,6 +1081,9 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           generateInterrupt={compilationInterrupt}
           onRetryCompilation={compilationInterrupt ? () => void handleContinueCompilation() : undefined}
           onGenerate={(instruction) => void handleGenerateCompilation(instruction)}
+          webScan={lastWebScan}
+          adoptingWeb={adoptingWeb}
+          onAdoptWebMaterials={() => void handleAdoptWebMaterials()}
           sourceRefs={sourceRefs}
         />
       )

@@ -122,6 +122,12 @@ export const IPC = {
   RAG_INDEX_STATUS: 'rag:indexStatus',
   RAG_REINDEX: 'rag:reindex',
 
+  /* 来源本地快照（第三批 C：网页会改版/撤稿，溯源要看抓取当时存下来的正文） */
+  SOURCES_GET_SNAPSHOT: 'sources:getSnapshot',
+
+  /* 纳入新网页材料（第三批 A1：材料集合首次落定后，新文章由用户显式纳入） */
+  COMPILATION_ADOPT_WEB_MATERIALS: 'compilation:adoptWebMaterials',
+
   /* 工作区（Phase 2.2） */
   WORKSPACE_STATUS: 'workspace:status',
   WORKSPACE_MIGRATE: 'workspace:migrate',
@@ -275,6 +281,42 @@ export type RagIndexStatusRes = {
   }
 }
 export type RagReindexRes = { queued: number; reset: number }
+
+/**
+ * 来源本地快照（第三批 C）：返回库里已存的正文快照（不联网），供"查看本地快照"弹窗使用。
+ * `truncated` 为 true 表示正文过长被截断；`shortText` 提示正文过短（疑似只抓到导航/页脚，E3）。
+ */
+export interface SourceSnapshotReq {
+  id: string
+}
+export type SourceSnapshotRes = {
+  id: string
+  kind: 'file' | 'url'
+  title: string
+  url?: string
+  /** 抓取时间（网页来源；ISO） */
+  snapshotAt?: string
+  /** 发布时间（网页来源，若解析到） */
+  publishedAt?: string
+  text: string
+  totalChars: number
+  truncated: boolean
+  shortText: boolean
+}
+
+/** 纳入新网页材料（第三批 A1）：把站点上"新命中但未纳入"的文章抓取入库并锁定到本任务 */
+export interface CompilationAdoptWebMaterialsReq {
+  taskId: string
+  /** 用于标题粗筛与相关度排序的查询（通常沿用该任务的撰写要求/标题） */
+  query: string
+}
+export type CompilationAdoptWebMaterialsRes = {
+  /** 本次新纳入的篇数 */
+  added: number
+  /** 仍因上限未纳入的篇数 */
+  skippedByCap: number
+  siteErrors: number
+}
 export interface SourceGetSummaryReq {
   id: string
 }
@@ -378,6 +420,8 @@ export type CompilationExtractScan = CompilationStageScan & {
  */
 export type CompilationWebScan = {
   sites: number
+  /** 同步失败的站点数（>0 = 本轮网页材料可能不完整） */
+  siteErrors: number
   /** 标题级命中的候选文章数 */
   hits: number
   /** 实际抓取落库的文章数 */
@@ -867,6 +911,10 @@ export interface IpcMapping {
   // 本地向量索引状态与重建
   [IPC.RAG_INDEX_STATUS]: { _req: void; _res: ApiResult<RagIndexStatusRes> }
   [IPC.RAG_REINDEX]: { _req: void; _res: ApiResult<RagReindexRes> }
+  // 来源本地快照
+  [IPC.SOURCES_GET_SNAPSHOT]: { _req: SourceSnapshotReq; _res: ApiResult<SourceSnapshotRes> }
+  // 纳入新网页材料
+  [IPC.COMPILATION_ADOPT_WEB_MATERIALS]: { _req: CompilationAdoptWebMaterialsReq; _res: ApiResult<CompilationAdoptWebMaterialsRes> }
   // 工作区
   [IPC.WORKSPACE_STATUS]: { _req: void; _res: ApiResult<WorkspaceStatusRes> }
   [IPC.WORKSPACE_MIGRATE]: { _req: void; _res: ApiResult<WorkspaceMigrateRes> }

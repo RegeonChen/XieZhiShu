@@ -63,7 +63,20 @@ export function extractArticleText(html: string): string {
   return doc.trim()
 }
 
-/** 从 HTML 提取发布日期（E10）：meta property/name 的 published_time/publishdate/pubdate，或 <time datetime>，或可见日期文本。纯函数、可测试。 */
+/** 从 URL 生成可读的兜底标题（E2）：页面没有 <title> 时不再把整条 URL 当标题（导出附录/来源小卡里很难看，
+ *  而且 URL 里的 `t20251203` 这类数字会被年份兜底误读成 2025）。 */
+export function fallbackTitleFromUrl(url: string): string {
+  let host = url
+  try {
+    host = new URL(url).host
+  } catch {
+    /* 非法 URL：原样返回 */
+  }
+  return host + '（页面无标题）'
+}
+
+/**
+ * 从 HTML 提取发布日期（E10）：meta property/name 的 published_time/publishdate/pubdate，或 <time datetime>，或可见日期文本。纯函数、可测试。 */
 export function extractPublishedDate(html: string): string | null {
   const metas = [
     /<meta[^>]+(?:property|name)=["'](?:article:published_time|publishdate|pubdate|date)["'][^>]+content=["']([^"']+)["']/i,
@@ -607,11 +620,11 @@ export async function importSiteArticle(
       }
       cleanedText = reused.cleanedText
       snapshotAt = reused.urlSnapshotAt ?? new Date().toISOString()
-      pageTitle = title || reused.title || url
+      pageTitle = title || reused.title || fallbackTitleFromUrl(url)
       publishedAt = reused.publishedAt ?? publishedAt
       logMain('web', '条件请求 304 复用正文 url=' + url + ' 标题=' + pageTitle + ' 正文字数=' + cleanedText.length)
     } else {
-      pageTitle = title || extractPageTitle(result.rawHtml) || url
+      pageTitle = title || extractPageTitle(result.rawHtml) || fallbackTitleFromUrl(url)
       // D8：用成熟正文提取器提升中文正文/表格质量；提取过短时回退浏览器净化的 cleanedText
       const richText = extractArticleText(result.rawHtml) || result.cleanedText
       // 正文级精过滤：标题 + 正文前 12000 字（足以判定主题，避免超长正文拖慢匹配）
@@ -705,6 +718,8 @@ export function rankArticlesByQuery<T extends { url: string; title: string }>(
 export interface WebFetchStats {
   /** 注册站点数 */
   sites: number
+  /** 同步（发现文章清单）失败的站点数：>0 说明本轮网页材料可能不完整（此前只在日志里） */
+  siteErrors: number
   /** 标题级命中的候选文章数（所有站点合计） */
   hits: number
   /** 实际落库成功的文章数 */
@@ -713,65 +728,125 @@ export interface WebFetchStats {
   skippedByCap: number
   /** 落库正文总字数 */
   chars: number
+  /** 本轮**复用**已锁定网页材料的篇数（>0 说明本次是重新生成，材料集合沿用首次落定） */
+  reused?: number
+  /** 站点里检测到、但未纳入的新命中文章数（由用户点「纳入新材料」决定是否抓取） */
+  newCandidates?: number
+}
+
+export interface WebCandidate {
+  url: string
+  title: string
+  siteId: string
+  siteTitle: string
 }
 
 /**
- * 生成初稿时的网页资料检索入口（全局绑定：遍历所有注册站点）：
- * 同步清单 → 标题粗筛(query) → 按相关度排序 → 抓正文做正文级精过滤 → 返回命中的 sourceIds（并入生成 scope）。
- * 命中文章按 taskId 落库为"任务绑定的网页缓存文章"。任一站点失败不阻断其他站点。
- * **带上限**（篇数 + 总字数），并把统计一并返回，供生成汇总如实告知用户"本轮用了多少网页材料、是否被截断"。
+ * 只做"发现 + 标题命中 + 排序"，**不抓正文**（第三批 A1）：
+ * - 用于「本次将采用哪些网页文章」的判断与"检测到 N 篇新文章"的提示；
+ * - 把这些网络动作与正文抓取分开，复用同一条路径，避免两处各写一遍 robots/限速/上限逻辑。
+ */
+export async function collectSiteCandidates(
+  query: string,
+  excludeUrls: Set<string> = new Set()
+): Promise<{ candidates: WebCandidate[]; stats: WebFetchStats }> {
+  const sites = listWebSites()
+  const stats: WebFetchStats = { sites: sites.length, siteErrors: 0, hits: 0, fetched: 0, skippedByCap: 0, chars: 0 }
+  const candidates: WebCandidate[] = []
+  if (sites.length === 0) return { candidates, stats }
+  const terms = extractTopicTerms(query)
+  const allTerms = [...new Set([...terms, ...expandDomainHints(terms)])]
+  if (allTerms.length === 0) return { candidates, stats }
+  for (const site of sites) {
+    try {
+      await syncSite(site.id)
+    } catch (err) {
+      // E1：站点同步失败会让本轮网页材料不完整，必须计数并在汇总里如实告知（此前只有日志）
+      stats.siteErrors += 1
+      logMain('web', `网页资料检索 站点同步失败 站点=${site.title || site.rootUrl}：${String(err)}`)
+      continue
+    }
+    const articles = listSiteArticles(site.id)
+    const hits = rankArticlesByQuery(filterArticlesByQuery(articles, query), query)
+    stats.hits += hits.length
+    for (const h of hits) {
+      if (excludeUrls.has(h.url)) continue
+      candidates.push({ url: h.url, title: h.title, siteId: site.id, siteTitle: site.title ?? site.rootUrl })
+    }
+    logMain('web', `网页资料检索 站点=${site.title || site.rootUrl} 文章清单=${articles.length} 标题命中=${hits.length}`)
+  }
+  return { candidates, stats }
+}
+
+/**
+ * 抓取并落库一批候选文章（受篇数/字数上限约束 + robots 礼貌限速）。
+ * 落库为"任务绑定的网页缓存文章"（`sources.task_id`）。
+ */
+export async function importSiteCandidates(
+  candidates: WebCandidate[],
+  query: string,
+  taskId: string
+): Promise<{ ids: string[]; stats: WebFetchStats }> {
+  const terms = [...new Set([...extractTopicTerms(query), ...expandDomainHints(extractTopicTerms(query))])]
+  const stats: WebFetchStats = { sites: 0, siteErrors: 0, hits: candidates.length, fetched: 0, skippedByCap: 0, chars: 0 }
+  const ids: string[] = []
+  let budgetChars = WEB_FETCH_MAX_CHARS
+  const siteMeta = new Map<string, { host: string; crawlDelay?: number; disallow: string[] }>()
+  for (const c of candidates) {
+    let meta = siteMeta.get(c.siteId)
+    if (!meta) {
+      const site = getWebSiteById(c.siteId)
+      const rootUrl = site?.rootUrl ?? c.url
+      let host = rootUrl
+      try { host = new URL(rootUrl).host } catch { /* 非法 URL：原样使用 */ }
+      const robots = await fetchRobotsTxt(rootUrl).catch(() => ({ crawlDelay: undefined, disallow: [] }))
+      meta = { host, crawlDelay: robots.crawlDelay, disallow: robots.disallow }
+      siteMeta.set(c.siteId, meta)
+    }
+    if (isPathDisallowed(c.url, meta.disallow)) continue
+    // 上限（篇数 / 字数）：命中太多时按相关度优先保留（候选已排序），其余记入 skippedByCap
+    if (stats.fetched >= WEB_FETCH_MAX_ARTICLES || budgetChars <= 0) {
+      stats.skippedByCap += 1
+      continue
+    }
+    await politeDelay(meta.host, meta.crawlDelay)
+    const src = await importSiteArticle(c.url, c.title, terms, taskId, c.siteId)
+    if (src) {
+      ids.push(src.id)
+      stats.fetched += 1
+      stats.chars += src.cleanedText?.length ?? 0
+      budgetChars -= src.cleanedText?.length ?? 0
+    }
+  }
+  if (stats.skippedByCap > 0) {
+    logMain('web', `网页资料抓取达上限：落库 ${stats.fetched} 篇 / ${stats.chars} 字，跳过 ${stats.skippedByCap} 篇（上限 ${WEB_FETCH_MAX_ARTICLES} 篇 / ${WEB_FETCH_MAX_CHARS} 字）`)
+  }
+  return { ids, stats }
+}
+
+/**
+ * 生成时的网页资料检索入口（首次生成走这里）：
+ * 发现 → 排序 → 抓取落库（含上限），返回命中的 sourceIds 与统计。
+ * 重新生成时不再走这里，而是复用 `task_web_materials` 里锁定的材料（见第三批 A1）。
  */
 export async function fetchRelatedSiteSources(
   query: string,
   taskId: string,
   onSite?: (siteTitle: string) => void
 ): Promise<{ ids: string[]; stats: WebFetchStats }> {
-  const sites = listWebSites()
-  const stats: WebFetchStats = { sites: sites.length, hits: 0, fetched: 0, skippedByCap: 0, chars: 0 }
-  if (sites.length === 0) return { ids: [], stats }
-  const terms = extractTopicTerms(query)
-  const allTerms = [...new Set([...terms, ...expandDomainHints(terms)])]
-  if (allTerms.length === 0) return { ids: [], stats }
-  const ids: string[] = []
-  let budgetChars = WEB_FETCH_MAX_CHARS
-  for (const site of sites) {
-    onSite?.(site.title || site.rootUrl)
-    try {
-      await syncSite(site.id)
-    } catch {
-      continue
-    }
-    let host: string
-    try { host = new URL(site.rootUrl).host } catch { host = site.rootUrl }
-    const robots = await fetchRobotsTxt(site.rootUrl).catch(() => ({ crawlDelay: undefined, disallow: [] }))
-    const articles = listSiteArticles(site.id)
-    const hits = rankArticlesByQuery(filterArticlesByQuery(articles, query), query)
-    stats.hits += hits.length
-    let imported = 0
-    for (const h of hits) {
-      // C6 礼貌限速：单站串行 + 请求间隔（robots crawl-delay 或默认最小间隔）
-      if (isPathDisallowed(h.url, robots.disallow)) continue
-      // 上限（篇数 / 字数）：命中太多时按相关度优先保留，其余记入 skippedByCap
-      if (stats.fetched >= WEB_FETCH_MAX_ARTICLES || budgetChars <= 0) {
-        stats.skippedByCap += 1
-        continue
-      }
-      await politeDelay(host, robots.crawlDelay)
-      const src = await importSiteArticle(h.url, h.title, allTerms, taskId, site.id)
-      if (src) {
-        ids.push(src.id)
-        imported++
-        stats.fetched += 1
-        stats.chars += src.cleanedText?.length ?? 0
-        budgetChars -= src.cleanedText?.length ?? 0
-      }
-    }
-    logMain('web', `网页资料检索 站点=${site.title || site.rootUrl} 文章清单=${articles.length} 标题命中=${hits.length} 落库=${imported} robots.crawlDelay=${robots.crawlDelay ?? '-'}`)
+  const collected = await collectSiteCandidates(query)
+  if (collected.candidates.length > 0) onSite?.(collected.candidates[0].siteTitle)
+  const imported = await importSiteCandidates(collected.candidates, query, taskId)
+  const stats: WebFetchStats = {
+    ...imported.stats,
+    sites: collected.stats.sites,
+    siteErrors: collected.stats.siteErrors,
+    hits: collected.stats.hits
   }
-  if (stats.skippedByCap > 0) {
-    logMain('web', `网页资料检索达上限：落库 ${stats.fetched} 篇 / ${stats.chars} 字，跳过 ${stats.skippedByCap} 篇（上限 ${WEB_FETCH_MAX_ARTICLES} 篇 / ${WEB_FETCH_MAX_CHARS} 字）`)
+  if (stats.siteErrors > 0) {
+    logMain('web', `网页资料检索：${stats.siteErrors}/${stats.sites} 个站点同步失败，本轮网页材料可能不完整`)
   }
-  return { ids, stats }
+  return { ids: imported.ids, stats }
 }
 
 // ---- vitest inline test ----
