@@ -104,7 +104,7 @@ import {
 } from './db/style-guides'
 import { ensureDemoTask } from './db/demo-task'
 import { generateCompilation, continueCompilation } from './writing/compilation-service'
-import { renderCompilationDocx, serializeCompilationArchive } from './writing/compilation-export'
+import { buildCompilationFileName, renderCompilationDocx, serializeCompilationArchive } from './writing/compilation-export'
 import {
   pushUndo,
   undoCompilation,
@@ -691,9 +691,11 @@ handleLogged(IPC.COMPILATION_EXPORT_DOCX, async (_event, params: CompilationExpo
   try {
     const compilation = getCompilationById(params.compilationId)
     if (!compilation) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料汇编不存在' } }
+    // 文件名取「当前任务标题」（中栏任务列表里用户可重命名的那个），导出时现取，改名后立即生效
+    const taskTitle = getTaskById(compilation.taskId)?.title
     const res = await dialog.showSaveDialog({
       title: '导出资料汇编为 Word 文档',
-      defaultPath: compilation.title + '.docx',
+      defaultPath: buildCompilationFileName(taskTitle, 'docx'),
       filters: [{ name: 'Word 文档', extensions: ['docx'] }]
     })
     if (res.canceled || !res.filePath) return { ok: false, error: { code: 'EXPORT_CANCELED', message: '已取消导出' } }

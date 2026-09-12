@@ -173,6 +173,21 @@ export function compilationDocxXml(comp: Compilation): string {
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paras.join('')}</w:body></w:document>`
 }
 
+/**
+ * 导出文件名：`<当前任务标题>-资料汇编.docx`（Phase 7.7 用户要求）。
+ * 标题取 `writing_tasks.title`——即中栏任务列表里用户可重命名的那一个，**在导出时现取**，
+ * 因此用户生成后改名也能立刻体现在文件名上；`compilations.title` 是生成时的指令快照，不随之变化。
+ * Windows 文件名非法字符统一替换为下划线，标题为空时回退为「资料汇编」。
+ */
+export function buildCompilationFileName(taskTitle: string | undefined, extension: string): string {
+  const safe = (taskTitle ?? '')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80)
+  return (safe ? safe + '-资料汇编' : '资料汇编') + '.' + extension
+}
+
 /** 导出资料汇编为 .docx（返回 Buffer，由主进程写盘）。 */
 export async function renderCompilationDocx(comp: Compilation): Promise<Buffer> {
   const zip = new JSZip()
@@ -348,6 +363,19 @@ if (import.meta.vitest) {
   })
 
   describe('compilation docx export (Phase 7.6：连续文档 + 上标编号 + 来源清单)', () => {
+    it('names the export file after the current task title (Phase 7.7)', () => {
+      expect(buildCompilationFileName('福州市学前教育事业发展概况', 'docx')).toBe('福州市学前教育事业发展概况-资料汇编.docx')
+      // 用户可随时重命名任务：文件名只依赖传入的标题，不含任何生成时快照
+      expect(buildCompilationFileName('改名后的任务', 'docx')).toBe('改名后的任务-资料汇编.docx')
+      // Windows 非法字符替换为下划线，首尾空白去掉、连续空白压成一个
+      expect(buildCompilationFileName('  高中教育: 2019/2020  ', 'docx')).toBe('高中教育_ 2019_2020-资料汇编.docx')
+      // 标题为空/缺失时回退为「资料汇编」
+      expect(buildCompilationFileName('', 'docx')).toBe('资料汇编.docx')
+      expect(buildCompilationFileName(undefined, 'docx')).toBe('资料汇编.docx')
+      // 过长的标题截断，避免超出文件名长度上限
+      expect(buildCompilationFileName('长'.repeat(200), 'docx')).toBe('长'.repeat(80) + '-资料汇编.docx')
+    })
+
     it('exports one paragraph per kept item: time prefix, body, superscript source ordinal', () => {
       const xml = compilationDocxXml(makeComp())
       // 段首时间（加粗）+ 正文 + 上标编号
