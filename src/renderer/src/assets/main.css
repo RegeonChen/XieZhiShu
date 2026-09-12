@@ -4534,10 +4534,11 @@ textarea:focus-visible {
 /*
  * Phase 7.6（用户要求）：资料汇编查看器的字号档位，由设置页选择、落库持久化，
  * 由 App 写到 `document.documentElement` 的 `data-doc-scale`（与 `data-theme` 同机制）。
- * `small` 就是改造前的字号与文档宽度；`medium`（默认）/`large` 依次放大字号并收窄两侧留白。
+ * `small` 就是改造前的字号与文档宽度；`medium`（默认）字号更大、文档固定宽度更宽；
+ * `large` 字号最大且文档铺满右栏。
  */
 :root {
-  --doc-max-width: 100%;
+  --doc-max-width: 1040px;
   --doc-font-size: 15px;
   --doc-year-font-size: 14px;
   --doc-time-font-size: 11.5px;

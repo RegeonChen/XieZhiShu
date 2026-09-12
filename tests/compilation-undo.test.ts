@@ -5,8 +5,8 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest'
 import Database from 'better-sqlite3'
 import { setDb, getDb } from '../src/main/db/connection'
 import { runMigrations } from '../src/main/db/migrate'
-import { createCompilation, insertCompilationItems } from '../src/main/db/compilations'
-import { pushUndo, undoCompilation, redoCompilation, getUndoCount, getRedoCount } from '../src/main/writing/compilation-undo'
+import { createCompilation, insertCompilationItems, insertCompilationContradictions, updateCompilationContradictionStatus } from '../src/main/db/compilations'
+import { pushUndo, undoCompilation, redoCompilation, getUndoCount, getRedoCount, clearUndoStacks } from '../src/main/writing/compilation-undo'
 
 let db: Database.Database
 
@@ -51,6 +51,51 @@ describe('compilation undo/redo (2026-08-28)', () => {
     // 恢复 → 再次删掉卡片二
     redoCompilation(c.id)
     expect(getDb().prepare('SELECT COUNT(*) c FROM compilation_items WHERE compilation_id = ?').get(c.id)).toMatchObject({ c: 1 })
+    expect(getRedoCount(c.id)).toBe(0)
+  })
+
+  it('undo/redo covers contradiction decisions (user request 2026-09-10)', () => {
+    const { taskId, sourceId } = seed()
+    const c = createCompilation({ taskId, title: '汇编' })
+    const items = insertCompilationItems(c.id, [
+      { sourceId, excerpt: '全区普通中学 30 所', ts: '2018 年' },
+      { sourceId, excerpt: '全区普通中学 32 所', ts: '2018 年' }
+    ])
+    const group = insertCompilationContradictions(c.id, [
+      {
+        topic: '2018 年普通中学数量',
+        kind: 'data',
+        variants: [
+          { itemId: items[0].id, variantText: '30 所', sourceId },
+          { itemId: items[1].id, variantText: '32 所', sourceId }
+        ]
+      }
+    ])[0]
+    expect(group.status).toBe('pending')
+
+    // 采纳说法一：与 IPC handler 同口径——先压栈，再改状态（未被采纳的段会进入回收站/被排除）
+    pushUndo(c.id)
+    updateCompilationContradictionStatus(group.id, 'resolved', items[0].id)
+    const afterResolve = getDb().prepare('SELECT status, chosen_item_id FROM compilation_contradictions WHERE id = ?').get(group.id)
+    expect(afterResolve).toMatchObject({ status: 'resolved', chosen_item_id: items[0].id })
+
+    // 撤销 → 回到「待处理」（用户要求：采纳/忽略也能用撤销按钮改回来）
+    expect(getUndoCount(c.id)).toBe(1)
+    undoCompilation(c.id)
+    const afterUndo = getDb().prepare('SELECT status, chosen_item_id FROM compilation_contradictions WHERE id = ?').get(group.id)
+    expect(afterUndo).toMatchObject({ status: 'pending', chosen_item_id: null })
+
+    // 恢复 → 重新采纳
+    expect(getRedoCount(c.id)).toBe(1)
+    redoCompilation(c.id)
+    expect(getDb().prepare('SELECT status, chosen_item_id FROM compilation_contradictions WHERE id = ?').get(group.id)).toMatchObject({
+      status: 'resolved',
+      chosen_item_id: items[0].id
+    })
+
+    // 排序等"只改顺序"的操作仍然作废撤销栈（用户 2026-09-10 早先的要求，不能因为本次放宽而回退）
+    clearUndoStacks(c.id)
+    expect(getUndoCount(c.id)).toBe(0)
     expect(getRedoCount(c.id)).toBe(0)
   })
 })
