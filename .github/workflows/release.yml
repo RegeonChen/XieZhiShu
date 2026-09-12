@@ -36,7 +36,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: win-installer
-          path: dist/*.exe
+          path: |
+            dist/*.exe
+            dist/*.exe.blockmap
           if-no-files-found: error
 
   release:
@@ -56,15 +58,27 @@ jobs:
           name: win-installer
           path: dist/
 
+      # 发布说明读进 output 再作为 body 传（`body_path` 实测在本 action 上没生效，
+      # v0.3.0 头两次发布都出成了空正文——这里改成显式读取，并打印首行便于核对）。
+      - name: Read release notes
+        id: notes
+        shell: bash
+        run: |
+          echo "release notes: $(wc -c < docs/release-notes.md) bytes"
+          head -3 docs/release-notes.md
+          {
+            echo 'body<<RELEASE_NOTES_EOF'
+            cat docs/release-notes.md
+            echo 'RELEASE_NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           draft: false
           prerelease: false
-          # 发布说明写在 docs/release-notes.md（每次发版前更新，含本版变更明细与验证数据）；
-          # 不再用自动生成的 PR 清单——本项目为单人开发，自动说明没有信息量。
-          body_path: docs/release-notes.md
+          body: ${{ steps.notes.outputs.body }}
           # 同一 tag 重跑时覆盖已上传的同名安装包（否则重发会因资产重名失败）
           overwrite_files: true
         env:
