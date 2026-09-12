@@ -163,18 +163,12 @@ interface Props {
   onRetryCompilation?: () => void
   /** 首次生成汇编（提交标题与要求） */
   onGenerate?: (instruction: string) => void
-  /** 第三批 A1：最近一次生成的网页材料统计（已锁定 / 新发现未纳入） */
+  /** 第三批 A1：最近一次生成的网页材料统计（已锁定篇数 / 站点新命中未纳入篇数） */
   webScan?: { sites: number; siteErrors: number; hits: number; fetched: number; skippedByCap: number; chars: number; reused?: number; newCandidates?: number } | null
-  /** 正在纳入新网页材料 */
-  adoptingWeb?: boolean
-  /** 纳入新网页材料（抓取站点上新命中但未纳入的文章并锁定到本任务） */
-  onAdoptWebMaterials?: () => void
-  /** 正在重新检索网页材料（清空并重算本任务的材料集合） */
-  refreshingWeb?: boolean
-  /** 重新检索网页材料 */
-  onRefreshWebMaterials?: () => void
-  /** 本任务已锁定的网页材料篇数（持久化查询结果；重启后仍可显示入口） */
+  /** 本任务已锁定的网页材料篇数（持久化查询结果；重启后仍可显示） */
   pinnedWebCount?: number
+  /** 重新生成汇编（按当前撰写要求重跑一遍生成管线；A1 会复用已锁定材料） */
+  onRegenerateCompilation?: () => void
   /** 来源引用清单（消息内 #N 渲染为可点击来源） */
   sourceRefs?: SourceRefItem[]
 }
@@ -239,11 +233,8 @@ function CompilationStep({
   generating,
   /** 第三批 A1：最近一次生成的网页材料情况（用于面板里的"已锁定 N 篇 / 新文章 M 篇"提示） */
   webScan,
-  adoptingWeb,
-  onAdoptWebMaterials,
-  refreshingWeb,
-  onRefreshWebMaterials,
   pinnedWebCount,
+  onRegenerateCompilation,
   generatingText,
   generateProgress,
   generateInterrupt,
@@ -253,8 +244,6 @@ function CompilationStep({
 }: Props) {
   const t = zhCN.compilation
   const webNew = webScan?.newCandidates ?? 0
-  /** 生成中/抓取中禁用「纳入新材料」「重新检索网页材料」（边生成边抓取会互相干扰） */
-  const webActionDisabled = generating === true || adoptingWeb === true || refreshingWeb === true
   /** 差异段按段 id 建索引（渲染时给段落上色 / 段内高亮） */
   const diffById = new Map((versionDiff?.segments ?? []).map((s) => [s.id, s]))
   /** 被删除的段落按 beforeId 归组：渲染时插回"它被删除前所在的位置"（用户 2026-09-10 要求） */
@@ -568,9 +557,8 @@ function CompilationStep({
   )
 
   /**
-   * 第三批 A1：网页材料提示条。**两种模式都渲染**（此前只长在生成模式里，
-   * 而重新生成会先按旧集合复用，"换一批材料"的入口事实上够不到）。
-   * 数据来源：本次生成的统计（`webScan`）优先，其次取主进程查到的持久化锁定篇数（重启后仍可见）。
+   * 第三批 A1：网页材料提示条。**两种模式都渲染**（重启后按持久化锁定篇数显示）。
+   * 数据来源：本次生成的统计（`webScan`）优先，其次取主进程查到的持久化锁定篇数。
    */
   const pinnedCount = Math.max(webScan?.reused ?? 0, pinnedWebCount ?? 0)
   const webInfo =
@@ -584,23 +572,7 @@ function CompilationStep({
           <span>{t.webMaterialsPinned.replace('{count}', String(pinnedCount))}</span>
         )}
         {webNew > 0 ? (
-          <>
-            <span className="compilation-webinfo__new">{t.webMaterialsNew.replace('{count}', String(webNew))}</span>
-            <button type="button" className="source-list__btn" disabled={webActionDisabled} onClick={() => onAdoptWebMaterials?.()}>
-              {adoptingWeb ? t.webMaterialsAdopting : t.webMaterialsAdopt}
-            </button>
-          </>
-        ) : null}
-        {pinnedCount > 0 ? (
-          <button
-            type="button"
-            className="source-list__btn compilation-webinfo__refresh"
-            title={t.webMaterialsRefreshHint}
-            disabled={webActionDisabled}
-            onClick={() => onRefreshWebMaterials?.()}
-          >
-            {refreshingWeb ? t.webMaterialsRefreshing : t.webMaterialsRefresh}
-          </button>
+          <span className="compilation-webinfo__new">{t.webMaterialsNew.replace('{count}', String(webNew))}</span>
         ) : null}
       </div>
     ) : null
@@ -667,6 +639,21 @@ function CompilationStep({
         />
         <div className="compilation-docchat__actions">
           <span className="compilation-docchat__hint">{t.docChatHint}</span>
+          {/*
+            已有汇编的任务此前**没有任何重跑生成的入口**（「与汇编对话」模式只有对话修改），
+            用户只能新建任务。这里补一个真正的「重新生成汇编」：走同一套生成管线，
+            网页材料沿用 A1 已锁定的那一批（`listPinnedWebMaterials`）。
+          */}
+          {onRegenerateCompilation ? (
+            <button
+              type="button"
+              className="source-list__btn"
+              disabled={docEditing === true || generating === true}
+              onClick={() => onRegenerateCompilation()}
+            >
+              {t.regenerateBtn}
+            </button>
+          ) : null}
           <button
             type="button"
             className="source-list__btn source-list__btn--primary"

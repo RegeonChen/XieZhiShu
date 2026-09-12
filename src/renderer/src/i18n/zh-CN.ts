@@ -449,6 +449,10 @@ export const zhCN = {
     empty: '尚未生成资料汇编。点击右下角按钮，输入本次撰写的标题与要求后生成。',
     generateBtn: '生成汇编',
     regenerateBtn: '重新生成汇编',
+    regenerateConfirmTitle: '重新生成资料汇编',
+    regenerateConfirmMessage:
+      '将按当前撰写要求重新检索并生成一版资料汇编：网页材料沿用本任务已锁定的那一批（不会重新抓取），当前这版的对话记录与版本历史不会带入新版本。确定继续？',
+    regenerateConfirmBtn: '重新生成',
     confirmBtn: '导出资料汇编',
     exportBtn: '导出资料汇编',    exportDocx: '导出 Word (…docx)',
     exportArchive: '导出软件格式 (…xzsc)',
@@ -554,19 +558,7 @@ export const zhCN = {
     /* 第三批 A1：网页材料集合首次落定后的提示与"纳入新材料"入口 */
     webMaterialsPinned: '本任务已锁定 {count} 篇网页材料（重新生成将复用同一批）',
     webMaterialsFetched: '本次新采用 {count} 篇网页材料',
-    webMaterialsNew: '站点上另有 {count} 篇新命中文章未纳入',
-    webMaterialsAdopt: '纳入新材料',
-    webMaterialsAdopting: '纳入中…',
-    webMaterialsAdopted: '已纳入 {count} 篇新网页材料；点「重新生成汇编」即可使用（材料集合会随本次纳入而更新）。',
-    webMaterialsAdoptNone: '没有可纳入的新文章（站点无新命中或已全部纳入）。',
-    webMaterialsAdoptFailed: '纳入新网页材料失败：{message}',
-    /* 第三批 A1 补强：材料集合可重算（首次落定不理想时不必新建任务） */
-    webMaterialsRefresh: '重新检索网页材料',
-    webMaterialsRefreshHint: '清空并重算本任务的网页材料集合（重新发现、按标题相关度排序、受上限抓取）。只改材料集合，不影响当前汇编；重算后需再点「重新生成汇编」。',
-    webMaterialsRefreshing: '正在重新检索…（受抓取上限约束，可能需要几分钟）',
-    webMaterialsRefreshed:
-      '已重新检索网页材料：锁定 {fetched} 篇（标题命中 {hits} 篇，因上限未采用 {skipped} 篇）。点「重新生成汇编」即可使用。',
-    webMaterialsRefreshFailed: '重新检索网页材料失败：{message}',
+    webMaterialsNew: '站点上另有 {count} 篇新命中文章未纳入本次材料集合',
     /* 大模型修正（2026-09-08 引入）已随 Phase 7.7 整体移除：软件内不再有「修正记录」概念 */
     recycleBin: '回收站',
     recycleBinTitle: '回收站',

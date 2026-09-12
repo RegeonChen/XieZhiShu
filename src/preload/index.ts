@@ -279,18 +279,7 @@ const api = {
   getSourceSnapshot(id: string): Promise<ApiResult<{ id: string; kind: 'file' | 'url'; title: string; url?: string; snapshotAt?: string; publishedAt?: string; text: string; totalChars: number; truncated: boolean; shortText: boolean }>> {
     return ipcRenderer.invoke(IPC.SOURCES_GET_SNAPSHOT, { id })
   },
-  /** 纳入新网页材料（第三批 A1）：抓取站点上新出现且未纳入的命中文章并锁定到本任务 */
-  adoptWebMaterials(taskId: string, query: string): Promise<ApiResult<{ added: number; skippedByCap: number; siteErrors: number }>> {
-    return ipcRenderer.invoke(IPC.COMPILATION_ADOPT_WEB_MATERIALS, { taskId, query })
-  },
-  /** 重新检索网页材料（第三批 A1 补强）：清空并重算本任务的网页材料集合（不改已有汇编） */
-  refreshWebMaterials(
-    taskId: string,
-    query: string
-  ): Promise<ApiResult<{ sites: number; siteErrors: number; hits: number; fetched: number; skippedByCap: number; chars: number; pinned: number; cleared: number }>> {
-    return ipcRenderer.invoke(IPC.COMPILATION_REFRESH_WEB_MATERIALS, { taskId, query })
-  },
-  /** 已锁定的网页材料篇数（只读）：面板据此在非生成状态也显示「重新检索网页材料」入口 */
+  /** 已锁定的网页材料篇数（只读）：面板据此显示「本任务已锁定 N 篇」 */
   getWebMaterials(taskId: string): Promise<ApiResult<{ pinned: number }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_WEB_MATERIALS, { taskId })
   },
