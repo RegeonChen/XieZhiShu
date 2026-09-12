@@ -64,8 +64,22 @@ function buildGeneratedSummary(
       passthrough?: number
       duplicatesDropped?: number
       conflictsKept?: number
+      /** C（2026-09-12）：因"只复述标题"被丢弃 / 因"年份无据"被标待核的段落数 */
+      titleOnlyDropped?: number
+      timeUnsupported?: number
     }
-    webScan?: { sites: number; siteErrors: number; hits: number; fetched: number; skippedByCap: number; chars: number; reused?: number; newCandidates?: number }
+    webScan?: {
+      sites: number
+      siteErrors: number
+      hits: number
+      fetched: number
+      skippedByCap: number
+      chars: number
+      reused?: number
+      newCandidates?: number
+      /** A1（2026-09-12）：未取到正文（模板/失效页面）而被丢弃的篇数 */
+      invalidBody?: number
+    }
   }
 ): string {
   const pendingCount = comp.contradictions.filter((c) => c.status === 'pending').length
@@ -94,6 +108,9 @@ function buildGeneratedSummary(
       )
     }
     if (ps.droppedCards) parts.push(zhCN.compilation.extractDropped.replace('{count}', String(ps.droppedCards)))
+    // C：两条硬校验的结果如实告知（标题型段落被丢弃 / 年份无据被标待核）
+    if (ps.titleOnlyDropped) parts.push(zhCN.compilation.extractTitleOnly.replace('{count}', String(ps.titleOnlyDropped)))
+    if (ps.timeUnsupported) parts.push(zhCN.compilation.extractTimeUnsupported.replace('{count}', String(ps.timeUnsupported)))
     if (ps.conflictsKept) parts.push(zhCN.compilation.extractConflictsKept.replace('{count}', String(ps.conflictsKept)))
   }
   // 网页资料本轮抓取情况（含上限截断）：让用户知道"这次用上了多少网页材料"
@@ -113,6 +130,10 @@ function buildGeneratedSummary(
           .replace('{chars}', String(ws.chars))
       )
       if (ws.skippedByCap > 0) parts.push(zhCN.compilation.webScanCapped.replace('{count}', String(ws.skippedByCap)))
+      // A1：抓回来发现"没取到正文"（老文章失效、站点返回模板页）→ 如实告知，别让用户以为材料本来就少
+      if (ws.invalidBody && ws.invalidBody > 0) {
+        parts.push(zhCN.compilation.webScanInvalidBody.replace('{count}', String(ws.invalidBody)))
+      }
       if (ws.fetched === 0 && ws.siteErrors === 0) parts.push(zhCN.compilation.webScanEmpty)
     }
     // E1：站点同步失败 → 明确告知，别让用户以为"网页资料没用上是因为没内容"
@@ -530,8 +551,20 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
             passthrough?: number
             duplicatesDropped?: number
             conflictsKept?: number
+            titleOnlyDropped?: number
+            timeUnsupported?: number
           }
-          webScan?: { sites: number; siteErrors: number; hits: number; fetched: number; skippedByCap: number; chars: number; reused?: number; newCandidates?: number }
+          webScan?: {
+            sites: number
+            siteErrors: number
+            hits: number
+            fetched: number
+            skippedByCap: number
+            chars: number
+            reused?: number
+            newCandidates?: number
+            invalidBody?: number
+          }
           interrupted?: { stage: string; message: string; percent: number; retryable?: boolean }
         }
         const comp = data.compilation

@@ -50,6 +50,8 @@ export interface IndexStatus {
   pending: number
   indexing: number
   failed: number
+  /** 正文缺失（页面为模板/该文章已失效）而不参与检索、也不再重试索引的来源数（2026-09-12 A1） */
+  bodyMissing?: number
   /** 最近一次失败原因（失败样本；没有失败时为 null） */
   lastError: string | null
   /** 失败原因里最近一条对应的时间，用于判断"是否本次会话尝试过" */
@@ -66,22 +68,25 @@ export function getIndexStatus(): IndexStatus {
   const last = db
     .prepare("SELECT index_error, updated_at FROM sources WHERE index_state = 'failed' AND index_error IS NOT NULL ORDER BY updated_at DESC LIMIT 1")
     .get() as { index_error: string; updated_at: string } | undefined
+  // 正文缺失的来源单独报数：它们既不参与检索、也不该被"重建索引"重试
+  const bodyMissing = (db.prepare('SELECT COUNT(*) AS c FROM sources WHERE body_missing = 1').get() as { c: number }).c
   return {
     total: rows.reduce((n, r) => n + r.c, 0),
     ready: count('ready'),
     pending: count('pending'),
     indexing: count('indexing'),
     failed: count('failed'),
+    bodyMissing,
     lastError: last?.index_error ?? null,
     lastErrorAt: last?.updated_at ?? null
   }
 }
 
-/** 清掉失败标记，让这些资料可以被重新索引（"重建索引"前调用） */
+/** 清掉失败标记，让这些资料可以被重新索引（"重建索引"前调用）；正文缺失的来源不再重试 */
 export function resetFailedIndex(): number {
   const db = getDb()
   return db
-    .prepare("UPDATE sources SET index_state = 'pending', index_error = NULL, updated_at = ? WHERE index_state = 'failed'")
+    .prepare("UPDATE sources SET index_state = 'pending', index_error = NULL, updated_at = ? WHERE index_state = 'failed' AND body_missing = 0")
     .run(new Date().toISOString()).changes
 }
 
@@ -124,10 +129,10 @@ function writeRebuildRecord(status: RebuildStatus, totalQueued: number, startedA
   writeSetting(REBUILD_KEY, JSON.stringify({ status, startedAt: startedAt ?? now, updatedAt: now, totalQueued } satisfies RebuildRecord))
 }
 
-/** 当前未就绪（仍需索引）的篇数 */
+/** 当前未就绪（仍需索引）的篇数；正文缺失的来源（页面为模板/文章已失效）不计入 */
 function countNotReady(): number {
   const db = getDb()
-  return (db.prepare("SELECT COUNT(*) AS c FROM sources WHERE index_state != 'ready'").get() as { c: number }).c
+  return (db.prepare("SELECT COUNT(*) AS c FROM sources WHERE index_state != 'ready' AND body_missing = 0").get() as { c: number }).c
 }
 
 /**
@@ -256,7 +261,7 @@ export async function indexAllPending(
   onProgress?: (done: number, total: number) => void
 ): Promise<{ indexed: number; failed: number; total: number; firstError?: string }> {
   const db = getDb()
-  const rows = db.prepare("SELECT id FROM sources WHERE index_state != 'ready'").all() as { id: string }[]
+  const rows = db.prepare("SELECT id FROM sources WHERE index_state != 'ready' AND body_missing = 0").all() as { id: string }[]
   let indexed = 0
   let failed = 0
   let firstError: string | undefined
@@ -354,7 +359,7 @@ const rebuildPendingIds = new Set<string>()
 export function requeuePendingIndexes(includeFailed = true): { queued: number; reset: number } {
   const reset = includeFailed ? resetFailedIndex() : 0
   const db = getDb()
-  const rows = db.prepare("SELECT id FROM sources WHERE index_state != 'ready'").all() as { id: string }[]
+  const rows = db.prepare("SELECT id FROM sources WHERE index_state != 'ready' AND body_missing = 0").all() as { id: string }[]
   const ids = rows.map((r) => r.id)
   /*
    * 续跑（上次被打断，或用户在跑的过程中又点了一次）沿用同一轮的分母与开始时间，

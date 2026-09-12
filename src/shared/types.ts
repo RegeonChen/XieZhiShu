@@ -26,6 +26,10 @@ export interface Source {
   workspace?: boolean // true=直接引用用户工作区文件（不转存副本）
   /** 任务绑定的网页缓存文章（2026-08-13）：非空 = 某任务生成初稿时抓取的网站文章（暂存、不属于长期资料库）；空 = 工作区文件/手动网址 */
   taskId?: string
+  /** 网页正文来源（2026-09-12 A2）：extractor=结构化提取器；full-page=整页回退（含模板噪音） */
+  textSource?: 'extractor' | 'full-page'
+  /** true = 未取到正文（老文章失效、站点返回通用模板页），不参与检索（2026-09-12 A1） */
+  bodyMissing?: boolean
   createdAt: string
   updatedAt: string
 }

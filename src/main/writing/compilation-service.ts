@@ -146,6 +146,10 @@ export type GenerateCompilationResult =
         droppedCards?: number
         omitted?: number
         passthrough?: number
+        /** 因"段落只是复述来源标题"而丢弃的段落数（2026-09-12：绝不能只看文章标题） */
+        titleOnlyDropped?: number
+        /** 因"年份在来源里查不到、也推不出"而降级为「时间待核」的段落数 */
+        timeUnsupported?: number
       }
       interrupted?: CompilationInterrupt
       /** 网页资料本轮的抓取情况（2026-09-12 第二批：达上限时如实告知，避免"以为用了几百篇"） */
@@ -1405,12 +1409,15 @@ async function runExtractPhase(
       droppedCards: agg.droppedCards,
       omitted: agg.omitted,
       passthrough: agg.passthrough,
+      titleOnlyDropped: agg.titleOnlyDropped,
+      timeUnsupported: agg.timeUnsupported,
       duplicatesDropped: assembled.duplicatesDropped,
       conflictsKept: assembled.conflictsKept,
       retried: agg.retried
     }
     if (incomplete) state.extractIncomplete = { message: incomplete }
     const chars = assembled.paragraphs.reduce((n, p) => n + p.text.length, 0)
+    const scan = state.extractStats
     logMain(
       'extract',
       '整合提取完成 汇编=' +
@@ -1420,7 +1427,7 @@ async function runExtractPhase(
         ' → 段落 ' +
         assembled.paragraphs.length +
         '（' +
-        state.extractStats.inputChars +
+        (scan?.inputChars ?? 0) +
         ' → ' +
         chars +
         ' 字）通过校验 ' +
@@ -1513,6 +1520,8 @@ async function runExtractPhase(
       agg.passthrough += res.stats.passthrough
       agg.retainedChars += res.stats.retainedChars
       agg.retried += res.stats.retried
+      agg.titleOnlyDropped += res.stats.titleOnlyDropped
+      agg.timeUnsupported += res.stats.timeUnsupported
       done.add(bi)
     }
   })

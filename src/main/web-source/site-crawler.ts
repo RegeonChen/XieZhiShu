@@ -75,6 +75,72 @@ export function fallbackTitleFromUrl(url: string): string {
   return host + '（页面无标题）'
 }
 
+/** 匹配用归一化：去掉空白与全角空格（纯函数） */
+function stripSpaces(value: string | undefined): string {
+  return (value ?? '').replace(/[\s\u3000]/g, '')
+}
+
+/**
+ * 抓回来的页面**是否真的包含这篇文章**（纯函数，A1）。
+ *
+ * 动因（2026-09-12 用户实测）：站点对**已失效的老文章 URL 返回 HTTP 200 + 一份通用模板页**
+ * （导航 + 其他文章列表 + 页脚）。此前我们只看状态码就把整页模板文本当正文入库——
+ * 最新任务 208 篇里 119 篇（57%）是这样，正文完全相同且不含该文章标题；
+ * 这些"材料"随后被当成素材送进大模型，产出「长乐新添一所普通高中，将于9月开学。」这类只剩标题的段落。
+ *
+ * 判定：标题核心片段（去空白后前 8 字）必须出现在**提取正文**或**原始 HTML** 里。
+ * 标题过短（<4 字）时不判定（避免误杀）；原始 HTML 命中即可通过（防止结构化提取器输出的正文不含标题）。
+ */
+export function pageContainsArticle(rawHtml: string | undefined, text: string | undefined, title: string): boolean {
+  const t = stripSpaces(title)
+  if (t.length < 4) return true
+  const probe = t.slice(0, Math.min(8, t.length))
+  return stripSpaces(text).includes(probe) || stripSpaces(rawHtml).includes(probe)
+}
+
+/**
+ * 正文清洗（A2）：去掉模板页噪音——前部导航/面包屑、后部「相关新闻/更多>>」列表与页脚备案。
+ * 真实站点实测：正文回退为整页文本时，90 行里有 40 行是导航、40 行是推荐列表，真正的正文只有 1 行。
+ * 纯函数、可测试；只做**保守裁剪**（找不到标记就原样返回），绝不改动正文内容本身。
+ */
+export function cleanArticleText(text: string, title?: string): string {
+  const raw = (text ?? '').replace(/\r/g, '')
+  if (!raw.trim()) return ''
+  const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean)
+  const FOOTER_RE = /(版权所有|违法和不良信息|ICP备|公网安备|互联网新闻信息服务许可证|关于我们网络实名)/
+  const LIST_TAIL_RE = /(更多>>|更多»|相关新闻|相关阅读|相关推荐)/
+  let end = lines.length
+  for (let i = 0; i < lines.length; i++) {
+    if (FOOTER_RE.test(lines[i]) || LIST_TAIL_RE.test(lines[i])) {
+      end = i
+      break
+    }
+  }
+  // 起点：面包屑（您的位置）之后，或标题行处（标题通常紧跟在导航之后）
+  let start = 0
+  const t = stripSpaces(title)
+  const probe = t.length >= 4 ? t.slice(0, Math.min(8, t.length)) : ''
+  let breadcrumb = -1
+  let titleLine = -1
+  for (let i = 0; i < end; i++) {
+    if (breadcrumb < 0 && lines[i].includes('您的位置')) breadcrumb = i
+    if (titleLine < 0 && probe && stripSpaces(lines[i]).includes(probe)) titleLine = i
+  }
+  if (breadcrumb >= 0) start = breadcrumb + 1
+  else if (titleLine > 0) start = titleLine
+  const kept: string[] = []
+  const seen = new Set<string>()
+  for (const line of lines.slice(start, end)) {
+    // 导航/栏目是短行且重复出现，去重（正文长行一律保留，避免误删同句）
+    if (line.length <= 12) {
+      if (seen.has(line)) continue
+      seen.add(line)
+    }
+    kept.push(line)
+  }
+  return kept.join('\n').trim()
+}
+
 /**
  * 从 HTML 提取发布日期（E10）：meta property/name 的 published_time/publishdate/pubdate，或 <time datetime>，或可见日期文本。纯函数、可测试。 */
 export function extractPublishedDate(html: string): string | null {
@@ -584,13 +650,20 @@ export function filterArticlesByQuery(
  * 增量导入单篇文章正文（幂等）：sources 中 (url, taskId) 已存在则直接返回已有，不重复抓取。
  * 传入 terms（关键词 + 领域下位词）时做**正文级精过滤**：抓取正文后，仅当标题+正文与关键词相关才落库，
  * 无关文章直接丢弃（不入资料库）。taskId 非空时落库为"任务绑定的网页缓存文章"（不进资料库、删任务时清理）。
+ *
+ * 2026-09-12（A1/A2）新增两道关卡：
+ * - **A1 正文有效性**：页面必须真的包含这篇文章（标题核心片段在正文或原始 HTML 里），否则判为
+ *   "老文章已失效、站点返回通用模板页" → 丢弃并回调 `onInvalidBody`（此前会把整页模板当正文入库）；
+ * - **A2 正文清洗**：去掉前部导航/面包屑与后部推荐列表/页脚，并把正文来源（结构化提取器 / 整页回退）
+ *   落库到 `text_source`，便于日后排查"为什么这篇材料质量差"。
  */
 export async function importSiteArticle(
   url: string,
   title: string,
   terms: string[] = [],
   taskId?: string,
-  siteId?: string
+  siteId?: string,
+  hooks?: { onInvalidBody?: () => void }
 ): Promise<Source | null> {
   // ② 列表页兜底：栏目/列表页（URL 强模式）绝不当作单篇文章正文落库，避免"打开来源跳到列表页"
   if (isListPageUrl(url)) {
@@ -618,6 +691,7 @@ export async function importSiteArticle(
     let cleanedText = result.cleanedText
     let snapshotAt = result.snapshotAt
     let pageTitle = title || ''
+    let textSource: 'extractor' | 'full-page' = 'full-page'
     /** 文章发布时间（E10 解析）：落库到 sources 供段首年份兜底使用（网页不能用年鉴 −1 规则） */
     let publishedAt: string | undefined = meta?.publishedAt
     if (result.notModified) {
@@ -631,17 +705,28 @@ export async function importSiteArticle(
       snapshotAt = reused.urlSnapshotAt ?? new Date().toISOString()
       pageTitle = title || reused.title || fallbackTitleFromUrl(url)
       publishedAt = reused.publishedAt ?? publishedAt
+      textSource = reused.textSource ?? 'full-page'
       logMain('web', '条件请求 304 复用正文 url=' + url + ' 标题=' + pageTitle + ' 正文字数=' + cleanedText.length)
     } else {
       pageTitle = title || extractPageTitle(result.rawHtml) || fallbackTitleFromUrl(url)
       // D8：用成熟正文提取器提升中文正文/表格质量；提取过短时回退浏览器净化的 cleanedText
-      const richText = extractArticleText(result.rawHtml) || result.cleanedText
+      const extracted = extractArticleText(result.rawHtml)
+      const richText = extracted || result.cleanedText
+      textSource = extracted ? 'extractor' : 'full-page'
+      // A1：页面必须真的包含这篇文章（老文章失效时站点会返回 200 + 通用模板页）
+      if (!pageContainsArticle(result.rawHtml, richText, pageTitle)) {
+        logMain('web', '未取到正文（页面为模板/该文章已失效），丢弃 url=' + url + ' 标题=' + pageTitle)
+        hooks?.onInvalidBody?.()
+        return null
+      }
+      // A2：清洗正文（去导航/面包屑/推荐列表/页脚）
+      const cleaned = cleanArticleText(richText, pageTitle)
+      cleanedText = cleaned || richText
       // 正文级精过滤：标题 + 正文前 12000 字（足以判定主题，避免超长正文拖慢匹配）
-      if (terms.length > 0 && !matchesExact((pageTitle + '\n' + richText).slice(0, 12000), terms)) {
+      if (terms.length > 0 && !matchesExact((pageTitle + '\n' + cleanedText).slice(0, 12000), terms)) {
         logMain('web', '正文精过滤未命中，丢弃 url=' + url + ' 标题=' + pageTitle)
         return null
       }
-      cleanedText = richText
       // E10：从正文/元数据解析发布时间并记录（供文章清单按时间排序 + 段落年份兜底）
       publishedAt = extractPublishedDate(result.rawHtml) ?? publishedAt
       // 记录抓取元数据（ETag / Last-Modified / 正文哈希），供条件请求与正文去重用
@@ -654,7 +739,13 @@ export async function importSiteArticle(
         })
         if (publishedAt) updateSiteArticlePublished(siteId, url, publishedAt)
       }
-      logMain('web', '抓取并落库 url=' + url + ' 标题=' + pageTitle + ' 正文字数=' + cleanedText.length + (publishedAt ? ' 发布时间=' + publishedAt : '') + (richText !== result.cleanedText ? ' 提取器=extractArticleText' : ' 提取器=stripHtml'))
+      logMain(
+        'web',
+        '抓取并落库 url=' + url + ' 标题=' + pageTitle + ' 正文字数=' + cleanedText.length +
+          (publishedAt ? ' 发布时间=' + publishedAt : '') +
+          ' 提取器=' + textSource +
+          (richText.length !== cleanedText.length ? '（已清洗 ' + (richText.length - cleanedText.length) + ' 字模板噪音）' : '')
+      )
     }
     const source: Source = {
       id: crypto.randomUUID(),
@@ -666,6 +757,8 @@ export async function importSiteArticle(
       cleanedText,
       status: 'ready',
       taskId,
+      textSource,
+      bodyMissing: false,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     }
@@ -773,6 +866,8 @@ export interface WebFetchStats {
   reused?: number
   /** 站点里检测到、但未纳入的新命中文章数（由用户点「纳入新材料」决定是否抓取） */
   newCandidates?: number
+  /** 抓回来发现"没取到正文"（老文章失效、站点返回通用模板页）而丢弃的篇数（A1） */
+  invalidBody?: number
 }
 
 export interface WebCandidate {
@@ -829,7 +924,7 @@ export async function importSiteCandidates(
   taskId: string
 ): Promise<{ ids: string[]; stats: WebFetchStats }> {
   const terms = [...new Set([...extractTopicTerms(query), ...expandDomainHints(extractTopicTerms(query))])]
-  const stats: WebFetchStats = { sites: 0, siteErrors: 0, hits: candidates.length, fetched: 0, skippedByCap: 0, chars: 0 }
+  const stats: WebFetchStats = { sites: 0, siteErrors: 0, hits: candidates.length, fetched: 0, skippedByCap: 0, chars: 0, invalidBody: 0 }
   const ids: string[] = []
   let budgetChars = WEB_FETCH_MAX_CHARS
   const siteMeta = new Map<string, { host: string; crawlDelay?: number; disallow: string[] }>()
@@ -851,13 +946,20 @@ export async function importSiteCandidates(
       continue
     }
     await politeDelay(meta.host, meta.crawlDelay)
-    const src = await importSiteArticle(c.url, c.title, terms, taskId, c.siteId)
+    const src = await importSiteArticle(c.url, c.title, terms, taskId, c.siteId, {
+      onInvalidBody: () => {
+        stats.invalidBody = (stats.invalidBody ?? 0) + 1
+      }
+    })
     if (src) {
       ids.push(src.id)
       stats.fetched += 1
       stats.chars += src.cleanedText?.length ?? 0
       budgetChars -= src.cleanedText?.length ?? 0
     }
+  }
+  if ((stats.invalidBody ?? 0) > 0) {
+    logMain('web', `网页正文未取到：${stats.invalidBody} 篇判为模板/失效页面（老文章 URL 返回 200 + 通用页），已丢弃不入库`)
   }
   if (stats.skippedByCap > 0) {
     logMain('web', `网页资料抓取达上限：落库 ${stats.fetched} 篇 / ${stats.chars} 字，跳过 ${stats.skippedByCap} 篇（上限 ${WEB_FETCH_MAX_ARTICLES} 篇 / ${WEB_FETCH_MAX_CHARS} 字）`)
@@ -1050,6 +1152,45 @@ if (import.meta.vitest) {
       expect(dedupeArticleKey('https://fzxq.fuzhou.gov.cn/a.htm')).toBe('fzxq.fuzhou.gov.cn/a.htm')
       expect(dedupeArticleKey('http://fzxq.fuzhou.gov.cn/a.htm')).toBe('fzxq.fuzhou.gov.cn/a.htm')
       expect(dedupeArticleKey('https://fzxq.fuzhou.gov.cn/b.htm/')).toBe('fzxq.fuzhou.gov.cn/b.htm')
+    })
+
+    it('rejects pages that do not contain the article (老文章失效→模板页，A1)', () => {
+      const title = '长乐新添一所普通高中！将于9月开学！'
+      // 正常文章页：原始 HTML 里有标题（哪怕提取出的正文不含标题）→ 通过
+      expect(pageContainsArticle('<html><title>长乐新添一所普通高中！将于9月开学！</title></html>', '正文', title)).toBe(true)
+      expect(pageContainsArticle('', '长乐新添一所普通高中！将于9月开学！\n福州市福外高级中学…', title)).toBe(true)
+      // 老文章 URL 返回的通用模板页（导航 + 其他文章列表，既无标题也无正文）→ 丢弃
+      const template = '长乐新闻网_长乐区互联网新闻中心 长乐要闻 长乐时讯 乡镇风采 八闽风物正当时 | 读懂福州，从一朵茉莉花开始'
+      expect(pageContainsArticle('<html><title>长乐新闻网</title></html>', template, title)).toBe(false)
+      // 标题过短（<4 字）不判定，避免误杀
+      expect(pageContainsArticle(undefined, '随便什么正文', '教育')).toBe(true)
+    })
+
+    it('cleans nav/breadcrumb/related-list/footer from a full-page body (A2)', () => {
+      const title = '福建省普通高中学业水平考试开考　三年共考14门'
+      const raw = [
+        '福建省普通高中学业水平考试开考　三年共考14门_正文_福建新闻_长乐新闻网',
+        '长乐要闻',
+        '长乐时讯',
+        '乡镇风采',
+        '部门动态',
+        '长乐要闻',
+        '您的位置: 长乐新闻网 >> 福建新闻 >> 正文',
+        title,
+        'http://www.clnews.com.cn 　2019-01-14 09:31:47 　 来源：厦门日报 　【字号 大 中 小】',
+        '厦门网讯 本周末新旧高中会考举行，其中新会考昨日开考。',
+        '相关新闻',
+        '全省首家“医中办养”居家社区养老服务照料中心开放(2019-01-14 09:31:14)',
+        '关于我们网络实名:长乐新闻网 闽ICP备2021012933号'
+      ].join('\n')
+      const cleaned = cleanArticleText(raw, title)
+      expect(cleaned).toContain('厦门网讯')
+      expect(cleaned).toContain('来源：厦门日报')
+      expect(cleaned).not.toContain('长乐要闻')
+      expect(cleaned).not.toContain('相关新闻')
+      expect(cleaned).not.toContain('闽ICP备')
+      // 正文长行一律保留（不做短行去重之外的删改）
+      expect(cleanArticleText('只有一行正文。', '标题')).toBe('只有一行正文。')
     })
 
     it('keeps both digits of the publish day (2026-09-12 实测截断回归)', () => {
