@@ -92,7 +92,14 @@ async function getExtractor(): Promise<FeatureExtractionPipeline> {
       return pipe
     })().catch((err) => {
       extractorPromise = null
-      throw new Error(`本地嵌入模型加载失败（请确认 ${modelPath}/${modelId}/ 目录包含模型文件）：${String(err)}`)
+      /*
+       * 报错要能区分两类原因（2026-09-12 实测踩过）：**模型文件缺失** 与 **引擎/依赖不可用**。
+       * 原提示只让用户检查模型目录，而真实故障是 `onnxruntime-node` 这个 file: 依赖没被正确安装
+       * （node_modules 里是空目录 → transformers 的 node 构建 import 失败），照提示查模型永远查不出来。
+       */
+      throw new Error(
+        `本地嵌入不可用（模型目录 ${modelPath}/${modelId}/ 或嵌入引擎 onnxruntime 后端）。原始错误：${String(err)}`
+      )
     })
   }
   return extractorPromise

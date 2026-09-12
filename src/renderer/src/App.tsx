@@ -46,6 +46,7 @@ const SETTINGS_SECTIONS: SectionNavItem[] = [
   },
   { id: 'appearance', label: zhCN.settingsPage.nav.appearance, icon: navIcon(['M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z', 'M12 3a9 9 0 0 1 0 18', 'M3 12h18']) },
   { id: 'workspace', label: zhCN.settingsPage.nav.workspace, icon: navIcon(['M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z']) },
+  { id: 'index', label: zhCN.settingsPage.nav.index, icon: navIcon(['M4 7h16', 'M4 12h16', 'M4 17h10']) },
   { id: 'preset', label: zhCN.settingsPage.nav.preset, icon: navIcon(['M12 2l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 7.7l5.4-.8L12 2z']) },
   { id: 'stepModels', label: zhCN.settingsPage.nav.stepModels, icon: navIcon(['M12 2l2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 7.7l5.4-.8L12 2z']) },
   { id: 'provider', label: zhCN.settingsPage.nav.provider, icon: navIcon(['M8 9l-4 4 4 4', 'M16 9l4 4-4 4', 'M13 5l-2 14']) }

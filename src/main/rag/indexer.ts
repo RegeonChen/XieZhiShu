@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import Database from 'better-sqlite3'
 import { getDb, setDb } from '../db/connection'
 import { runMigrations } from '../db/migrate'
+import { logMain } from '../logger'
 import { chunkText } from './retrieval'
 import { configureEmbedModel, embedTexts, getEmbedModelId } from './embed'
 
@@ -26,10 +27,61 @@ function setState(sourceId: string, state: IndexState, indexedAt?: string): void
   const db = getDb()
   const now = new Date().toISOString()
   if (indexedAt) {
-    db.prepare('UPDATE sources SET index_state = ?, indexed_at = ?, updated_at = ? WHERE id = ?').run(state, indexedAt, now, sourceId)
+    // 成功：清空失败原因（避免旧错误一直挂在界面上）
+    db.prepare('UPDATE sources SET index_state = ?, indexed_at = ?, index_error = NULL, updated_at = ? WHERE id = ?')
+      .run(state, indexedAt, now, sourceId)
   } else {
     db.prepare('UPDATE sources SET index_state = ?, updated_at = ? WHERE id = ?').run(state, now, sourceId)
   }
+}
+
+/** 记录索引失败原因（供设置页展示；截断避免超长堆栈进库） */
+function setIndexError(sourceId: string, error: string): void {
+  const db = getDb()
+  const now = new Date().toISOString()
+  db.prepare('UPDATE sources SET index_state = ?, index_error = ?, updated_at = ? WHERE id = ?')
+    .run('failed', error.slice(0, 600), now, sourceId)
+}
+
+export interface IndexStatus {
+  total: number
+  ready: number
+  pending: number
+  indexing: number
+  failed: number
+  /** 最近一次失败原因（失败样本；没有失败时为 null） */
+  lastError: string | null
+  /** 失败原因里最近一条对应的时间，用于判断"是否本次会话尝试过" */
+  lastErrorAt: string | null
+}
+
+/** 索引状态汇总（设置页展示：是否可用、失败原因、是否需要重建） */
+export function getIndexStatus(): IndexStatus {
+  const db = getDb()
+  const rows = db
+    .prepare('SELECT index_state, COUNT(*) AS c FROM sources GROUP BY index_state')
+    .all() as { index_state: string; c: number }[]
+  const count = (state: string): number => rows.find((r) => r.index_state === state)?.c ?? 0
+  const last = db
+    .prepare("SELECT index_error, updated_at FROM sources WHERE index_state = 'failed' AND index_error IS NOT NULL ORDER BY updated_at DESC LIMIT 1")
+    .get() as { index_error: string; updated_at: string } | undefined
+  return {
+    total: rows.reduce((n, r) => n + r.c, 0),
+    ready: count('ready'),
+    pending: count('pending'),
+    indexing: count('indexing'),
+    failed: count('failed'),
+    lastError: last?.index_error ?? null,
+    lastErrorAt: last?.updated_at ?? null
+  }
+}
+
+/** 清掉失败标记，让这些资料可以被重新索引（"重建索引"前调用） */
+export function resetFailedIndex(): number {
+  const db = getDb()
+  return db
+    .prepare("UPDATE sources SET index_state = 'pending', index_error = NULL, updated_at = ? WHERE index_state = 'failed'")
+    .run(new Date().toISOString()).changes
 }
 
 /** 为单个资料建立向量索引（幂等：先清旧块再插入） */
@@ -83,23 +135,34 @@ export async function indexSource(sourceId: string): Promise<{ ok: boolean; erro
     setState(sourceId, 'ready', now)
     return { ok: true, chunks: chunks.length }
   } catch (err) {
-    setState(sourceId, 'failed')
-    return { ok: false, error: String(err) }
+    // 失败原因落库（`index_error`）+ 日志：2026-09-12 之前只有 console.error，用户侧完全看不到
+    // 为什么"语义检索没生效"（实测全库 index_state='failed' 而原因不可查）。
+    const reason = err instanceof Error ? err.message : String(err)
+    setIndexError(sourceId, reason)
+    logMain('rag', '向量索引失败 source=' + sourceId + ' 原因=' + reason)
+    return { ok: false, error: reason }
   }
 }
 
-/** 索引所有未就绪的资料（后台批量调用） */
-export async function indexAllPending(): Promise<{ indexed: number; failed: number }> {
+/** 索引所有未就绪的资料（后台批量调用；失败原因写入 index_error） */
+export async function indexAllPending(
+  onProgress?: (done: number, total: number) => void
+): Promise<{ indexed: number; failed: number; total: number; firstError?: string }> {
   const db = getDb()
   const rows = db.prepare("SELECT id FROM sources WHERE index_state != 'ready'").all() as { id: string }[]
   let indexed = 0
   let failed = 0
-  for (const r of rows) {
+  let firstError: string | undefined
+  for (const [i, r] of rows.entries()) {
     const res = await indexSource(r.id)
     if (res.ok) indexed += 1
-    else failed += 1
+    else {
+      failed += 1
+      firstError = firstError ?? res.error
+    }
+    onProgress?.(i + 1, rows.length)
   }
-  return { indexed, failed }
+  return { indexed, failed, total: rows.length, firstError }
 }
 
 /**
@@ -159,6 +222,23 @@ export function enqueueIndex(sourceId: string): void {
   })
 }
 
+/** 后台队列里尚未处理的资料数（设置页轮询"重建索引"进度用） */
+export function getQueueSize(): number {
+  return queuedIndexIds.size
+}
+
+/**
+ * 重建索引：按需清掉失败标记，并把所有未就绪资料交给**后台串行队列**（不阻塞 IPC）。
+ * 界面只需轮询 `getIndexStatus()` 看 ready 数上升；单篇失败不影响其余资料。
+ */
+export function requeuePendingIndexes(includeFailed = true): { queued: number; reset: number } {
+  const reset = includeFailed ? resetFailedIndex() : 0
+  const db = getDb()
+  const rows = db.prepare("SELECT id FROM sources WHERE index_state != 'ready'").all() as { id: string }[]
+  for (const r of rows) enqueueIndex(r.id)
+  return { queued: rows.length, reset }
+}
+
 // ---- vitest inline test ----
 if (import.meta.vitest) {
   const { describe, expect, it, beforeAll, afterAll } = import.meta.vitest
@@ -201,8 +281,35 @@ if (import.meta.vitest) {
       expect(res.ok).toBe(false)
       // 引擎后端不可用或模型文件缺失均应给出明确错误
       expect(res.error).toContain('嵌入')
-      const row = db.prepare("SELECT index_state FROM sources WHERE id = 's-model'").get() as { index_state: string }
+      const row = db.prepare("SELECT index_state, index_error FROM sources WHERE id = 's-model'").get() as { index_state: string; index_error: string | null }
       expect(row.index_state).toBe('failed')
+      // 2026-09-12：失败原因必须落库（此前只有日志，用户侧看不到为什么语义检索没生效）
+      expect(row.index_error).toContain('嵌入')
+    })
+
+    it('reports index status and can reset failures for a rebuild (2026-09-12)', async () => {
+      db.prepare(
+        `INSERT INTO sources (id, kind, title, cleaned_text, status, index_state) VALUES ('s-ok', 'file', '已索引', '正文', 'ready', 'ready')`
+      ).run()
+      db.prepare(
+        `INSERT INTO sources (id, kind, title, cleaned_text, status, index_state, index_error) VALUES ('s-bad', 'file', '失败', '正文', 'ready', 'failed', '本地嵌入不可用：xxx')`
+      ).run()
+      const st = getIndexStatus()
+      expect(st.ready).toBeGreaterThanOrEqual(1)
+      expect(st.failed).toBeGreaterThanOrEqual(1)
+      expect(st.total).toBeGreaterThanOrEqual(st.ready + st.failed)
+      // 最近失败原因透出给设置页（取不到时应为 null，而不是抛错）
+      expect(st.lastError).toBeTruthy()
+
+      // 重建：失败标记被清掉，资料回到 pending 以便重新入队
+      const reset = resetFailedIndex()
+      expect(reset).toBeGreaterThanOrEqual(1)
+      const after = db.prepare("SELECT index_state, index_error FROM sources WHERE id = 's-bad'").get() as { index_state: string; index_error: string | null }
+      expect(after.index_state).toBe('pending')
+      expect(after.index_error).toBeNull()
+      expect(getIndexStatus().failed).toBe(0)
+      // 队列计数在无排队任务时为 0（界面据此判断"重建是否结束"）
+      expect(getQueueSize()).toBe(0)
     })
 
     it('stores chunk rows after successful embedding (mock free via direct insert path)', () => {

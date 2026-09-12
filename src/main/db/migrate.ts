@@ -981,6 +981,15 @@ UPDATE sources SET published_at = (
    LIMIT 1
 ) WHERE kind = 'url' AND published_at IS NULL;
 `
+  },
+  {
+    // 2026-09-12（向量索引失败可诊断）：真实数据核对发现全库 `index_state='failed'`、`chunk_embeddings` 为空，
+    // 但**失败原因无处可查**（只有日志里的 console.error），用户无法判断是模型缺失还是引擎不可用。
+    // 本迁移增加 `index_error`（失败原因，成功时清空），供设置页展示与"重建索引"后核对。
+    version: 38,
+    sql: `
+ALTER TABLE sources ADD COLUMN index_error TEXT;
+`
   }
 ]
 

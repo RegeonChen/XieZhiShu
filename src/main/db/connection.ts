@@ -340,6 +340,37 @@ if (import.meta.vitest) {
       old.close()
     })
 
+    it('migration 038 adds sources.index_error so index failures are diagnosable (2026-09-12)', () => {
+      const old = new Database(':memory:')
+      old.exec(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `)
+      const insertMigration = old.prepare('INSERT INTO schema_migrations (version) VALUES (?)')
+      const applyAll = old.transaction(() => {
+        for (const m of MIGRATIONS.filter((x) => x.version < 38)) {
+          if (m.run) m.run(old)
+          else if (m.sql) old.exec(m.sql)
+          insertMigration.run(m.version)
+        }
+      })
+      applyAll()
+      old.prepare("INSERT INTO sources (id, kind, title, cleaned_text, index_state) VALUES ('s1','file','资料','正文','failed')").run()
+      expect((old.prepare('PRAGMA table_info(sources)').all() as { name: string }[]).some((c) => c.name === 'index_error')).toBe(false)
+
+      const m38 = MIGRATIONS.find((m) => m.version === 38)!
+      if (m38.run) m38.run(old)
+      else if (m38.sql) old.exec(m38.sql)
+
+      // 存量失败资料的原因为空（历史失败无法追溯），新失败可写入
+      expect(old.prepare('SELECT index_error FROM sources WHERE id = ?').get('s1')).toEqual({ index_error: null })
+      old.prepare("UPDATE sources SET index_error = '本地嵌入不可用' WHERE id = 's1'").run()
+      expect(old.prepare('SELECT index_error FROM sources WHERE id = ?').get('s1')).toEqual({ index_error: '本地嵌入不可用' })
+      old.close()
+    })
+
     it('migration 030/031 adds the paragraph model and backfills ordinals, years and a v1 version (2026-09-10, Phase 7.1)', () => {
       // 模拟升级前状态：应用迁移 1-29（含 028 清库，故测试数据在其后插入）
       const old = new Database(':memory:')

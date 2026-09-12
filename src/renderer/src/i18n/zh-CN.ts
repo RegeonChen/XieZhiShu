@@ -188,6 +188,7 @@ export const zhCN = {
       overview: '总览',
       appearance: '外观',
       workspace: '工作区资料库',
+      index: '本地检索索引',
       preset: '预设大模型',
       stepModels: '步骤默认模型',
       provider: '模型服务（Provider）'
@@ -306,6 +307,22 @@ export const zhCN = {
       saving: '保存中...',
       saved: '工作区已更新',
       failed: '操作失败：{message}'
+    },
+    /* 本地向量索引（2026-09-12）：语义检索依赖本地模型与 onnxruntime 引擎，此前失败原因只在日志里 */
+    index: {
+      title: '本地检索索引',
+      hint: '本地语义检索（向量索引）让「字面不相关但意思相关」的资料也能被检索到；它依赖随软件附带的嵌入模型与 onnxruntime 引擎，全部在本地运行、不联网。若这里显示失败，检索会退化为纯关键词匹配。',
+      rebuildBtn: '重建索引',
+      rebuilding: '重建中…',
+      stateReady: '索引可用',
+      stateFailed: '索引失败',
+      statePending: '尚未索引',
+      counts: '已索引 {ready} / 共 {total} 篇（失败 {failed}，队列中 {queued}）',
+      lastError: '最近失败原因',
+      queued: '已开始重建：{count} 篇排队中，可切换到其它页面，完成后回到此处查看。',
+      done: '重建完成，索引可用。',
+      doneWithFailures: '重建结束，仍有 {count} 篇失败（原因见上）。',
+      failed: '重建失败：{message}'
     }
   },
   writingTasks: {

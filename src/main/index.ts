@@ -62,6 +62,8 @@ import {
   type WorkspaceSourceRemovalListRes,
   type WorkspaceSourceRemovalDecideReq,
   type WorkspaceSourceRemovalDecideRes,
+  type RagIndexStatusRes,
+  type RagReindexRes,
   type SourceDeleteRes,
   type SourceDeleteManyRes
 } from '../shared/ipc'
@@ -120,7 +122,7 @@ import { generateDraft, regenerateDraft, retrieveForTask, chatWithTask } from '.
 import { applyContradictionEdit } from './writing/contradiction-apply'
 import { askSourceForTask } from './writing/source-query'
 import { configureEmbedModel, stopEmbedWorker } from './rag/embed'
-import { enqueueIndex } from './rag/indexer'
+import { enqueueIndex, getIndexStatus, getQueueSize, requeuePendingIndexes } from './rag/indexer'
 import { summarizeAllPending, getSourceSummary } from './rag/summarizer'
 import { getWorkspaceDir, type ReconcileProgress } from './workspace/reconcile'
 import { startWorkspaceWatcher, restartWorkspaceWatcher, stopWorkspaceWatcher } from './workspace/watcher'
@@ -1191,6 +1193,26 @@ handleLogged(IPC.SETTINGS_UPDATE, (_event, params: { patch: Partial<AppSettings>
     return { ok: true, data: settings }
   } catch (err) {
     return { ok: false, error: { code: 'INVALID_PARAM', message: String(err) } }
+  }
+})
+
+// 本地向量索引状态 + 重建（2026-09-12）：语义检索失效时用户此前无从判断原因（原因只在日志里）
+handleLogged(IPC.RAG_INDEX_STATUS, (): ApiResult<RagIndexStatusRes> => {
+  try {
+    return { ok: true, data: { ...getIndexStatus(), queued: getQueueSize() } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.RAG_REINDEX, (): ApiResult<RagReindexRes> => {
+  try {
+    // 交给后台串行队列（嵌入推理在 Worker 线程，可能持续数分钟）；界面轮询状态接口看进度
+    const res = requeuePendingIndexes(true)
+    logMain('rag', `重建索引：重置失败 ${res.reset} 篇，排队 ${res.queued} 篇`)
+    return { ok: true, data: res }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
 })
 

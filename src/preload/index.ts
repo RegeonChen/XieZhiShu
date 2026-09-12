@@ -267,6 +267,14 @@ const api = {
   updateSettings(patch: { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string; keepAwake?: boolean; docScale?: 'small' | 'medium' | 'large' }): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.SETTINGS_UPDATE, { patch })
   },
+  /** 本地向量索引状态（语义检索是否可用、失败原因、后台队列剩余） */
+  getRagIndexStatus(): Promise<ApiResult<{ total: number; ready: number; pending: number; indexing: number; failed: number; lastError: string | null; lastErrorAt: string | null; queued: number }>> {
+    return ipcRenderer.invoke(IPC.RAG_INDEX_STATUS)
+  },
+  /** 重建本地向量索引（后台串行队列；用 getRagIndexStatus 轮询进度） */
+  reindexRag(): Promise<ApiResult<{ queued: number; reset: number }>> {
+    return ipcRenderer.invoke(IPC.RAG_REINDEX)
+  },
   /** 工作区状态（目录 + 资料统计） */
   getWorkspaceStatus(): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.WORKSPACE_STATUS)
