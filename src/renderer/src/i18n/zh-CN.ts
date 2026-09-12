@@ -322,7 +322,9 @@ export const zhCN = {
       queued: '已开始重建：{count} 篇排队中，可切换到其它页面，完成后回到此处查看。',
       done: '重建完成，索引可用。',
       doneWithFailures: '重建结束，仍有 {count} 篇失败（原因见上）。',
-      failed: '重建失败：{message}'
+      failed: '重建失败：{message}',
+      /** preload 桥过旧（界面已更新但核心进程仍是旧版本）——preload 只在创建窗口时加载一次 */
+      staleBridge: '当前运行的软件核心进程仍是旧版本（界面已更新、内核未更新），此功能暂不可用。请完全退出软件后重新启动再试。'
     }
   },
   writingTasks: {
