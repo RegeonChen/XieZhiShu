@@ -417,8 +417,7 @@ export const zhCN = {
     generateBtn: '生成汇编',
     regenerateBtn: '重新生成汇编',
     confirmBtn: '导出资料汇编',
-    exportBtn: '导出资料汇编',
-    exportDocx: '导出 Word (…docx)',
+    exportBtn: '导出资料汇编',    exportDocx: '导出 Word (…docx)',
     exportArchive: '导出软件格式 (…xzsc)',
     exportTitle: '导出资料汇编',
     sortBtn: '按时间排序',
@@ -473,7 +472,7 @@ export const zhCN = {
     adviceReduceConcurrency: '检测到频繁限流（HTTP 429）。已自动降低本次生成资料的并发数；建议您在「设置 → LLM Provider」中把当前大模型的「并发窗口数」调低（如 2），可减少限流。',
     continueFailed: '继续生成失败：',
     confirmed: '资料汇编已确认，可进入下一步指定行文规范。',
-    regenerated: '已重新生成资料汇编：{count} 张卡片。',
+    regenerated: '已重新生成资料汇编：{count} 段。',
     adjusting: '正在调整资料汇编…',
     contradictionScanFailed: '矛盾扫描未完成（{reason}），可能存在遗漏，请酌情复核。',
     /* 预设提示词（2026-09-08：弹出面板 + 分组；点击填入输入框并选中「……」占位符） */

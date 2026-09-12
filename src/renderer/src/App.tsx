@@ -421,7 +421,8 @@ export default function App() {
             (sourceRemoval.origin === 'manual' ? zhCN.sourceRemoval.messageManual : zhCN.sourceRemoval.messageWorkspace)
               .replace('{title}', sourceRemoval.title)
               .replace('{summary}', [
-                `${sourceRemoval.cardCount} 张卡片`,
+                // Phase 7.6：汇编已是连续文档，"卡片"口径改为"段落"（count 本身就是该来源被引用的段数）
+                `${sourceRemoval.cardCount} 段`,
                 sourceRemoval.contradictionCount > 0 ? `${sourceRemoval.contradictionCount} 组矛盾` : null,
                 sourceRemoval.repairCount > 0 ? `${sourceRemoval.repairCount} 条大模型修正` : null
               ].filter(Boolean).join('，'))
