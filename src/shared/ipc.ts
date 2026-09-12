@@ -8,7 +8,6 @@ import type {
   Compilation,
   CompilationContradiction,
   CompilationInterrupt,
-  CompilationItem,
   CompilationRecycleBinItem,
   CompilationVersionSummary,
   Contradiction,
@@ -60,15 +59,11 @@ export const IPC = {
   COMPILATION_GET: 'compilation:get',
   COMPILATION_GENERATE: 'compilation:generate',
   COMPILATION_CONTINUE: 'compilation:continue',
-  COMPILATION_UPDATE_ITEM: 'compilation:updateItem',
-  COMPILATION_DELETE_ITEM: 'compilation:deleteItem',
   COMPILATION_RESOLVE_CONTRADICTION: 'compilation:resolveContradiction',
   COMPILATION_CONFIRM: 'compilation:confirm',
   COMPILATION_REORDER: 'compilation:reorder',
-  /* Phase 7.4：版本管控（列表 / 差异 / 恢复） */
+  /* Phase 7.4：版本列表（对话编辑的乐观锁基线；两版差异 / 版本恢复通道已随 Phase 7.7 删除） */
   COMPILATION_VERSIONS: 'compilation:versions',
-  COMPILATION_VERSION_DIFF: 'compilation:version:diff',
-  COMPILATION_VERSION_RESTORE: 'compilation:version:restore',
   /* Phase 7.5：与文档对话（大模型以 ops 修改汇编）与对话历史 */
   COMPILATION_DOC_EDIT: 'compilation:doc:edit',
   COMPILATION_MESSAGES: 'compilation:messages',
@@ -359,12 +354,7 @@ export interface CompilationVersionsReq {
   compilationId: string
 }
 export type CompilationVersionsRes = { versions: CompilationVersionSummary[] }
-export interface CompilationVersionDiffReq {
-  compilationId: string
-  fromVersionNo: number
-  toVersionNo: number
-}
-/** 差异段（主进程算好、渲染层只负责画） */
+/** 差异段（主进程算好、渲染层只负责画）；供对话编辑返回的「本次改动前后」差异使用 */
 export interface CompilationVersionDiffSegment {
   kind: 'added' | 'removed' | 'modified' | 'unchanged'
   id: string
@@ -374,18 +364,8 @@ export interface CompilationVersionDiffSegment {
   /** 仅 removed：渲染时插回"该段被删除前紧邻的下一段"之前（缺省 = 原本在最后） */
   beforeId?: string
 }
-export type CompilationVersionDiffRes = {
-  fromVersionNo: number
-  toVersionNo: number
-  segments: CompilationVersionDiffSegment[]
-  summary: { added: number; removed: number; modified: number; unchanged: number }
-}
-export interface CompilationVersionRestoreReq {
-  compilationId: string
-  versionNo: number
-}
-export type CompilationVersionRestoreRes = { compilation: Compilation; restoredFrom: number }
 /* ---- Phase 7.5：与文档对话（req 内联类型，避免为一个字段新增共享类型） ---- */
+
 export interface CompilationDocEditReq {
   compilationId: string
   instruction: string
@@ -425,27 +405,6 @@ export interface CompilationUndoRes {
   redoAvailable: number
 }
 export type CompilationUndoStateRes = { undoAvailable: number; redoAvailable: number }
-
-export interface CompilationUpdateItemReq {
-  itemId: string
-  excerpt?: string
-  ts?: string | null
-  note?: string | null
-  extraTags?: string[]
-  kept?: boolean
-}
-export type CompilationUpdateItemRes = {
-  item: CompilationItem
-  /**
-   * Phase 7.5：当本次改动包含时间标签时，主进程会**顺带按时间重排整份汇编**（用户要求"改完时间自动重排"），
-   * 因此返回重排后的完整汇编供渲染层整体替换——不能只替换单个 item，否则界面顺序与库中 position 不一致。
-   */
-  compilation?: Compilation
-}
-
-export interface CompilationDeleteItemReq {
-  itemId: string
-}
 
 export interface CompilationResolveContradictionReq {
   contradictionId: string
@@ -797,14 +756,10 @@ export interface IpcMapping {
   [IPC.COMPILATION_GET]: { _req: CompilationGetReq; _res: ApiResult<CompilationGetRes> }
   [IPC.COMPILATION_GENERATE]: { _req: CompilationGenerateReq; _res: ApiResult<CompilationGenerateRes> }
   [IPC.COMPILATION_CONTINUE]: { _req: CompilationContinueReq; _res: ApiResult<CompilationContinueRes> }
-  [IPC.COMPILATION_UPDATE_ITEM]: { _req: CompilationUpdateItemReq; _res: ApiResult<CompilationUpdateItemRes> }
-  [IPC.COMPILATION_DELETE_ITEM]: { _req: CompilationDeleteItemReq; _res: ApiResult<void> }
   [IPC.COMPILATION_RESOLVE_CONTRADICTION]: { _req: CompilationResolveContradictionReq; _res: ApiResult<CompilationResolveContradictionRes> }
   [IPC.COMPILATION_CONFIRM]: { _req: CompilationConfirmReq; _res: ApiResult<CompilationConfirmRes> }
   [IPC.COMPILATION_REORDER]: { _req: CompilationReorderReq; _res: ApiResult<CompilationReorderRes> }
   [IPC.COMPILATION_VERSIONS]: { _req: CompilationVersionsReq; _res: ApiResult<CompilationVersionsRes> }
-  [IPC.COMPILATION_VERSION_DIFF]: { _req: CompilationVersionDiffReq; _res: ApiResult<CompilationVersionDiffRes> }
-  [IPC.COMPILATION_VERSION_RESTORE]: { _req: CompilationVersionRestoreReq; _res: ApiResult<CompilationVersionRestoreRes> }
   [IPC.COMPILATION_DOC_EDIT]: { _req: CompilationDocEditReq; _res: ApiResult<CompilationDocEditRes> }
   [IPC.COMPILATION_MESSAGES]: { _req: CompilationMessagesReq; _res: ApiResult<CompilationMessagesRes> }
   [IPC.COMPILATION_UNDO]: { _req: CompilationUndoReq; _res: ApiResult<CompilationUndoRes> }

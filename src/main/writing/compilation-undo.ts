@@ -168,12 +168,6 @@ export function getRedoCount(compilationId: string): number {
   return (redoStacks.get(compilationId) ?? []).length
 }
 
-/** 由 itemId 反查所属汇编 id（编辑/删除卡片前用于登记撤销）。 */
-export function compilationIdOfItem(itemId: string): string | null {
-  const db = getDb()
-  const row = db.prepare('SELECT compilation_id FROM compilation_items WHERE id = ?').get(itemId) as { compilation_id: string } | undefined
-  return row?.compilation_id ?? null
-}
 /** 由矛盾 id 反查所属汇编 id。 */
 export function compilationIdOfContradiction(id: string): string | null {
   const db = getDb()

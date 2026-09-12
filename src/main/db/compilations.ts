@@ -1073,6 +1073,9 @@ export function insertCompilationMessage(input: {
  * 用某个历史版本的段落重建当前文档（Phase 7.4「恢复到该版本」）：
  * 复用版本快照里的**段 id**（矛盾变体/来源编号仍指向它们），全部置为 kept，并让调用方随后记一个新版本。
  * 返回 null 表示该版本不存在。
+ *
+ * 注：Phase 7.7 删除了 `compilation:version:restore` 通道与所有版本恢复 UI——复核态的「回退」走撤销栈
+ * （`compilation:undo`），不经过版本。本函数作为版本恢复原语保留在仓储层，当前无调用方。
  */
 export function restoreCompilationFromVersion(compilationId: string, versionNo: number): CompilationItem[] | null {
   const version = getCompilationVersion(compilationId, versionNo)
