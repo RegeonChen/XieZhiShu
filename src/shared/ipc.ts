@@ -65,8 +65,6 @@ export const IPC = {
   COMPILATION_DELETE_ITEM: 'compilation:deleteItem',
   COMPILATION_RESOLVE_CONTRADICTION: 'compilation:resolveContradiction',
   COMPILATION_CONFIRM: 'compilation:confirm',
-  /* Phase 7.5：解锁人工修改模式（不可逆，Migration 034 落库） */
-  COMPILATION_MANUAL_EDIT: 'compilation:manualEdit',
   COMPILATION_ADJUST: 'compilation:adjust',
   COMPILATION_REORDER: 'compilation:reorder',
   /* Phase 7.4：版本管控（列表 / 差异 / 恢复） */
@@ -391,6 +389,8 @@ export interface CompilationVersionDiffSegment {
   prevText?: string
   nextText?: string
   inline?: { type: 'same' | 'add' | 'del'; text: string }[]
+  /** 仅 removed：渲染时插回"该段被删除前紧邻的下一段"之前（缺省 = 原本在最后） */
+  beforeId?: string
 }
 export type CompilationVersionDiffRes = {
   fromVersionNo: number
@@ -416,9 +416,18 @@ export type CompilationDocEditRes = {
   applied: number
   rejected: { op: string; reason: string }[]
   versionNo?: number
-  /** 本次改动的段 id（前端高亮 + 滚动到首个改动段） */
+  /** 本次改动的段 id（前端滚动到首个改动段） */
   changedIds: string[]
   changeSummary: { added: number; modified: number; removed: number }
+  /**
+   * **本次修改前后**的差异（主进程按"改前的段落快照 vs 改后的段落快照"直接算，而不是靠版本号推算）。
+   * 用户 2026-09-10 裁定：对话修改完成后**自动进入对比模式**让用户「采纳 / 回退」，不需要用户再点按钮；
+   * 因此基线就是这次的改前状态，与"上一版版本"无关（版本可能被回退、被裁剪，用它当基线会算错差异）。
+   */
+  diff: {
+    segments: CompilationVersionDiffSegment[]
+    summary: { added: number; removed: number; modified: number; unchanged: number }
+  }
 }
 export interface CompilationMessagesReq {
   compilationId: string
@@ -468,12 +477,6 @@ export interface CompilationConfirmReq {
   compilationId: string
 }
 export type CompilationConfirmRes = { compilation: Compilation }
-
-/** Phase 7.5（D5 补充裁定）：解锁「人工修改」模式；**不可逆**（没有反向通道） */
-export interface CompilationManualEditReq {
-  compilationId: string
-}
-export type CompilationManualEditRes = { compilation: Compilation }
 
 export interface CompilationRecycleBinListReq {
   compilationId: string
@@ -829,7 +832,6 @@ export interface IpcMapping {
   [IPC.COMPILATION_DELETE_ITEM]: { _req: CompilationDeleteItemReq; _res: ApiResult<void> }
   [IPC.COMPILATION_RESOLVE_CONTRADICTION]: { _req: CompilationResolveContradictionReq; _res: ApiResult<CompilationResolveContradictionRes> }
   [IPC.COMPILATION_CONFIRM]: { _req: CompilationConfirmReq; _res: ApiResult<CompilationConfirmRes> }
-  [IPC.COMPILATION_MANUAL_EDIT]: { _req: CompilationManualEditReq; _res: ApiResult<CompilationManualEditRes> }
   [IPC.COMPILATION_ADJUST]: { _req: CompilationAdjustReq; _res: ApiResult<CompilationAdjustRes> }
   [IPC.COMPILATION_REORDER]: { _req: CompilationReorderReq; _res: ApiResult<CompilationReorderRes> }
   [IPC.COMPILATION_VERSIONS]: { _req: CompilationVersionsReq; _res: ApiResult<CompilationVersionsRes> }

@@ -46,10 +46,8 @@ export interface AppApi {
   diffCompilationVersions(compilationId: string, fromVersionNo: number, toVersionNo: number): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   restoreCompilationVersion(compilationId: string, versionNo: number): Promise<{ ok: boolean; data?: { compilation: unknown; restoredFrom: number }; error?: { code: string; message: string } }>
   /* Phase 7.5：对话框内让大模型按段落 id 修改汇编正文 */
-  editCompilationDoc(compilationId: string, instruction: string, baseVersionNo?: number): Promise<{ ok: boolean; data?: { compilation: unknown; reply: string; applied: number; rejected: { op: string; reason: string }[]; versionNo?: number; changedIds: string[]; changeSummary: { added: number; modified: number; removed: number } }; error?: { code: string; message: string } }>
+  editCompilationDoc(compilationId: string, instruction: string, baseVersionNo?: number): Promise<{ ok: boolean; data?: { compilation: unknown; reply: string; applied: number; rejected: { op: string; reason: string }[]; versionNo?: number; changedIds: string[]; changeSummary: { added: number; modified: number; removed: number }; diff: unknown }; error?: { code: string; message: string } }>
   listCompilationMessages(compilationId: string): Promise<{ ok: boolean; data?: { messages: unknown[] }; error?: { code: string; message: string } }>
-  /* Phase 7.5：解锁人工修改模式（不可逆） */
-  enterCompilationManualEdit(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
   updateCompilationItem(itemId: string, patch: { excerpt?: string; ts?: string | null; note?: string | null; extraTags?: string[]; kept?: boolean }): Promise<{ ok: boolean; data?: { item: unknown; compilation?: unknown }; error?: { code: string; message: string } }>
   deleteCompilationItem(itemId: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   resolveCompilationContradiction(contradictionId: string, action: 'resolve' | 'ignore', chosenItemId?: string): Promise<{ ok: boolean; data?: { contradiction: unknown }; error?: { code: string; message: string } }>

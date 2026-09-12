@@ -414,12 +414,6 @@ export interface Compilation {
   contradictions: CompilationContradiction[]
   /** 资料卡片「大模型修正」记录（默认已应用，卡片上以标记承载，可回退/再次应用） */
   repairs?: CompilationRepair[]
-  /**
-   * Phase 7.5（Migration 034）：是否已解锁「人工修改」模式。
-   * 用户 2026-09-10 裁定**不可逆**——确认汇编后进入一次即永久生效（跨任务切换与重启保持），
-   * 不允许退回"只能通过对话框改"的锁定态。false/缺省 = 未解锁。
-   */
-  manualEdit?: boolean
 }
 
 /** 回收站条目基类（按 created_at 倒序展示） */

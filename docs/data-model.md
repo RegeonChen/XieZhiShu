@@ -295,9 +295,10 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 | task_id | TEXT NOT NULL REFERENCES writing_tasks(id) ON DELETE CASCADE | 所属任务 |
 | title | TEXT NOT NULL | 汇编标题（通常与撰写标题一致） |
 | status | TEXT NOT NULL DEFAULT 'drafting' CHECK('drafting','reviewing','finalized') | drafting=生成中/待审阅；reviewing=审阅中；finalized=已确认 |
-| manual_edit | INTEGER NOT NULL DEFAULT 0 | **Migration 034（Phase 7.5）**：1 = 已解锁「人工修改」模式。用户 2026-09-10 裁定**不可逆**——进入一次即永久生效（跨任务切换与重启保持），**没有把 1 改回 0 的入口**；由 `setCompilationManualEdit` 维护 |
 | extract_scan | TEXT NULL | Migration 032：最近一次生成的整合提取诊断（JSON） |
 | created_at / updated_at | TEXT NOT NULL | |
+
+> **Migration 034/035（Phase 7.5）**：034 曾新增 `manual_edit`（人工修改模式解锁标记），用户当天改变需求（改为"导出本地修改"）后由 **035 `DROP COLUMN`** 删除——迁移账本保持只增不改，两条都保留在历史里。
 
 ### 2.22 compilation_items（资料卡片 → 连续文档段落，Migration 016 / 030，Phase 6.0 / 7.1）
 

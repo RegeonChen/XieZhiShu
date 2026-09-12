@@ -161,64 +161,39 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   const [compilationProgress, setCompilationProgress] = useState<{ percent: number; etaSeconds?: number } | null>(null)
   const [compilationInterrupt, setCompilationInterrupt] = useState<{ stage: string; message: string; percent: number; retryable?: boolean } | null>(null)
   const [compilationInstruction, setCompilationInstruction] = useState('')
-  /* ---- Phase 7.4：版本管控 ---- */
+  /* ---- Phase 7.4/7.5：版本（对话修改后自动进入复核态） ---- */
   const [versions, setVersions] = useState<CompilationVersionView[]>([])
-  const [compareFrom, setCompareFrom] = useState<number | null>(null)
   const [versionDiff, setVersionDiff] = useState<CompilationVersionDiffView | null>(null)
+  /** 本次对话修改产生的版本号（复核条上标注用） */
+  const [reviewVersionNo, setReviewVersionNo] = useState<number | null>(null)
   const [onlyChanged, setOnlyChanged] = useState(false)
-  /* ---- Phase 7.5：悬浮对话框（人机协同编辑）+ 人工修改解锁（D5） ---- */
+  /* ---- Phase 7.5：悬浮对话框（人机协同编辑） ---- */
   const [docMessages, setDocMessages] = useState<CompilationMessageView[]>([])
   const [docEditing, setDocEditing] = useState(false)
   const [docError, setDocError] = useState<string | null>(null)
   const [docChangedIds, setDocChangedIds] = useState<string[]>([])
-  /**
-   * 手动改完时间后要定位 + 短暂高亮的段落（nonce 每次递增，保证同一段连续改两次也能重新触发）。
-   * 主进程会在改时间时自动按时间重排，段落位置可能变化很大，所以要主动滚过去。
-   */
-  const [refocus, setRefocus] = useState<{ id: string; nonce: number } | null>(null)
 
-  /** 读取某汇编的版本列表；有 ≥2 版时才显示版本控件 */
+  /** 读取某汇编的版本列表（用于乐观锁的 baseVersionNo；不再有版本下拉/对比开关） */
   const loadVersions = useCallback(async (compilationId: string): Promise<void> => {
     const res = await window.api.listCompilationVersions(compilationId)
     if (res.ok && res.data) setVersions((res.data.versions ?? []) as CompilationVersionView[])
   }, [])
 
-  // 汇编变化后刷新版本列表（生成 / 矛盾取舍 / 手动编辑·删除·排序·回收站恢复·修正回退 / 汇编调整 / 版本恢复
-  // 都会在主进程记录一个新版本；本效果只负责把最新列表取回来）
+  // 汇编变化后刷新版本列表（对话修改 / 生成会产生新版本，主进程是权威来源）
   useEffect(() => {
     if (compilation?.id) void loadVersions(compilation.id)
     else setVersions([])
   }, [compilation, loadVersions])
 
-  /** 选择历史版本 → 取「该版本 → 最新版本」的差异（主进程算好，渲染层只负责画） */
-  const handleSelectVersion = useCallback(
-    async (versionNo: number | null): Promise<void> => {
-      if (!compilation) return
-      if (versionNo == null) {
-        setCompareFrom(null)
-        setVersionDiff(null)
-        return
-      }
-      const latest = versions.length > 0 ? versions[versions.length - 1].versionNo : versionNo
-      setCompareFrom(versionNo)
-      const res = await window.api.diffCompilationVersions(compilation.id, versionNo, latest)
-      if (res.ok && res.data) setVersionDiff(res.data as unknown as CompilationVersionDiffView)
-    },
-    [compilation, versions]
-  )
-
-  /** 恢复到某历史版本——**UI 暂不提供**（用户 2026-09-10：先不做这个功能）。
-   *  主进程的 `compilation:version:restore` 仍保留可用（不记录新版本），需要时再挂上来。 */
-  void 0
-
-  /* ---- Phase 7.5：与文档对话（大模型按 ops 修改汇编） ---- */
-  // 换汇编时清空对话/改动高亮/定位（人工修改模式不在这里重置：它是落库的、不可逆的，
-  // 由 `compilation.manualEdit` 派生，切换任务或重启后依然生效）
+  /* ---- Phase 7.5：与文档对话（大模型按 ops 修改汇编；软件内改动汇编的唯一入口） ---- */
+  // 换汇编时清空对话、复核态与错误
   useEffect(() => {
     setDocMessages([])
     setDocError(null)
     setDocChangedIds([])
-    setRefocus(null)
+    setVersionDiff(null)
+    setReviewVersionNo(null)
+    setOnlyChanged(false)
     setDocEditing(false)
   }, [compilation?.id])
 
@@ -230,6 +205,8 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   /**
    * 发送一条修改要求：主进程读取当前文档 → 调大模型 → 逐条校验 ops → 应用并记一个版本。
    * 失败（未配置模型 / 调用失败 / 格式无法解析 / 乐观锁冲突）**文档不变**，只回错误。
+   * 成功则把主进程算好的「本次修改前后差异」置上 → **自动进入复核态**（用户 2026-09-10 裁定：
+   * 不再需要用户手点「与上一版对比」按钮，直接给出「采纳 / 回退」）。
    * 返回给用户看的回复文本，供左侧对话框复用（右侧悬浮面板只读 docMessages）。
    */
   const handleDocSend = useCallback(
@@ -239,6 +216,8 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
       setDocEditing(true)
       setDocError(null)
       setDocChangedIds([])
+      setVersionDiff(null)
+      setOnlyChanged(false)
       // 用户消息先本地显示（主进程也会写入 compilation_messages，成功后整体回读覆盖，不会重复）
       setDocMessages((prev) => [...prev, { role: 'user', content: text, createdAt: new Date().toISOString() }])
       try {
@@ -247,6 +226,9 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
         if (res.ok && res.data) {
           setCompilation(res.data.compilation as CompilationView)
           setDocChangedIds(res.data.changedIds ?? [])
+          // **自动进入复核态**：主进程已算好"本次修改前后"的差异，用户只需「采纳 / 回退」
+          setVersionDiff(res.data.diff as unknown as CompilationVersionDiffView)
+          setReviewVersionNo(res.data.versionNo ?? null)
           await loadDocMessages(compilation.id)
           return { ok: true, reply: res.data.reply }
         }
@@ -752,43 +734,33 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     }
   }
 
+  /** 复核「采纳」：改动已经落库，只需退出复核态 */
+  const handleAcceptDocEdit = (): void => {
+    setVersionDiff(null)
+    setReviewVersionNo(null)
+    setOnlyChanged(false)
+  }
+
   /**
-   * 进入人工修改模式（Phase 7.5 / D5 补充裁定）：**不可逆**、落库持久，
-   * 因此界面状态一律从 `compilation.manualEdit` 派生，切换任务或重启后依然生效。
+   * 复核「回退」：弹出撤销栈中**最近登记的一次操作**（也就是这次对话修改），把文档还原到修改前。
+   * 刻意**不登记新版本**（用户 2026-09-10 明确要求：回退不是一次新改动，否则会凭空多出一版）。
    */
-  const handleStartManualEdit = async () => {
-    if (!compilation) return
-    const res = await window.api.enterCompilationManualEdit(compilation.id)
-    if (res.ok && res.data) {
-      setCompilation(res.data.compilation as CompilationView)
-    } else {
-      appendAssistant('开启人工修改模式失败：' + (res.error?.message ?? ''))
-    }
-  }
-
-  const handleUpdateItem = async (itemId: string, patch: { excerpt?: string; ts?: string | null; note?: string | null }) => {
-    const res = await window.api.updateCompilationItem(itemId, patch)
-    if (res.ok && res.data) {
-      if (res.data.compilation) {
-        // 改时间时主进程顺带按时间重排了整份汇编 → 必须整体替换（只换单个 item 顺序会与库不一致）
+  const handleRevertDocEdit = async (): Promise<void> => {
+    if (!compilation || busy) return
+    try {
+      const res = await window.api.undoCompilation(compilation.id)
+      if (res.ok && res.data) {
         setCompilation(res.data.compilation as CompilationView)
+        setUndoAvailable(res.data.undoAvailable)
+        setRedoAvailable(res.data.redoAvailable)
+        setVersionDiff(null)
+        setReviewVersionNo(null)
+        setOnlyChanged(false)
       } else {
-        const item = res.data.item as CompilationView['items'][number]
-        setCompilation((cur) => (cur ? { ...cur, items: cur.items.map((it) => (it.id === itemId ? item : it)) } : cur))
+        appendAssistant('回退失败：' + (res.error?.message ?? ''))
       }
-      // 改过时间 → 重排后滚动定位到该段新位置并高亮 2 秒
-      if (patch.ts !== undefined) setRefocus({ id: itemId, nonce: Date.now() })
-    } else {
-      appendAssistant('编辑资料卡片失败：' + (res.error?.message ?? ''))
-    }
-  }
-
-  const handleDeleteItem = async (itemId: string) => {
-    const res = await window.api.deleteCompilationItem(itemId)
-    if (res.ok) {
-      setCompilation((cur) => (cur ? { ...cur, items: cur.items.filter((it) => it.id !== itemId) } : cur))
-    } else {
-      appendAssistant('删除资料卡片失败：' + (res.error?.message ?? ''))
+    } catch {
+      appendAssistant('回退失败：请确认应用已完整重启')
     }
   }
 
@@ -1059,8 +1031,6 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           candidateChunks={compilationMeta?.candidateChunks}
           onConfirm={() => void handleExportCompilation()}
           onOpenSource={(sourceId) => void handleOpenSource(sourceId)}
-          onUpdateItem={handleUpdateItem}
-          onDeleteItem={(itemId) => void handleDeleteItem(itemId)}
           onResolve={handleResolveContradiction}
           onDecideRepair={(repairId, action) => void handleDecideRepair(repairId, action)}
           onReorderItems={(direction) => void handleReorderItems(direction)}
@@ -1068,12 +1038,12 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           onRedo={() => void handleRedo()}
           undoAvailable={undoAvailable}
           redoAvailable={redoAvailable}
-          versions={versions}
-          compareFrom={compareFrom}
           versionDiff={versionDiff}
+          reviewVersionNo={reviewVersionNo}
           onlyChanged={onlyChanged}
-          onSelectVersion={(no) => void handleSelectVersion(no)}
           onToggleOnlyChanged={setOnlyChanged}
+          onAcceptEdit={handleAcceptDocEdit}
+          onRevertEdit={() => void handleRevertDocEdit()}
           docMessages={docMessages}
           docEditing={docEditing}
           docError={docError}
@@ -1082,9 +1052,6 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           onDocOpen={() => {
             if (compilation) void loadDocMessages(compilation.id)
           }}
-          manualMode={compilation?.manualEdit === true}
-          onStartManualEdit={() => void handleStartManualEdit()}
-          refocus={refocus}
         />
       )
     }

@@ -220,7 +220,7 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `compilation:deleteItem` | `{ itemId }` → `{ ok: true }` | 删除资料卡片 |
 | `compilation:resolveContradiction` | `{ contradictionId, action: 'resolve'\|'ignore', chosenItemId? }` → `{ contradiction: CompilationContradiction }` | 汇编矛盾取舍：resolve 须传保留的卡片 id（属于该矛盾）；ignore 清空已选 |
 | `compilation:confirm` | `{ compilationId }` → `{ compilation: Compilation }` | 确认汇编（finalize），进入下一步 |
-| `compilation:manualEdit` | `{ compilationId }` → `{ compilation: Compilation }` | **Phase 7.5** 解锁「人工修改」模式（Migration 034 落库）。**不可逆**：没有反向通道，不记版本、不登记撤销栈（否则撤销能把它退回去）。界面状态由 `compilation.manualEdit` 派生 |
+| `compilation:manualEdit` | ~~`{ compilationId }` → `{ compilation }`~~ | **已于 2026-09-10 三轮验收中删除**：软件内不再提供逐段手改，改为「导出资料汇编 → 本地修改」。Migration 035 删除了 `compilations.manual_edit` 列 |
 | `compilation:reorder` | `{ compilationId, direction: 'asc'|'desc' }` → `{ compilation: Compilation }` | 资料汇编卡片按时间标签重新排序并重写 position（asc 正序 / desc 反序；无时间戳排最后），返回最新汇编 |
 | `compilation:undo` / `compilation:redo` | `{ compilationId }` → `{ compilation, undoAvailable, redoAvailable }` | 撤销/恢复资料汇编操作（快照机制：编辑/删除/调整/矛盾取舍/大模型修正回退或应用/回收站恢复/排序/确认等，会话内） |
 | `compilation:undoState` | `{ compilationId }` → `{ undoAvailable, redoAvailable }` | 查询当前汇编可撤销/可恢复步数 |
@@ -231,16 +231,22 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `compilation:versions` | `{ compilationId }` → `{ versions: CompilationVersionSummary[] }` | **Phase 7.4** 版本列表（`versionNo / origin / instruction? / reply? / changeSummary / createdAt`）。内容变更类操作各记一版；**恢复不记版本**；只保留最近 2 版（`pruneCompilationVersions(id, 2)`） |
 | `compilation:version:diff` | `{ compilationId, fromVersionNo, toVersionNo }` → `{ fromVersionNo, toVersionNo, segments, summary }` | **Phase 7.4** 两版差异（段落级 + modified 段的行内字级 diff）。`segments[].kind ∈ added/removed/modified/unchanged`；**被删除的段带 `beforeId`**（= 删除前紧邻的下一段），渲染层据此把「已删除」占位插回原位；差异过大（>400k 单元格）时降级为整块标记 |
 | `compilation:version:restore` | `{ compilationId, versionNo }` → `{ compilation, restoredFrom }` | 恢复到某历史版本（写回全部段落列；**不记录新版本**）。**渲染层暂未提供入口**（用户 2026-09-10：先不做该功能） |
-| `compilation:doc:edit` | `{ compilationId, instruction, baseVersionNo? }` → `{ compilation, reply, applied, rejected, versionNo?, changedIds, changeSummary }` | **Phase 7.5** 与文档对话：把 id 化的当前文档 + 用户要求交给大模型，模型返回 `{reply, ops}`，本地逐条校验后应用并记一个版本（origin `llm-edit`）。`rejected` 为被拒 op 与原因；`changedIds`/`changeSummary` 供前端高亮与滚动；乐观锁冲突返回 `VERSION_CONFLICT` |
+| `compilation:doc:edit` | `{ compilationId, instruction, baseVersionNo? }` → `{ compilation, reply, applied, rejected, versionNo?, changedIds, changeSummary, diff }` | **Phase 7.5** 与文档对话：把 id 化的当前文档 + 用户要求交给大模型，模型返回 `{reply, ops}`，本地逐条校验后应用并记一个版本（origin `llm-edit`）。`rejected` 为被拒 op 与原因；`changedIds` 供前端滚动到首个改动段；**`diff` 是"本次修改前后"的段落差异**（主进程直接比对改前/改后快照，不靠版本号推算），前端据此**自动进入复核态**。乐观锁冲突返回 `VERSION_CONFLICT` |
 | `compilation:messages` | `{ compilationId }` → `{ messages: {role, content, versionNo?, createdAt}[] }` | **Phase 7.5** 汇编级对话历史（`compilation_messages`，按时间升序） |
 
 > **大模型修正（2026-09-08 改版；2026-09-10 收紧）**：修正由生成管线在「提纯」之后、「卡片矛盾扫描」之前产出并**默认应用**（不再有 `repairScan`/`repairs:list`/`repairs:decide` 三个旧通道），卡片上以「经过大模型修正」标记承载；渲染层点标记弹窗查看修正前原文与理由并选择回退/再次应用。修正阶段异常 → `interrupted`（429 置 `retryable`），`compilation:continue` 续跑只重跑未完成批次；超出阶段预算 → 结果带 `repairScan:{ok:false,message}` 提示「修正未完成」。**时间戳规则（2026-09-10）**：需要补齐的情形为「时间为『无』**或时间缺少年份**（如 `5 月 19 日`、`7—9 日`）」，提示词要求时间标注**必须含年份**、依据上下文与来源年鉴年份推断、**不得编造**；本地以 `hasYear`（4 位年份）取舍——模型给的 ts 不含年份一律不采纳，卡片已有含年份的 ts 一律不覆盖，缺年份的旧值允许被覆盖（`tsFills` 仍属静默补齐，不落 `compilation_repairs`、无标记、不可回退）。残缺判定补充「句子起点/终点不完整、缺少主谓宾、指代不明」，并要求**优先补全而非删除**。
 > **对话编辑协议（Phase 7.5，2026-09-10；用户裁定 D3/D5）**：**软件 → 大模型** = 系统提示（`[p12] 2018 年 | 来源3 | 段落正文` 形式的 id 化文档 + 可引用来源编号清单 + 规则）+ 用户要求；**大模型 → 软件** = 单个 JSON `{"reply":"给用户看的回答","ops":[…]}`（容忍代码块围栏与前后夹带文字）。op 类型：`delete{ids}` / `replace{id,text,timeLabel?}` / `insertAfter{afterId,text,timeLabel,sourceOrdinal}` / `move{ids,afterId}` / `merge{ids}`（**仅同一来源**）/ `split{id,at,text}` / `setTime{id,timeLabel}` / `replaceAll{paragraphs}`（逃生舱）。
 > **本地校验**（逐条失败即该 op 拒绝并记入 `rejected`，其余照常应用）：① 段号（`pN`）必须存在；② `sourceOrdinal` 必须落在 `1..N`；③ 新增/改写正文中的**数字必须能在该来源原文中找到**（沿用 `numbersCoveredBy` 整 token 口径，防幻觉）；④ `merge` 仅限同一来源；⑤ **不得删空整篇**；⑥ 不支持的 op 直接拒绝。解析失败 → **文档不变**并明确报错（用户消息仍留痕）。
 > **数字校验的豁免（2026-09-10 用户裁定）**：用户**明确要求**把某个数字改成指定值时，**大模型和软件都照做即可**。协议上由 op 携带 `"allowNewNumbers":true`（`replace` / `insertAfter` / `replaceAll.paragraphs[]` 均支持），本地校验见到该字段**直接跳过数字校验**；解析层只认字面 `true`（其它值不算）。提示词要求"**只有用户点名具体数值时才能加这个字段**，其它任何情况一律不加，绝不可用它给推测/估算/补齐数据开口子"。
-> **撤销栈一致性**：落库前必须 `pushUndo(compilationId)`（`doc-edit-runner` 已补）——否则「撤销操作」会跳过这次对话改动、直接回退到上一个快照（2026-09-10 用户实测的 bug）。
+> **撤销栈语义（2026-09-10 三轮验收敲定）**：`pushUndo` **只在 `runDocEdit` 调用**——"撤销操作"就是回退上一次大模型改动。
+> 其余会改内容或顺序的路径（排序 / 矛盾取舍 / 回收站恢复 / 修正回退与再应用 / 目录级编辑 / 版本恢复 / 汇编调整）改为
+> **`clearUndoStacks(cid)` 作废撤销栈**（不压栈、不记版本）：快照是整个汇编的状态，若两次对话编辑之间发生了别的改动，
+> 直接弹栈会把那些改动一并回滚。这样「撤销」要么精确回退上一次对话编辑，要么不可用。
+> **复核态（自动对比）**：对话修改成功后前端据响应里的 `diff` **自动进入对比模式**并显示「采纳 / 回退」；
+> 采纳 = 保留改动退出；**回退 = 调 `compilation:undo` 弹出最近快照，不产生新版本**。复核态下工具栏的撤销/恢复/排序按钮禁用。
+> **时间排序**：`runDocEdit` 在"时间标签变化或有新段"时于**同一次操作内** `sortParagraphsByTime` 重排后再落库（纯 `move` 不触发）。
 > **应用**：应用 ops → **单次** `upsertCompilationParagraphs`（保留段 id；来源 id 由 ordinal 预解析后一次传入，避免"只传一段会删掉其余段"）→ 生成新版本（origin `llm-edit`，含 `instruction`/`reply`/`baseVersionNo`）→ 写两条 `compilation_messages`（用户 + 助手，助手带 `versionNo`/`applied`/`rejected`）。**并发保护**：请求带 `baseVersionNo`，与最新版本号不一致则拒绝（`VERSION_CONFLICT`）并提示重试。
-> **手动编辑解锁（D5）**：确认汇编（`finalized`）之前查看器**不提供任何直接编辑入口**（工具栏标注「仅可对话修改」）；确认后才出现「开始人工修改」按钮，点击弹**不可逆二次确认**，确认后进入人工修改模式（悬停显示编辑/删除，每次改动同样生成新版本 origin `user-edit`）。**2026-09-10 验收后补充裁定**：该模式**落库持久化且不可逆**（`compilations.manual_edit`，Migration 034）——进入一次即永久生效，切换任务与重启软件都保持，不提供回到锁定态的入口。改时间标签会**同一次操作内自动按时间重排**并返回完整 `compilation`（前端滚动定位到该段新位置 + 2 秒高亮）。
+> **手动编辑（已删除）**：Phase 7.5 曾提供「确认汇编 → 开始人工修改 → 逐段编辑/删除」，**已于 2026-09-10 三轮验收中整体删除**（前端的 D5 门槛、编辑弹窗、悬停操作，以及后端的 `manual_edit` 列、IPC、仓储函数）。用户新需求：软件内不再手改，改为「导出资料汇编到本地修改」，需要核对来源时可随时回到软件内查看。软件内改动汇编的唯一入口是**对话编辑**；对话修改后自动进入复核态（「采纳 / 回退」）。
 
 
 

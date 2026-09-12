@@ -942,6 +942,16 @@ ALTER TABLE compilations ADD COLUMN extract_scan TEXT;
     sql: `
 ALTER TABLE compilations ADD COLUMN manual_edit INTEGER NOT NULL DEFAULT 0;
 `
+  },
+  {
+    // 2026-09-10（Phase 7.5 二次验收）：用户当天改变了需求——**删除「人工修改模式」**，
+    // 改为「导出资料汇编到本地修改、需要核对来源时再回到软件内查看」。于是 Migration 034 引入的
+    // `manual_edit` 列失去意义，本次一并删列（同类先例：Migration 026 删除 E11 的 keywords 列）。
+    // 保留 034 条目而不改写历史：迁移是只增不改的账本，用户库里已记录 034。
+    version: 35,
+    sql: `
+ALTER TABLE compilations DROP COLUMN manual_edit;
+`
   }
 ]
 
