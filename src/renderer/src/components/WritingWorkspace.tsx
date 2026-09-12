@@ -199,6 +199,8 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   const [adoptingWeb, setAdoptingWeb] = useState(false)
   /** 正在重新检索网页材料（清空并重算本任务的材料集合） */
   const [refreshingWeb, setRefreshingWeb] = useState(false)
+  /** 本任务已锁定的网页材料篇数（持久化；重启软件后也能显示入口） */
+  const [pinnedWebCount, setPinnedWebCount] = useState(0)
 
   /** 读取某汇编的版本列表（用于乐观锁的 baseVersionNo；不再有版本下拉/对比开关） */
   const loadVersions = useCallback(async (compilationId: string): Promise<void> => {
@@ -369,6 +371,17 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   }, [taskId, reloadKey])
 
   useEffect(() => { load() }, [load])
+
+  /**
+   * 加载本任务已锁定的网页材料篇数（第三批 A1 补强）：让「重新检索网页材料」入口
+   * 不依赖"本次会话生成过一次"，重启软件后照样能换材料集合。
+   */
+  const loadPinnedWebCount = useCallback(async (): Promise<void> => {
+    const res = await window.api.getWebMaterials(taskId)
+    if (res.ok && res.data) setPinnedWebCount(res.data.pinned)
+  }, [taskId])
+
+  useEffect(() => { void loadPinnedWebCount() }, [loadPinnedWebCount, reloadKey])
 
   useEffect(() => {
     const off = window.api.onDraftGenerateProgress?.((p) => {
@@ -541,6 +554,7 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
         } else {
           setCompilationInterrupt(null)
           setLastWebScan(data.webScan ?? null)
+          void loadPinnedWebCount()
           const summary = buildGeneratedSummary('已生成资料汇编：', comp, data)
           appendAssistant(summary)
           void window.api.addTaskMessage(taskId, 'assistant', summary, 'notice')
@@ -825,6 +839,7 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
         void window.api.addTaskMessage(taskId, 'assistant', text, 'notice')
         // 纳入后新文章数清零（重新生成时会重新统计）
         setLastWebScan((prev) => (prev ? { ...prev, newCandidates: 0 } : prev))
+        void loadPinnedWebCount()
       } else {
         appendAssistant(zhCN.compilation.webMaterialsAdoptFailed.replace('{message}', res.error?.message ?? ''))
       }
@@ -865,6 +880,7 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           reused: d.pinned,
           newCandidates: 0
         })
+        setPinnedWebCount(d.pinned)
       } else {
         appendAssistant(zhCN.compilation.webMaterialsRefreshFailed.replace('{message}', res.error?.message ?? ''))
       }
@@ -1120,6 +1136,7 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           onAdoptWebMaterials={() => void handleAdoptWebMaterials()}
           refreshingWeb={refreshingWeb}
           onRefreshWebMaterials={() => void handleRefreshWebMaterials()}
+          pinnedWebCount={pinnedWebCount}
           sourceRefs={sourceRefs}
         />
       )

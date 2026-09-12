@@ -129,6 +129,8 @@ export const IPC = {
   COMPILATION_ADOPT_WEB_MATERIALS: 'compilation:adoptWebMaterials',
   /** 重新检索网页材料：清空并重算本任务的网页材料集合（第三批 A1 补强） */
   COMPILATION_REFRESH_WEB_MATERIALS: 'compilation:refreshWebMaterials',
+  /** 查询本任务已锁定的网页材料篇数（只读；供面板在非生成状态也显示入口） */
+  COMPILATION_WEB_MATERIALS: 'compilation:webMaterials',
 
   /* 工作区（Phase 2.2） */
   WORKSPACE_STATUS: 'workspace:status',
@@ -335,6 +337,16 @@ export type CompilationRefreshWebMaterialsRes = CompilationWebScan & {
   pinned: number
   /** 重算前被清空的锁定条数 */
   cleared: number
+}
+/**
+ * 已锁定的网页材料篇数（第三批 A1 补强，只读）：面板据此**不依赖生成**也能显示
+ * 「本任务已锁定 N 篇」与「重新检索网页材料」入口（重启软件后同样可见）。
+ */
+export interface CompilationWebMaterialsReq {
+  taskId: string
+}
+export type CompilationWebMaterialsRes = {
+  pinned: number
 }
 export interface SourceGetSummaryReq {
   id: string
@@ -939,6 +951,7 @@ export interface IpcMapping {
   // 纳入新网页材料
   [IPC.COMPILATION_ADOPT_WEB_MATERIALS]: { _req: CompilationAdoptWebMaterialsReq; _res: ApiResult<CompilationAdoptWebMaterialsRes> }
   [IPC.COMPILATION_REFRESH_WEB_MATERIALS]: { _req: CompilationRefreshWebMaterialsReq; _res: ApiResult<CompilationRefreshWebMaterialsRes> }
+  [IPC.COMPILATION_WEB_MATERIALS]: { _req: CompilationWebMaterialsReq; _res: ApiResult<CompilationWebMaterialsRes> }
   // 工作区
   [IPC.WORKSPACE_STATUS]: { _req: void; _res: ApiResult<WorkspaceStatusRes> }
   [IPC.WORKSPACE_MIGRATE]: { _req: void; _res: ApiResult<WorkspaceMigrateRes> }

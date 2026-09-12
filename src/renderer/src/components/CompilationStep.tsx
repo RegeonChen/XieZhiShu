@@ -173,6 +173,8 @@ interface Props {
   refreshingWeb?: boolean
   /** 重新检索网页材料 */
   onRefreshWebMaterials?: () => void
+  /** 本任务已锁定的网页材料篇数（持久化查询结果；重启后仍可显示入口） */
+  pinnedWebCount?: number
   /** 来源引用清单（消息内 #N 渲染为可点击来源） */
   sourceRefs?: SourceRefItem[]
 }
@@ -241,6 +243,7 @@ function CompilationStep({
   onAdoptWebMaterials,
   refreshingWeb,
   onRefreshWebMaterials,
+  pinnedWebCount,
   generatingText,
   generateProgress,
   generateInterrupt,
@@ -249,9 +252,9 @@ function CompilationStep({
   sourceRefs
 }: Props) {
   const t = zhCN.compilation
-  /** 第三批 A1：网页材料提示数字（`reused`/`newCandidates` 是可缺省字段，统一取 0 后再参与判断） */
-  const webPinned = webScan?.reused ?? 0
   const webNew = webScan?.newCandidates ?? 0
+  /** 生成中/抓取中禁用「纳入新材料」「重新检索网页材料」（边生成边抓取会互相干扰） */
+  const webActionDisabled = generating === true || adoptingWeb === true || refreshingWeb === true
   /** 差异段按段 id 建索引（渲染时给段落上色 / 段内高亮） */
   const diffById = new Map((versionDiff?.segments ?? []).map((s) => [s.id, s]))
   /** 被删除的段落按 beforeId 归组：渲染时插回"它被删除前所在的位置"（用户 2026-09-10 要求） */
@@ -565,50 +568,50 @@ function CompilationStep({
   )
 
   /**
+   * 第三批 A1：网页材料提示条。**两种模式都渲染**（此前只长在生成模式里，
+   * 而重新生成会先按旧集合复用，"换一批材料"的入口事实上够不到）。
+   * 数据来源：本次生成的统计（`webScan`）优先，其次取主进程查到的持久化锁定篇数（重启后仍可见）。
+   */
+  const pinnedCount = Math.max(webScan?.reused ?? 0, pinnedWebCount ?? 0)
+  const webInfo =
+    pinnedCount > 0 || webNew > 0 ? (
+      <div className="compilation-webinfo">
+        {webScan && (webScan.reused ?? 0) > 0 ? (
+          <span>{t.webMaterialsPinned.replace('{count}', String(webScan.reused))}</span>
+        ) : webScan ? (
+          <span>{t.webMaterialsFetched.replace('{count}', String(webScan.fetched))}</span>
+        ) : (
+          <span>{t.webMaterialsPinned.replace('{count}', String(pinnedCount))}</span>
+        )}
+        {webNew > 0 ? (
+          <>
+            <span className="compilation-webinfo__new">{t.webMaterialsNew.replace('{count}', String(webNew))}</span>
+            <button type="button" className="source-list__btn" disabled={webActionDisabled} onClick={() => onAdoptWebMaterials?.()}>
+              {adoptingWeb ? t.webMaterialsAdopting : t.webMaterialsAdopt}
+            </button>
+          </>
+        ) : null}
+        {pinnedCount > 0 ? (
+          <button
+            type="button"
+            className="source-list__btn compilation-webinfo__refresh"
+            title={t.webMaterialsRefreshHint}
+            disabled={webActionDisabled}
+            onClick={() => onRefreshWebMaterials?.()}
+          >
+            {refreshingWeb ? t.webMaterialsRefreshing : t.webMaterialsRefresh}
+          </button>
+        ) : null}
+      </div>
+    ) : null
+
+  /**
    * 生成模式主体：复用左栏原来的 `ChatPanel`（预设提示词 / 进度条 / 中断「尝试继续」/ 消息气泡全部沿用，
    * 视觉与交互不退化），只是搬进了悬浮面板。
    */
   const generateBody = (
     <div className="compilation-docchat__chatpanel">
-      {/*
-        第三批 A1：网页材料集合在首次生成时落定，重新生成默认复用同一批。
-        站点上出现的新命中文章只报数量，由用户点「纳入新材料」才抓取——避免"重新生成"悄悄换材料。
-      */}
-      {webScan && (webPinned > 0 || webNew > 0) ? (
-        <div className="compilation-webinfo">
-          {webPinned > 0 ? (
-            <span>{t.webMaterialsPinned.replace('{count}', String(webPinned))}</span>
-          ) : (
-            <span>{t.webMaterialsFetched.replace('{count}', String(webScan.fetched))}</span>
-          )}
-          {webNew > 0 ? (
-            <>
-              <span className="compilation-webinfo__new">
-                {t.webMaterialsNew.replace('{count}', String(webNew))}
-              </span>
-              <button
-                type="button"
-                className="source-list__btn"
-                disabled={adoptingWeb === true || refreshingWeb === true}
-                onClick={() => onAdoptWebMaterials?.()}
-              >
-                {adoptingWeb ? t.webMaterialsAdopting : t.webMaterialsAdopt}
-              </button>
-            </>
-          ) : null}
-          {webPinned > 0 ? (
-            <button
-              type="button"
-              className="source-list__btn compilation-webinfo__refresh"
-              title={t.webMaterialsRefreshHint}
-              disabled={refreshingWeb === true || adoptingWeb === true}
-              onClick={() => onRefreshWebMaterials?.()}
-            >
-              {refreshingWeb ? t.webMaterialsRefreshing : t.webMaterialsRefresh}
-            </button>
-          ) : null}
-        </div>
-      ) : null}
+      {webInfo}
       <ChatPanel
         messages={taskMessages ?? []}
         draftExisted={false}
@@ -632,6 +635,7 @@ function CompilationStep({
 
   const chatBody = (
     <>
+      {webInfo}
       <div className="compilation-docchat__list" ref={chatListRef}>
         {messages.length === 0 ? (
           <p className="compilation-docchat__empty">{t.docChatEmpty}</p>
