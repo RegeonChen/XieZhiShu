@@ -66,10 +66,6 @@ import {
   type CompilationRecycleBinListRes,
   type CompilationRecycleBinRestoreReq,
   type CompilationRecycleBinRestoreRes,
-  type CompilationRepairRevertReq,
-  type CompilationRepairRevertRes,
-  type CompilationRepairApplyReq,
-  type CompilationRepairApplyRes,
   type WorkspaceSourceRemovalListRes,
   type WorkspaceSourceRemovalDecideReq,
   type WorkspaceSourceRemovalDecideRes,
@@ -112,7 +108,6 @@ import {
 } from './db/compilations'
 import { diffParagraphVersions, summarizeParagraphDiff } from './writing/compilation-diff'
 import { runDocEdit, listDocMessages } from './writing/doc-edit-runner'
-import { setRepairApplied } from './db/compilation-repairs'
 import {
   listStyleGuides,
   saveStyleGuide,
@@ -132,7 +127,6 @@ import {
   clearUndoStacks,
   compilationIdOfItem,
   compilationIdOfContradiction,
-  compilationIdOfRepair,
   compilationIdOfBin
 } from './writing/compilation-undo'
 import { listTaskMessages, addTaskMessage } from './db/task-messages'
@@ -957,32 +951,6 @@ handleLogged(IPC.COMPILATION_RECYCLE_BIN_RESTORE, (_event, params: CompilationRe
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
 })
-
-// 资料卡片「大模型修正」（2026-09-08：默认已应用，卡片上以标记承载，仅剩回退 / 再次应用两个动作）
-handleLogged(IPC.COMPILATION_REPAIR_REVERT, (_event, params: CompilationRepairRevertReq): ApiResult<CompilationRepairRevertRes> => {
-  try {
-    const undoCid = compilationIdOfRepair(params.repairId)
-    const res = setRepairApplied(params.repairId, false)
-    if (!res) return { ok: false, error: { code: 'INVALID_PARAM', message: '大模型修正记录不存在' } }
-    clearUndoStacks(undoCid)
-    return { ok: true, data: { item: res.item, repair: res.repair } }
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-})
-
-handleLogged(IPC.COMPILATION_REPAIR_APPLY, (_event, params: CompilationRepairApplyReq): ApiResult<CompilationRepairApplyRes> => {
-  try {
-    const undoCid = compilationIdOfRepair(params.repairId)
-    const res = setRepairApplied(params.repairId, true)
-    if (!res) return { ok: false, error: { code: 'INVALID_PARAM', message: '大模型修正记录不存在' } }
-    clearUndoStacks(undoCid)
-    return { ok: true, data: { item: res.item, repair: res.repair } }
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-})
-
 
 // ===== Phase 6.4.1：规范文档库 ======
 handleLogged(IPC.STYLE_GUIDE_LIST, (): ApiResult<StyleGuideListRes> => {

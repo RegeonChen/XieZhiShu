@@ -39,19 +39,6 @@ export interface CompilationItemView {
   sourceOrdinal?: number
 }
 
-export interface CompilationRepairView {
-  id: string
-  compilationId: string
-  itemId: string
-  originalText: string
-  revisedText: string
-  reason: string
-  /** applied：修正已应用到卡片（绿色标记）；reverted：用户已回退（灰色标记，可再次应用） */
-  status: 'applied' | 'reverted'
-  createdAt: string
-  updatedAt: string
-}
-
 export interface CompilationVariantView {
   id: string
   contradictionId: string
@@ -82,7 +69,6 @@ export interface CompilationView {
   updatedAt: string
   items: CompilationItemView[]
   contradictions: CompilationContradictionView[]
-  repairs?: CompilationRepairView[]
 }
 
 interface Props {
@@ -92,8 +78,6 @@ interface Props {
   onConfirm: () => void
   onOpenSource: (sourceId: string) => void
   onResolve: (contradictionId: string, action: 'resolve' | 'ignore', chosenItemId?: string) => void
-  /** 回退（applied=true 时）或再次应用（applied=false 时）一条大模型修正 */
-  onDecideRepair: (repairId: string, applied: boolean) => void
   onReorderItems: (direction: 'asc' | 'desc') => void
   onUndo: () => void
   onRedo: () => void
@@ -184,7 +168,6 @@ function CompilationStep({
   onConfirm,
   onOpenSource,
   onResolve,
-  onDecideRepair,
   onReorderItems,
   onUndo,
   onRedo,
@@ -255,8 +238,6 @@ function CompilationStep({
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
   /** 当前打开「来源小卡」的来源编号（点击段尾圆标） */
   const [sourceCardFor, setSourceCardFor] = useState<number | null>(null)
-  /** 当前展开「修正详情」弹窗的卡片修正记录（一次只看一张） */
-  const [fixDetail, setFixDetail] = useState<CompilationRepairView | null>(null)
   /** 矛盾窗口是否展开（默认展开，可收起） */
   const [contradictionsOpen, setContradictionsOpen] = useState(true)
   /** 刚被「定位到该段」命中的卡片（短暂高亮，便于用户在下方列表中找到） */
@@ -366,11 +347,6 @@ function CompilationStep({
     if (locateTimerRef.current !== null) window.clearTimeout(locateTimerRef.current)
     locateTimerRef.current = window.setTimeout(() => setLocatedId(null), 1800)
   }
-
-  /** 大模型修正记录（应用于该卡片；回退后仍有记录，标记转为灰色） */
-  const appliedFixes = (compilation?.repairs ?? []).filter((r) => r.status === 'applied')
-  const repairForItem = (itemId: string): CompilationRepairView | undefined =>
-    (compilation?.repairs ?? []).find((r) => r.itemId === itemId)
 
   /**
    * 悬浮面板有两种模式（用户裁定 D7=A）：
@@ -577,7 +553,6 @@ function CompilationStep({
             {t.pendingTimeStat.replace('{count}', String(pendingTimeCount))}
           </span>
         ) : null}
-        {appliedFixes.length > 0 ? <span className="compilation-stat">{t.repairAppliedCount.replace('{count}', String(appliedFixes.length))}</span> : null}
         <span className={cls('compilation-badge', pending.length ? 'danger' : 'ok')}>
           {pending.length ? t.pendingContradictions.replace('{count}', String(pending.length)) : t.noContradictions}
         </span>
@@ -740,7 +715,6 @@ function CompilationStep({
           <div className="compilation-empty">{keptItems.length === 0 ? t.emptyDoc : t.versionNoChanges}</div>
         ) : (
           visibleItems.map((it, index) => {
-            const fix = repairForItem(it.id)
             const year = it.year ?? null
             // 年份小标题按**可见列表**计算（用户 2026-09-10：仅看改动时也要统一显示年份标题）
             const prevYear = index > 0 ? (visibleItems[index - 1].year ?? null) : null
@@ -758,7 +732,6 @@ function CompilationStep({
                   className={cls(
                     'compilation-para',
                     conflictForItem(it.id) ? 'has-conflict' : '',
-                    fix ? 'is-repair' : '',
                     locatedId === it.id ? 'is-located' : '',
                     /* Phase 7.5：复核态下按差异上色（红=删除 / 黄=修改 / 绿=新增） */
                     diff ? 'diff-' + diff.kind : ''
@@ -805,17 +778,6 @@ function CompilationStep({
                       </span>
                     )
                   )}
-                  {fix ? (
-                    <button
-                      type="button"
-                      className={cls('compilation-chip', 'compilation-chip--fix', fix.status === 'reverted' ? 'is-reverted' : '')}
-                      title={t.repairBadgeHint}
-                      aria-label={t.repairBadgeHint}
-                      onClick={() => setFixDetail(fix)}
-                    >
-                      {fix.status === 'applied' ? t.repairBadge : t.repairBadgeReverted}
-                    </button>
-                  ) : null}
                 </div>
               </Fragment>
             )
@@ -866,45 +828,6 @@ function CompilationStep({
                 }}
               >
                 {t.openSource}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {fixDetail ? (
-        <div className="skills-manager__modal-backdrop" onMouseDown={() => setFixDetail(null)}>
-          <div className="skills-manager__modal compilation-fix-modal" onMouseDown={(e) => e.stopPropagation()}>
-            <h4 className="skills-manager__modal-title">{t.repairDialogTitle}</h4>
-            <div className={cls('compilation-fix-status', fixDetail.status === 'reverted' ? 'is-reverted' : '')}>
-              {fixDetail.status === 'applied' ? t.repairBadge : t.repairBadgeReverted}
-            </div>
-            <div className="compilation-fix-block">
-              <div className="compilation-fix-label">{t.repairOriginalLabel}</div>
-              <div className="compilation-fix-original">{fixDetail.originalText}</div>
-            </div>
-            {fixDetail.revisedText && fixDetail.revisedText !== fixDetail.originalText ? (
-              <div className="compilation-fix-block">
-                <div className="compilation-fix-label">{t.repairRevisedLabel}</div>
-                <div className="compilation-fix-revised">{fixDetail.revisedText}</div>
-              </div>
-            ) : null}
-            {fixDetail.reason ? (
-              <div className="compilation-fix-block">
-                <div className="compilation-fix-label">{t.repairReason}</div>
-                <div className="compilation-fix-reason">{fixDetail.reason}</div>
-              </div>
-            ) : null}
-            <p className="compilation-fix-note">{t.repairRevertHint}</p>
-            <div className="skills-manager__modal-actions">
-              <button type="button" className="source-list__btn" disabled={busy} onClick={() => setFixDetail(null)}>{t.cancel}</button>
-              <button
-                type="button"
-                className={cls('source-list__btn', fixDetail.status === 'applied' ? '' : 'source-list__btn--primary')}
-                disabled={busy}
-                onClick={() => { onDecideRepair(fixDetail.id, fixDetail.status !== 'applied'); setFixDetail(null) }}
-              >
-                {fixDetail.status === 'applied' ? t.repairRevert : t.repairReapply}
               </button>
             </div>
           </div>

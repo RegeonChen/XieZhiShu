@@ -24,7 +24,6 @@ import type {
 } from '../../shared/types'
 import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
-import { insertRepair, listRepairsByCompilation } from './compilation-repairs'
 import { buildParagraphSnapshot, renderDocumentMarkdown, summarizeParagraphChange, withFallbackYear } from '../writing/compilation-document'
 
 interface CompilationRow {
@@ -197,8 +196,7 @@ export function getCompilationById(id: string): Compilation | null {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     items: getItemsByCompilation(row.id),
-    contradictions: getContradictionsByCompilation(row.id),
-    repairs: listRepairsByCompilation(row.id)
+    contradictions: getContradictionsByCompilation(row.id)
   }
 }
 
@@ -217,8 +215,7 @@ export function listCompilationsByTask(taskId: string): Compilation[] {
       createdAt: r.created_at,
       updatedAt: r.updated_at,
       items: [],
-      contradictions: [],
-      repairs: []
+      contradictions: []
     }
   })
 }
@@ -252,15 +249,9 @@ export interface CompilationItemInput {
   ts?: string
   note?: string
   extraTags?: string[]
-  /**
-   * 该卡片的「大模型修正」记录（生成管线在内存阶段算出，随卡片一起流转）。
-   * 与卡片**同事务**写入 compilation_repairs（status='applied'），因此在 mapOutputItemsToInputs 过滤、
-   * sortItemsByTs 重排之后仍与卡片严格对应，不会错位（这是徽标归属正确的关键）。
-   */
-  repair?: { originalText: string; revisedText: string; reason: string }
 }
 
-/** 批量写入资料卡片（事务，按传入顺序编号 position）；卡片携带的大模型修正记录一并写入。 */
+/** 批量写入资料卡片（事务，按传入顺序编号 position）。 */
 export function insertCompilationItems(compilationId: string, inputs: CompilationItemInput[]): CompilationItem[] {
   const db = getDb()
   if (inputs.length === 0) return []
@@ -282,15 +273,6 @@ export function insertCompilationItems(compilationId: string, inputs: Compilatio
         JSON.stringify(it.extraTags ?? []),
         now
       )
-      if (it.repair && it.repair.revisedText !== it.repair.originalText) {
-        insertRepair({
-          compilationId,
-          itemId,
-          originalText: it.repair.originalText,
-          revisedText: it.repair.revisedText,
-          reason: it.repair.reason
-        })
-      }
     })
   })
   tx()
@@ -785,7 +767,6 @@ export function importCompilationIntoTask(taskId: string, source: Compilation): 
   const insItem = db.prepare("INSERT INTO compilation_items (id, compilation_id, position, source_id, excerpt, ts, note, extra_tags, kept, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
   const insC = db.prepare("INSERT INTO compilation_contradictions (id, compilation_id, topic, kind, status, chosen_item_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
   const insV = db.prepare("INSERT INTO compilation_contradiction_variants (id, contradiction_id, item_id, variant_text, source_id, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-  const insR = db.prepare("INSERT INTO compilation_repairs (id, compilation_id, item_id, original_text, revised_text, reason, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
   const tx = db.transaction(() => {
     source.items.forEach((it, i) => {
       const nid = crypto.randomUUID()
@@ -799,9 +780,6 @@ export function importCompilationIntoTask(taskId: string, source: Compilation): 
       for (const v of c.variants) {
         insV.run(crypto.randomUUID(), ncid, itemIdMap.get(v.itemId) ?? '', v.variantText, v.sourceId, v.createdAt || now)
       }
-    }
-    for (const r of (source.repairs ?? [])) {
-      insR.run(crypto.randomUUID(), newCompId, itemIdMap.get(r.itemId) ?? '', r.originalText, r.revisedText, r.reason, r.status, r.createdAt || now, r.updatedAt || now)
     }
   })
   tx()
@@ -1488,7 +1466,7 @@ if (import.meta.vitest) {
       expect(count.c).toBe(0)
     })
 
-    it('deleteCompilationItemsForSourceIds removes source cards + contradictions + repairs, nothing recyclable (2026-08-28)', () => {
+    it('deleteCompilationItemsForSourceIds removes source cards + contradictions, nothing recyclable (2026-08-28)', () => {
       const { taskId, sourceIds } = seed()
       const c = createCompilation({ taskId, title: '汇编' })
       const items = insertCompilationItems(c.id, [
@@ -1508,25 +1486,15 @@ if (import.meta.vitest) {
       ])[0]
       // 让该矛盾先进入回收站（模拟已被采纳/忽略过），删除后应一并清除
       updateCompilationContradictionStatus(g.id, 'resolved', items[0].id)
-      // 给 sourceIds[0] 的卡片加一条大模型修正记录（已应用）
-      insertRepair({
-        compilationId: c.id,
-        itemId: items[0].id,
-        originalText: '公办园 76 所',
-        revisedText: '2021 年公办园 76 所。',
-        reason: '表意不明'
-      })
 
       const res = deleteCompilationItemsForSourceIds([sourceIds[0]])
       expect(res.deletedItems).toBe(2) // 来源0 的两张卡
       expect(res.deletedContradictions).toBe(1)
-      expect(res.deletedRepairs).toBe(1)
 
       const after = getCompilationById(c.id)!
       expect(after.items.map((i) => i.excerpt)).toEqual(['公办园 82 所']) // 来源1 的卡保留
       expect(after.contradictions).toHaveLength(0) // 涉及被删卡片的矛盾整组删除
-      expect(after.repairs).toHaveLength(0)
-      // 不写入回收站：矛盾回收站为空；修正记录随卡片级联删除（不再有独立回收站表）
+      // 不写入回收站：矛盾回收站为空
       expect(listRecycleBinByCompilation(c.id)).toHaveLength(0)
     })
 
@@ -1537,7 +1505,6 @@ if (import.meta.vitest) {
         { sourceId: sourceIds[0], excerpt: '公办园 76 所', ts: '2021 年' },
         { sourceId: sourceIds[1], excerpt: '公办园 82 所', ts: '2021 年' }
       ])
-      insertRepair({ compilationId: c.id, itemId: items[0].id, originalText: '公办园 76 所', revisedText: '修正后', reason: '表意不明' })
       const g = insertCompilationContradictions(c.id, [
         {
           topic: '2021 年公办园数量',
@@ -1555,29 +1522,19 @@ if (import.meta.vitest) {
       expect(bin.map((b) => b.kind).sort()).toEqual(['card', 'contradiction'])
     })
 
-    it('writes the card repair in the same transaction, mapped to the right card (2026-09-08)', () => {
+    it('reorders paragraphs by time while keeping their ids (Phase 7.1)', () => {
       const { taskId, sourceIds } = seed()
       const c = createCompilation({ taskId, title: '汇编' })
       const items = insertCompilationItems(c.id, [
-        {
-          sourceId: sourceIds[0],
-          excerpt: '2021 年公办园 76 所',
-          ts: '2021 年',
-          repair: { originalText: '公办园 76 所', revisedText: '2021 年公办园 76 所', reason: '缺少年份' }
-        },
+        { sourceId: sourceIds[0], excerpt: '2021 年公办园 76 所', ts: '2021 年' },
         { sourceId: sourceIds[1], excerpt: '2005 年全县幼儿园 89 所。', ts: '2005 年' }
       ])
       const loaded = getCompilationById(c.id)!
-      const repairs = loaded.repairs ?? []
-      expect(repairs).toHaveLength(1)
-      expect(repairs[0].status).toBe('applied')
-      expect(repairs[0].itemId).toBe(items[0].id) // 修正记录与卡片严格对应
-      expect(repairs[0].originalText).toBe('公办园 76 所')
       expect(loaded.items[0].excerpt).toBe('2021 年公办园 76 所')
-      // 卡片按时间重排后，修正记录仍指向原卡片（item id 不变）
+      // 卡片按时间重排后，段 id 不变
       reorderCompilationItemsByTs(c.id, 'desc')
       const after = getCompilationById(c.id)!
-      expect(after.repairs![0].itemId).toBe(items[0].id)
+      expect(after.items[0].id).toBe(items[0].id)
       expect(after.items.map((i) => i.excerpt)).toEqual(['2021 年公办园 76 所', '2005 年全县幼儿园 89 所。'])
     })
   })

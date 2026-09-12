@@ -380,29 +380,6 @@ export interface CompilationContradiction {
   variants: CompilationContradictionVariant[]
 }
 
-/**
- * 资料卡片「大模型修正」（原“二次加工/语义补全”）状态（2026-09-08 改版）：
- * - applied：修正已默认应用到卡片（卡片显示「经过大模型修正」标记，可点开查看原文/理由）
- * - reverted：用户点了「回退到修正前」，卡片已还原为修正前文本（保留记录，可再次应用）
- */
-export type CompilationRepairStatus = 'applied' | 'reverted'
-
-/**
- * 资料卡片二次加工（大模型修正）：卡片表意不明/疑似残缺时，读取来源上下文后由大模型提出修正文本，
- * 默认直接应用到卡片，并在卡片上留下标记供用户查看修正前原文、理由与回退。
- */
-export interface CompilationRepair {
-  id: string
-  compilationId: string
-  itemId: string
-  originalText: string
-  revisedText: string
-  reason: string
-  status: CompilationRepairStatus
-  createdAt: string
-  updatedAt: string
-}
-
 export interface Compilation {
   id: string
   taskId: string
@@ -412,8 +389,6 @@ export interface Compilation {
   updatedAt: string
   items: CompilationItem[]
   contradictions: CompilationContradiction[]
-  /** 资料卡片「大模型修正」记录（默认已应用，卡片上以标记承载，可回退/再次应用） */
-  repairs?: CompilationRepair[]
 }
 
 /** 回收站条目基类（按 created_at 倒序展示） */
