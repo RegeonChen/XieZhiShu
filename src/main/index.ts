@@ -108,6 +108,7 @@ import {
   listFinalizedCompilationsForImport,
   importCompilationIntoTask,
   listCompilationVersions,
+  listCompilationMessages,
   getCompilationVersion,
   restoreCompilationFromVersion
 } from './db/compilations'
@@ -772,7 +773,20 @@ handleLogged(IPC.COMPILATION_EXPORT_ARCHIVE, async (_event, params: CompilationE
       filters: [{ name: '志书工具资料汇编', extensions: ['xzsc'] }]
     })
     if (res.canceled || !res.filePath) return { ok: false, error: { code: 'EXPORT_CANCELED', message: '已取消导出' } }
-    writeFileSync(res.filePath, serializeCompilationArchive(compilation), 'utf8')
+    // v2 归档：段落数组 + 来源编号表 + 版本摘要（可裁剪）+ 对话历史，便于外部工具与将来导入
+    const versions = listCompilationVersions(params.compilationId).map((v) => ({
+      versionNo: v.versionNo,
+      origin: v.origin,
+      createdAt: v.createdAt,
+      changeSummary: v.changeSummary
+    }))
+    const messages = listCompilationMessages(params.compilationId).map((m) => ({
+      role: m.role,
+      content: m.content,
+      versionNo: m.versionNo,
+      createdAt: m.createdAt
+    }))
+    writeFileSync(res.filePath, serializeCompilationArchive(compilation, { versions, messages }), 'utf8')
     return { ok: true, data: { path: res.filePath } }
   } catch (err) {
     return { ok: false, error: { code: 'EXPORT_FAILED', message: String(err) } }
