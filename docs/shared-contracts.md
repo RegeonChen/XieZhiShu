@@ -227,8 +227,17 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `compilation:recycleBin:restore` | `{ binId }` → `{ contradiction?, item?, card? }` | 恢复条目：矛盾回到 pending；资料卡片还原（含其矛盾变异与大模型修正记录，映射为 card 返回） |
 | `compilation:repairs:revert` | `{ repairId }` → `{ item, repair }` | **回退**一条大模型修正（卡片还原为修正前文本，状态 applied→reverted；登记撤销栈） |
 | `compilation:repairs:apply` | `{ repairId }` → `{ item, repair }` | **再次应用**一条已回退的修正（卡片回到修正后文本，状态 reverted→applied；登记撤销栈） |
+| `compilation:versions` | `{ compilationId }` → `{ versions: CompilationVersionSummary[] }` | **Phase 7.4** 版本列表（`versionNo / origin / instruction? / reply? / changeSummary / createdAt`）。内容变更类操作各记一版；**恢复不记版本**；只保留最近 2 版（`pruneCompilationVersions(id, 2)`） |
+| `compilation:version:diff` | `{ compilationId, fromVersionNo, toVersionNo }` → `{ fromVersionNo, toVersionNo, segments, summary }` | **Phase 7.4** 两版差异（段落级 + modified 段的行内字级 diff）。`segments[].kind ∈ added/removed/modified/unchanged`；**被删除的段带 `beforeId`**（= 删除前紧邻的下一段），渲染层据此把「已删除」占位插回原位；差异过大（>400k 单元格）时降级为整块标记 |
+| `compilation:version:restore` | `{ compilationId, versionNo }` → `{ compilation, restoredFrom }` | 恢复到某历史版本（写回全部段落列；**不记录新版本**）。**渲染层暂未提供入口**（用户 2026-09-10：先不做该功能） |
+| `compilation:doc:edit` | `{ compilationId, instruction, baseVersionNo? }` → `{ compilation, reply, applied, rejected, versionNo?, changedIds, changeSummary }` | **Phase 7.5** 与文档对话：把 id 化的当前文档 + 用户要求交给大模型，模型返回 `{reply, ops}`，本地逐条校验后应用并记一个版本（origin `llm-edit`）。`rejected` 为被拒 op 与原因；`changedIds`/`changeSummary` 供前端高亮与滚动；乐观锁冲突返回 `VERSION_CONFLICT` |
+| `compilation:messages` | `{ compilationId }` → `{ messages: {role, content, versionNo?, createdAt}[] }` | **Phase 7.5** 汇编级对话历史（`compilation_messages`，按时间升序） |
 
 > **大模型修正（2026-09-08 改版；2026-09-10 收紧）**：修正由生成管线在「提纯」之后、「卡片矛盾扫描」之前产出并**默认应用**（不再有 `repairScan`/`repairs:list`/`repairs:decide` 三个旧通道），卡片上以「经过大模型修正」标记承载；渲染层点标记弹窗查看修正前原文与理由并选择回退/再次应用。修正阶段异常 → `interrupted`（429 置 `retryable`），`compilation:continue` 续跑只重跑未完成批次；超出阶段预算 → 结果带 `repairScan:{ok:false,message}` 提示「修正未完成」。**时间戳规则（2026-09-10）**：需要补齐的情形为「时间为『无』**或时间缺少年份**（如 `5 月 19 日`、`7—9 日`）」，提示词要求时间标注**必须含年份**、依据上下文与来源年鉴年份推断、**不得编造**；本地以 `hasYear`（4 位年份）取舍——模型给的 ts 不含年份一律不采纳，卡片已有含年份的 ts 一律不覆盖，缺年份的旧值允许被覆盖（`tsFills` 仍属静默补齐，不落 `compilation_repairs`、无标记、不可回退）。残缺判定补充「句子起点/终点不完整、缺少主谓宾、指代不明」，并要求**优先补全而非删除**。
+> **对话编辑协议（Phase 7.5，2026-09-10；用户裁定 D3/D5）**：**软件 → 大模型** = 系统提示（`[p12] 2018 年 | 来源3 | 段落正文` 形式的 id 化文档 + 可引用来源编号清单 + 规则）+ 用户要求；**大模型 → 软件** = 单个 JSON `{"reply":"给用户看的回答","ops":[…]}`（容忍代码块围栏与前后夹带文字）。op 类型：`delete{ids}` / `replace{id,text,timeLabel?}` / `insertAfter{afterId,text,timeLabel,sourceOrdinal}` / `move{ids,afterId}` / `merge{ids}`（**仅同一来源**）/ `split{id,at,text}` / `setTime{id,timeLabel}` / `replaceAll{paragraphs}`（逃生舱）。
+> **本地校验**（逐条失败即该 op 拒绝并记入 `rejected`，其余照常应用）：① 段号（`pN`）必须存在；② `sourceOrdinal` 必须落在 `1..N`；③ 新增/改写正文中的**数字必须能在该来源原文中找到**（沿用 `numbersCoveredBy` 整 token 口径，防幻觉）；④ `merge` 仅限同一来源；⑤ **不得删空整篇**；⑥ 不支持的 op 直接拒绝。解析失败 → **文档不变**并明确报错（用户消息仍留痕）。
+> **应用**：应用 ops → **单次** `upsertCompilationParagraphs`（保留段 id；来源 id 由 ordinal 预解析后一次传入，避免"只传一段会删掉其余段"）→ 生成新版本（origin `llm-edit`，含 `instruction`/`reply`/`baseVersionNo`）→ 写两条 `compilation_messages`（用户 + 助手，助手带 `versionNo`/`applied`/`rejected`）。**并发保护**：请求带 `baseVersionNo`，与最新版本号不一致则拒绝（`VERSION_CONFLICT`）并提示重试。
+> **手动编辑解锁（D5）**：确认汇编（`finalized`）之前查看器**不提供任何直接编辑入口**（工具栏标注「仅可对话修改」）；确认后才出现「开始人工修改」按钮，点击弹**不可逆二次确认**，确认后进入人工修改模式（悬停显示编辑/删除，每次改动同样生成新版本 origin `user-edit`）。
 
 
 

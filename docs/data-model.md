@@ -328,11 +328,12 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 
 - id PK、compilation_id FK CASCADE、version_no NOT NULL、paragraphs（段落数组 JSON 快照）、markdown（一段一行的渲染快照）、origin CHECK('generate','llm-edit','user-edit','restore','contradiction','import')、instruction、reply、change_summary（JSON：added/removed/modified/moved + paragraphIds）、base_version_no、created_at；UNIQUE(compilation_id, version_no)。
 - 取代原**进程内**撤销栈（`compilation-undo.ts` 的 5 表快照，重启即失）：版本**落库**、可对比、可回滚，撤销/恢复按钮语义变为「上一版/下一版」。存储策略为**内联**（未做内容寻址/压缩去重，体量可忽略）。
+- **只保留最近 2 版**（`pruneCompilationVersions(id, 2)`，Phase 7.4，用户 2026-09-10 简化：只需与"改动前的上一版"对比）。版本快照**只含 `kept` 段落**（软删除的段不计入，否则变更统计会全是 0）。**记录时机的例外**：恢复历史版本**不**记新版本。
 
 ### 2.22d compilation_messages（汇编级人机对话，Migration 030，Phase 7.1）
 
 - id PK、compilation_id FK CASCADE、role CHECK('user','assistant')、content、version_no、applied（JSON）、rejected（JSON）、created_at；索引 (compilation_id, created_at)。
-- 悬浮对话框的历史记录与该轮编辑产生的版本号；属于**汇编**（随导入/导出一起走），与任务级 `task_messages` 区分。
+- 悬浮对话框的历史记录与该轮编辑产生的版本号；属于**汇编**（随导入/导出一起走），与任务级 `task_messages` 区分。Phase 7.5 起由 `compilation:doc:edit` 写入（用户消息在调用大模型**之前**落库，成功失败都留痕）、`compilation:messages` 读取。
 
 ### 2.23 compilation_contradictions / compilation_contradiction_variants（汇编矛盾，Migration 016，Phase 6.0）
 

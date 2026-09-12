@@ -4312,6 +4312,7 @@ textarea:focus-visible {
 
 /* 资料汇编：卡片审阅 */
 .compilation-step {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -4729,6 +4730,194 @@ textarea:focus-visible {
 .compilation-stat.is-warn {
   color: var(--warning);
   cursor: help;
+}
+/* 人工修改模式标记（Phase 7.5 / D5） */
+.compilation-stat.is-manual {
+  padding: 2px 9px;
+  border-radius: 999px;
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.compilation-manual-warn {
+  margin: 8px 0 4px;
+  font-size: 13px;
+  line-height: 1.9;
+  color: var(--fg-soft);
+}
+/* 本次对话改动的高亮（Phase 7.5：修改后高亮并滚动到首个改动段） */
+.compilation-para.is-changed {
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+  animation: compilation-card-locate 1.8s ease-out;
+}
+/* ---- Phase 7.5：右下悬浮对话框（机器人圆按钮 + 可拖动面板） ---- */
+.compilation-docchat-fab {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  z-index: 40;
+  width: 48px;
+  height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--accent);
+  box-shadow: var(--shadow-lg, 0 6px 18px rgba(0, 0, 0, 0.18));
+  cursor: pointer;
+  transition: transform 0.15s, background 0.15s, color 0.15s;
+}
+.compilation-docchat-fab:hover {
+  transform: translateY(-2px);
+  background: var(--accent-soft);
+}
+.compilation-docchat-fab.is-open {
+  background: var(--accent);
+  color: var(--bg);
+}
+.compilation-docchat {
+  position: absolute;
+  right: 18px;
+  bottom: 78px;
+  z-index: 50;
+  width: min(380px, calc(100% - 36px));
+  max-height: min(520px, calc(100% - 110px));
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 12px);
+  background: color-mix(in srgb, var(--bg-elevated) 96%, transparent);
+  backdrop-filter: blur(6px);
+  box-shadow: var(--shadow-lg, 0 10px 30px rgba(0, 0, 0, 0.22));
+  overflow: hidden;
+}
+.compilation-docchat__head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.compilation-docchat__head:active {
+  cursor: grabbing;
+}
+.compilation-docchat__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.compilation-docchat__drag {
+  flex: 1;
+  font-size: 11px;
+  color: var(--fg-soft);
+}
+.compilation-docchat__close {
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-soft);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+.compilation-docchat__close:hover {
+  background: var(--bg);
+  color: var(--fg);
+}
+.compilation-docchat__list {
+  flex: 1;
+  min-height: 120px;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.compilation-docchat__empty {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.9;
+  color: var(--fg-soft);
+}
+.compilation-docchat__msg {
+  position: relative;
+  max-width: 88%;
+  padding: 7px 10px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.compilation-docchat__msg.is-user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: var(--bg);
+}
+.compilation-docchat__msg.is-assistant {
+  align-self: flex-start;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+}
+.compilation-docchat__ver {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  opacity: 0.7;
+}
+.compilation-docchat__typing {
+  align-self: flex-start;
+  font-size: 12px;
+  color: var(--fg-soft);
+}
+.compilation-docchat__error {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--danger-soft, var(--bg));
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.compilation-docchat__foot {
+  flex-shrink: 0;
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elevated);
+}
+.compilation-docchat__input {
+  width: 100%;
+  resize: vertical;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.7;
+  font-family: inherit;
+}
+.compilation-docchat__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.compilation-docchat__hint {
+  flex: 1;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--fg-soft);
 }
 /* 自绘提示气泡（Phase 7.1）：fixed 定位，不会被卡片列表的滚动容器裁剪，瞬时出现 */
 .compilation-hint {

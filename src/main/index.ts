@@ -57,6 +57,10 @@ import {
   type CompilationVersionDiffRes,
   type CompilationVersionRestoreReq,
   type CompilationVersionRestoreRes,
+  type CompilationDocEditReq,
+  type CompilationDocEditRes,
+  type CompilationMessagesReq,
+  type CompilationMessagesRes,
   type CompilationUndoReq,
   type CompilationUndoRes,
   type CompilationUndoStateRes,
@@ -109,6 +113,7 @@ import {
   restoreCompilationFromVersion
 } from './db/compilations'
 import { diffParagraphVersions, summarizeParagraphDiff } from './writing/compilation-diff'
+import { runDocEdit, listDocMessages } from './writing/doc-edit-runner'
 
 /**
  * 任何**改变汇编内容**的操作之后记录一个版本（用户裁定 D6：以版本为准，取代进程内撤销栈）。
@@ -891,6 +896,41 @@ handleLogged(IPC.COMPILATION_REORDER, (_event, params: CompilationReorderReq): A
 })
 
 // 资料汇编操作撤销/恢复（2026-08-28）
+handleLogged(IPC.COMPILATION_DOC_EDIT, async (_event, params: CompilationDocEditReq): Promise<ApiResult<CompilationDocEditRes>> =>
+  withKeepAwake(async () => {
+    try {
+      if (!params.compilationId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
+      const res = await runDocEdit(params.compilationId, params.instruction, params.baseVersionNo)
+      if (!res.ok) return { ok: false, error: res.error }
+      const compilation = getCompilationById(params.compilationId)
+      if (!compilation) return { ok: false, error: { code: 'COMPILATION_NOT_FOUND', message: '资料汇编不存在' } }
+      return {
+        ok: true,
+        data: {
+          compilation,
+          reply: res.summary.reply,
+          applied: res.summary.applied,
+          rejected: res.summary.rejected,
+          versionNo: res.summary.versionNo,
+          changedIds: res.summary.changedIds,
+          changeSummary: res.summary.changeSummary
+        }
+      }
+    } catch (err) {
+      return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+    }
+  })
+)
+
+handleLogged(IPC.COMPILATION_MESSAGES, (_event, params: CompilationMessagesReq): ApiResult<CompilationMessagesRes> => {
+  try {
+    if (!params.compilationId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
+    return { ok: true, data: { messages: listDocMessages(params.compilationId) } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
 handleLogged(IPC.COMPILATION_UNDO, (_event, params: CompilationUndoReq): ApiResult<CompilationUndoRes> => {
   try {
     if (!params.compilationId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }

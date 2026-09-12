@@ -71,6 +71,9 @@ export const IPC = {
   COMPILATION_VERSIONS: 'compilation:versions',
   COMPILATION_VERSION_DIFF: 'compilation:version:diff',
   COMPILATION_VERSION_RESTORE: 'compilation:version:restore',
+  /* Phase 7.5：与文档对话（大模型以 ops 修改汇编）与对话历史 */
+  COMPILATION_DOC_EDIT: 'compilation:doc:edit',
+  COMPILATION_MESSAGES: 'compilation:messages',
   COMPILATION_UNDO: 'compilation:undo',
   COMPILATION_REDO: 'compilation:redo',
   COMPILATION_UNDO_STATE: 'compilation:undoState',
@@ -398,6 +401,27 @@ export interface CompilationVersionRestoreReq {
   versionNo: number
 }
 export type CompilationVersionRestoreRes = { compilation: Compilation; restoredFrom: number }
+/* ---- Phase 7.5：与文档对话（req 内联类型，避免为一个字段新增共享类型） ---- */
+export interface CompilationDocEditReq {
+  compilationId: string
+  instruction: string
+  /** 乐观锁：发起时看到的最新版本号；与当前不一致则拒绝（避免并发覆盖） */
+  baseVersionNo?: number
+}
+export type CompilationDocEditRes = {
+  compilation: Compilation
+  reply: string
+  applied: number
+  rejected: { op: string; reason: string }[]
+  versionNo?: number
+  /** 本次改动的段 id（前端高亮 + 滚动到首个改动段） */
+  changedIds: string[]
+  changeSummary: { added: number; modified: number; removed: number }
+}
+export interface CompilationMessagesReq {
+  compilationId: string
+}
+export type CompilationMessagesRes = { messages: { role: 'user' | 'assistant'; content: string; versionNo?: number; createdAt: string }[] }
 /** 资料汇编操作撤销/恢复（2026-08-28）：undo/redo 返回最新汇编与各自可用步数 */
 export interface CompilationUndoReq {
   compilationId: string
@@ -795,6 +819,8 @@ export interface IpcMapping {
   [IPC.COMPILATION_VERSIONS]: { _req: CompilationVersionsReq; _res: ApiResult<CompilationVersionsRes> }
   [IPC.COMPILATION_VERSION_DIFF]: { _req: CompilationVersionDiffReq; _res: ApiResult<CompilationVersionDiffRes> }
   [IPC.COMPILATION_VERSION_RESTORE]: { _req: CompilationVersionRestoreReq; _res: ApiResult<CompilationVersionRestoreRes> }
+  [IPC.COMPILATION_DOC_EDIT]: { _req: CompilationDocEditReq; _res: ApiResult<CompilationDocEditRes> }
+  [IPC.COMPILATION_MESSAGES]: { _req: CompilationMessagesReq; _res: ApiResult<CompilationMessagesRes> }
   [IPC.COMPILATION_UNDO]: { _req: CompilationUndoReq; _res: ApiResult<CompilationUndoRes> }
   [IPC.COMPILATION_REDO]: { _req: CompilationUndoReq; _res: ApiResult<CompilationUndoRes> }
   [IPC.COMPILATION_UNDO_STATE]: { _req: CompilationUndoReq; _res: ApiResult<CompilationUndoStateRes> }

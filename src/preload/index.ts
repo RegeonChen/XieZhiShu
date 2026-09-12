@@ -178,6 +178,18 @@ const api = {
   redoCompilation(compilationId: string): Promise<ApiResult<{ compilation: unknown; undoAvailable: number; redoAvailable: number }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_REDO, { compilationId })
   },
+  /* Phase 7.5：对话框内让大模型按段落 id 修改汇编正文 */
+  editCompilationDoc(
+    compilationId: string,
+    instruction: string,
+    baseVersionNo?: number
+  ): Promise<ApiResult<{ compilation: unknown; reply: string; applied: number; rejected: { op: string; reason: string }[]; versionNo?: number; changedIds: string[]; changeSummary: { added: number; modified: number; removed: number } }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_DOC_EDIT, { compilationId, instruction, baseVersionNo })
+  },
+  /** 读取某汇编的对话历史（含大模型修改记录） */
+  listCompilationMessages(compilationId: string): Promise<ApiResult<{ messages: unknown[] }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_MESSAGES, { compilationId })
+  },
   /** 查询当前汇编可撤销/可恢复的步数 */
   getCompilationUndoState(compilationId: string): Promise<ApiResult<{ undoAvailable: number; redoAvailable: number }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_UNDO_STATE, { compilationId })
