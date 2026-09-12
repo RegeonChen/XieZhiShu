@@ -40,9 +40,6 @@ import {
   type CompilationGenerateRes,
   type CompilationContinueReq,
   type CompilationContinueRes,
-  type CompilationUpdateItemReq,
-  type CompilationUpdateItemRes,
-  type CompilationDeleteItemReq,
   type CompilationResolveContradictionReq,
   type CompilationResolveContradictionRes,
   type CompilationConfirmReq,
@@ -51,10 +48,6 @@ import {
   type CompilationReorderRes,
   type CompilationVersionsReq,
   type CompilationVersionsRes,
-  type CompilationVersionDiffReq,
-  type CompilationVersionDiffRes,
-  type CompilationVersionRestoreReq,
-  type CompilationVersionRestoreRes,
   type CompilationDocEditReq,
   type CompilationDocEditRes,
   type CompilationMessagesReq,
@@ -91,8 +84,6 @@ import { getContradictionsByDraft, updateContradictionStatus } from './db/contra
 import {
   listCompilationsByTask,
   getCompilationById,
-  updateCompilationItem,
-  deleteCompilationItem,
   updateCompilationContradictionStatus,
   confirmCompilation,
   listRecycleBinByCompilation,
@@ -101,11 +92,8 @@ import {
   listFinalizedCompilationsForImport,
   importCompilationIntoTask,
   listCompilationVersions,
-  listCompilationMessages,
-  getCompilationVersion,
-  restoreCompilationFromVersion
+  listCompilationMessages
 } from './db/compilations'
-import { diffParagraphVersions, summarizeParagraphDiff } from './writing/compilation-diff'
 import { runDocEdit, listDocMessages } from './writing/doc-edit-runner'
 import {
   listStyleGuides,
@@ -124,7 +112,6 @@ import {
   getUndoCount,
   getRedoCount,
   clearUndoStacks,
-  compilationIdOfItem,
   compilationIdOfContradiction,
   compilationIdOfBin
 } from './writing/compilation-undo'
@@ -652,42 +639,6 @@ handleLogged(IPC.COMPILATION_CONTINUE, async (event, params: CompilationContinue
   }
 }))
 
-handleLogged(IPC.COMPILATION_UPDATE_ITEM, (_event, params: CompilationUpdateItemReq): ApiResult<CompilationUpdateItemRes> => {
-  try {
-    const undoCid = compilationIdOfItem(params.itemId)
-    const item = updateCompilationItem(params.itemId, {
-      excerpt: params.excerpt,
-      ts: params.ts,
-      note: params.note,
-      extraTags: params.extraTags,
-      kept: params.kept
-    })
-    if (!item) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料卡片不存在' } }
-    /*
-     * 时间标签被改动 → **同一次操作内**按时间重排整份汇编（否则文档会静默违反"按时间排序"）。
-     * 重排只改 position，段 id 不变。注意：该接口当前已无界面入口（人工修改模式按用户要求删除，
-     * 段落级编辑不再暴露），保留为 API 并保持行为正确。
-     */
-    if (params.ts !== undefined && undoCid) reorderCompilationItemsByTs(undoCid, 'asc')
-    clearUndoStacks(undoCid)
-    const compilation = params.ts !== undefined && undoCid ? getCompilationById(undoCid) : null
-    return { ok: true, data: compilation ? { item, compilation } : { item } }
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-})
-
-handleLogged(IPC.COMPILATION_DELETE_ITEM, (_event, params: CompilationDeleteItemReq): ApiResult<void> => {
-  try {
-    const undoCid = compilationIdOfItem(params.itemId)
-    deleteCompilationItem(params.itemId)
-    clearUndoStacks(undoCid)
-    return { ok: true, data: undefined }
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-})
-
 handleLogged(
   IPC.COMPILATION_RESOLVE_CONTRADICTION,
   (_event, params: CompilationResolveContradictionReq): ApiResult<CompilationResolveContradictionRes> => {
@@ -790,48 +741,11 @@ handleLogged(IPC.COMPILATION_IMPORT_ARCHIVE, async (_event, _params: Compilation
 })
 
 // 资料汇编卡片重新按时间排序（2026-08-28）：asc 正序 / desc 反序，重写 position 并返回最新汇编
-// Phase 7.4：版本管控 —— 列表 / 两版差异 / 恢复到某版
+// Phase 7.4：版本列表（对话编辑的乐观锁基线；两版差异 / 版本恢复通道已随 Phase 7.7 删除）
 handleLogged(IPC.COMPILATION_VERSIONS, (_event, params: CompilationVersionsReq): ApiResult<CompilationVersionsRes> => {
   try {
     if (!params.compilationId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
     return { ok: true, data: { versions: listCompilationVersions(params.compilationId) } }
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-})
-
-handleLogged(IPC.COMPILATION_VERSION_DIFF, (_event, params: CompilationVersionDiffReq): ApiResult<CompilationVersionDiffRes> => {
-  try {
-    if (!params.compilationId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
-    const from = getCompilationVersion(params.compilationId, params.fromVersionNo)
-    const to = getCompilationVersion(params.compilationId, params.toVersionNo)
-    if (!from || !to) return { ok: false, error: { code: 'INVALID_PARAM', message: '版本不存在' } }
-    const segments = diffParagraphVersions(from.paragraphs, to.paragraphs)
-    return {
-      ok: true,
-      data: {
-        fromVersionNo: params.fromVersionNo,
-        toVersionNo: params.toVersionNo,
-        segments,
-        summary: summarizeParagraphDiff(segments)
-      }
-    }
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-})
-
-handleLogged(IPC.COMPILATION_VERSION_RESTORE, (_event, params: CompilationVersionRestoreReq): ApiResult<CompilationVersionRestoreRes> => {
-  try {
-    if (!params.compilationId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
-    const restored = restoreCompilationFromVersion(params.compilationId, params.versionNo)
-    if (!restored) return { ok: false, error: { code: 'INVALID_PARAM', message: '版本不存在' } }
-    // 恢复动作**不记录新版本**（用户 2026-09-10 裁定）；也作废撤销栈（它不是对话编辑）。
-    // UI 上的「恢复到上一版」按钮暂不提供。
-    clearUndoStacks(params.compilationId)
-    const compilation = getCompilationById(params.compilationId)
-    if (!compilation) return { ok: false, error: { code: 'INTERNAL_ERROR', message: '资料汇编不存在' } }
-    return { ok: true, data: { compilation, restoredFrom: params.versionNo } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }

@@ -157,18 +157,9 @@ const api = {
   undoCompilation(compilationId: string): Promise<ApiResult<{ compilation: unknown; undoAvailable: number; redoAvailable: number }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_UNDO, { compilationId })
   },
-  /* Phase 7.4：版本管控（列表 / 两版差异 / 恢复到某版） */
+  /* Phase 7.4：版本列表（对话编辑的乐观锁基线；两版差异 / 版本恢复通道已随 Phase 7.7 删除） */
   listCompilationVersions(compilationId: string): Promise<ApiResult<{ versions: unknown[] }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_VERSIONS, { compilationId })
-  },
-  diffCompilationVersions(compilationId: string, fromVersionNo: number, toVersionNo: number): Promise<ApiResult<unknown>> {
-    return ipcRenderer.invoke(IPC.COMPILATION_VERSION_DIFF, { compilationId, fromVersionNo, toVersionNo })
-  },
-  restoreCompilationVersion(
-    compilationId: string,
-    versionNo: number
-  ): Promise<ApiResult<{ compilation: unknown; restoredFrom: number }>> {
-    return ipcRenderer.invoke(IPC.COMPILATION_VERSION_RESTORE, { compilationId, versionNo })
   },
   /** 恢复被撤销的资料汇编操作 */
   redoCompilation(compilationId: string): Promise<ApiResult<{ compilation: unknown; undoAvailable: number; redoAvailable: number }>> {
@@ -189,14 +180,6 @@ const api = {
   /** 查询当前汇编可撤销/可恢复的步数 */
   getCompilationUndoState(compilationId: string): Promise<ApiResult<{ undoAvailable: number; redoAvailable: number }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_UNDO_STATE, { compilationId })
-  },
-  /** 编辑资料卡片 */
-  updateCompilationItem(itemId: string, patch: { excerpt?: string; ts?: string | null; note?: string | null; extraTags?: string[]; kept?: boolean }): Promise<ApiResult<{ item: unknown; compilation?: unknown }>> {
-    return ipcRenderer.invoke(IPC.COMPILATION_UPDATE_ITEM, { itemId, ...patch })
-  },
-  /** 删除资料卡片 */
-  deleteCompilationItem(itemId: string): Promise<ApiResult<void>> {
-    return ipcRenderer.invoke(IPC.COMPILATION_DELETE_ITEM, { itemId })
   },
   /** 资料汇编矛盾取舍（resolve 须传 chosenItemId；ignore 清空已选） */
   resolveCompilationContradiction(contradictionId: string, action: 'resolve' | 'ignore', chosenItemId?: string): Promise<ApiResult<{ contradiction: unknown }>> {
