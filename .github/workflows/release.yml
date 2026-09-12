@@ -58,30 +58,30 @@ jobs:
           name: win-installer
           path: dist/
 
-      # 用 runner 自带的 gh CLI 建/更新 Release：`--notes-file` 直接读仓库里的文件，
-      # 不再经 action 的 body/body_path 传参（那条路实测三次都出成空正文，原因不明但不可依赖）。
-      # 已存在同 tag 的 Release 就改正文 + 覆盖资产，不存在就新建。
-      - name: Create or update GitHub Release
+      # ⚠️ 已知问题（v0.3.0 实测）：`resources/models/` 在 .gitignore 里、**不在仓库中**，
+      # 因此 CI 打出的安装包**不含本地嵌入模型 BGE-small-zh-v1.5（约 90 MB）**，
+      # 装到用户机器上会退化成"纯词法检索"（功能可用，但语义召回失效）。
+      # 正式发布请用**本地构建**的安装包（`npm run dist:win`，含模型）作为 Release 资产，
+      # 或先把模型纳入仓库/改为构建时下载，再让 CI 产物对外发布。
+      - name: Create or update GitHub Release (assets)
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          draft: false
+          prerelease: false
+          body_path: docs/release-notes.md
+          # 同一 tag 重跑时覆盖已上传的同名安装包（否则重发会因资产重名失败）
+          overwrite_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 正文补偿：action 的 body_path 在 v0.3.0 的实测里没有生效（Release 出成空正文），
+      # 这里再用 runner 自带的 gh CLI 显式写一次；即使失败也不影响资产已经发布。
+      - name: Patch release notes (best effort)
+        continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          echo "notes file: $(wc -c < docs/release-notes.md) bytes"
-          ls -l dist/
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "release $GITHUB_REF_NAME exists → updating notes"
-            gh release edit "$GITHUB_REF_NAME" \
-              --title "$GITHUB_REF_NAME" \
-              --notes-file docs/release-notes.md \
-              --latest
-          else
-            echo "creating release $GITHUB_REF_NAME"
-            gh release create "$GITHUB_REF_NAME" \
-              --title "$GITHUB_REF_NAME" \
-              --notes-file docs/release-notes.md \
-              --latest
-          fi
-          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
-          gh release view "$GITHUB_REF_NAME" --json name,tagName,isDraft,isPrerelease,assets \
-            -q '"published: " + .tagName + " assets=" + ([.assets[].name] | join(","))'
+          echo "notes: $(wc -c < docs/release-notes.md) bytes"
+          gh release edit "$GITHUB_REF_NAME" --notes-file docs/release-notes.md
