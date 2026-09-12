@@ -267,8 +267,8 @@ const api = {
   updateSettings(patch: { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string; keepAwake?: boolean; docScale?: 'small' | 'medium' | 'large' }): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.SETTINGS_UPDATE, { patch })
   },
-  /** 本地向量索引状态（语义检索是否可用、失败原因、后台队列剩余） */
-  getRagIndexStatus(): Promise<ApiResult<{ total: number; ready: number; pending: number; indexing: number; failed: number; lastError: string | null; lastErrorAt: string | null; queued: number }>> {
+  /** 本地向量索引状态（语义检索是否可用、失败原因、后台队列剩余、重建进度） */
+  getRagIndexStatus(): Promise<ApiResult<{ total: number; ready: number; pending: number; indexing: number; failed: number; lastError: string | null; lastErrorAt: string | null; queued: number; rebuild: { status: 'running' | 'interrupted' | 'done'; startedAt: string | null; totalQueued: number; remaining: number; processed: number; percent: number; active: boolean }; engine?: { poolSize: number; livePool: number; workerThreads: number; workerErrors: number; directFallbacks: number; lastWorkerError: string | null } }>> {
     return ipcRenderer.invoke(IPC.RAG_INDEX_STATUS)
   },
   /** 重建本地向量索引（后台串行队列；用 getRagIndexStatus 轮询进度） */

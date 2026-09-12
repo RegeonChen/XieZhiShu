@@ -95,8 +95,17 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docS
     failed: number
     lastError: string | null
     queued: number
+    engine?: { poolSize: number; livePool: number; workerThreads: number; workerErrors: number; directFallbacks: number; lastWorkerError: string | null }
+    rebuild: {
+      status: 'running' | 'interrupted' | 'done'
+      startedAt: string | null
+      totalQueued: number
+      remaining: number
+      processed: number
+      percent: number
+      active: boolean
+    }
   } | null>(null)
-  const [reindexing, setReindexing] = useState(false)
   const [indexMsg, setIndexMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
   /**
@@ -120,24 +129,16 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docS
     void loadRagStatus()
   }, [loadRagStatus])
 
-  // 重建期间轮询进度（索引在后台串行队列里跑，界面只负责看"已索引"数上升）
-  useEffect(() => {
-    if (!reindexing) return
-    const timer = window.setInterval(() => void loadRagStatus(), 2000)
-    return () => window.clearInterval(timer)
-  }, [reindexing, loadRagStatus])
+  /** 重建是否在进行中——**由持久化状态推导**，因此切换页面、重启软件后回来仍然显示"重建中" */
+  const rebuilding = ragStatus?.rebuild.status === 'running'
+  const rebuildInterrupted = ragStatus?.rebuild.status === 'interrupted'
 
-  // 队列清空即视为重建结束（成功与否都给出结论，失败原因在下方单独显示）
+  // 重建期间轮询进度（状态来自 DB，故轮询本身也不依赖组件生命周期）
   useEffect(() => {
-    if (!reindexing || !ragStatus) return
-    if (ragStatus.queued > 0 || ragStatus.pending > 0 || ragStatus.indexing > 0) return
-    setReindexing(false)
-    setIndexMsg(
-      ragStatus.failed === 0
-        ? { ok: true, text: zhCN.settingsPage.index.done }
-        : { ok: false, text: zhCN.settingsPage.index.doneWithFailures.replace('{count}', String(ragStatus.failed)) }
-    )
-  }, [reindexing, ragStatus])
+    if (!rebuilding) return
+    const timer = window.setInterval(() => void loadRagStatus(), 1500)
+    return () => window.clearInterval(timer)
+  }, [rebuilding, loadRagStatus])
 
   const handleReindex = async () => {
     setIndexMsg(null)
@@ -145,19 +146,22 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docS
       setIndexMsg({ ok: false, text: zhCN.settingsPage.index.staleBridge })
       return
     }
-    setReindexing(true)
     try {
       const res = await window.api.reindexRag()
       if (res.ok && res.data) {
-        setIndexMsg({ ok: true, text: zhCN.settingsPage.index.queued.replace('{count}', String(res.data.queued)) })
+        setIndexMsg({
+          ok: true,
+          text: (res.data.queued > 0 ? zhCN.settingsPage.index.queued : zhCN.settingsPage.index.nothingToDo).replace(
+            '{count}',
+            String(res.data.queued)
+          )
+        })
         await loadRagStatus()
       } else {
         setIndexMsg({ ok: false, text: zhCN.settingsPage.index.failed.replace('{message}', res.error?.message ?? '') })
-        setReindexing(false)
       }
     } catch (e) {
       setIndexMsg({ ok: false, text: zhCN.settingsPage.index.failed.replace('{message}', String(e)) })
-      setReindexing(false)
     }
   }
 
@@ -548,9 +552,13 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docS
               type="button"
               className="source-list__btn source-list__btn--primary"
               onClick={() => void handleReindex()}
-              disabled={reindexing || !ragApiReady}
+              disabled={rebuilding || !ragApiReady}
             >
-              {reindexing ? zhCN.settingsPage.index.rebuilding : zhCN.settingsPage.index.rebuildBtn}
+              {rebuilding
+                ? zhCN.settingsPage.index.rebuilding
+                : rebuildInterrupted
+                  ? zhCN.settingsPage.index.continueBtn
+                  : zhCN.settingsPage.index.rebuildBtn}
             </button>
           </div>
         </div>
@@ -559,21 +567,47 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docS
           <p className="settings__hint settings__hint--err">{zhCN.settingsPage.index.staleBridge}</p>
         ) : null}
         {ragStatus ? (
-          <p className="settings__workspace-path">
-            <span className={`settings__status-chip${ragStatus.failed === 0 && ragStatus.ready === ragStatus.total && ragStatus.total > 0 ? ' is-ok' : ''}`}>
-              {ragStatus.failed > 0
-                ? zhCN.settingsPage.index.stateFailed
-                : ragStatus.ready === ragStatus.total && ragStatus.total > 0
-                  ? zhCN.settingsPage.index.stateReady
-                  : zhCN.settingsPage.index.statePending}
-            </span>
-            <span>
-              {zhCN.settingsPage.index.counts
-                .replace('{ready}', String(ragStatus.ready))
-                .replace('{total}', String(ragStatus.total))
-                .replace('{failed}', String(ragStatus.failed))
-                .replace('{queued}', String(ragStatus.queued))}
-            </span>
+          <>
+            <p className="settings__workspace-path">
+              <span className={`settings__status-chip${ragStatus.failed === 0 && ragStatus.ready === ragStatus.total && ragStatus.total > 0 ? ' is-ok' : ''}`}>
+                {ragStatus.failed > 0
+                  ? zhCN.settingsPage.index.stateFailed
+                  : ragStatus.ready === ragStatus.total && ragStatus.total > 0
+                    ? zhCN.settingsPage.index.stateReady
+                    : zhCN.settingsPage.index.statePending}
+              </span>
+              <span>
+                {zhCN.settingsPage.index.counts
+                  .replace('{ready}', String(ragStatus.ready))
+                  .replace('{total}', String(ragStatus.total))
+                  .replace('{failed}', String(ragStatus.failed))}
+              </span>
+            </p>
+            {rebuilding || rebuildInterrupted ? (
+              <p className="settings__hint">
+                {zhCN.settingsPage.index.progress
+                  .replace('{percent}', String(ragStatus.rebuild.percent))
+                  .replace('{processed}', String(ragStatus.rebuild.processed))
+                  .replace('{total}', String(ragStatus.rebuild.totalQueued))
+                  .replace('{remaining}', String(ragStatus.rebuild.remaining))}
+                {rebuildInterrupted ? ' ' + zhCN.settingsPage.index.interruptedHint : ''}
+              </p>
+            ) : null}
+            {!rebuilding && !rebuildInterrupted && ragStatus.rebuild.status === 'done' && ragStatus.rebuild.totalQueued > 0 && ragStatus.failed > 0 ? (
+              <p className="settings__hint settings__hint--err">
+                {zhCN.settingsPage.index.doneWithFailures.replace('{count}', String(ragStatus.failed))}
+              </p>
+            ) : null}
+          </>
+        ) : null}
+        {ragStatus?.engine ? (
+          <p className="settings__hint">
+            {zhCN.settingsPage.index.engine
+              .replace('{pool}', String(ragStatus.engine.poolSize))
+              .replace('{threads}', String(ragStatus.engine.workerThreads || 1))
+              .replace('{errors}', String(ragStatus.engine.workerErrors))
+              .replace('{fallbacks}', String(ragStatus.engine.directFallbacks))}
+            {ragStatus.engine.lastWorkerError ? '：' + ragStatus.engine.lastWorkerError : ''}
           </p>
         ) : null}
         {ragStatus?.lastError ? (

@@ -8,9 +8,10 @@ import { join } from 'node:path'
 import Database from 'better-sqlite3'
 import { getDb, setDb } from '../db/connection'
 import { runMigrations } from '../db/migrate'
+import { readSetting, writeSetting } from '../db/settings'
 import { logMain } from '../logger'
 import { chunkText } from './retrieval'
-import { configureEmbedModel, embedTexts, getEmbedModelId } from './embed'
+import { configureEmbedModel, embedTexts, EMBED_WORKER_POOL_SIZE, getEmbedModelId } from './embed'
 
 /** float32 数组 ↔ SQLite BLOB 互转 */
 export function vectorToBuffer(v: number[]): Buffer {
@@ -84,6 +85,117 @@ export function resetFailedIndex(): number {
     .run(new Date().toISOString()).changes
 }
 
+// ================= 重建（rebuild）状态：跨页面切换与跨重启可见、可续跑 =================
+
+/** 重建状态：running=正在跑；interrupted=上次被关软件打断（可「继续重建」）；done=已完成 */
+export type RebuildStatus = 'running' | 'interrupted' | 'done'
+
+interface RebuildRecord {
+  status: RebuildStatus
+  startedAt: string
+  updatedAt: string
+  /** 本次重建开始时的待索引篇数（算进度用：已完成 = totalQueued − 当前未就绪数） */
+  totalQueued: number
+}
+
+const REBUILD_KEY = 'index_rebuild'
+/** 进程内是否有重建在跑（持久化记录写 running、进程内无任务 = 上次被重启打断） */
+let rebuildRunning = false
+
+function readRebuildRecord(): RebuildRecord | null {
+  const raw = readSetting(REBUILD_KEY)
+  if (!raw) return null
+  try {
+    const parsed = JSON.parse(raw) as Partial<RebuildRecord>
+    if (parsed.status !== 'running' && parsed.status !== 'interrupted' && parsed.status !== 'done') return null
+    return {
+      status: parsed.status,
+      startedAt: parsed.startedAt ?? new Date().toISOString(),
+      updatedAt: parsed.updatedAt ?? new Date().toISOString(),
+      totalQueued: Number(parsed.totalQueued ?? 0)
+    }
+  } catch {
+    return null
+  }
+}
+
+function writeRebuildRecord(status: RebuildStatus, totalQueued: number, startedAt?: string): void {
+  const now = new Date().toISOString()
+  writeSetting(REBUILD_KEY, JSON.stringify({ status, startedAt: startedAt ?? now, updatedAt: now, totalQueued } satisfies RebuildRecord))
+}
+
+/** 当前未就绪（仍需索引）的篇数 */
+function countNotReady(): number {
+  const db = getDb()
+  return (db.prepare("SELECT COUNT(*) AS c FROM sources WHERE index_state != 'ready'").get() as { c: number }).c
+}
+
+/**
+ * 启动时初始化索引状态（主进程 whenReady 调用）：
+ * 1. 上次被强杀时停在 `indexing` 的资料**改回 pending**（否则它们永远不再被索引）；
+ * 2. 持久化记录若仍是 `running`，说明上次是**被关软件打断**的 → 标 `interrupted`（界面显示「继续重建」）；
+ * 3. 已无待索引资料时直接标 `done`，避免界面留下假的"可继续"。
+ */
+export function initIndexingState(): { resetIndexing: number; interrupted: boolean } {
+  const db = getDb()
+  const resetIndexing = db
+    .prepare("UPDATE sources SET index_state = 'pending', updated_at = ? WHERE index_state = 'indexing'")
+    .run(new Date().toISOString()).changes
+  const rec = readRebuildRecord()
+  let interrupted = false
+  if (rec?.status === 'running') {
+    const remaining = countNotReady()
+    if (remaining > 0) {
+      // 保留原来的 totalQueued/startedAt：进度继续按"整轮重建"算，界面上的百分比不会在续跑时跳回去
+      writeRebuildRecord('interrupted', rec.totalQueued, rec.startedAt)
+      interrupted = true
+      logMain('rag', `上次重建被中断：剩余 ${remaining} 篇未索引（设置页可「继续重建」）`)
+    } else {
+      writeRebuildRecord('done', rec.totalQueued, rec.startedAt)
+    }
+  } else if (rec?.status === 'interrupted' && countNotReady() === 0) {
+    writeRebuildRecord('done', rec.totalQueued, rec.startedAt)
+  }
+  if (resetIndexing > 0) logMain('rag', `启动清理：${resetIndexing} 篇停在 indexing 的资料改回 pending`)
+  return { resetIndexing, interrupted }
+}
+
+/** 重建进度（跨重启可算：已完成 = 开始时待索引数 − 当前未就绪数） */
+export interface RebuildProgress {
+  status: RebuildStatus
+  startedAt: string | null
+  /** 本次重建开始时待索引篇数 */
+  totalQueued: number
+  /** 尚未索引篇数（pending + indexing + failed） */
+  remaining: number
+  /** 已处理篇数（含失败；失败的资料要等用户再次点重建才重试） */
+  processed: number
+  /** 0-100 */
+  percent: number
+  /** 进程内是否正在跑（区分"真在跑"与"记录说在跑但其实是上次被打断"） */
+  active: boolean
+}
+
+export function getRebuildProgress(): RebuildProgress {
+  const rec = readRebuildRecord()
+  const remaining = countNotReady()
+  if (!rec) {
+    return { status: 'done', startedAt: null, totalQueued: 0, remaining, processed: 0, percent: 100, active: false }
+  }
+  const processed = Math.max(0, rec.totalQueued - remaining)
+  const percent =
+    rec.totalQueued > 0 ? Math.min(100, Math.round((processed / rec.totalQueued) * 100)) : remaining === 0 ? 100 : 0
+  return {
+    status: rec.status,
+    startedAt: rec.startedAt,
+    totalQueued: rec.totalQueued,
+    remaining,
+    processed,
+    percent,
+    active: rebuildRunning && rec.status === 'running'
+  }
+}
+
 /** 为单个资料建立向量索引（幂等：先清旧块再插入） */
 export async function indexSource(sourceId: string): Promise<{ ok: boolean; error?: string; chunks?: number }> {
   const db = getDb()
@@ -101,16 +213,11 @@ export async function indexSource(sourceId: string): Promise<{ ok: boolean; erro
   setState(sourceId, 'indexing')
   try {
     const chunks = chunkText(row.cleaned_text)
-    // 分批嵌入：推理已在 Worker 线程执行（不阻塞主进程事件循环），仍保持小批次，
-    // 避免单批过大占用内存/单次响应过久；批间让出事件循环，保持界面响应。
-    const EMBED_BATCH = 5
-    const vectors: number[][] = []
-    for (let i = 0; i < chunks.length; i += EMBED_BATCH) {
-      const slice = chunks.slice(i, i + EMBED_BATCH)
-      const vecs = await embedTexts(slice.map((c) => c.text))
-      vectors.push(...vecs)
-      await new Promise<void>((r) => setImmediate(() => r()))
-    }
+    /*
+     * 一次性把整篇分块交给 embedTexts：由它按长度分组投喂（同批长度相近 → padding 浪费最小，
+     * 2026-09-12 实测 23ms/条 vs 原样顺序 162ms/条），批间自行让出事件循环。
+     */
+    const vectors = await embedTexts(chunks.map((c) => c.text))
     const modelId = getEmbedModelId()
     const now = new Date().toISOString()
 
@@ -222,21 +329,87 @@ export function enqueueIndex(sourceId: string): void {
   })
 }
 
-/** 后台队列里尚未处理的资料数（设置页轮询"重建索引"进度用） */
+/** 后台队列里尚未处理的资料数（设置页轮询"重建"进度用） */
 export function getQueueSize(): number {
-  return queuedIndexIds.size
+  return queuedIndexIds.size + rebuildPendingIds.size
 }
 
 /**
- * 重建索引：按需清掉失败标记，并把所有未就绪资料交给**后台串行队列**（不阻塞 IPC）。
- * 界面只需轮询 `getIndexStatus()` 看 ready 数上升；单篇失败不影响其余资料。
+ * 重建并发度：与 Worker 池同量级（每篇资料的嵌入调用会真正占用一个 Worker），
+ * 再高只会排队等 Worker，反而不利于进度可读性。
+ */
+const REBUILD_CONCURRENCY = Math.max(2, EMBED_WORKER_POOL_SIZE)
+
+/** 重建中"已入队但还没处理完"的资料 id（用于进度与"是否还在跑"） */
+const rebuildPendingIds = new Set<string>()
+
+/**
+ * 重建索引（可反复点、可中断续跑）：
+ * - 只处理**未就绪**（pending / indexing / failed）的资料，**已 ready 的一律不动**（幂等，不重复索引）；
+ * - 按 `REBUILD_CONCURRENCY` 并发跑（配合 embed 的 Worker 池把 CPU 用满）；
+ * - 状态与进度写入 settings（`index_rebuild`），**跨页面切换与跨重启可见**；被关软件打断后
+ *   启动时会被标成 `interrupted`，界面显示「继续重建」，再点即从剩余部分继续；
+ * - 全部跑完写 `done`（失败篇数另计，失败资料要等用户再次点重建才重试）。
  */
 export function requeuePendingIndexes(includeFailed = true): { queued: number; reset: number } {
   const reset = includeFailed ? resetFailedIndex() : 0
   const db = getDb()
   const rows = db.prepare("SELECT id FROM sources WHERE index_state != 'ready'").all() as { id: string }[]
-  for (const r of rows) enqueueIndex(r.id)
-  return { queued: rows.length, reset }
+  const ids = rows.map((r) => r.id)
+  /*
+   * 续跑（上次被打断，或用户在跑的过程中又点了一次）沿用同一轮的分母与开始时间，
+   * 这样进度是单调前进的 21% → 60% → 100%，而不是每次续跑都从头算。
+   */
+  const prev = readRebuildRecord()
+  const continuing = prev != null && prev.status !== 'done'
+  const startedAt = continuing ? prev.startedAt : undefined
+  const totalQueued = continuing ? Math.max(prev.totalQueued, ids.length) : ids.length
+  writeRebuildRecord('running', totalQueued, startedAt)
+  rebuildRunning = ids.length > 0
+  if (ids.length === 0) {
+    writeRebuildRecord('done', totalQueued, startedAt)
+    return { queued: 0, reset }
+  }
+  for (const id of ids) rebuildPendingIds.add(id)
+  void runRebuildQueue(ids, totalQueued, startedAt)
+  return { queued: ids.length, reset }
+}
+
+/** 并发执行重建队列；全部结束后把持久化状态落到 done */
+async function runRebuildQueue(ids: string[], totalQueued: number, startedAt?: string): Promise<void> {
+  let cursor = 0
+  let indexed = 0
+  let failed = 0
+  let firstError: string | undefined
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = cursor++
+      if (i >= ids.length) return
+      const id = ids[i]
+      try {
+        const res = await indexSource(id)
+        if (res.ok) indexed += 1
+        else {
+          failed += 1
+          firstError = firstError ?? res.error
+        }
+      } catch (err) {
+        failed += 1
+        firstError = firstError ?? String(err)
+      } finally {
+        rebuildPendingIds.delete(id)
+      }
+    }
+  }
+  const started = Date.now()
+  try {
+    await Promise.all(Array.from({ length: Math.min(REBUILD_CONCURRENCY, ids.length) }, () => worker()))
+  } finally {
+    const secs = Math.round((Date.now() - started) / 1000)
+    logMain('rag', `重建索引结束：成功 ${indexed} 篇 / 失败 ${failed} 篇 / 共 ${ids.length} 篇，耗时 ${secs}s${firstError ? '；首个失败原因：' + firstError : ''}`)
+    rebuildRunning = false
+    writeRebuildRecord('done', totalQueued, startedAt)
+  }
 }
 
 // ---- vitest inline test ----
@@ -327,6 +500,40 @@ if (import.meta.vitest) {
       // 删除资料级联清理向量
       db.prepare('DELETE FROM sources WHERE id = ?').run(srcId)
       expect(db.prepare('SELECT COUNT(*) AS c FROM chunk_embeddings WHERE id = ?').get('c1') as { c: number }).toEqual({ c: 0 })
+    })
+
+    it('marks a persisted running rebuild as interrupted and requeues stale indexing rows (2026-09-12)', () => {
+      // 模拟"上次被关软件打断"：持久化记录还是 running，且有资料停在 indexing
+      writeSetting('index_rebuild', JSON.stringify({ status: 'running', startedAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', totalQueued: 9 }))
+      db.prepare(
+        `INSERT INTO sources (id, kind, title, cleaned_text, status, index_state) VALUES ('s-stale','file','被打断','正文','ready','indexing')`
+      ).run()
+
+      const res = initIndexingState()
+      expect(res.resetIndexing).toBeGreaterThanOrEqual(1)
+      expect(res.interrupted).toBe(true)
+      // 停在 indexing 的资料必须回到 pending，否则永远不会再被索引
+      expect(db.prepare("SELECT index_state FROM sources WHERE id = 's-stale'").get()).toEqual({ index_state: 'pending' })
+      // 进度从持久化记录 + 当前未就绪数推导（重启后仍可见）
+      const p = getRebuildProgress()
+      expect(p.status).toBe('interrupted')
+      expect(p.startedAt).toBe('2026-01-01T00:00:00.000Z')
+      expect(p.totalQueued).toBe(9)
+      expect(p.active).toBe(false)
+      expect(p.remaining).toBeGreaterThan(0)
+      expect(p.processed).toBe(Math.max(0, 9 - p.remaining))
+    })
+
+    it('reports 100% and done once everything is indexed', () => {
+      writeSetting('index_rebuild', JSON.stringify({ status: 'interrupted', startedAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', totalQueued: 10 }))
+      db.prepare("UPDATE sources SET index_state = 'ready', index_error = NULL").run()
+      const p = getRebuildProgress()
+      expect(p.remaining).toBe(0)
+      expect(p.processed).toBe(10)
+      expect(p.percent).toBe(100)
+      // 无记录时按"已完成"处理，界面不会留一个假的"继续重建"
+      db.prepare("DELETE FROM settings WHERE key = 'index_rebuild'").run()
+      expect(getRebuildProgress()).toMatchObject({ status: 'done', percent: 100, totalQueued: 0 })
     })
   })
 }

@@ -22,6 +22,18 @@ function getSetting(key: string): string | undefined {
   return row?.value
 }
 
+/**
+ * 通用键值读写（2026-09-12）：`settings` 表本身就是 key-value，向量索引重建这类**需要跨重启保留**的
+ * 运行态（进度/中断标记）直接借用它，避免为一个瞬时状态再加一张表。
+ */
+export function readSetting(key: string): string | undefined {
+  return getSetting(key)
+}
+
+export function writeSetting(key: string, value: string): void {
+  setSetting(key, value)
+}
+
 function setSetting(key: string, value: string): void {
   const db = getDb()
   db.prepare('INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at')
