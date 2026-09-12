@@ -437,6 +437,28 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 > - **契约**：新增 `IPC.COMPILATION_DOC_EDIT` / `IPC.COMPILATION_MESSAGES` + `CompilationDocEditReq/Res`（含 `changedIds` / `changeSummary`）/ `CompilationMessagesReq/Res`；
 >   preload 新增 `editCompilationDoc` / `listCompilationMessages`（+ `index.d.ts`）。
 > - 测试：`doc-edit-service` 6 项（原 5 项 + 新增「改动摘要：文本 diff + setTime/move/merge 目标补记」）。
+>
+> **用户验收后整改（2026-09-10，第二轮）**——验收项基本通过，反馈 1 个 bug + 4 项改动，逐项落地：
+> 1. **对话编辑无法被「撤销操作」撤销（bug）**：`runDocEdit` 落库前没有 `pushUndo`，撤销栈顶仍是更早的快照，
+>    撤销会跳过这次对话改动 → 落库前补 `pushUndo(compilationId)`，与手动编辑/删除/矛盾取舍同口径。
+> 2. **改动段底色不变回来（bug）**：原实现把 `docChangedIds` 一直挂在 state 上，底色永不消失；且我用了 `--accent-soft`，
+>    而 classic 主题的 accent 是**暗红**（`#8c3b2e`/`#f3e2dc`），所以看起来是"红色且不恢复"。
+>    改为**独立高亮 token** `--hl-changed` / `--hl-changed-soft`（青绿系，三套主题各给值，**刻意不跟随 accent**，
+>    与对比模式的 红=删除 / 黄=修改 / 绿=新增 都能区分），并在 `CompilationStep` 内 **3.5 秒后自动清除**。
+> 3. **人工修改模式改为持久化 + 不可逆**（用户裁定改写原 D5）：新增 Migration 034 `compilations.manual_edit INTEGER NOT NULL DEFAULT 0`、
+>    仓储 `setCompilationManualEdit`、IPC `compilation:manualEdit`、preload `enterCompilationManualEdit`；
+>    界面状态一律由 `compilation.manualEdit` 派生（不再有渲染层 `manualMode` state），**只增不减、没有反向通道**，
+>    切换任务/重启软件均保持。不记版本、不登记撤销栈（否则撤销能把它退回去，违背"不可逆"）。
+>    真实库副本演练：Migration 33 → 34，`manual_edit` 列 `INTEGER NOT NULL DEFAULT 0`，5 份存量汇编全部为 0，汇编/段落数零变化，`integrity_check=ok`。
+> 4. **改完时间自动重排 + 滚动定位 + 2 秒高亮**：`compilation:updateItem` 在**同一次操作内**（`params.ts !== undefined` 时）
+>    调用 `reorderCompilationItemsByTs(cid, 'asc')` 并返回重排后的完整 `compilation`（契约加可选字段，前端整体替换，
+>    **不额外记版本**——用户视角这是一次编辑）；前端 `refocus={id, nonce}` 触发滚动到该段新位置 + `is-refocused` 高亮 2 秒，
+>    并把工具栏排序图标复位为 ↑。配套：编辑弹窗**只提交真正改动的字段**（原来每次保存都带 `ts`，
+>    会把"只改正文"误判成"改了时间"，无谓重排并冲掉用户手调的顺序）。
+> 5. **用户明确要求改数字时不再校验**（用户裁定）：op 上加 `allowNewNumbers?: boolean`（`replace` / `insertAfter` / `replaceAll.paragraphs` 均支持），
+>    提示词明确"**只有用户点名具体数值时才能加这个字段**，其它任何情况一律不加，绝不可用它给推测/估算开口子"，
+>    本地校验见到该字段**直接放行**（用户裁定"大模型和软件都照做即可"）。
+> **验证（第二轮）**：typecheck 零错误、**261/262 单测通过**（1 项 watcher chokidar 环境失败为既有问题）、生产构建成功。
 > **验证**：typecheck 零错误、**258/259 单测通过**（1 项 watcher chokidar 环境失败为既有问题）、生产构建成功。
 > **待用户实测**：配置好第 1 步模型后，在右侧对话框输入「校区建设不属于这方面的内容，请你把校区建设相关内容都删掉」→ 相关段被删除、查看器即时更新并高亮；错误路径（幻觉段号、跨来源 merge、引用了来源中不存在的数字、乐观锁冲突）。
 
@@ -502,7 +524,7 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 | **D2** | 圆标数字的含义 | **A**：**本汇编内**按首次引用顺序编号 1..N（同一篇文章的多段共用同一编号；编号只增不回收） |
 | **D3** | 大模型编辑协议 | **A**：ops 引用段 id（`delete/replace/insertAfter/move/merge/split/setTime`）+ `replaceAll` 逃生舱；本地逐条校验后应用 |
 | **D4** | 时间排序 | **C + D**：结构化 `year/month` + 本地稳定多键排序（年→月→来源序号→生成序）+ **按年份分节渲染**（`## 2018 年`）+ 允许用对话"移动段落" |
-| **D5** | 手动编辑 | **用户补充裁定（覆盖面超出原三选项）**：**确认汇编（finalized）之前查看器无任何直接编辑入口，只能通过对话框让大模型改**；确认后工具栏出现 **「开始人工修改」** 按钮，点击弹**不可逆二次确认**，确认后进入手动编辑模式（详见 7.5）。后期如需调整再议 |
+| **D5** | 手动编辑 | **用户补充裁定（覆盖面超出原三选项）**：**确认汇编（finalized）之前查看器无任何直接编辑入口，只能通过对话框让大模型改**；确认后工具栏出现 **「开始人工修改」** 按钮，点击弹**不可逆二次确认**，确认后进入手动编辑模式（详见 7.5）。**2026-09-10 验收后再补充**：人工修改模式**落库持久化且不可逆**——进入一次即永久生效，切换任务与重启软件都保持，不提供回到锁定态的入口 |
 | **D6** | 旧机制处置 | **A**：废弃「大模型修正」记录（`compilation_repairs`）与卡片回收站，撤销/恢复改为"上一版/下一版"；破坏性清理放在 7.7（新界面与版本机制上线后） |
 
 > **实施节奏（用户敲定）**：**按阶段推进，每完成一阶段停下来等用户验收**（每阶段完成即提交，遵守"一个提交一个目的"）。开工顺序：7.1 → 7.2 → 7.3 → 7.4 → 7.5 → 7.6 → 7.7。

@@ -932,6 +932,16 @@ ALTER TABLE compilations ADD COLUMN extract_scan TEXT;
         upd.run(year, month, day, confidence, ordinal, r.id)
       }
     }
+  },
+  {
+    // 2026-09-10（Phase 7.5 验收反馈）：用户裁定「人工修改模式一旦进入就不可逆」——
+    // 需要跨任务切换与软件重启保持，因此必须落库，不能只存在渲染层状态里。
+    // 语义：0 = 汇编确认前的人机协同（只能通过对话框让大模型改）；1 = 已解锁人工修改。
+    // 只增不减（没有把 1 改回 0 的入口）。
+    version: 34,
+    sql: `
+ALTER TABLE compilations ADD COLUMN manual_edit INTEGER NOT NULL DEFAULT 0;
+`
   }
 ]
 

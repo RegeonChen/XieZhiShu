@@ -34,6 +34,8 @@ interface CompilationRow {
   status: CompilationStatus
   created_at: string
   updated_at: string
+  /** Migration 034（Phase 7.5）：1 = 已解锁人工修改模式（不可逆） */
+  manual_edit: number
 }
 
 interface CompilationItemRow {
@@ -198,8 +200,26 @@ export function getCompilationById(id: string): Compilation | null {
     updatedAt: row.updated_at,
     items: getItemsByCompilation(row.id),
     contradictions: getContradictionsByCompilation(row.id),
-    repairs: listRepairsByCompilation(row.id)
+    repairs: listRepairsByCompilation(row.id),
+    manualEdit: (row.manual_edit ?? 0) === 1
   }
+}
+
+/**
+ * 解锁「人工修改」模式（Phase 7.5 / D5 补充裁定，Migration 034）。
+ * **只增不减**：用户明确"进入一次即不可逆，不允许回到锁定的人机写作模式"，
+ * 所以没有任何把 1 改回 0 的入口（`enabled=false` 仅用于将来可能的运维手段）。
+ */
+export function setCompilationManualEdit(compilationId: string, enabled = true): Compilation | null {
+  const db = getDb()
+  const row = db.prepare('SELECT id FROM compilations WHERE id = ?').get(compilationId)
+  if (!row) return null
+  db.prepare('UPDATE compilations SET manual_edit = ?, updated_at = ? WHERE id = ?').run(
+    enabled ? 1 : 0,
+    new Date().toISOString(),
+    compilationId
+  )
+  return getCompilationById(compilationId)
 }
 
 export function listCompilationsByTask(taskId: string): Compilation[] {
@@ -218,7 +238,8 @@ export function listCompilationsByTask(taskId: string): Compilation[] {
       updatedAt: r.updated_at,
       items: [],
       contradictions: [],
-      repairs: []
+      repairs: [],
+      manualEdit: (r.manual_edit ?? 0) === 1
     }
   })
 }
@@ -1365,6 +1386,20 @@ if (import.meta.vitest) {
 
       deleteCompilationItem(item.id)
       expect(getCompilationById(c.id)!.items).toHaveLength(0)
+    })
+
+    it('persists the irreversible manual-edit unlock (Phase 7.5, Migration 034)', () => {
+      const { taskId } = seed()
+      const c = createCompilation({ taskId, title: '汇编' })
+      // 默认未解锁
+      expect(getCompilationById(c.id)!.manualEdit).toBe(false)
+      const unlocked = setCompilationManualEdit(c.id)!
+      expect(unlocked.manualEdit).toBe(true)
+      // 重新读取仍是 true（落库，不是内存态）——切换任务/重启后应保持
+      expect(getCompilationById(c.id)!.manualEdit).toBe(true)
+      // 列在列表查询里也要带上
+      expect(listCompilationsByTask(taskId).find((x) => x.id === c.id)!.manualEdit).toBe(true)
+      expect(setCompilationManualEdit('不存在的汇编')).toBeNull()
     })
 
     it('recomputes structured time and marks origin when the user edits text or the time label', () => {
