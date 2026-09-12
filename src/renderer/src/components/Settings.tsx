@@ -99,9 +99,21 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docS
   const [reindexing, setReindexing] = useState(false)
   const [indexMsg, setIndexMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
+  /**
+   * preload 桥能力自检（2026-09-12 实测踩坑）：Electron 的 preload **只在创建窗口时加载一次**，
+   * 界面热更新/刷新不会换掉它。于是"新界面 + 旧桥"会出现 `xxx is not a function` 这种莫名报错。
+   * 这里按方法存在性自检，缺方法时给出"请重启软件"的明确指引，而不是抛 TypeError。
+   */
+  const ragApiReady = typeof window.api.getRagIndexStatus === 'function' && typeof window.api.reindexRag === 'function'
+
   const loadRagStatus = useCallback(async () => {
-    const res = await window.api.getRagIndexStatus()
-    if (res.ok && res.data) setRagStatus(res.data)
+    if (typeof window.api.getRagIndexStatus !== 'function') return
+    try {
+      const res = await window.api.getRagIndexStatus()
+      if (res.ok && res.data) setRagStatus(res.data)
+    } catch {
+      /* 桥不可用：上方 ragApiReady 提示已覆盖，这里静默 */
+    }
   }, [])
 
   useEffect(() => {
@@ -129,6 +141,10 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docS
 
   const handleReindex = async () => {
     setIndexMsg(null)
+    if (typeof window.api.reindexRag !== 'function') {
+      setIndexMsg({ ok: false, text: zhCN.settingsPage.index.staleBridge })
+      return
+    }
     setReindexing(true)
     try {
       const res = await window.api.reindexRag()
@@ -532,13 +548,16 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docS
               type="button"
               className="source-list__btn source-list__btn--primary"
               onClick={() => void handleReindex()}
-              disabled={reindexing}
+              disabled={reindexing || !ragApiReady}
             >
               {reindexing ? zhCN.settingsPage.index.rebuilding : zhCN.settingsPage.index.rebuildBtn}
             </button>
           </div>
         </div>
         <p className="settings__hint">{zhCN.settingsPage.index.hint}</p>
+        {!ragApiReady ? (
+          <p className="settings__hint settings__hint--err">{zhCN.settingsPage.index.staleBridge}</p>
+        ) : null}
         {ragStatus ? (
           <p className="settings__workspace-path">
             <span className={`settings__status-chip${ragStatus.failed === 0 && ragStatus.ready === ragStatus.total && ragStatus.total > 0 ? ' is-ok' : ''}`}>
