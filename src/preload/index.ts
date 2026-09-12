@@ -290,6 +290,10 @@ const api = {
   ): Promise<ApiResult<{ sites: number; siteErrors: number; hits: number; fetched: number; skippedByCap: number; chars: number; pinned: number; cleared: number }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_REFRESH_WEB_MATERIALS, { taskId, query })
   },
+  /** 已锁定的网页材料篇数（只读）：面板据此在非生成状态也显示「重新检索网页材料」入口 */
+  getWebMaterials(taskId: string): Promise<ApiResult<{ pinned: number }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_WEB_MATERIALS, { taskId })
+  },
   /** 工作区状态（目录 + 资料统计） */
   getWorkspaceStatus(): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.WORKSPACE_STATUS)

@@ -70,6 +70,8 @@ import {
   type CompilationAdoptWebMaterialsRes,
   type CompilationRefreshWebMaterialsReq,
   type CompilationRefreshWebMaterialsRes,
+  type CompilationWebMaterialsReq,
+  type CompilationWebMaterialsRes,
   type SourceDeleteRes,
   type SourceDeleteManyRes
 } from '../shared/ipc'
@@ -1253,6 +1255,18 @@ handleLogged(IPC.COMPILATION_REFRESH_WEB_MATERIALS, async (_event, params: Compi
       logMain('compilation', `重新检索网页材料：清空 ${cleared} 篇 → 本轮没有取到网页材料（站点失败 ${web.stats.siteErrors}）`)
     }
     return { ok: true, data: { ...web.stats, pinned, cleared } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 已锁定的网页材料篇数（第三批 A1 补强，只读）：让面板在非生成状态/重启后也能显示
+// 「本任务已锁定 N 篇」与「重新检索网页材料」入口——此前该入口只在生成模式下才渲染，
+// 而重新生成又会先按旧集合复用，用户根本够不到"换一批材料"。
+handleLogged(IPC.COMPILATION_WEB_MATERIALS, (_event, params: CompilationWebMaterialsReq): ApiResult<CompilationWebMaterialsRes> => {
+  try {
+    if (!params.taskId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
+    return { ok: true, data: { pinned: listPinnedWebMaterials(params.taskId).length } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
