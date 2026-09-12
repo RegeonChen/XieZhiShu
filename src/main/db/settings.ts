@@ -43,6 +43,12 @@ export function getSettings(): AppSettings {
   if (compilationProviderId) settings.compilationProviderId = compilationProviderId
   const draftProviderId = getSetting('draft_provider_id')
   if (draftProviderId) settings.draftProviderId = draftProviderId
+  // Phase 7.6：资料汇编字号档位（缺省 = medium，调用方自行兜底）
+  const docScale = getSetting('doc_scale')
+  if (docScale === 'small' || docScale === 'medium' || docScale === 'large') settings.docScale = docScale
+  // 长任务保持唤醒：只在显式关闭时落库（缺省即开启）
+  // 注：原先只写不读，导致该开关重启后被重置为"开启"——2026-09-10 一并修掉
+  if (getSetting('keep_awake') === 'false') settings.keepAwake = false
   return settings
 }
 
@@ -91,6 +97,18 @@ export function updateSettings(patch: Partial<AppSettings>): AppSettings {
     }
   }
 
+  if ('keepAwake' in patch) {
+    if (patch.keepAwake === false) setSetting('keep_awake', 'false')
+    else deleteSetting('keep_awake') // 缺省即开启，清除键即可回到默认
+  }
+
+  if ('docScale' in patch) {
+    const v = patch.docScale
+    // 非法值一律当作"回到默认"，避免把坏值写进库
+    if (v === 'small' || v === 'large') setSetting('doc_scale', v)
+    else deleteSetting('doc_scale') // medium 是默认值，不落库
+  }
+
   return getSettings()
 }
 
@@ -119,6 +137,28 @@ if (import.meta.vitest) {
     it('clears settings when set to undefined', () => {
       const cleared = updateSettings({ dataDir: undefined })
       expect(cleared.dataDir).toBeUndefined()
+    })
+
+    it('persists the compilation font scale and the keep-awake switch (Phase 7.6)', () => {
+      // 缺省：docScale 未设置（调用方按 medium 兜底）、keepAwake 视为开启
+      const initial = updateSettings({ docScale: undefined, keepAwake: undefined })
+      expect(initial.docScale).toBeUndefined()
+      expect(initial.keepAwake).toBeUndefined()
+
+      // 显式改档位/关闭唤醒 → 重新读取（模拟重启）仍然生效
+      updateSettings({ docScale: 'large', keepAwake: false })
+      const reopened = getSettings()
+      expect(reopened.docScale).toBe('large')
+      expect(reopened.keepAwake).toBe(false)
+
+      // 回到默认：medium 不落库、keepAwake 清除键即恢复开启
+      updateSettings({ docScale: 'medium', keepAwake: true })
+      const reset = getSettings()
+      expect(reset.docScale).toBeUndefined()
+      expect(reset.keepAwake).toBeUndefined()
+      // small 也要能持久化（三个档位都可选）
+      updateSettings({ docScale: 'small' })
+      expect(getSettings().docScale).toBe('small')
     })
 
     it('rejects unknown provider id', () => {

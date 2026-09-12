@@ -222,6 +222,14 @@ export const zhCN = {
       on: '开启',
       off: '关闭'
     },
+    /* Phase 7.6（用户要求）：资料汇编字号档位，可持久化 */
+    docScale: {
+      title: '资料汇编字号',
+      hint: '调整「生成汇编」右栏正文的字号与左右留白：小 = 改造前的字号与宽度，中、大依次放大字号并收窄留白。设置会保存，重启后仍然生效。',
+      small: '小',
+      medium: '中',
+      large: '大'
+    },
     exportLog: {
       btn: '导出日志',
       exporting: '导出中...',
@@ -463,6 +471,8 @@ export const zhCN = {
     more: '更多操作',
     collapse: '收起',
     contradict: '矛盾',
+    /** Phase 7.6：矛盾分组编号（用户要求段尾标注"矛盾N"，与导出文档同源） */
+    contradictNo: '矛盾{n}',
     generating: '正在生成资料汇编（本地宽召回 + AI 细读，资料较多时可能需要数分钟）...',
     interruptedTitle: '大模型生成中断',
     interruptedMessage: '已中断于：{stage}。原因：{reason}。请修复该问题（如充值余额 / 检查网络）后点击「尝试继续」，将从断点续跑，无需重新开始。',
