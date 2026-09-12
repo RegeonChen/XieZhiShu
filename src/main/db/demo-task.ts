@@ -1,6 +1,6 @@
 /**
  * demo-task.ts —— 演示用「测试任务（仅作为演示）」种子（2026-08-28）。
- * 仅用于新手教程展示三段式撰写闭环：预置对话历史、资料汇编（含矛盾与大模型修正标记）、志书初稿。
+ * 仅用于新手教程展示三段式撰写闭环：预置对话历史、资料汇编（连续文档，含矛盾）、志书初稿。
  * 幂等：若已存在同标题任务则直接返回，不重复创建。
  */
 import Database from 'better-sqlite3'
@@ -10,7 +10,17 @@ import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
 import { createTask, getTaskById, updateTaskInstruction } from './tasks'
 import { addTaskMessage, listTaskMessages } from './task-messages'
-import { createCompilation, insertCompilationItems, insertCompilationContradictions, confirmCompilation, listCompilationsByTask, importCompilationIntoTask } from './compilations'
+import {
+  createCompilation,
+  insertCompilationContradictions,
+  confirmCompilation,
+  listCompilationsByTask,
+  importCompilationIntoTask,
+  ensureCompilationSources,
+  upsertCompilationParagraphs,
+  snapshotCompilationVersion
+} from './compilations'
+import { parseTimeLabel } from '../writing/compilation-document'
 import { createDraft, replaceDraftSegments, addSegmentSource, getLatestDraftByTask } from './drafts'
 
 const DEMO_INSTRUCTION =
@@ -81,16 +91,48 @@ function seedCompileDemoTask(): WritingTask {
   addTaskMessage(
     task.id,
     'assistant',
-    '已生成资料汇编：7 张卡片，1 组矛盾待处理。请审阅资料卡片并处理矛盾，处理完成后可点击「导出资料汇编」。',
+    '已生成资料汇编：7 段，1 组矛盾待处理。请审阅汇编内容并处理矛盾；需要修改可点右下角悬浮按钮与大模型对话，随时可点击「导出资料汇编」。',
     'notice'
   )
 
-  // 资料汇编：卡片 + 矛盾 + 二次改动（语义补全/修订）
+  /*
+   * 资料汇编：连续文档（Phase 7.1 起的数据模型）。
+   * 演示数据必须走**与真实生成管线相同**的落库路径（段落 upsert + 来源编号表 + v1 版本），
+   * 否则演示汇编会缺少年份分节、来源圆标与版本基线，界面看起来"功能没生效"。
+   * 来源编号按「正文中首次引用」的顺序 1..N 分配（与 `ensureCompilationSources` 同口径）。
+   */
   const compilation = createCompilation({ taskId: task.id, title: DEMO_INSTRUCTION })
-  const items = insertCompilationItems(
+  const titleBySourceId = new Map(DEMO_SOURCES.map((s) => [s.id, s.title]))
+  const ordinalBySourceId = new Map<string, number>()
+  for (const it of DEMO_ITEMS) {
+    if (!ordinalBySourceId.has(it.sourceId)) ordinalBySourceId.set(it.sourceId, ordinalBySourceId.size + 1)
+  }
+  const items = upsertCompilationParagraphs(
     compilation.id,
-    DEMO_ITEMS.map((it) => ({ sourceId: it.sourceId, excerpt: it.excerpt, ts: it.ts, extraTags: [] }))
+    DEMO_ITEMS.map((it) => {
+      const time = parseTimeLabel(it.ts)
+      return {
+        sourceId: it.sourceId,
+        text: it.excerpt,
+        timeLabel: it.ts,
+        year: time.year,
+        month: time.month,
+        day: time.day,
+        timeConfidence: time.confidence,
+        sourceOrdinal: ordinalBySourceId.get(it.sourceId),
+        origin: 'generate' as const,
+        revision: 1,
+        kind: 'paragraph' as const
+      }
+    })
   )
+  // 来源编号表（含引用计数，用于"删除来源影响多少段"的提示）
+  ensureCompilationSources(
+    compilation.id,
+    DEMO_ITEMS.map((it) => ({ sourceId: it.sourceId, title: titleBySourceId.get(it.sourceId) ?? it.sourceId }))
+  )
+  snapshotCompilationVersion(compilation.id, 'generate')
+
   const byExcerpt = new Map(items.map((it) => [it.excerpt, it]))
   const item5 = byExcerpt.get('2020 年，全市新增幼儿园 3 所。')
   const item6 = byExcerpt.get('2020 年，全市新增幼儿园 5 所。')

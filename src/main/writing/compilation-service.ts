@@ -25,7 +25,7 @@ import { safeStorageCodec } from '../llm/secret'
 import { chatCompletion, type ChatMessage } from '../llm/chat'
 import { logMain } from '../logger'
 import { fetchRelatedSiteSources, extractTopicTerms, expandDomainHints } from '../web-source/site-crawler'
-import { assembleDocument, stripSpaces, textSimilarity, type AssembledParagraph } from './compilation-document'
+import { assembleDocument, parseTimeLabel, stripSpaces, textSimilarity, type AssembledParagraph } from './compilation-document'
 import {
   emptyExtractStats,
   extractBatch,
@@ -40,7 +40,6 @@ import {
 import {
   createCompilation,
   ensureCompilationSources,
-  insertCompilationItems,
   insertCompilationContradictions,
   replaceCompilationItems,
   setCompilationExtractScan,
@@ -1066,17 +1065,8 @@ async function readWindow(
 }
 
 function finalizeCompilationLocal(taskId: string, title: string, chunks: RetrievedChunk[]): GenerateCompilationResult {
-  const dedup = new Set<string>()
-  const items: CompilationItemInput[] = []
-  for (const c of chunks) {
-    const key = c.sourceId + '|' + c.position + '|' + c.text
-    if (dedup.has(key)) continue
-    dedup.add(key)
-    const m = c.text.match(/(18|19|20)\d{2}/)
-    items.push({ sourceId: c.sourceId, excerpt: c.text, ts: m ? m[0] + ' 年' : undefined })
-  }
   const compilation = createCompilation({ taskId, title })
-  insertCompilationItems(compilation.id, sortItemsByTs(items))
+  persistLocalFallback(compilation.id, localFallbackParagraphs(chunks))
   return { ok: true, compilationId: compilation.id, candidateChunks: chunks.length, contradictions: 0 }
 }
 
@@ -1651,19 +1641,74 @@ function finalizeCompilationInto(
 
 /** 无 Provider / AI 无产出时的本地降级（替换到已创建的汇编） */
 function finalizeCompilationLocalInto(compilationId: string, chunks: RetrievedChunk[]): GenerateCompilationResult {
+  const paragraphs = localFallbackParagraphs(chunks)
+  persistLocalFallback(compilationId, paragraphs)
+  return { ok: true, compilationId, candidateChunks: chunks.length, contradictions: 0 }
+}
+
+/** 本地降级：来源块整段保留，年份直接从正文抓（无大模型可用，不做裁剪与整合） */
+function localFallbackParagraphs(chunks: RetrievedChunk[]): AssembledParagraph[] {
   const dedup = new Set<string>()
-  const items: CompilationItemInput[] = []
+  const paragraphs: AssembledParagraph[] = []
   for (const c of chunks) {
     const key = c.sourceId + '|' + c.position + '|' + c.text
     if (dedup.has(key)) continue
     dedup.add(key)
     // 年份正则：`\d{2}` 曾被误写为 `d{2}`（少一个反斜杠，等同于字面量「d」），
-    // 导致本地降级产出的卡片永远没有时间戳；此处修正为 4 位年份匹配。
+    // 导致本地降级产出的段落永远没有时间戳；此处修正为 4 位年份匹配。
     const m = c.text.match(/(18|19|20)\d{2}/)
-    items.push({ sourceId: c.sourceId, excerpt: c.text, ts: m ? m[0] + ' 年' : undefined })
+    const time = parseTimeLabel(m ? m[0] + ' 年' : undefined)
+    paragraphs.push({
+      ordinal: paragraphs.length,
+      sourceId: c.sourceId,
+      text: c.text,
+      timeLabel: time.label,
+      year: time.year,
+      month: time.month,
+      day: time.day,
+      timeConfidence: time.confidence,
+      origin: 'generate',
+      revision: 1,
+      kind: 'paragraph',
+      kept: true,
+      parentIndex: paragraphs.length
+    })
   }
-  replaceCompilationItems(compilationId, sortItemsByTs(items))
-  return { ok: true, compilationId, candidateChunks: chunks.length, contradictions: 0 }
+  return paragraphs
+}
+
+/**
+ * 本地降级落库：刻意走**与 AI 管线相同的段落模型**（来源编号 + 结构化时间 + v1 版本），
+ * 否则降级生成出的汇编没有年份分节、没有来源圆标、也没有版本基线，界面看起来像功能坏了。
+ */
+function persistLocalFallback(compilationId: string, paragraphs: AssembledParagraph[]): void {
+  const sourceOrder: string[] = []
+  for (const p of paragraphs) {
+    if (p.sourceId && !sourceOrder.includes(p.sourceId)) sourceOrder.push(p.sourceId)
+  }
+  const sourceRefs = ensureCompilationSources(
+    compilationId,
+    sourceOrder.map((sourceId) => ({ sourceId, title: getSourcesByIds([sourceId])[0]?.title ?? sourceId }))
+  )
+  const ordinalBySourceId = new Map(sourceRefs.filter((s) => s.sourceId).map((s) => [s.sourceId as string, s.ordinal]))
+  upsertCompilationParagraphs(
+    compilationId,
+    paragraphs.map((p) => ({
+      sourceId: p.sourceId ?? '',
+      text: p.text,
+      timeLabel: p.timeLabel,
+      year: p.year,
+      month: p.month,
+      day: p.day,
+      timeConfidence: p.timeConfidence,
+      sourceOrdinal: p.sourceId ? ordinalBySourceId.get(p.sourceId) : undefined,
+      origin: p.origin,
+      revision: p.revision,
+      kind: p.kind,
+      kept: p.kept
+    }))
+  )
+  snapshotCompilationVersion(compilationId, 'generate')
 }
 
 /**

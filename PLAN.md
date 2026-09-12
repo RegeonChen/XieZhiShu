@@ -599,15 +599,14 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 
 ### 7.7 收尾（端到端、性能、文档、清理）
 
-> **Status（2026-09-10）**：**进行中**。切片 A 已提交（`a42e3a1`：删除被 7.5 取代的「汇编调整」链路——`compilation-adjust.ts` + IPC `compilation:adjust` + 类型 + preload + 文案）。
+> **Status（2026-09-10）**：**代码清理部分已完成（切片 A–E），仅剩用户侧端到端验证（切片 F）**。切片 A 已提交（`a42e3a1`：删除被 7.5 取代的「汇编调整」链路——`compilation-adjust.ts` + IPC `compilation:adjust` + 类型 + preload + 文案）；切片 B1 已提交（`336c2c4`：删除 `purify-service.ts`/`repair-service.ts` 与 `compilation-service.ts` 里已无人调用的两个阶段函数）；切片 B2 已提交（`777e2db`：修正链路端到端下线——渲染层徽标/详情弹窗/工具栏统计、`Compilation.repairs` 类型、两个 IPC 通道、`compilation-repairs.ts` 仓储、`CompilationItemInput.repair`）；切片 C 已提交（`77e3647`：Migration 036 删表 + 回收站收缩为仅矛盾 + 撤销快照去掉 `repairs`）；切片 D 已提交（`34cab09`：删除 `compilation:updateItem`/`deleteItem`/`version:diff`/`version:restore` 四个无入口通道）；切片 E 已提交（`4be1396`：死样式、文档、演示/降级落库口径、基线数字）。
 >
 > **⚠ 对原计划的修正**：原 7.7 条目写着"删除 `compilation-undo.ts` 快照栈"，但**这条已作废**——用户在 7.5/7.6 验收中明确要求「撤销/恢复」可用，并要求**矛盾采纳/忽略也可撤销**，内存快照栈是这套能力的载体，**保留**。
 >
-> **剩余切片（按此顺序）**：
-> - **B 修正链路收尾**：删 `purify-service.ts`、`repair-service.ts` 两个文件与 `compilation-service.ts` 里已无人调用的 `runPurifyPhase`（约 1320–1485 行）、`runRepairPhase`（约 1498–1587 行）及其 import/状态字段；再删渲染层「✎ 经过大模型修正」徽标 + 修正详情弹窗、IPC `repairs:revert/apply`、preload、`Compilation.repairs` 类型与 `compilation-repairs.ts` 仓储。
-> - **C 破坏性 DB 清理（Migration 036）**：`DROP TABLE compilation_repairs`、`DROP TABLE compilation_card_recycle_bin`；回收站收缩为**仅矛盾**（保留 `compilation_recycle_bin`），同步删卡片回收站的快照/恢复代码与 `deleteCompilationItem`/`deleteCompilationItems*` 的入站逻辑、`compilation-undo.ts` 快照里的 `repairs`/`cardRecycleBin` 字段、来源移除提示里的"N 条大模型修正"。
-> - **D 无界面入口的通道清理**：`compilation:updateItem`/`compilation:deleteItem`/`compilation:version:diff`/`compilation:version:restore`（含 preload 与 d.ts）；仓储函数保留（`demo-task` 与单测仍在用）。
-> - **E 死样式与文档**：`main.css` 的 `.compilation-card*`/`.compilation-cards`；`docs/ui-architecture.md` 与 `docs/{data-model,shared-contracts}.md` 全量对齐；`demo-task.ts` 演示数据与新手教程文案若含"卡片"表述；更新验证基线数字。
+> **切片 B2/C 的实机影响（用户需知）**：Migration 036 是**破坏性**的。真实库副本演练结果：`compilation_repairs` 中 **130 条历史修正记录**、`compilation_card_recycle_bin` 中 **6 条待恢复卡片快照**被永久清除；6 份汇编 / 737 段落 / 10 组矛盾 / 6 条矛盾回收站条目零变化，`integrity_check=ok`、外键违规 0。升级后**回收站只剩「矛盾」一类**，此前躺在卡片回收站里的卡片无法再恢复。
+>
+> **剩余切片**：
+> - **E 死样式与文档**（已提交 `4be1396`）：`main.css` 的 `.compilation-card*`/`.compilation-cards` 已删（保留 `@keyframes compilation-card-locate`）；`docs/{ui-architecture,data-model,shared-contracts}.md` 已对齐；`demo-task.ts` 与新手教程文案的「卡片/大模型修正」表述已改，**演示任务与本地降级改为走真实段落模型落库**（来源编号表 + 段落 upsert + v1 版本，此前演示汇编缺年份分节与来源圆标、无 Provider 时生成的汇编看起来"功能没生效"）；`AGENTS.md`/`PLAN.md` 验证基线与迁移范围已更新（001–036、243/244）。
 > - **F 用户侧端到端**（我无法代做，需要真实 Provider）：生成 → 浏览（时间/编号/来源）→ 多轮对话编辑 → 复核采纳/回退 → 导出 `.docx`/`.xzsc` → 导入到新任务 → 第三步生成初稿；以及性能基线（生成耗时、查看器滚动、diff、单轮对话耗时）。
 
 - 真实 Provider 端到端：生成 → 浏览（时间/编号/来源）→ 多轮对话编辑 → 版本对比与恢复 → 导出 → 导入到新任务 → 第三步生成初稿。
