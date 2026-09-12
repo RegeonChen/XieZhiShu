@@ -169,6 +169,10 @@ interface Props {
   adoptingWeb?: boolean
   /** 纳入新网页材料（抓取站点上新命中但未纳入的文章并锁定到本任务） */
   onAdoptWebMaterials?: () => void
+  /** 正在重新检索网页材料（清空并重算本任务的材料集合） */
+  refreshingWeb?: boolean
+  /** 重新检索网页材料 */
+  onRefreshWebMaterials?: () => void
   /** 来源引用清单（消息内 #N 渲染为可点击来源） */
   sourceRefs?: SourceRefItem[]
 }
@@ -235,6 +239,8 @@ function CompilationStep({
   webScan,
   adoptingWeb,
   onAdoptWebMaterials,
+  refreshingWeb,
+  onRefreshWebMaterials,
   generatingText,
   generateProgress,
   generateInterrupt,
@@ -583,12 +589,23 @@ function CompilationStep({
               <button
                 type="button"
                 className="source-list__btn"
-                disabled={adoptingWeb === true}
+                disabled={adoptingWeb === true || refreshingWeb === true}
                 onClick={() => onAdoptWebMaterials?.()}
               >
                 {adoptingWeb ? t.webMaterialsAdopting : t.webMaterialsAdopt}
               </button>
             </>
+          ) : null}
+          {webPinned > 0 ? (
+            <button
+              type="button"
+              className="source-list__btn compilation-webinfo__refresh"
+              title={t.webMaterialsRefreshHint}
+              disabled={refreshingWeb === true || adoptingWeb === true}
+              onClick={() => onRefreshWebMaterials?.()}
+            >
+              {refreshingWeb ? t.webMaterialsRefreshing : t.webMaterialsRefresh}
+            </button>
           ) : null}
         </div>
       ) : null}

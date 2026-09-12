@@ -4842,6 +4842,10 @@ textarea:focus-visible {
   font-size: 11.5px;
   line-height: 1.6;
 }
+/* 重新检索在提示条右侧独立成组，避免与「纳入新材料」挨在一起误点 */
+.compilation-webinfo__refresh {
+  margin-left: auto;
+}
 .compilation-docchat__head:active {
   cursor: grabbing;
 }

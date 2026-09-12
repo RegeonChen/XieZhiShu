@@ -560,6 +560,13 @@ export const zhCN = {
     webMaterialsAdopted: '已纳入 {count} 篇新网页材料；点「重新生成汇编」即可使用（材料集合会随本次纳入而更新）。',
     webMaterialsAdoptNone: '没有可纳入的新文章（站点无新命中或已全部纳入）。',
     webMaterialsAdoptFailed: '纳入新网页材料失败：{message}',
+    /* 第三批 A1 补强：材料集合可重算（首次落定不理想时不必新建任务） */
+    webMaterialsRefresh: '重新检索网页材料',
+    webMaterialsRefreshHint: '清空并重算本任务的网页材料集合（重新发现、按标题相关度排序、受上限抓取）。只改材料集合，不影响当前汇编；重算后需再点「重新生成汇编」。',
+    webMaterialsRefreshing: '正在重新检索…（受抓取上限约束，可能需要几分钟）',
+    webMaterialsRefreshed:
+      '已重新检索网页材料：锁定 {fetched} 篇（标题命中 {hits} 篇，因上限未采用 {skipped} 篇）。点「重新生成汇编」即可使用。',
+    webMaterialsRefreshFailed: '重新检索网页材料失败：{message}',
     /* 大模型修正（2026-09-08 引入）已随 Phase 7.7 整体移除：软件内不再有「修正记录」概念 */
     recycleBin: '回收站',
     recycleBinTitle: '回收站',

@@ -283,6 +283,13 @@ const api = {
   adoptWebMaterials(taskId: string, query: string): Promise<ApiResult<{ added: number; skippedByCap: number; siteErrors: number }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_ADOPT_WEB_MATERIALS, { taskId, query })
   },
+  /** 重新检索网页材料（第三批 A1 补强）：清空并重算本任务的网页材料集合（不改已有汇编） */
+  refreshWebMaterials(
+    taskId: string,
+    query: string
+  ): Promise<ApiResult<{ sites: number; siteErrors: number; hits: number; fetched: number; skippedByCap: number; chars: number; pinned: number; cleared: number }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_REFRESH_WEB_MATERIALS, { taskId, query })
+  },
   /** 工作区状态（目录 + 资料统计） */
   getWorkspaceStatus(): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.WORKSPACE_STATUS)

@@ -49,6 +49,12 @@ export function pinWebMaterials(
   return added
 }
 
+/** 清空某任务锁定的网页材料（返回删除条数）；供「重新检索网页材料」重算材料集合用 */
+export function clearPinnedWebMaterials(taskId: string): number {
+  const db = getDb()
+  return db.prepare('DELETE FROM task_web_materials WHERE task_id = ?').run(taskId).changes
+}
+
 // ---- vitest inline test ----
 if (import.meta.vitest) {
   const { describe, expect, it, beforeAll, afterAll } = import.meta.vitest
@@ -77,6 +83,16 @@ if (import.meta.vitest) {
     it('drops pinned materials when their source is deleted (cascade)', () => {
       db.prepare("DELETE FROM sources WHERE id = 's1'").run()
       expect(listPinnedWebMaterials('t1').map((p) => p.sourceId)).toEqual(['s2'])
+    })
+
+    it('clears all pinned materials of a task (重新检索网页材料)', () => {
+      expect(clearPinnedWebMaterials('t1')).toBe(1)
+      expect(listPinnedWebMaterials('t1')).toHaveLength(0)
+      expect(clearPinnedWebMaterials('t1')).toBe(0)
+      // 不影响其它任务
+      db.prepare("INSERT INTO writing_tasks (id, title, scope_json) VALUES ('t2','另一任务','{\"all\":true}')").run()
+      pinWebMaterials('t2', [{ sourceId: 's2', url: 'https://x/2', title: '乙文' }])
+      expect(listPinnedWebMaterials('t2')).toHaveLength(1)
     })
   })
 }
