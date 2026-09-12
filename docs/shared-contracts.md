@@ -126,21 +126,14 @@ interface CompilationContradiction {
   status: CompilationContradictionStatus; chosenItemId?: string; createdAt: string;
   variants: CompilationContradictionVariant[];
 }
-type CompilationRepairStatus = 'pending' | 'accepted' | 'rejected';
-interface CompilationRepair {
-  id: string; compilationId: string; itemId: string; originalText: string;
-  revisedText: string; reason: string; status: 'applied' | 'reverted';   // 2026-09-08 起：默认应用，可回退/再次应用
-  createdAt: string; updatedAt: string;
-}
 interface Compilation {
   id: string; taskId: string; title: string; status: CompilationStatus;
   createdAt: string; updatedAt: string;
-  items: CompilationItem[]; contradictions: CompilationContradiction[]; repairs?: CompilationRepair[];
+  items: CompilationItem[]; contradictions: CompilationContradiction[];
 }
-/** 汇编回收站条目（判别联合：资料卡片 / 矛盾；大模型修正不再入回收站，改由卡片标记承载） */
+/** 汇编回收站条目（Phase 7.7 起**仅一类**：已采纳/已忽略、可恢复后重新取舍的矛盾） */
 type CompilationRecycleBinItem =
-  | { kind: 'contradiction'; id: string; contradiction: CompilationContradiction }
-  | { kind: 'card'; id: string; item: CompilationItem };
+  | { kind: 'contradiction'; id: string; contradiction: CompilationContradiction };
 
 /** 规范文档库（Phase 6.4.1） */
 interface StyleGuide { id: string; name: string; content: string; isDefault: boolean; createdAt: string; updatedAt: string; }
@@ -196,10 +189,10 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 
 ### 2.3.1 资料汇编（compilation，Phase 6.0，2026-08-25）
 
-三段式撰写第一步的资料汇编契约。`compilation:generate` / `compilation:regenerate` 在 Phase 6.1 已接入生成服务（本地宽召回宁多勿漏 + AI 细读 + **大模型提纯** + 大模型修正 + 矛盾标注；无 Provider / 失败降级为本地候选卡片）；生成进度经事件 `compilation:progress` 推送。CRUD / 矛盾取舍 / 确认已实现。
+三段式撰写第一步的资料汇编契约。`compilation:generate` / `compilation:continue` 已接入生成服务（本地宽召回宁多勿漏 + AI 细读筛选 + **整合提取** + 矛盾标注；无 Provider / 失败降级为本地候选段落，走同一套段落模型）；生成进度经事件 `compilation:progress` 推送。CRUD / 矛盾取舍 / 确认 / 对话编辑均以 `compilation:*` 通道实现（见下表）。
 
 > **生成管线阶段顺序（Phase 7.2，2026-09-10）**：`关键词提取 → 网页检索 → 本地宽召回 → 保守闸门 → AI 分窗细读（**只做筛选**）→ **整合提取（extract）** → 卡片矛盾扫描（contradiction）→ 落库`。
-> 原「提纯（purify）」与「修正（repair）」两个阶段已被**整合提取**取代（用户裁定 D1）：细读阶段放宽为"只挑可能相关的、宁多勿漏、整段保留"，
+> 原「提纯（purify）」与「修正（repair）」两个阶段已被**整合提取**取代（用户裁定 D1），相关服务与通道已随 Phase 7.7 删除：细读阶段放宽为"只挑可能相关的、宁多勿漏、整段保留"，
 > 由整合提取统一完成**裁剪 + 补全 + 整合**，产出志稿素材段落（段首含年份的时间 + 段尾来源编号 + **每段单一来源**）。
 > 三道本地硬校验兜住自由度：① `evidence` 必须是来源卡片原文中逐字连续的一段；② 正文里的数字必须都能在来源卡片原文中找到（**整 token** 比较，拦住编造/推算）；③ 时间可信度由本地解析 `timeLabel` 决定（不采信模型自报）。任一不过 → **降级保留原文整段**（不丢材料）并计入 `extractScan.degraded`。
 > 提示词另禁两条：**不得跨卡片拼接**（跨来源）与**不得合并互相矛盾的说法**（冲突必须保留为不同段落，否则"自由整合"会把矛盾抹平、矛盾扫描形同虚设）。
@@ -216,30 +209,27 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 > **整段化切片（Phase A/B）**：切片以**整段**为基本单元——`chunkByParagraphs`（默认上限 `CHUNK_PARAGRAPH_MAX=1000`）按换行切段；超长段仅按句号折成 ≤上限 的子块并共存同一 `paragraphIndex`；**粗细筛以整段为单位做“保留/剔除”**（段内任一子块有信号 → 整段所有子块一起保留，避免“一整段相关却被误筛”）。**资料卡片=整段/整子块**（AI 不再按时间/事实切分，excerpt=该段原文，随后由管线内的**整合提取**阶段裁剪/补全/整合为志稿段落）。
 > **整合提取阶段（Phase 7.2）**：`extractScan:{ok, message?, inputCards?, outputParagraphs?, inputChars?, outputChars?, accepted?, degraded?, droppedCards?, omitted?, passthrough?}`——卡片 → 段落与字数变化供生成汇总展示；`accepted` 为通过本地校验的段落数，`degraded` 为校验失败而降级按原文整段保留的卡片数，`droppedCards` 为模型判定与主题无关而整卡丢弃，`omitted/passthrough` 为漏答与按原文保留。`ok=false` 表示超出阶段时间预算（1200s），其余卡片**按原文整段保留**（绝不丢材料）。
 > **429 自动续传（Phase A/B）**：窗口细读/矛盾扫描遇到**限流（HTTP 429）**时，主进程自动降本次生成并发数（`reduceConcurrency` 减半、最小 1，**不写回 Provider 设置**，仅本次生效）、退避后从断点自动续跑（`runWithRateLimitAutoResume`，默认上限 `RATE_LIMIT_RESUME_LIMIT=2`）；降并发时经事件 **``compilation:advice`（`{ taskId, kind:'reduce-concurrency' }`）** 推送建议，渲染层翻译为「建议降低当前大模型的并发数」存为对话消息。若仍限流，`interrupted.retryable=true` 供前端自动续传兜底（前端最多 2 次、间隔递增），其余异常 `retryable` 缺省，仅提供手动「尝试继续」。`CompilationInterrupt` 增加 `retryable?: boolean`。
-| `compilation:updateItem` | `{ itemId, excerpt?, ts?, note?, extraTags?, kept? }` → `{ item, compilation? }` | 编辑资料段落。**Phase 7.5**：`ts` 变化时主进程在**同一次操作内**按时间重排整份汇编（`reorderCompilationItemsByTs(cid,'asc')`）并额外返回重排后的完整 `compilation`（前端整体替换，避免界面顺序与库中 position 不一致）；同时重算 `year/month/day/time_confidence`（年鉴惯例兜底）并标记 `origin='user-edit'`、`revision+1`。只改正文时不重排 |
-| `compilation:deleteItem` | `{ itemId }` → `{ ok: true }` | 删除资料卡片 |
+| `compilation:updateItem` / `compilation:deleteItem` | ~~`{ itemId, excerpt?, ts?, note?, extraTags?, kept? }` / `{ itemId }`~~ | **已于 Phase 7.7 删除**：段落级编辑/删除早无界面入口（人工修改模式删除后即无人调用）。仓储函数 `updateCompilationItem`/`deleteCompilationItem` 保留（单测在用） |
 | `compilation:resolveContradiction` | `{ contradictionId, action: 'resolve'\|'ignore', chosenItemId? }` → `{ contradiction: CompilationContradiction }` | 汇编矛盾取舍：resolve 须传保留的卡片 id（属于该矛盾）；ignore 清空已选 |
 | `compilation:confirm` | `{ compilationId }` → `{ compilation: Compilation }` | 确认汇编（finalize），进入下一步 |
 | `compilation:manualEdit` | ~~`{ compilationId }` → `{ compilation }`~~ | **已于 2026-09-10 三轮验收中删除**：软件内不再提供逐段手改，改为「导出资料汇编 → 本地修改」。Migration 035 删除了 `compilations.manual_edit` 列 |
-| `compilation:reorder` | `{ compilationId, direction: 'asc'|'desc' }` → `{ compilation: Compilation }` | 资料汇编卡片按时间标签重新排序并重写 position（asc 正序 / desc 反序；无时间戳排最后），返回最新汇编 |
-| `compilation:undo` / `compilation:redo` | `{ compilationId }` → `{ compilation, undoAvailable, redoAvailable }` | 撤销/恢复资料汇编操作（快照机制：编辑/删除/调整/矛盾取舍/大模型修正回退或应用/回收站恢复/排序/确认等，会话内） |
+| `compilation:reorder` | `{ compilationId, direction: 'asc'|'desc' }` → `{ compilation: Compilation }` | 资料汇编段落按时间标签重新排序并重写 position（asc 正序 / desc 反序；无时间戳排最后），返回最新汇编 |
+| `compilation:undo` / `compilation:redo` | `{ compilationId }` → `{ compilation, undoAvailable, redoAvailable }` | 撤销/恢复资料汇编操作（快照机制：**撤销只登记对话编辑**，其余会改内容/顺序的路径一律作废撤销栈，会话内） |
 | `compilation:undoState` | `{ compilationId }` → `{ undoAvailable, redoAvailable }` | 查询当前汇编可撤销/可恢复步数 |
-| `compilation:recycleBin:list` | `{ compilationId }` → `{ items: CompilationRecycleBinItem[] }` | 回收站条目（资料卡片 + 矛盾两类，按删除时间倒序 = 最近删除在前） |
-| `compilation:recycleBin:restore` | `{ binId }` → `{ contradiction?, item?, card? }` | 恢复条目：矛盾回到 pending；资料卡片还原（含其矛盾变异与大模型修正记录，映射为 card 返回） |
-| `compilation:repairs:revert` | `{ repairId }` → `{ item, repair }` | **回退**一条大模型修正（卡片还原为修正前文本，状态 applied→reverted；登记撤销栈） |
-| `compilation:repairs:apply` | `{ repairId }` → `{ item, repair }` | **再次应用**一条已回退的修正（卡片回到修正后文本，状态 reverted→applied；登记撤销栈） |
-| `compilation:versions` | `{ compilationId }` → `{ versions: CompilationVersionSummary[] }` | **Phase 7.4** 版本列表（`versionNo / origin / instruction? / reply? / changeSummary / createdAt`）。内容变更类操作各记一版；**恢复不记版本**；只保留最近 2 版（`pruneCompilationVersions(id, 2)`） |
-| `compilation:version:diff` | `{ compilationId, fromVersionNo, toVersionNo }` → `{ fromVersionNo, toVersionNo, segments, summary }` | **Phase 7.4** 两版差异（段落级 + modified 段的行内字级 diff）。`segments[].kind ∈ added/removed/modified/unchanged`；**被删除的段带 `beforeId`**（= 删除前紧邻的下一段），渲染层据此把「已删除」占位插回原位；差异过大（>400k 单元格）时降级为整块标记 |
-| `compilation:version:restore` | `{ compilationId, versionNo }` → `{ compilation, restoredFrom }` | 恢复到某历史版本（写回全部段落列；**不记录新版本**）。**渲染层暂未提供入口**（用户 2026-09-10：先不做该功能） |
+| `compilation:recycleBin:list` | `{ compilationId }` → `{ items: CompilationRecycleBinItem[] }` | 回收站条目（**Phase 7.7 起仅矛盾一类**，按时间倒序 = 最近删除在前） |
+| `compilation:recycleBin:restore` | `{ binId }` → `{ contradiction? }` | 恢复条目：矛盾回到 pending（卡片回收站与 `compilation_card_recycle_bin` 已随 Phase 7.7 删除） |
+| `compilation:repairs:revert` / `compilation:repairs:apply` | ~~`{ repairId }` → `{ item, repair }`~~ | **已于 Phase 7.7 删除**（连同渲染层徽标与弹窗、`compilation-repairs.ts` 仓储、`compilation_repairs` 表） |
+| `compilation:versions` | `{ compilationId }` → `{ versions: CompilationVersionSummary[] }` | **Phase 7.4** 版本列表（`versionNo / origin / instruction? / reply? / changeSummary / createdAt`）。内容变更类操作各记一版；**恢复不记版本**；只保留最近 2 版（`pruneCompilationVersions(id, 2)`）。当前唯一用途是对话编辑的**乐观锁基线**（`baseVersionNo`），界面无版本下拉 |
+| `compilation:version:diff` / `compilation:version:restore` | ~~两版差异 / 恢复到某版~~ | **已于 Phase 7.7 删除**：复核态改为「本次修改前后」的自动差异（由 `compilation:doc:edit` 返回），版本下拉与恢复按钮早已移除。仓储 `restoreCompilationFromVersion` 保留为版本恢复原语（当前无调用方） |
 | `compilation:doc:edit` | `{ compilationId, instruction, baseVersionNo? }` → `{ compilation, reply, applied, rejected, versionNo?, changedIds, changeSummary, diff }` | **Phase 7.5** 与文档对话：把 id 化的当前文档 + 用户要求交给大模型，模型返回 `{reply, ops}`，本地逐条校验后应用并记一个版本（origin `llm-edit`）。`rejected` 为被拒 op 与原因；`changedIds` 供前端滚动到首个改动段；**`diff` 是"本次修改前后"的段落差异**（主进程直接比对改前/改后快照，不靠版本号推算），前端据此**自动进入复核态**。乐观锁冲突返回 `VERSION_CONFLICT` |
 | `compilation:messages` | `{ compilationId }` → `{ messages: {role, content, versionNo?, createdAt}[] }` | **Phase 7.5** 汇编级对话历史（`compilation_messages`，按时间升序） |
 
-> **大模型修正（2026-09-08 改版；2026-09-10 收紧）**：修正由生成管线在「提纯」之后、「卡片矛盾扫描」之前产出并**默认应用**（不再有 `repairScan`/`repairs:list`/`repairs:decide` 三个旧通道），卡片上以「经过大模型修正」标记承载；渲染层点标记弹窗查看修正前原文与理由并选择回退/再次应用。修正阶段异常 → `interrupted`（429 置 `retryable`），`compilation:continue` 续跑只重跑未完成批次；超出阶段预算 → 结果带 `repairScan:{ok:false,message}` 提示「修正未完成」。**时间戳规则（2026-09-10）**：需要补齐的情形为「时间为『无』**或时间缺少年份**（如 `5 月 19 日`、`7—9 日`）」，提示词要求时间标注**必须含年份**、依据上下文与来源年鉴年份推断、**不得编造**；本地以 `hasYear`（4 位年份）取舍——模型给的 ts 不含年份一律不采纳，卡片已有含年份的 ts 一律不覆盖，缺年份的旧值允许被覆盖（`tsFills` 仍属静默补齐，不落 `compilation_repairs`、无标记、不可回退）。残缺判定补充「句子起点/终点不完整、缺少主谓宾、指代不明」，并要求**优先补全而非删除**。
+> **大模型修正（已删除，Phase 7.7）**：卡片级「大模型修正」（`compilation_repairs` + 卡片标记 + 回退/再应用弹窗 + 两个 IPC 通道 + 仓储）是 2026-09-08 引入的机制，先被 Phase 7.2 的整合提取取代（不再产出修正记录），又被 Phase 7.6 的连续文档改造抽掉界面，Phase 7.7 整体删除；Migration 036 删表。历史决策记录见 `PLAN.md`。时间戳/残缺句的补全现由**整合提取**阶段承担（提示词要求时间标注必须含年份、缺依据不得编造；本地以 `hasYear`/`numbersCoveredBy` 等硬校验兜底）。
 > **对话编辑协议（Phase 7.5，2026-09-10；用户裁定 D3/D5）**：**软件 → 大模型** = 系统提示（`[p12] 2018 年 | 来源3 | 段落正文` 形式的 id 化文档 + 可引用来源编号清单 + 规则）+ 用户要求；**大模型 → 软件** = 单个 JSON `{"reply":"给用户看的回答","ops":[…]}`（容忍代码块围栏与前后夹带文字）。op 类型：`delete{ids}` / `replace{id,text,timeLabel?}` / `insertAfter{afterId,text,timeLabel,sourceOrdinal}` / `move{ids,afterId}` / `merge{ids}`（**仅同一来源**）/ `split{id,at,text}` / `setTime{id,timeLabel}` / `replaceAll{paragraphs}`（逃生舱）。
 > **本地校验**（逐条失败即该 op 拒绝并记入 `rejected`，其余照常应用）：① 段号（`pN`）必须存在；② `sourceOrdinal` 必须落在 `1..N`；③ 新增/改写正文中的**数字必须能在该来源原文中找到**（沿用 `numbersCoveredBy` 整 token 口径，防幻觉）；④ `merge` 仅限同一来源；⑤ **不得删空整篇**；⑥ 不支持的 op 直接拒绝。解析失败 → **文档不变**并明确报错（用户消息仍留痕）。
 > **数字校验的豁免（2026-09-10 用户裁定）**：用户**明确要求**把某个数字改成指定值时，**大模型和软件都照做即可**。协议上由 op 携带 `"allowNewNumbers":true`（`replace` / `insertAfter` / `replaceAll.paragraphs[]` 均支持），本地校验见到该字段**直接跳过数字校验**；解析层只认字面 `true`（其它值不算）。提示词要求"**只有用户点名具体数值时才能加这个字段**，其它任何情况一律不加，绝不可用它给推测/估算/补齐数据开口子"。
 > **撤销栈语义（2026-09-10 三轮验收敲定）**：`pushUndo` **只在 `runDocEdit` 调用**——"撤销操作"就是回退上一次大模型改动。
-> 其余会改内容或顺序的路径（排序 / 矛盾取舍 / 回收站恢复 / 修正回退与再应用 / 目录级编辑 / 版本恢复 / 汇编调整）改为
+> 其余会改内容或顺序的路径（排序 / 矛盾取舍 / 回收站恢复 / 目录级编辑 / 版本恢复）改为
 > **`clearUndoStacks(cid)` 作废撤销栈**（不压栈、不记版本）：快照是整个汇编的状态，若两次对话编辑之间发生了别的改动，
 > 直接弹栈会把那些改动一并回滚。这样「撤销」要么精确回退上一次对话编辑，要么不可用。
 > **复核态（自动对比）**：对话修改成功后前端据响应里的 `diff` **自动进入对比模式**并显示「采纳 / 回退」；
@@ -309,7 +299,7 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `workspace:navSync` | `{}` → `{}` | 进入"资料库"功能区时自动触发一次同步 |
 | `workspace:migrate` | `{}` → `{ migrated, failed, skipped }` | 一次性迁移存量导入资料到工作区 |
 | `workspace:sourceRemoval:list` | `{}` → `{ items: WorkspaceSourceRemovalPending[] }` | 列出待确认的来源移除（来源=工作区文件被删除或资料库直接删除，且已被资料汇编引用） |
-| `workspace:sourceRemoval:decide` | `{ sourceId, action: 'delete'|'keep' }` → `{ deletedItems, deletedContradictions, deletedRepairs }` | 处理来源移除确认：`delete` 删除该来源在全部资料汇编中的卡片（含矛盾/二次改动，不入回收站）再删来源；`keep` 仅删来源、保留卡片（source_id 置空） |
+| `workspace:sourceRemoval:decide` | `{ sourceId, action: 'delete'|'keep' }` → `{ deletedItems, deletedContradictions }` | 处理来源移除确认：`delete` 删除该来源在全部资料汇编中的卡片（含矛盾，不入回收站）再删来源；`keep` 仅删来源、保留卡片（source_id 置空）。Phase 7.7 移除了 `deletedRepairs`（修正记录已不存在） |
 | `workspace:sourceRemoved`（主进程推送事件） | `WorkspaceSourceRemovalPending` | 推送新增的来源移除待确认项（渲染层弹确认框） |
 | `app:openFileDialog` | `{}` → `{ paths: string[] }` | 系统文件选择对话框（主进程打开，仅回传路径） |
 | `app:openDirectoryDialog` | `{}` → `{ path: string \| null }` | 系统目录选择对话框（工作区选择） |

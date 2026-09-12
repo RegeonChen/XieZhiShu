@@ -345,26 +345,19 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 - 矛盾取舍只在汇编阶段发生（初稿生成不再扫描矛盾）；`pending` 未处理完时前端阻止进入下一步。
 - 回收站：采纳/忽略某组矛盾时快照进 `compilation_recycle_bin`（Migration 017，引用 contradiction_id，随 compilation 级联），恢复=所有 variant 卡片改回 `kept=1`、矛盾状态回 pending、删除回收站条目；**用软删除代替硬删除，恢复不重建卡片**。
 
-### 2.24 compilation_repairs（资料卡片「大模型修正」，Migration 021 → 029 改版）
+### 2.24 compilation_repairs（**已删除**，Migration 021 建立 → 029 改版 → **036 删除**）
 
-生成汇编时由**生成管线内**的大模型修正阶段产出（位置：**提纯**之后、卡片矛盾扫描之前——先摘出与主题相关的句段、再由修正补全语义/补齐时间戳，最后交给矛盾检测），**默认直接应用到卡片**，卡片上以「✎ 经过大模型修正」标记承载：点击可查看修正前原文与理由，并可「回退到修正前」（标记转灰「↺ 已回退」）或「再次应用修正」。**不再有「待裁定」状态，也不再进入回收站**（`compilation_repair_recycle_bin` 已随 Migration 029 删除）。
+资料卡片「大模型修正」的历史表：id PK、compilation_id FK CASCADE、item_id REFERENCES compilation_items(id) ON DELETE CASCADE、original_text、revised_text、reason、status CHECK('applied','reverted')、created_at/updated_at。
 
-> **提纯阶段（2026-09-08）不新增表**：提纯只是把细读产出的整段卡片**替换**为「与主题相关句段」的片段（仍是 `compilation_items` 行，继承原 `source_id`/`ts`/`note`），因此无需迁移；提纯前原文不落库（黑箱），需要退回时用「重新生成汇编」。提纯先于修正，故修正记录（`compilation_repairs.item_id`）始终与最终卡片一对一，不涉及记录迁移。
->
-> **2026-09-10 提纯口径与实现调整（仍无 schema 变化）**：判定口径由「只要有可能的联系就保留」改为**写通测试**（这段文字会不会写进题为《主题》的志稿正文）；片段额外经**本地句读吸附**（起点左扩到句读边界、终点右扩到句末标点，只外向不内向）；批次 50 张 / 18000 字、整阶段预算 900s、按 Provider 并发并行；输出不再包含 `reason` 字段（提纯是黑箱，理由从不展示也不落库），`PurifyBatchStats` 仅用于日志与 `purifyScan.passthroughCards`。修正阶段的 ts 补齐规则同步收紧为**必须含 4 位年份**（缺年份的旧值可被覆盖，已有年份的不覆盖，模型给不出年份则不采纳）。
+该机制的三段式退场：① 2026-09-10（Phase 7.2）「整合提取」取代「提纯 + 修正」两趟，管线不再产出修正记录；② Phase 7.6 把资料卡片改造成连续文档，修正徽标与详情弹窗失去承载界面；③ Phase 7.7 删除渲染层徽标/弹窗、两个 IPC 通道、`compilation-repairs.ts` 仓储与 `CompilationItemInput.repair` 字段，并在 **Migration 036** 中 `DROP TABLE compilation_repairs`（用户库实机演练：130 条历史修正记录被清除，其余数据零变化）。
 
-- `compilation_repairs`：id PK、compilation_id FK CASCADE、item_id REFERENCES compilation_items(id) ON DELETE CASCADE、original_text（修正前）、revised_text（修正后）、reason、status CHECK('applied','reverted')、created_at/updated_at；索引 (compilation_id)、(item_id)。
-- 生成侧由 `insertCompilationItems` 与卡片**同事务**写入（status='applied'）：修正记录随卡片对象（`CompilationItemInput.repair`）一起经过来源过滤与按时间排序，故与卡片严格对应、不会错位。
-- 修正阶段**分批**（`REPAIR_BATCH_MAX` 30 张 / `REPAIR_BATCH_CHARS` 12000 字，`splitRepairBatches`）串行调用，单批超时 300s、整阶段预算 900s；大模型异常 → 中断并由断点续传「尝试继续」（只重跑未完成批次）；超预算 → 标为未完成但不阻断矛盾扫描。
-- **时间戳（ts）自动补齐不属于修正记录**：对缺 ts 的卡片静默补齐（无标记、不可回退），因管线内已提前，落库时按时间排序自然正确。
+> 时间标注与残缺句的补全现由**整合提取**阶段承担：提示词要求时间标注必须含 4 位年份、依据上下文与来源年鉴年份推断、**无依据不得编造**；本地以 `hasYear`（4 位年份）与 `numbersCoveredBy`（数字整 token 有据）做硬校验，不过即降级保留原文整段。时间补齐属管线内行为，不落任何"修正记录"表。
 
-> 卡片被删除时修正记录随 `item_id` 级联删除；被删卡片快照进 `compilation_card_recycle_bin` 时，其修正记录一并存入 `extra` JSON，恢复卡片时连带还原。
+### 2.25 compilation_card_recycle_bin（**已删除**，Migration 023 建立 → **036 删除**）
 
-### 2.25 compilation_card_recycle_bin（资料卡片回收站，Migration 023）
+历史表：被删除的资料卡片快照（id PK、compilation_id FK CASCADE、item_id、position、source_id、excerpt、ts、note、extra_tags、kept、created_at、deleted_at、extra JSON——含该卡片的矛盾变异与修正记录）。
 
-被删除的资料卡片（单卡删除、汇编调整批量删除）快照进该表，含卡片行 + 其矛盾变异与大模型修正记录 JSON（`extra`）。回收站自 2026-09-08 起含**资料卡片 / 矛盾两类**（大模型修正改由卡片标记承载，不再入回收站），按删除时间倒序（栈式，最近删除在前）；恢复卡片连同其矛盾变异与修正记录一起还原。**来源级联清理仍为硬删除不入回收站**（来源已删，恢复外键悬空）。
-
-- 字段：id PK、compilation_id FK CASCADE、item_id、position、source_id、excerpt、ts、note、extra_tags、kept、created_at、deleted_at、extra（默认 '{}'）。
+删除原因：软件内已无逐段删除入口（人工修改模式于 2026-09-10 三轮验收删除，删除途径只剩"删除来源"与"对话编辑"，前者本就是硬删除且不入回收站）。Phase 7.7 删除了快照/恢复函数、`deleteCompilationItem`/`deleteCompilationItemsByIds` 的入站逻辑，并在 **Migration 036** 中 `DROP TABLE compilation_card_recycle_bin`（用户库实机演练：6 条待恢复卡片快照被清除）。**回收站自此只剩「矛盾」一类**（`compilation_recycle_bin`）；撤销/回退由撤销栈（`compilation:undo`）承担。
 
 ## 3. 关键设计决策
 
