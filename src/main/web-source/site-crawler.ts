@@ -75,7 +75,12 @@ export function extractPublishedDate(html: string): string | null {
   }
   const time = /<time[^>]*datetime=["']([^"']+)["']/i.exec(html)
   if (time && time[1]) return time[1].trim().slice(0, 20)
-  const text = /(20\d{2}\s*[年./-]\s*(?:0?[1-9]|1[0-2])\s*[月./-]\s*(?:0?[1-9]|[12]\d|3[01])日?)/.exec(html)
+  /*
+   * 可见日期文本。**日/月的候选必须长在前**（`3[01]|[12]\d|0?[1-9]`）：
+   * 原写法把 `0?[1-9]` 放在最前，而结尾没有强制分隔符，于是 "2016-06-22" 只匹配到 "2016-06-2"，
+   * 实测把库里 477 篇网页的发布时间全部截掉了最后一位（2026-09-12 真实数据核对）。
+   */
+  const text = /(20\d{2}\s*[年./-]\s*(?:1[0-2]|0?[1-9])\s*[月./-]\s*(?:3[01]|[12]\d|0?[1-9])\s*日?)/.exec(html)
   return text ? text[1].trim() : null
 }
 
@@ -820,6 +825,22 @@ if (import.meta.vitest) {
       expect(dedupeArticleKey('https://fzxq.fuzhou.gov.cn/a.htm')).toBe('fzxq.fuzhou.gov.cn/a.htm')
       expect(dedupeArticleKey('http://fzxq.fuzhou.gov.cn/a.htm')).toBe('fzxq.fuzhou.gov.cn/a.htm')
       expect(dedupeArticleKey('https://fzxq.fuzhou.gov.cn/b.htm/')).toBe('fzxq.fuzhou.gov.cn/b.htm')
+    })
+
+    it('keeps both digits of the publish day (2026-09-12 实测截断回归)', () => {
+      // 真实数据里 477 篇网页的发布时间全被截掉最后一位（"2016-06-2" / "2017-08-3"），
+      // 根因是日/月候选把单位数放在最前且结尾无强制分隔符 → 前缀即算匹配
+      expect(extractPublishedDate('<span>2016-06-22</span>')).toBe('2016-06-22')
+      expect(extractPublishedDate('<div>2017-08-30 10:32</div>')).toBe('2017-08-30')
+      expect(extractPublishedDate('发布时间：2022-09-30')).toBe('2022-09-30')
+      expect(extractPublishedDate('2015年3月8日')).toBe('2015年3月8日')
+      expect(extractPublishedDate('2015 年 12 月 25 日')).toBe('2015 年 12 月 25 日')
+      // 单位数日期不受影响
+      expect(extractPublishedDate('2014-03-1 发布')).toBe('2014-03-1')
+      // 优先 meta 与 <time>，且都不是日期文本时才回退
+      expect(extractPublishedDate('<meta property="article:published_time" content="2021-03-05T08:00:00+08:00">')).toBe('2021-03-05T08:00:00+')
+      expect(extractPublishedDate('<time datetime="2020-11-09"></time>')).toBe('2020-11-09')
+      expect(extractPublishedDate('<p>没有日期</p>')).toBeNull()
     })
 
     it('recalls kindergarten news and rejects politics-study news via exact prefilter (test1 regression)', () => {
