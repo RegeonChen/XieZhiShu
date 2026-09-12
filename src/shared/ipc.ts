@@ -372,10 +372,26 @@ export type CompilationExtractScan = CompilationStageScan & {
   /** 疑似同一事实但数字不一致、特意保留的段数（矛盾候选） */
   conflictsKept?: number
 }
+/**
+ * 网页资料库本轮抓取情况（2026-09-12 第二批）：
+ * 抓取设有篇数/字数上限，达上限时在生成汇总里如实告知，避免用户误以为"几百篇都用上了"。
+ */
+export type CompilationWebScan = {
+  sites: number
+  /** 标题级命中的候选文章数 */
+  hits: number
+  /** 实际抓取落库的文章数 */
+  fetched: number
+  /** 因上限被跳过的候选数 */
+  skippedByCap: number
+  /** 落库正文总字数 */
+  chars: number
+}
 export type CompilationGenerateRes = {
   compilation: Compilation
   contradictionScan?: CompilationStageScan
   extractScan?: CompilationExtractScan
+  webScan?: CompilationWebScan
   interrupted?: CompilationInterrupt
 }
 /** 中断续跑（Phase 6.x：会话内断点续传） */
@@ -386,6 +402,7 @@ export type CompilationContinueRes = {
   compilation: Compilation
   contradictionScan?: CompilationStageScan
   extractScan?: CompilationExtractScan
+  webScan?: CompilationWebScan
   interrupted?: CompilationInterrupt
 }
 /** 资料汇编卡片重新按时间排序（2026-08-28）：asc = 正序（旧→新），desc = 反序（新→旧） */

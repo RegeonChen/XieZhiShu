@@ -64,6 +64,7 @@ function buildGeneratedSummary(
       duplicatesDropped?: number
       conflictsKept?: number
     }
+    webScan?: { sites: number; hits: number; fetched: number; skippedByCap: number; chars: number }
   }
 ): string {
   const pendingCount = comp.contradictions.filter((c) => c.status === 'pending').length
@@ -93,6 +94,17 @@ function buildGeneratedSummary(
     }
     if (ps.droppedCards) parts.push(zhCN.compilation.extractDropped.replace('{count}', String(ps.droppedCards)))
     if (ps.conflictsKept) parts.push(zhCN.compilation.extractConflictsKept.replace('{count}', String(ps.conflictsKept)))
+  }
+  // 网页资料本轮抓取情况（含上限截断）：让用户知道"这次用上了多少网页材料"
+  const ws = scans.webScan
+  if (ws && ws.sites > 0) {
+    parts.push(
+      zhCN.compilation.webScan
+        .replace('{hits}', String(ws.hits))
+        .replace('{fetched}', String(ws.fetched))
+        .replace('{chars}', String(ws.chars))
+    )
+    if (ws.skippedByCap > 0) parts.push(zhCN.compilation.webScanCapped.replace('{count}', String(ws.skippedByCap)))
   }
   parts.push(pendingCount > 0 ? pendingCount + ' 组矛盾待处理' : '无未处理矛盾')
   let text = parts.join('，') + '。请审阅' + (pendingCount > 0 ? '并处理后' : '后') + '点击「确认汇编」。'
@@ -468,7 +480,31 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     try {
       const res = await window.api.generateCompilation(taskId, inst)
       if (res.ok && res.data) {
-        const data = res.data as { compilation: CompilationView; contradictionScan?: { ok: boolean; message?: string }; interrupted?: { stage: string; message: string; percent: number; retryable?: boolean } }
+        const data = res.data as {
+          compilation: CompilationView
+          contradictionScan?: { ok: boolean; message?: string }
+          extractScan?: {
+            ok: boolean
+            message?: string
+            inputCards?: number
+            outputParagraphs?: number
+            inputChars?: number
+            outputChars?: number
+            accepted?: number
+            degraded?: number
+            invalidNumbers?: number
+            invalidEvidence?: number
+            degradedFromEvidence?: number
+            degradedWholeCard?: number
+            droppedCards?: number
+            omitted?: number
+            passthrough?: number
+            duplicatesDropped?: number
+            conflictsKept?: number
+          }
+          webScan?: { sites: number; hits: number; fetched: number; skippedByCap: number; chars: number }
+          interrupted?: { stage: string; message: string; percent: number; retryable?: boolean }
+        }
         const comp = data.compilation
         setCompilation(comp)
         if (data.interrupted) {

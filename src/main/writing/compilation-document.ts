@@ -459,23 +459,37 @@ export interface AssembleResult {
   duplicatesDropped: number
   /** 「疑似同一事实但数字不一致」而**特意保留**的段数（矛盾候选，交给矛盾扫描） */
   conflictsKept: number
+  /** 其中**跨来源**合并掉的段数（网页转载 / 网站版与工作区同文档；2026-09-12 第二批） */
+  crossSourceMerged: number
 }
 
 /** 近似重复判定阈值（同来源、数字一致时才视为重复；略低以覆盖"改一两个字"的重复表述） */
 export const NEAR_DUPLICATE_DICE = 0.85
 
 /**
+ * 跨来源近似重复阈值（更严）：不同来源措辞接近，比同一来源更容易是"两件不同的事"，
+ * 因此只在非常接近、且**数字完全一致**时才合并（合并后只保留一个来源，见 assembleDocument 注释）。
+ */
+export const NEAR_DUPLICATE_DICE_CROSS = 0.92
+
+/**
  * 把各批「整合提取」结果拼成一篇文档（纯函数）：
- * ① 完全重复（去空白标点后相同）→ 保留信息更全的一条；
- * ② 同来源且近似重复（Dice ≥ 0.92）→ **数字一致**才算重复（保留更长的一条）；
+ * ① 完全重复（去空白标点后相同）→ 保留信息更全的一条（**跨来源也算重复**）；
+ * ② 近似重复（Dice 相似）→ **数字一致**才算重复（保留更长的一条）；
  *    **数字不一致则两段都保留** —— 这是"疑似矛盾的说法"，绝不能在这里被合并掉，交给矛盾扫描处理；
+ *    跨来源（网页转载、网站版与工作区同文档）用更严格的阈值 `NEAR_DUPLICATE_DICE_CROSS`：
+ *    同一件事被两个来源分别收录时只留一处（2026-09-12 用户立项的第二批），但阈值更保守，
+ *    因为"不同来源措辞接近"比"同一来源措辞接近"更容易是两件不同的事；
  * ③ 按 `年 → 月 → 生成序` 稳定排序，并重写 ordinal（无年份的段落沉底）。
  * 来源编号（sourceOrdinal）不在这里分配：由仓储层按 `sourceOrder` 统一编号后回填，保证"只增不回收"。
+ * 注：合并后只保留**一个**来源（段落模型是单一来源）；"合并后标注多个来源"属 Phase 7.12，尚未设计。
  */
 export function assembleDocument(inputs: AssembleInputParagraph[]): AssembleResult {
   const kept: AssembledParagraph[] = []
   let duplicatesDropped = 0
   let conflictsKept = 0
+  /** 跨来源合并掉的段数（诊断用：说明"同一件事两个来源"确实发生了） */
+  let crossSourceMerged = 0
   for (const input of inputs) {
     const text = (input.text ?? '').trim()
     if (!text) continue
@@ -504,9 +518,17 @@ export function assembleDocument(inputs: AssembleInputParagraph[]): AssembleResu
       duplicatesDropped += 1
       continue
     }
-    const nearAt = kept.findIndex(
+    // 先在同一来源里找近似重复（阈值较松），找不到再跨来源找（阈值更严）
+    const sameSourceAt = kept.findIndex(
       (p) => p.sourceId && p.sourceId === draft.sourceId && textSimilarity(p.text, text) >= NEAR_DUPLICATE_DICE
     )
+    const crossSourceAt =
+      sameSourceAt >= 0
+        ? -1
+        : kept.findIndex(
+            (p) => p.sourceId && p.sourceId !== draft.sourceId && textSimilarity(p.text, text) >= NEAR_DUPLICATE_DICE_CROSS
+          )
+    const nearAt = sameSourceAt >= 0 ? sameSourceAt : crossSourceAt
     if (nearAt >= 0) {
       const prev = kept[nearAt]
       const sameNumbers = numbersCoveredBy(text, prev.text) && numbersCoveredBy(prev.text, text)
@@ -516,6 +538,7 @@ export function assembleDocument(inputs: AssembleInputParagraph[]): AssembleResu
           kept[nearAt] = { ...draft, ordinal: prev.ordinal }
         }
         duplicatesDropped += 1
+        if (crossSourceAt >= 0) crossSourceMerged += 1
         continue
       }
       // 数字不一致 → 疑似矛盾，两段都留（下面照常 push）
@@ -528,7 +551,7 @@ export function assembleDocument(inputs: AssembleInputParagraph[]): AssembleResu
   for (const p of sorted) {
     if (p.sourceId && !sourceOrder.includes(p.sourceId)) sourceOrder.push(p.sourceId)
   }
-  return { paragraphs: sorted, sourceOrder, duplicatesDropped, conflictsKept }
+  return { paragraphs: sorted, sourceOrder, duplicatesDropped, conflictsKept, crossSourceMerged }
 }
 
 // ---- vitest inline test ----
@@ -793,6 +816,42 @@ if (import.meta.vitest) {
       expect(out.paragraphs[3].timeLabel).toBe('7—9 日')
       // 空正文不入文
       expect(assembleDocument([{ text: '   ', sourceId: 's1', parentIndex: 0 }]).paragraphs).toHaveLength(0)
+    })
+
+    it('merges the same fact across sources when the numbers match (2026-09-12 第二批)', () => {
+      /*
+       * 网页转载 / 网站版与工作区同文档：同一件事被两个来源分别收录。
+       * 跨来源阈值更严（0.92），且**数字必须完全一致**才合并——合并后只留一个来源。
+       */
+      const out = assembleDocument([
+        { text: '2021 年，全区新增幼儿园 6 所，公办园占比 42%。', timeLabel: '2021 年', sourceId: 's1', parentIndex: 0 },
+        { text: '2021 年，全区新增幼儿园 6 所，公办园占比达 42%。', timeLabel: '2021 年', sourceId: 's2', parentIndex: 1 }
+      ])
+      expect(out.paragraphs).toHaveLength(1)
+      expect(out.duplicatesDropped).toBe(1)
+      expect(out.crossSourceMerged).toBe(1)
+      expect(out.paragraphs[0].sourceId).toBe('s1') // 保留先出现者（本段单一来源）
+    })
+
+    it('never merges across sources when the numbers differ — that is a contradiction', () => {
+      const out = assembleDocument([
+        { text: '2021 年，全区新增幼儿园 6 所，公办园占比 42%。', timeLabel: '2021 年', sourceId: 's1', parentIndex: 0 },
+        { text: '2021 年，全区新增幼儿园 7 所，公办园占比 42%。', timeLabel: '2021 年', sourceId: 's2', parentIndex: 1 }
+      ])
+      // 数字不一致 → 两段都留（交给矛盾扫描）；绝不因为"长得像"就合并掉一个说法
+      expect(out.paragraphs).toHaveLength(2)
+      expect(out.paragraphs.map((p) => p.sourceId)).toEqual(['s1', 's2'])
+      expect(out.crossSourceMerged).toBe(0)
+    })
+
+    it('keeps slightly-similar but genuinely different cross-source paragraphs (threshold 0.92)', () => {
+      const out = assembleDocument([
+        { text: '2021 年，全区新增幼儿园 6 所，其中城区 3 所。', timeLabel: '2021 年', sourceId: 's1', parentIndex: 0 },
+        { text: '2021 年，全区新增幼儿园 6 所，另外还改扩建 2 所。', timeLabel: '2021 年', sourceId: 's2', parentIndex: 1 }
+      ])
+      // 措辞接近但讲的是不同的事（数字集合也不同）→ 不合并
+      expect(out.paragraphs).toHaveLength(2)
+      expect(out.crossSourceMerged).toBe(0)
     })
   })
 }
