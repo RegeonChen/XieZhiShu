@@ -67,7 +67,6 @@ function buildGeneratedSummary(
   }
 ): string {
   const pendingCount = comp.contradictions.filter((c) => c.status === 'pending').length
-  const fixCount = (comp.repairs ?? []).filter((r) => r.status === 'applied').length
   const parts: string[] = [prefix + comp.items.length + ' 段']
   const ps = scans.extractScan
   if (ps && ps.inputCards != null && ps.outputParagraphs != null) {
@@ -95,7 +94,6 @@ function buildGeneratedSummary(
     if (ps.droppedCards) parts.push(zhCN.compilation.extractDropped.replace('{count}', String(ps.droppedCards)))
     if (ps.conflictsKept) parts.push(zhCN.compilation.extractConflictsKept.replace('{count}', String(ps.conflictsKept)))
   }
-  if (fixCount > 0) parts.push(fixCount + ' 张经过大模型修正（卡片上有标记，可点开查看修正前原文与理由并回退）')
   parts.push(pendingCount > 0 ? pendingCount + ' 组矛盾待处理' : '无未处理矛盾')
   let text = parts.join('，') + '。请审阅' + (pendingCount > 0 ? '并处理后' : '后') + '点击「确认汇编」。'
   if (scans.contradictionScan && scans.contradictionScan.ok === false) {
@@ -397,11 +395,6 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
       setMessages(res.data.items.map((m) => ({ role: m.role, content: m.content })))
     }
   }, [taskId])
-
-  const refreshCompilation = useCallback(async (compilationId: string) => {
-    const getRes = await window.api.getCompilation(compilationId)
-    if (getRes.ok && getRes.data) setCompilation(getRes.data.compilation as CompilationView)
-  }, [])
 
   /** 刷新当前汇编的可撤销/可恢复步数（每次汇编变化后调用） */
   const refreshUndoState = useCallback(async (compilationId: string) => {
@@ -759,22 +752,6 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     }
   }
 
-  // ---- 资料卡片大模型修正（2026-09-08：默认已应用，卡片标记承载，可回退 / 再次应用）----
-
-  const handleDecideRepair = async (repairId: string, applied: boolean) => {
-    const res = applied
-      ? await window.api.applyCompilationRepair(repairId)
-      : await window.api.revertCompilationRepair(repairId)
-    if (res.ok && res.data) {
-      if (compilation) {
-        // 重新加载汇编（useEffect 会随之刷新撤销/恢复步数）
-        await refreshCompilation(compilation.id)
-      }
-    } else {
-      appendAssistant('处理大模型修正失败：' + (res.error?.message ?? ''))
-    }
-  }
-
   // ---- 初稿生成（Phase 6.3）----
 
   const handleGenerateDraft = async (instruction: string) => {
@@ -990,7 +967,6 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           onConfirm={() => void handleExportCompilation()}
           onOpenSource={(sourceId) => void handleOpenSource(sourceId)}
           onResolve={handleResolveContradiction}
-          onDecideRepair={(repairId, action) => void handleDecideRepair(repairId, action)}
           onReorderItems={(direction) => void handleReorderItems(direction)}
           onUndo={() => void handleUndo()}
           onRedo={() => void handleRedo()}

@@ -53,8 +53,6 @@ export interface AppApi {
   confirmCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
   listCompilationRecycleBin(compilationId: string): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   restoreCompilationRecycleBin(binId: string): Promise<{ ok: boolean; data?: { contradiction?: unknown; item?: unknown; card?: unknown }; error?: { code: string; message: string } }>
-  revertCompilationRepair(repairId: string): Promise<{ ok: boolean; data?: { item: unknown; repair: unknown }; error?: { code: string; message: string } }>
-  applyCompilationRepair(repairId: string): Promise<{ ok: boolean; data?: { item: unknown; repair: unknown }; error?: { code: string; message: string } }>
   exportCompilationDocx(compilationId: string): Promise<{ ok: boolean; data?: { path: string }; error?: { code: string; message: string } }>
   exportCompilationArchive(compilationId: string): Promise<{ ok: boolean; data?: { path: string }; error?: { code: string; message: string } }>
   importCompilationArchive(taskId: string, filePath: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>

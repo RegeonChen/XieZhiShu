@@ -214,14 +214,6 @@ const api = {
   restoreCompilationRecycleBin(binId: string): Promise<ApiResult<{ contradiction?: unknown; card?: unknown }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_RECYCLE_BIN_RESTORE, { binId })
   },
-  /** 回退一条「大模型修正」：卡片还原为修正前文本（保留记录，可再次应用） */
-  revertCompilationRepair(repairId: string): Promise<ApiResult<{ item: unknown; repair: unknown }>> {
-    return ipcRenderer.invoke(IPC.COMPILATION_REPAIR_REVERT, { repairId })
-  },
-  /** 再次应用一条已回退的「大模型修正」：卡片文本回到修正后文本 */
-  applyCompilationRepair(repairId: string): Promise<ApiResult<{ item: unknown; repair: unknown }>> {
-    return ipcRenderer.invoke(IPC.COMPILATION_REPAIR_APPLY, { repairId })
-  },
   // ---- 资料汇编导出/导入（生成汇编 → 撰写初稿，2026-09） ----
   /** 导出资料汇编为 .docx */
   exportCompilationDocx(compilationId: string): Promise<ApiResult<{ path: string }>> {

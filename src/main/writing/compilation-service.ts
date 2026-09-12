@@ -486,12 +486,6 @@ export interface CompilationOutputItem {
   position: string
   excerpt: string
   ts: string | null
-  /**
-   * 管线内附加：该卡片被大模型修正过（由 repair 阶段写入；**不来自 LLM 输出的 JSON 解析**）。
-   * 它随卡片对象一起流经合并/过滤/按时间排序，最终由 insertCompilationItems 与卡片同事务写入
-   * compilation_repairs，从而保证「修正标记」与卡片的对应关系不错位。
-   */
-  repair?: { originalText: string; revisedText: string; reason: string }
 }
 
 export interface CompilationOutputVariant {
@@ -695,7 +689,7 @@ export function mergeContradictionGroups(
   }
   return out
 }
-/** 把 #N 来源编号映射回 sourceId，丢弃无法解析的卡片；大模型修正记录随卡片一起带走 */
+/** 把 #N 来源编号映射回 sourceId，丢弃无法解析的卡片 */
 export function mapOutputItemsToInputs(
   items: CompilationOutputItem[],
   refs: SourceRefEntry[]
@@ -705,7 +699,7 @@ export function mapOutputItemsToInputs(
   for (const it of items) {
     const sourceId = byRef.get(it.sourceRef)
     if (!sourceId) continue
-    out.push({ sourceId, excerpt: it.excerpt, ts: it.ts ?? undefined, note: it.position || undefined, repair: it.repair })
+    out.push({ sourceId, excerpt: it.excerpt, ts: it.ts ?? undefined, note: it.position || undefined })
   }
   return out
 }

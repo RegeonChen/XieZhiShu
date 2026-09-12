@@ -189,12 +189,6 @@ export function compilationIdOfContradiction(id: string): string | null {
   const row = db.prepare('SELECT compilation_id FROM compilation_contradictions WHERE id = ?').get(id) as { compilation_id: string } | undefined
   return row?.compilation_id ?? null
 }
-/** 由修订 id 反查所属汇编 id。 */
-export function compilationIdOfRepair(id: string): string | null {
-  const db = getDb()
-  const row = db.prepare('SELECT compilation_id FROM compilation_repairs WHERE id = ?').get(id) as { compilation_id: string } | undefined
-  return row?.compilation_id ?? null
-}
 /** 由回收站条目 id 反查所属汇编 id（被删除的资料卡片回收站）。 */
 export function compilationIdOfBin(binId: string): string | null {
   const db = getDb()

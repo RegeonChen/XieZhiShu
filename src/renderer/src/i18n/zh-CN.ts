@@ -508,20 +508,7 @@ export const zhCN = {
     extractDropped: '模型判定与主题无关而整卡丢弃 {count} 张',
     extractConflictsKept: '{count} 段因「疑似同一事实但数字不一致」特意保留（交给矛盾扫描）',
     extractScanFailed: '整合提取未完成（{reason}），部分卡片可能仍按原文原样保留、未做裁剪整合。',
-    /* 大模型修正（2026-09-08：默认应用 + 卡片标记 + 可回退/再次应用；不再进入回收站） */
-    repairBadge: '✎ 经过大模型修正',
-    repairBadgeReverted: '↺ 已回退到修正前',
-    repairBadgeHint: '该卡片经过大模型修正，点击查看修正前原文与理由，可回退',
-    repairDetail: '修正详情',
-    repairDialogTitle: '大模型修正详情',
-    repairOriginalLabel: '修正前原文',
-    repairRevisedLabel: '修正后文本',
-    repairReason: '修正理由',
-    repairRevert: '回退到修正前',
-    repairReapply: '重新应用修正',
-    repairRevertHint: '回退只影响本张卡片的文本；时间戳的自动补齐不在修正记录内。',
-    repairAppliedCount: '{count} 张卡片经过大模型修正',
-    /* repairScanFailed 已随 Phase 7.2 移除（修正阶段并入整合提取，不再单独回报未完成） */
+    /* 大模型修正（2026-09-08 引入）已随 Phase 7.7 整体移除：软件内不再有「修正记录」概念 */
     recycleBin: '回收站',
     recycleBinTitle: '回收站',
     recycleBinEmpty: '回收站为空。',

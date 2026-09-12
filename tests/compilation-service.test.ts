@@ -77,27 +77,6 @@ describe('compilation service (Phase 6.1)', () => {
     expect(items[0].sourceId).toBe('s1')
   })
 
-  it('mapOutputItemsToInputs carries the repair record with its card (2026-09-08 修正随卡片流转)', () => {
-    const refs = buildCompilationSourceRefs([
-      { sourceId: 's1', sourceTitle: '教育发展报告', position: '第1段', text: '卡片一', score: 1 }
-    ])
-    const items = mapOutputItemsToInputs(
-      [
-        {
-          sourceRef: '#1',
-          position: '第1段',
-          excerpt: '预科班 30 人。',
-          ts: '2005 年',
-          repair: { originalText: '其中预科班 30 人。', revisedText: '预科班 30 人。', reason: '缺少主语' }
-        },
-        { sourceRef: '#99', position: '第1段', excerpt: '坏引用', ts: null }
-      ],
-      refs
-    )
-    expect(items).toHaveLength(1)
-    expect(items[0].repair).toEqual({ originalText: '其中预科班 30 人。', revisedText: '预科班 30 人。', reason: '缺少主语' })
-  })
-
   it('mapWindowGroupsThroughExtract rewrites window-level variant excerpts onto extracted paragraphs (Phase 7.2 整合提取)', () => {
     // 细读产出的两张整段卡片（整合提取前）
     const parents = [
