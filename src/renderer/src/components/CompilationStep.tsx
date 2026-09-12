@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { zhCN } from '../i18n/zh-CN'
+import ChatPanel, { type ChatMessageItem, type SourceRefItem } from './ChatPanel'
 
 /**
  * 极简行内 Markdown 渲染（Phase 7.3）：只处理段落正文里常见的 `**加粗**`，
@@ -125,6 +126,23 @@ interface Props {
   onDocSend?: (instruction: string) => void
   /** 打开对话框时按需拉取历史 */
   onDocOpen?: () => void
+  /* ---- 7.6.1：左栏下线后的「生成模式」（悬浮面板兼作生成入口，用户裁定 D7=A） ---- */
+  /** 生成汇编阶段的任务对话（`task_messages`，左栏下线后在这里继续显示） */
+  taskMessages?: ChatMessageItem[]
+  /** 正在生成汇编（含整合提取/矛盾扫描全程） */
+  generating?: boolean
+  /** 生成中的状态文案（「正在生成资料汇编…」等） */
+  generatingText?: string | null
+  /** 生成进度（百分比 + 预计剩余） */
+  generateProgress?: { percent: number; etaSeconds?: number } | null
+  /** 大模型异常中断信息（必须能在面板里点「尝试继续」，否则中断后无法续跑） */
+  generateInterrupt?: { stage: string; message: string; percent: number } | null
+  /** 从断点继续生成汇编 */
+  onRetryCompilation?: () => void
+  /** 首次生成汇编（提交标题与要求） */
+  onGenerate?: (instruction: string) => void
+  /** 来源引用清单（消息内 #N 渲染为可点击来源） */
+  sourceRefs?: SourceRefItem[]
 }
 
 export interface CompilationMessageView {
@@ -183,7 +201,15 @@ function CompilationStep({
   docError,
   docChangedIds,
   onDocSend,
-  onDocOpen
+  onDocOpen,
+  taskMessages,
+  generating,
+  generatingText,
+  generateProgress,
+  generateInterrupt,
+  onRetryCompilation,
+  onGenerate,
+  sourceRefs
 }: Props) {
   const t = zhCN.compilation
   /** 差异段按段 id 建索引（渲染时给段落上色 / 段内高亮） */
@@ -266,23 +292,6 @@ function CompilationStep({
   /** 复核态：对话修改完成后由父组件自动置上差异，用户「采纳 / 回退」后才退出 */
   const reviewing = versionDiff != null
 
-  // 新消息/编辑中 → 对话列表滚到底部
-  useEffect(() => {
-    const el = chatListRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [messages.length, docEditing, chatOpen])
-
-  // 本次改动 → 滚动到首个改动段
-  useEffect(() => {
-    if (!docChangedIds || docChangedIds.length === 0) return
-    const id = docChangedIds[0]
-    const timer = window.setTimeout(() => {
-      const el = cardsRef.current?.querySelector<HTMLElement>(`[data-card-id="${id}"]`)
-      el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    }, 80)
-    return () => window.clearTimeout(timer)
-  }, [docChangedIds])
-
   const onPanelPointerDown = (e: ReactPointerEvent<HTMLDivElement>): void => {
     const panel = panelRef.current
     const pane = paneRef.current
@@ -352,10 +361,193 @@ function CompilationStep({
   const repairForItem = (itemId: string): CompilationRepairView | undefined =>
     (compilation?.repairs ?? []).find((r) => r.itemId === itemId)
 
+  /**
+   * 悬浮面板有两种模式（用户裁定 D7=A）：
+   * - **生成模式**：还没有汇编、正在生成、或生成中断（中断时主进程已落库部分段落，`compilation` 非空，
+   *   但此刻用户真正需要的是进度与「尝试继续」，所以中断态仍留在生成模式）；
+   * - **对话模式**：已有汇编且不在生成中，即原来的「与汇编对话」。
+   */
+  const generatingMode = !compilation || generating === true || generateInterrupt != null
+
+  // 生成中/中断/首次进入（还没有汇编）→ 自动展开面板，否则用户看不到进度与「尝试继续」
+  useEffect(() => {
+    if (generatingMode) setChatOpen(true)
+  }, [generatingMode])
+
+  /**
+   * 生成**成功**结束（非中断）→ 自动收起面板，把刚生成的汇编让出来给用户看。
+   * 仅识别「生成中 → 非生成中」这一次真实跃迁，用户手动展开的面板不会被误收。
+   */
+  const prevGeneratingRef = useRef(false)
+  useEffect(() => {
+    const prev = prevGeneratingRef.current
+    prevGeneratingRef.current = generating === true
+    if (prev && generating !== true && generateInterrupt == null && compilation) setChatOpen(false)
+  }, [generating, generateInterrupt, compilation])
+
+  // 新消息/编辑中 → 对话列表滚到底部
+  useEffect(() => {
+    const el = chatListRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [messages.length, docEditing, chatOpen])
+
+  // 本次改动 → 滚动到首个改动段
+  useEffect(() => {
+    if (!docChangedIds || docChangedIds.length === 0) return
+    const id = docChangedIds[0]
+    const timer = window.setTimeout(() => {
+      const el = cardsRef.current?.querySelector<HTMLElement>(`[data-card-id="${id}"]`)
+      el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 80)
+    return () => window.clearTimeout(timer)
+  }, [docChangedIds])
+
+  /** 右下悬浮圆按钮（两种模式共用） */
+  const fab = (
+    <button
+      type="button"
+      className={cls('compilation-docchat-fab', chatOpen ? 'is-open' : '')}
+      title={generatingMode ? t.generatePanelTitle : t.docChatOpen}
+      aria-label={generatingMode ? t.generatePanelTitle : t.docChatOpen}
+      aria-expanded={chatOpen}
+      onClick={() => {
+        const next = !chatOpen
+        setChatOpen(next)
+        if (next && !generatingMode) onDocOpen?.()
+      }}
+    >
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+        <rect x="4" y="7.5" width="16" height="12" rx="3.2" fill="none" stroke="currentColor" strokeWidth="1.6" />
+        <path d="M12 7.5V4.6" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+        <circle cx="12" cy="3.6" r="1.3" fill="currentColor" />
+        <circle cx="9.2" cy="13" r="1.4" fill="currentColor" />
+        <circle cx="14.8" cy="13" r="1.4" fill="currentColor" />
+        <path d="M9.4 16.6h5.2" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        <path d="M2.6 12.4v4.4M21.4 12.4v4.4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      </svg>
+    </button>
+  )
+
+  /** 悬浮面板外壳（可拖动 + 可最小化；标题随模式变化） */
+  const panelShell = (body: ReactNode): ReactNode => (
+    <div
+      ref={panelRef}
+      className={cls('compilation-docchat', generatingMode ? 'is-generating' : '')}
+      style={panelPos ? { left: panelPos.x, top: panelPos.y, right: 'auto', bottom: 'auto' } : undefined}
+    >
+      <div
+        className="compilation-docchat__head"
+        onPointerDown={onPanelPointerDown}
+        onPointerMove={onPanelPointerMove}
+        onPointerUp={onPanelPointerUp}
+        onPointerCancel={onPanelPointerUp}
+      >
+        <span className="compilation-docchat__title">{generatingMode ? t.generatePanelTitle : t.docChatTitle}</span>
+        <span className="compilation-docchat__drag">{t.docChatDragHint}</span>
+        <button
+          type="button"
+          className="compilation-docchat__close"
+          title={t.docChatMinimize}
+          aria-label={t.docChatMinimize}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={() => setChatOpen(false)}
+        >
+          &#8211;
+        </button>
+      </div>
+      {body}
+    </div>
+  )
+
+  /**
+   * 生成模式主体：复用左栏原来的 `ChatPanel`（预设提示词 / 进度条 / 中断「尝试继续」/ 消息气泡全部沿用，
+   * 视觉与交互不退化），只是搬进了悬浮面板。
+   */
+  const generateBody = (
+    <div className="compilation-docchat__chatpanel">
+      <ChatPanel
+        messages={taskMessages ?? []}
+        draftExisted={false}
+        busy={generating === true}
+        busyText={generatingText ?? null}
+        streamText={null}
+        progress={generateProgress ?? null}
+        interrupt={generateInterrupt ?? null}
+        onRetryCompilation={onRetryCompilation}
+        onGenerate={(text) => onGenerate?.(text)}
+        onChat={(text) => onGenerate?.(text)}
+        primaryLabel={zhCN.compilation.generateBtn}
+        onPrimaryAction={(text) => onGenerate?.(text)}
+        showPresetButton
+        hasCompilation={false}
+        refs={sourceRefs}
+        onOpenSource={onOpenSource}
+      />
+    </div>
+  )
+
+  const chatBody = (
+    <>
+      <div className="compilation-docchat__list" ref={chatListRef}>
+        {messages.length === 0 ? (
+          <p className="compilation-docchat__empty">{t.docChatEmpty}</p>
+        ) : (
+          messages.map((m, i) => (
+            <div key={i} className={cls('compilation-docchat__msg', m.role === 'user' ? 'is-user' : 'is-assistant')}>
+              {m.content}
+              {m.versionNo != null ? <span className="compilation-docchat__ver">v{m.versionNo}</span> : null}
+            </div>
+          ))
+        )}
+        {docEditing ? <div className="compilation-docchat__typing">{t.docChatEditing}</div> : null}
+      </div>
+      {docError ? <div className="compilation-docchat__error">{docError}</div> : null}
+      <div className="compilation-docchat__foot">
+        <textarea
+          className="compilation-docchat__input"
+          rows={2}
+          value={chatInput}
+          placeholder={t.docChatPlaceholder}
+          disabled={docEditing === true}
+          onChange={(e) => setChatInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && canSend) {
+              onDocSend?.(chatInput.trim())
+              setChatInput('')
+            }
+          }}
+        />
+        <div className="compilation-docchat__actions">
+          <span className="compilation-docchat__hint">{t.docChatHint}</span>
+          <button
+            type="button"
+            className="source-list__btn source-list__btn--primary"
+            disabled={!canSend}
+            onClick={() => {
+              onDocSend?.(chatInput.trim())
+              setChatInput('')
+            }}
+          >
+            {docEditing ? t.docChatEditing : t.docChatSend}
+          </button>
+        </div>
+      </div>
+    </>
+  )
+
   if (!compilation) {
     return (
-      <div className="compilation-empty">
-        <p>{t.empty}</p>
+      <div className="compilation-step" ref={paneRef}>
+        <div className="compilation-empty">
+          <p>{t.empty}</p>
+        </div>
+        {fab}
+        {chatOpen ? panelShell(generateBody) : null}
+        {hint ? (
+          <div className="compilation-hint" style={{ left: hint.x, top: hint.y - 10 }} role="tooltip">
+            {hint.text}
+          </div>
+        ) : null}
       </div>
     )
   }
@@ -705,102 +897,11 @@ function CompilationStep({
         </div>
       ) : null}
 
-      {/* Phase 7.5：右下悬浮圆按钮（机器人简笔）——打开「与汇编对话」面板，由大模型按 ops 修改汇编 */}
-      <button
-        type="button"
-        className={cls('compilation-docchat-fab', chatOpen ? 'is-open' : '')}
-        title={t.docChatOpen}
-        aria-label={t.docChatOpen}
-        aria-expanded={chatOpen}
-        onClick={() => {
-          const next = !chatOpen
-          setChatOpen(next)
-          if (next) onDocOpen?.()
-        }}
-      >
-        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
-          <rect x="4" y="7.5" width="16" height="12" rx="3.2" fill="none" stroke="currentColor" strokeWidth="1.6" />
-          <path d="M12 7.5V4.6" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-          <circle cx="12" cy="3.6" r="1.3" fill="currentColor" />
-          <circle cx="9.2" cy="13" r="1.4" fill="currentColor" />
-          <circle cx="14.8" cy="13" r="1.4" fill="currentColor" />
-          <path d="M9.4 16.6h5.2" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-          <path d="M2.6 12.4v4.4M21.4 12.4v4.4" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-        </svg>
-      </button>
+      {/* 右下悬浮圆按钮（机器人简笔）：无汇编时是「生成」入口，有汇编时是「与汇编对话」入口——
+          用户裁定 D7=A：全局只保留这一个入口（左栏任务对话框已下线）。 */}
+      {fab}
 
-      {chatOpen ? (
-        <div
-          ref={panelRef}
-          className="compilation-docchat"
-          style={panelPos ? { left: panelPos.x, top: panelPos.y, right: 'auto', bottom: 'auto' } : undefined}
-        >
-          <div
-            className="compilation-docchat__head"
-            onPointerDown={onPanelPointerDown}
-            onPointerMove={onPanelPointerMove}
-            onPointerUp={onPanelPointerUp}
-            onPointerCancel={onPanelPointerUp}
-          >
-            <span className="compilation-docchat__title">{t.docChatTitle}</span>
-            <span className="compilation-docchat__drag">{t.docChatDragHint}</span>
-            <button
-              type="button"
-              className="compilation-docchat__close"
-              title={t.docChatMinimize}
-              aria-label={t.docChatMinimize}
-              onPointerDown={(e) => e.stopPropagation()}
-              onClick={() => setChatOpen(false)}
-            >
-              &#8211;
-            </button>
-          </div>
-          <div className="compilation-docchat__list" ref={chatListRef}>
-            {messages.length === 0 ? (
-              <p className="compilation-docchat__empty">{t.docChatEmpty}</p>
-            ) : (
-              messages.map((m, i) => (
-                <div key={i} className={cls('compilation-docchat__msg', m.role === 'user' ? 'is-user' : 'is-assistant')}>
-                  {m.content}
-                  {m.versionNo != null ? <span className="compilation-docchat__ver">v{m.versionNo}</span> : null}
-                </div>
-              ))
-            )}
-            {docEditing ? <div className="compilation-docchat__typing">{t.docChatEditing}</div> : null}
-          </div>
-          {docError ? <div className="compilation-docchat__error">{docError}</div> : null}
-          <div className="compilation-docchat__foot">
-            <textarea
-              className="compilation-docchat__input"
-              rows={2}
-              value={chatInput}
-              placeholder={t.docChatPlaceholder}
-              disabled={docEditing === true}
-              onChange={(e) => setChatInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && canSend) {
-                  onDocSend?.(chatInput.trim())
-                  setChatInput('')
-                }
-              }}
-            />
-            <div className="compilation-docchat__actions">
-              <span className="compilation-docchat__hint">{t.docChatHint}</span>
-              <button
-                type="button"
-                className="source-list__btn source-list__btn--primary"
-                disabled={!canSend}
-                onClick={() => {
-                  onDocSend?.(chatInput.trim())
-                  setChatInput('')
-                }}
-              >
-                {docEditing ? t.docChatEditing : t.docChatSend}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      {chatOpen ? panelShell(generatingMode ? generateBody : chatBody) : null}
     </div>
   )
 }

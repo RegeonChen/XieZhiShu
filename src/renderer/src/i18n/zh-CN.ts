@@ -413,7 +413,7 @@ export const zhCN = {
     defaultBadge: '默认'
   },
   compilation: {
-    empty: '尚未生成资料汇编。请在左侧输入本次撰写的标题与要求，点击「生成汇编」。',
+    empty: '尚未生成资料汇编。点击右下角按钮，输入本次撰写的标题与要求后生成。',
     generateBtn: '生成汇编',
     regenerateBtn: '重新生成汇编',
     confirmBtn: '导出资料汇编',
@@ -522,6 +522,8 @@ export const zhCN = {
     close: '关闭',
     restored: '已从回收站恢复该条目，请重新选择。',
     /* Phase 7.5：悬浮对话框（人机协同编辑）——软件内改动汇编的唯一入口 */
+    /* 7.6.1：左栏下线后，悬浮面板兼作「生成模式」（用户裁定 D7=A） */
+    generatePanelTitle: '生成资料汇编',
     docChatOpen: '与汇编对话（让大模型修改）',
     docChatTitle: '与汇编对话',
     docChatHint: '用一句话告诉大模型要怎么改（如「把校区建设相关的内容都删掉」），它会直接修改右侧汇编。',

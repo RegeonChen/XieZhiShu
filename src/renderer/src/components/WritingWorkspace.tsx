@@ -577,34 +577,9 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   }
 
   /**
-   * 首条消息生成汇编后，后续每条消息都是对**当前资料汇编**的修改要求。
-   * Phase 7.5：左侧对话框与右侧悬浮对话框走**同一个后端**（`doc:edit`，大模型按段落 id 返回 ops），
-   * 旧的 `compilation:adjust`（cardId 寻址）不再从界面进入，仅留待 Phase 7.7 清理。
+   * 7.6.1：原 `handleAdjustCompilation`（左栏「调整现有汇编」的消息入口）已随左栏一并删除——
+   * 汇编的修改统一走右侧悬浮面板的 `handleDocSend`（`doc:edit` 后端），不再有第二个入口。
    */
-  const handleAdjustCompilation = async (message: string) => {
-    if (busy || !compilation) return
-    const inst = message.trim()
-    if (!inst) return
-    setMessages((prev) => [...prev, { role: 'user', content: message }])
-    setBusy('generating')
-    setBusyText(zhCN.compilation.adjusting)
-    setStreamText(null)
-    setCompilationProgress(null)
-    try {
-      const out = await handleDocSend(inst)
-      if (out.reply) {
-        appendAssistant(out.reply)
-        void window.api.addTaskMessage(taskId, 'assistant', out.reply, 'notice')
-      }
-    } catch (e) {
-      const msg = '调整资料汇编失败：' + String(e)
-      appendAssistant(msg)
-      void window.api.addTaskMessage(taskId, 'assistant', msg, 'notice')
-    } finally {
-      resetBusy()
-      await reloadMessages()
-    }
-  }
 
   /** 「导出资料汇编」：先确认（finalize），再弹出格式选择 */
   const handleExportCompilation = async () => {
@@ -962,29 +937,12 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
 
   const renderChat = () => {
     if (mode === 'compile') {
-      // 首条消息生成资料汇编（按钮「生成汇编」）；首条已发出（生成中或已生成）后按钮变「↑」，后续每条消息都是对汇编的调整
-      const hasComp = !!compilation
-      const firstSent = hasComp || busy !== null
-      return (
-        <ChatPanel
-          messages={messages}
-          draftExisted={false}
-          busy={busy !== null}
-          busyText={busyText}
-          streamText={streamText}
-          progress={compilationProgress}
-          interrupt={compilationInterrupt}
-          onRetryCompilation={compilationInterrupt ? () => void handleContinueCompilation() : undefined}
-          onGenerate={(text) => void (hasComp ? handleAdjustCompilation(text) : handleGenerateCompilation(text))}
-          onChat={(message) => void (hasComp ? handleAdjustCompilation(message) : handleGenerateCompilation(message))}
-          primaryLabel={firstSent ? '↑' : zhCN.compilation.generateBtn}
-          onPrimaryAction={hasComp ? undefined : (text) => void handleGenerateCompilation(text)}
-          showPresetButton
-          hasCompilation={hasComp}
-          refs={sourceRefs}
-          onOpenSource={(sourceId) => void handleOpenSource(sourceId)}
-        />
-      )
+      /*
+       * 7.6.1（用户裁定 D7=A）：**「生成汇编」功能区不再有左栏对话框**——
+       * 生成入口与大模型对话统一由右侧悬浮面板承载（生成模式 / 对话模式）。
+       * 任务对话（`task_messages`）仍照旧落库，历史不丢，只是不再有独立面板。
+       */
+      return null
     }
     // 撰写初稿
     if (!compilation) {
@@ -1052,6 +1010,14 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           onDocOpen={() => {
             if (compilation) void loadDocMessages(compilation.id)
           }}
+          taskMessages={messages}
+          generating={busy !== null}
+          generatingText={busyText}
+          generateProgress={compilationProgress}
+          generateInterrupt={compilationInterrupt}
+          onRetryCompilation={compilationInterrupt ? () => void handleContinueCompilation() : undefined}
+          onGenerate={(instruction) => void handleGenerateCompilation(instruction)}
+          sourceRefs={sourceRefs}
         />
       )
     }
@@ -1121,6 +1087,9 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     )
   }
 
+  // 「生成汇编」功能区为 null（无左栏）；「撰写初稿」功能区是左侧任务对话框
+  const chatNode = renderChat()
+
   return (
     <div className="writing-workspace writing-workspace--chat">
       <header className="writing-workspace__header">
@@ -1185,8 +1154,13 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
       </header>
 
       <div className="writing-workspace__body">
-        <section className="writing-workspace__chat" style={{ width: chatWidth }}>{renderChat()}</section>
-        <ResizeHandle onResize={handleChatResize} direction="horizontal" />
+        {/* 「生成汇编」功能区无左栏（7.6.1）；「撰写初稿」功能区保留左侧任务对话 */}
+        {chatNode ? (
+          <>
+            <section className="writing-workspace__chat" style={{ width: chatWidth }}>{chatNode}</section>
+            <ResizeHandle onResize={handleChatResize} direction="horizontal" />
+          </>
+        ) : null}
         <section className="writing-workspace__editor">{renderContent()}</section>
       </div>
 
