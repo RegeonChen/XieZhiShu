@@ -45,6 +45,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # 必须 checkout：发布说明取自仓库里的 docs/release-notes.md，
+      # 不 checkout 的话该文件不在工作区 → Release 正文会静默变成空（v0.3.0 首次发布踩过）。
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download Windows artifact
         uses: actions/download-artifact@v4
         with:
@@ -60,5 +65,7 @@ jobs:
           # 发布说明写在 docs/release-notes.md（每次发版前更新，含本版变更明细与验证数据）；
           # 不再用自动生成的 PR 清单——本项目为单人开发，自动说明没有信息量。
           body_path: docs/release-notes.md
+          # 同一 tag 重跑时覆盖已上传的同名安装包（否则重发会因资产重名失败）
+          overwrite_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
