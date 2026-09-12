@@ -295,7 +295,64 @@ export function yearOfDate(value?: string | null): number | undefined {
   return year >= 1900 ? year : undefined
 }
 
-/** 标题是否像一个 URL/域名（E2：URL 里的 `t20251203` 之类数字不能被当作年份依据） */
+/**
+ * 段落是否只是"把来源标题复述了一遍"（纯函数，2026-09-12 用户实测后新增）。
+ *
+ * 动因：真实库里出现过「长乐新添一所普通高中，将于9月开学。」这类段落——正文与**来源标题**几乎一致，
+ * 校名/规模/投资/地点等正文里的具体信息全被丢掉；它还常常带着一个正文中查不到的年份（实测 2019
+ * 而文章发布于 2023）。用户明确要求：**绝不能只看文章标题**。
+ *
+ * 判定：归一化（去空白与标点）后，段落与标题互为子串，或标题包含段落的全部字符 —— 即"段落没有比标题多出信息"。
+ * 注意：这是**收窄判定**（宁少勿错）：只有段落确实没带来新信息时才判为标题型；
+ * 段落比标题长且含正文要素（数字/专名）时一律放行。
+ */
+export function isTitleOnlyParagraph(text: string | undefined, sourceTitle: string | undefined): boolean {
+  const t = normalizeForMatch(text)
+  const s = normalizeForMatch(sourceTitle)
+  if (!t || !s) return false
+  if (s.includes(t)) return true // 段落是标题的一部分（如标题「今日获批！36个班！长乐将新增一所高中！」→ 段落「长乐将新增一所高中」）
+  // 段落比标题更长时：只有当它只是标题 + 极少量连接词（≤6 字新增内容）才算"只复述标题"
+  if (t.includes(s)) return t.length - s.length <= 6
+  // 与标题"同词不同序的改写"（「可容3000名学生！长乐将新建一所高中！」→「长乐将新建一所高中，可容纳3000名学生。」）
+  // 用 bigram 相似度兜住；加长度护栏：只有"短段"才可能是标题复述，长段必然含正文要素，不判。
+  if (t.length > TITLE_ONLY_MAX_CHARS) return false
+  return textSimilarity(t, s) >= TITLE_ONLY_DICE
+}
+
+/**
+ * 「段落≈标题」判定阈值（2026-09-12 用真实数据标定）：
+ * 三条实测标题复述段的相似度为 **0.58–0.60**（同词不同序 + 少量连接词），
+ * 而正常段落（带校名/规模/地点）与标题的相似度通常 <0.3，取 0.55 留出安全边际；
+ * 同时只在段落较短（≤40 字归一化后）时才做相似度判定——长段必然带来了正文信息。
+ */
+export const TITLE_ONLY_DICE = 0.55
+/** 段落超过这个长度（归一化后）就不再判"标题复述" */
+export const TITLE_ONLY_MAX_CHARS = 40
+
+/**
+ * 段落的年份是否有据可查（纯函数，2026-09-12 新增，配合「时间必须有据」的硬校验）。
+ *
+ * 依据按优先级：① 年份在该来源正文/卡片原文里出现；② 等于该来源的推测年份（年鉴 −1 / 标题年份 / 网页发布时间）。
+ * 都查不到 → 说明模型自己编了一个年份（实测：正文无 2019 的文章被标成 2019 年），调用方应降级为「时间待核」。
+ */
+export function isYearSupportedBySource(
+  year: number | undefined,
+  source: { text?: string | null; title?: string | null; kind?: 'file' | 'url'; publishedAt?: string | null }
+): boolean {
+  if (year == null) return true
+  const text = source.text ?? ''
+  if (text.includes(String(year))) return true
+  const inferred = inferYearFromSource({ title: source.title, kind: source.kind, publishedAt: source.publishedAt })
+  return inferred?.year === year
+}
+
+/** 匹配用归一化：去空白、常见标点与装饰符号（纯函数） */
+function normalizeForMatch(value: string | undefined): string {
+  return (value ?? '').replace(/[\s　，。；、,.!?！？：:（）()「」“”"'《》\-—_·|【】\[\]]/g, '')
+}
+
+/**
+ * 标题是否像一个 URL/域名（E2：URL 里的 `t20251203` 之类数字不能被当作年份依据） */
 export function looksLikeUrl(value?: string | null): boolean {
   const v = (value ?? '').trim()
   if (!v) return false
@@ -863,6 +920,38 @@ if (import.meta.vitest) {
       // 措辞接近但讲的是不同的事（数字集合也不同）→ 不合并
       expect(out.paragraphs).toHaveLength(2)
       expect(out.crossSourceMerged).toBe(0)
+    })
+
+    it('detects title-only paragraphs and unsupported years (2026-09-12 用户实测回归)', () => {
+      // 段落就是标题复述（含只比标题多几个连接词）→ 判为标题型
+      expect(isTitleOnlyParagraph('长乐新添一所普通高中，将于9月开学。', '长乐新添一所普通高中！将于9月开学！')).toBe(true)
+      expect(isTitleOnlyParagraph('长乐将新增一所高中', '今日获批！36个班！长乐将新增一所高中！')).toBe(true)
+      // 同词不同序的标题复述（真实模型输出）→ 由相似度规则兜住
+      expect(isTitleOnlyParagraph('长乐将新增一所高中，已获批准，办学规模为36个班。', '今日获批！36个班！长乐将新增一所高中！')).toBe(true)
+      expect(isTitleOnlyParagraph('长乐将新建一所高中，可容纳3000名学生。', '可容3000名学生！长乐将新建一所高中！')).toBe(true)
+      // 段落带来了正文信息（校名/规模/地点）→ 放行
+      expect(
+        isTitleOnlyParagraph(
+          '福州市福外高级中学是全日制民办普通高级中学，设计规模为高中3个年级60个班，可容纳3000名学生。',
+          '长乐新添一所普通高中！将于9月开学！'
+        )
+      ).toBe(false)
+      expect(isTitleOnlyParagraph('长乐区普通高中招生录取3625人。', '长乐区2020年教育事业发展情况')).toBe(false)
+
+      // 年份有据：出现在正文里 / 等于网页发布时间 / 等于年鉴 −1 推断年 → 放行
+      expect(isYearSupportedBySource(2023, { text: '项目自2022年9月开工…2023年投用' })).toBe(true)
+      expect(isYearSupportedBySource(2023, { text: '预计今年9月开学', kind: 'url', publishedAt: '2023-03-07' })).toBe(true)
+      expect(isYearSupportedBySource(2018, { text: '无年份正文', title: '长乐年鉴2019', kind: 'file' })).toBe(true)
+      // 年份在正文里查不到、也不来自任何合法推断依据 → 无据（实测：正文无 2019 的文章被标成 2019 年）
+      expect(
+        isYearSupportedBySource(2019, {
+          text: '预计今年9月开学',
+          kind: 'url',
+          publishedAt: '2023-03-07',
+          title: '长乐新添一所普通高中！将于9月开学！'
+        })
+      ).toBe(false)
+      expect(isYearSupportedBySource(2021, { text: '学校规划办学规模60个班3000人', kind: 'url', publishedAt: '2022-11-07' })).toBe(false)
     })
   })
 }

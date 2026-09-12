@@ -407,6 +407,10 @@ export type CompilationExtractScan = CompilationStageScan & {
   /** 模型始终未回答、按原文保留的卡片数 */
   omitted?: number
   passthrough?: number
+  /** 因"段落只是复述来源标题、没有正文信息"而丢弃的段落数（2026-09-12：绝不能只看文章标题） */
+  titleOnlyDropped?: number
+  /** 因"年份在来源里查不到、也推不出"而降级为「时间待核」的段落数 */
+  timeUnsupported?: number
   /** 成文阶段被判为重复而合并掉的段数 */
   duplicatesDropped?: number
   /** 疑似同一事实但数字不一致、特意保留的段数（矛盾候选） */

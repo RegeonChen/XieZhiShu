@@ -93,6 +93,8 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docS
     pending: number
     indexing: number
     failed: number
+    /** 正文缺失（页面为模板/文章已失效）而不参与检索、也不重试索引的来源数（2026-09-12 A1） */
+    bodyMissing?: number
     lastError: string | null
     queued: number
     engine?: { poolSize: number; livePool: number; workerThreads: number; workerErrors: number; directFallbacks: number; lastWorkerError: string | null }
@@ -583,6 +585,11 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docS
                   .replace('{failed}', String(ragStatus.failed))}
               </span>
             </p>
+            {ragStatus.bodyMissing && ragStatus.bodyMissing > 0 ? (
+              <p className="settings__hint">
+                {zhCN.settingsPage.index.bodyMissing.replace('{count}', String(ragStatus.bodyMissing))}
+              </p>
+            ) : null}
             {rebuilding || rebuildInterrupted ? (
               <p className="settings__hint">
                 {zhCN.settingsPage.index.progress

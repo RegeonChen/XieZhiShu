@@ -319,6 +319,8 @@ export const zhCN = {
       stateFailed: '索引失败',
       statePending: '尚未索引',
       counts: '已索引 {ready} / 共 {total} 篇（失败 {failed}）',
+      bodyMissing:
+        '另有 {count} 篇网页材料未取到正文（老文章链接已失效、站点返回的是通用页面）：已排除在检索之外，也不会被「重建索引」重试。',
       progress: '重建进度 {percent}%（已处理 {processed} / {total}，剩余 {remaining}）',
       interruptedHint: '上次重建被关闭软件打断，点击「继续重建」从剩余部分接着跑（已索引的不会重做）。',
       lastError: '最近失败原因',
@@ -546,6 +548,8 @@ export const zhCN = {
     extractDiagnostics:
       '（校验：通过 {accepted} 段；降级 {degraded} 段 —— 其中数字在来源中找不到 {numbers} 段、证据引文非原文 {evidence} 段；降级粒度：保留证据片段 {fromEvidence} 段、退回整卡原文 {wholeCard} 段）',
     extractDropped: '模型判定与主题无关而整卡丢弃 {count} 张',
+    extractTitleOnly: '另有 {count} 段因"只复述了文章标题、没有正文信息"而丢弃（标题不等于材料）',
+    extractTimeUnsupported: '另有 {count} 段的年份在来源里查不到、也推不出，已标为「时间待核」',
     extractConflictsKept: '{count} 段因「疑似同一事实但数字不一致」特意保留（交给矛盾扫描）',
     extractScanFailed: '整合提取未完成（{reason}），部分卡片可能仍按原文原样保留、未做裁剪整合。',
     /* 网页资料抓取情况（2026-09-12 第二批）：如实告知本轮用了多少网页材料、是否被上限截断 */
@@ -555,6 +559,7 @@ export const zhCN = {
     webScanEmpty: '（本次未取得任何网页文章：标题未命中或正文未通过精过滤）',
     webScanReused: '网页资料：复用已锁定的 {count} 篇材料',
     webScanNewCandidates: '（站点上另有 {count} 篇新命中文章未纳入，可在生成面板点「纳入新材料」）',
+    webScanInvalidBody: '（另有 {count} 篇未取到正文——老文章链接已失效、站点返回的是通用页面，已丢弃不入库）',
     /* 第三批 A1：网页材料集合首次落定后的提示与"纳入新材料"入口 */
     webMaterialsPinned: '本任务已锁定 {count} 篇网页材料（重新生成将复用同一批）',
     webMaterialsFetched: '本次新采用 {count} 篇网页材料',

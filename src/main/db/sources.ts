@@ -22,6 +22,10 @@ export interface SourceRow {
   file_size: number | null
   workspace: number
   task_id: string | null
+  /** 正文来源（Migration 040）：结构化提取器 / 整页回退 */
+  text_source: string | null
+  /** 正文缺失标记（Migration 040/041）：老文章失效、站点返回通用模板页 → 不参与检索 */
+  body_missing: number
   created_at: string
   updated_at: string
 }
@@ -43,6 +47,8 @@ function rowToSource(row: SourceRow): Source {
     fileSize: row.file_size ?? undefined,
     workspace: row.workspace === 1,
     taskId: row.task_id ?? undefined,
+    textSource: row.text_source === 'extractor' || row.text_source === 'full-page' ? row.text_source : undefined,
+    bodyMissing: row.body_missing === 1 ? true : undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   }
@@ -123,8 +129,8 @@ export function insertSource(source: Omit<Source, 'createdAt' | 'updatedAt'>): S
   const now = new Date().toISOString()
   db.prepare(
     `INSERT INTO sources (id, kind, title, file_path, url, url_snapshot_at, published_at, cleaned_text, status, error_code,
-       content_hash, file_mtime, file_size, workspace, task_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       content_hash, file_mtime, file_size, workspace, task_id, text_source, body_missing, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     source.id,
     source.kind,
@@ -141,6 +147,8 @@ export function insertSource(source: Omit<Source, 'createdAt' | 'updatedAt'>): S
     source.fileSize ?? null,
     source.workspace ? 1 : 0,
     source.taskId ?? null,
+    source.textSource ?? null,
+    source.bodyMissing ? 1 : 0,
     now,
     now
   )

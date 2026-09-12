@@ -21,6 +21,8 @@ import type { CompilationTimeConfidence } from '../../shared/types'
 import { chatCompletion, type ChatMessage } from '../llm/chat'
 import { logMain } from '../logger'
 import {
+  isTitleOnlyParagraph,
+  isYearSupportedBySource,
   locateVerbatim,
   validateExtractedParagraph,
   withFallbackYear,
@@ -97,6 +99,10 @@ export interface ExtractBatchStats {
   passthrough: number
   retainedChars: number
   retried: number
+  /** 因"段落只是复述来源标题"而丢弃的段落数（2026-09-12：绝不能只看文章标题） */
+  titleOnlyDropped: number
+  /** 因"年份在该来源里查不到、也推不出"而降级为「时间待核」的段落数 */
+  timeUnsupported: number
 }
 
 export function emptyExtractStats(input = 0, inputChars = 0): ExtractBatchStats {
@@ -115,7 +121,9 @@ export function emptyExtractStats(input = 0, inputChars = 0): ExtractBatchStats 
     omitted: 0,
     passthrough: 0,
     retainedChars: 0,
-    retried: 0
+    retried: 0,
+    titleOnlyDropped: 0,
+    timeUnsupported: 0
   }
 }
 
@@ -150,6 +158,10 @@ export interface ExtractScanStats {
   /** 模型始终未回答、按原文保留的卡片数 */
   omitted: number
   passthrough: number
+  /** 因"段落只是复述来源标题、没有正文信息"而丢弃的段落数（2026-09-12：绝不能只看文章标题） */
+  titleOnlyDropped?: number
+  /** 因"年份在来源里查不到、也推不出"而降级为「时间待核」的段落数 */
+  timeUnsupported?: number
   /** 成文阶段被判定为重复而合并掉的段数 */
   duplicatesDropped: number
   /** 「疑似同一事实但数字不一致」而特意保留的段数（矛盾候选） */
@@ -234,11 +246,12 @@ export function buildExtractMessages(batch: ExtractCandidate[], topic: string): 
     '判断依据是「志稿正文会不会用到它」，而不是「它与主题有没有一点点关系」。',
     '',
     '【硬性要求】',
+    '0. **绝不能只复述文章标题**：段落正文必须来自卡片正文，并至少给出一个正文里的具体要素（机构/学校全称、数量或规模、金额、地点、时间、事件结果等）。只把标题换个说法写一遍（例如标题写「长乐新添一所普通高中！将于9月开学！」，段落就写「长乐新添一所普通高中，将于9月开学。」）**不合格**——这种情况要么从正文里写出关键信息，要么把这张卡片放进 `dropped`。',
     '1. **忠于原文事实**：数字、日期、人名、地名、机构名一律照抄原文，不得改写、不得推算、不得编造；不得改变原文的结论。',
     '2. **每段只能来自一张卡片**（即一个来源）：不得把不同卡片的文字拼成一段；不同来源的内容必须分成不同段落。',
-    '3. 允许的加工：删掉无关内容；在同一张卡片内部调整语序、合并同一事实的多句表述、把省略的主语或指代补全（「他」「该校」→ 具体人名/校名）；去掉或改写「【概况】」这类栏目名。',
+    '3. 允许的加工：删掉无关内容；在同一张卡片内部调整语序、合并同一事实的多句表述、把省略的主语或指代补全（「他」「该校」→ 具体人名/校名）；去掉或改写「【概况】」这类栏目名。**允许压缩概括，但主体名称与规模/数量/金额/地点/时间等关键要素不得丢失**（例如「福州市福外高级中学…设计规模为高中3个年级60个班，可容纳3000名学生…总投资约6亿元，占地142亩」不能压缩成「长乐新添一所普通高中」）。',
     '4. **不得合并互相矛盾的说法**：若两张卡片（或同一卡片内两处）对同一事实给出不同数字、时间或说法，必须**分别保留为不同段落**，不要取其中一种，也不要折中。',
-    '5. 每段必须给出 `timeLabel`（段首时间，**必须含 4 位年份**，如「2018 年」「2018 年 5 月」「2018 年 5 月 19 日」；不要写「5 月 19 日」这种缺年份的写法）：依据正文、卡片时间与来源文献年份推断（**年鉴惯例**：来源为《长乐年鉴2019》时，其正文通常记述 2018 年，即年鉴年份减 1）。确实推断不出年份时也必须给出一个含年份的时间（按上述惯例推定），不要留空。',
+    '5. 每段必须给出 `timeLabel`（段首时间，**必须含 4 位年份**，如「2018 年」「2018 年 5 月」「2018 年 5 月 19 日」；不要写「5 月 19 日」这种缺年份的写法）：依据正文、卡片时间与来源文献年份推断（**年鉴惯例**：来源为《长乐年鉴2019》时，其正文通常记述 2018 年，即年鉴年份减 1）。确实推断不出年份时也必须给出一个含年份的时间（按上述惯例推定），不要留空。**年份必须有依据**：正文里没写、也推不出来的年份，本地校验会把它降级成「时间待核」，所以不要凭印象填年份。',
     '6. 每段必须给出 `evidence`：从该卡片原文中**逐字连续**摘出的一段（不得改写、不得拼接、不得跨卡片拼），作为这段的事实依据。',
     '7. 某张卡片里确实没有与主题相关的内容时，把它放进 `dropped` 并简述原因。',
     '8. 不要输出任何解释性文字或代码块围栏，只输出一个 JSON 对象。',
@@ -311,6 +324,34 @@ function degraded(candidate: ExtractCandidate, evidence?: string): ExtractedDraf
 }
 
 /**
+ * 降级保留（原文整段 / evidence 片段）**并做同样的两道硬校验**（纯函数）：
+ * 标题型段落无新信息 → 直接丢弃；年份无据 → 标「时间待核」。返回 null 表示该卡片被丢掉。
+ */
+function degradedChecked(
+  candidate: ExtractCandidate,
+  evidence: string | undefined,
+  stats: ExtractBatchStats
+): ExtractedDraft | null {
+  const d = degraded(candidate, evidence)
+  if (isTitleOnlyParagraph(d.text, candidate.sourceTitle)) {
+    stats.titleOnlyDropped += 1
+    return null
+  }
+  const matched = (d.timeLabel ?? '').match(/(?:18|19|20)\d{2}/)
+  const supported = isYearSupportedBySource(matched ? Number(matched[0]) : undefined, {
+    text: candidate.excerpt,
+    title: candidate.sourceTitle,
+    kind: candidate.sourceKind,
+    publishedAt: candidate.sourcePublishedAt
+  })
+  if (!supported) {
+    stats.timeUnsupported += 1
+    return { ...d, timeConfidence: 'unknown' }
+  }
+  return d
+}
+
+/**
  * 把模型输出处理成"已校验/已降级"的段落草稿（纯函数，可测试）。
  * - sourceRef 找不到对应卡片 → 忽略（幻觉出来的引用号）；
  * - `evidence` 必须是该来源**卡片原文中逐字连续**的一段 → 这就是"每段单一来源"的本地保证
@@ -347,24 +388,47 @@ export function collectExtractResults(
       else if (reason === 'evidence-not-found') stats.invalidEvidence += 1
       else stats.emptyText += 1
       // 降级：优先只保留 evidence 片段（粒度细），定位不到才退回整张卡片原文
-      const fallback = degraded(group[0], (draft.evidence ?? '').trim() || undefined)
-      if (fallback.degradedFromEvidence) stats.degradedFromEvidence += 1
-      else stats.degradedWholeCard += 1
-      drafts.push(fallback)
+      const fallback = degradedChecked(group[0], (draft.evidence ?? '').trim() || undefined, stats)
+      if (fallback) {
+        if (fallback.degradedFromEvidence) stats.degradedFromEvidence += 1
+        else stats.degradedWholeCard += 1
+        drafts.push(fallback)
+      }
       continue
     }
     // 段落归属：优先归到 evidence 所在的那张卡片（用于矛盾说法映射与诊断），否则归该来源第一张
     const evidence = (draft.evidence ?? '').trim()
     const parent = (evidence ? group.find((c) => locateVerbatim(c.excerpt, evidence) !== null) : undefined) ?? group[0]
+    /*
+     * 硬校验一（2026-09-12 用户实测后新增）：**不得只复述文章标题**。
+     * 真实案例：某段正文与来源标题几乎一致，正文里的校名/规模/投资/地点全被丢掉；
+     * 这类段落不提供任何新信息（且常伴随编造年份），直接丢弃并计入诊断。
+     */
+    if (isTitleOnlyParagraph(validation.text, parent.sourceTitle)) {
+      stats.titleOnlyDropped += 1
+      continue
+    }
     // 段首时间兜底：模型没给年份时按来源推断（年鉴类标题 −1；网页标题/发布时间按原样，标为 inferred）
     const time = withFallbackYear(validation.timeLabel, parent.sourceTitle, { kind: parent.sourceKind, publishedAt: parent.sourcePublishedAt })
+    /*
+     * 硬校验二：**时间必须有据**。模型给的年份若在该来源里查不到、也不等于来源推测年份
+     * （年鉴 −1 / 标题年份 / 网页发布时间），说明是凭空写的年份，降级为「时间待核」而不是当作 exact。
+     */
+    const yearSupported = isYearSupportedBySource(time.year, {
+      text: sourceText,
+      title: parent.sourceTitle,
+      kind: parent.sourceKind,
+      publishedAt: parent.sourcePublishedAt
+    })
+    const timeConfidence: CompilationTimeConfidence = yearSupported ? time.timeConfidence : 'unknown'
+    if (!yearSupported) stats.timeUnsupported += 1
     stats.accepted += 1
     stats.retainedChars += validation.text.length
     drafts.push({
       parentIndex: parent.index,
       text: validation.text,
       timeLabel: time.timeLabel,
-      timeConfidence: time.timeConfidence,
+      timeConfidence,
       evidence: validation.evidence
     })
   }
@@ -464,7 +528,7 @@ export async function extractBatch(
       stats.passthrough = batch.length
       stats.omitted = batch.length
       logMain('extract', '整批 ' + batch.length + ' 张卡片的输出无法解析，已按原文整段保留')
-      return { ok: true, drafts: batch.map((c) => degraded(c)), stats }
+      return { ok: true, drafts: batch.map((c) => degradedChecked(c, undefined, stats)).filter((d): d is ExtractedDraft => d !== null), stats }
     }
   }
 
@@ -486,7 +550,8 @@ export async function extractBatch(
     if (answered.has(c.sourceRef)) continue
     stats.omitted += 1
     stats.passthrough += 1
-    drafts.push(degraded(c))
+    const d = degradedChecked(c, undefined, stats)
+    if (d) drafts.push(d)
   }
   return { ok: true, drafts, stats }
 }

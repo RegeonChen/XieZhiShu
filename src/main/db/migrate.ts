@@ -1009,6 +1009,39 @@ CREATE TABLE IF NOT EXISTS task_web_materials (
 );
 CREATE INDEX IF NOT EXISTS idx_task_web_materials_task ON task_web_materials(task_id);
 `
+  },
+  {
+    // 2026-09-12（网页正文质量 A1/A2）：给 `sources` 加两列便于排查与治理"正文没抓到"的材料。
+    // - `text_source`：正文是结构化提取器给的，还是整页回退（回退的含导航/推荐列表噪音）；
+    // - `body_missing`：正文缺失标记（老文章失效、站点返回 HTTP 200 + 通用模板页）→ 不参与检索、不建索引。
+    version: 40,
+    sql: `
+ALTER TABLE sources ADD COLUMN text_source TEXT;
+ALTER TABLE sources ADD COLUMN body_missing INTEGER NOT NULL DEFAULT 0;
+`
+  },
+  {
+    // 2026-09-12（存量清理，用户裁定）：把此前**误当正文入库的模板页**清理掉。
+    // 判定与抓取端一致：去空白后，正文里必须能找到标题的前 8 个字；找不到就是"这篇文章的正文从未取到"
+    // （真实数据：685 篇任务绑定网页来源里 178 篇如此，正文完全相同且不含标题，2012—2016 老文章为主）。
+    // 处置：标 body_missing=1、清空其向量（省 3.6 万个分块）、从任务锁定集合里摘掉（不再进入检索范围）。
+    // 注：**不删 sources 行**——汇编段落通过外键引用来源，直接删除会级联删掉已生成的段落。
+    version: 41,
+    sql: `
+UPDATE sources SET body_missing = 1,
+       index_state = 'failed',
+       index_error = '正文未取到（页面为模板/该文章已失效），不参与检索'
+ WHERE kind = 'url'
+   AND task_id IS NOT NULL
+   AND body_missing = 0
+   AND cleaned_text <> ''
+   AND instr(
+         replace(replace(replace(cleaned_text, ' ', ''), char(10), ''), char(13), ''),
+         substr(replace(replace(replace(title, ' ', ''), char(10), ''), char(13), ''), 1, 8)
+       ) = 0;
+DELETE FROM chunk_embeddings WHERE source_id IN (SELECT id FROM sources WHERE body_missing = 1);
+DELETE FROM task_web_materials WHERE source_id IN (SELECT id FROM sources WHERE body_missing = 1);
+`
   }
 ]
 
