@@ -4,6 +4,7 @@ import ConfirmDialog from './ConfirmDialog'
 import PresetGuideDialog from './PresetGuideDialog'
 import { LLM_PRESETS } from '../../../shared/llm-presets'
 import type { LlmPreset } from '../../../shared/llm-presets'
+import type { DocScale } from '../../../shared/types'
 
 interface ProviderItem {
   id: string
@@ -19,6 +20,7 @@ interface AppSettingsShape {
   compilationProviderId?: string
   draftProviderId?: string
   keepAwake?: boolean
+  docScale?: DocScale
 }
 
 interface ProviderForm {
@@ -40,12 +42,15 @@ interface SettingsProps {
   theme?: 'light' | 'dark' | 'classic'
   /** 切换主题回调（由 App 注入） */
   onThemeChange?: (theme: 'light' | 'dark' | 'classic') => void
+  /** Phase 7.6：资料汇编查看器字号档位（由 App 注入并持久化到设置表） */
+  docScale?: DocScale
+  onDocScaleChange?: (scale: DocScale) => void
 }
 
 /** 设置页区块顺序（与中栏导航一致；scroll-spy 观察对象） */
 const SETTING_SECTIONS = ['overview', 'appearance', 'workspace', 'preset', 'stepModels', 'provider'] as const
 
-function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange }: SettingsProps) {
+function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docScale, onDocScaleChange }: SettingsProps) {
   const [providers, setProviders] = useState<ProviderItem[] | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadErr, setLoadErr] = useState<string | null>(null)
@@ -303,6 +308,14 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange }: Se
     if (!res.ok) setKeepAwake(!next) // 失败回滚
   }
 
+  /** Phase 7.6：切换资料汇编字号档位（立即生效 + 落库持久化） */
+  const handleDocScaleChange = async (next: DocScale) => {
+    const prev: DocScale = docScale ?? 'medium'
+    onDocScaleChange?.(next)
+    const res = await window.api.updateSettings({ docScale: next })
+    if (!res.ok) onDocScaleChange?.(prev) // 失败回滚
+  }
+
   // Phase 6.8：设置第 1/3 步默认大模型（从已配置 Provider 中选取；空 = 回退任务/全局）
   const handleStepModelChange = async (step: 1 | 3, id: string): Promise<void> => {
     const value = id ? id : null
@@ -379,6 +392,25 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange }: Se
               {label}
             </button>
           ))}
+        </div>
+        {/* Phase 7.6（用户要求）：资料汇编字号大/中/小，可持久化（重启后仍生效） */}
+        <div className="settings__switch-row">
+          <div>
+            <div className="settings__field-label">{zhCN.settingsPage.docScale.title}</div>
+            <div className="settings__hint">{zhCN.settingsPage.docScale.hint}</div>
+          </div>
+          <div className="settings__theme-row settings__theme-row--inline">
+            {([['small', zhCN.settingsPage.docScale.small], ['medium', zhCN.settingsPage.docScale.medium], ['large', zhCN.settingsPage.docScale.large]] as const).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                className={'settings__theme-option' + (docScale === id ? ' is-active' : '')}
+                onClick={() => void handleDocScaleChange(id)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
       </section>
 

@@ -326,6 +326,17 @@ function CompilationStep({
   )
 
   const pending = compilation?.contradictions.filter((c) => c.status === 'pending') ?? []
+  /**
+   * 矛盾分组编号（用户 2026-09-10 要求）：**按汇编内矛盾数组顺序 1..N**，包含已处理/已忽略的组。
+   * 数组来自 `ORDER BY rowid`（稳定），因此编号不会随取舍变化而漂移——用户引用的「矛盾3」始终是同一组，
+   * 导出文档里的编号与此**同源**（导出侧同样按数组顺序编号）。
+   */
+  const groupNoById = new Map((compilation?.contradictions ?? []).map((g, i) => [g.id, i + 1]))
+  /** 该段落所属的**全部**矛盾组（含已处理）：用于显示「矛盾N」并让编号与导出文档对得上 */
+  const conflictGroupsForItem = (itemId: string): { id: string; no: number; pending: boolean; topic: string }[] =>
+    (compilation?.contradictions ?? [])
+      .filter((g) => g.variants.some((v) => v.itemId === itemId))
+      .map((g) => ({ id: g.id, no: groupNoById.get(g.id) ?? 0, pending: g.status === 'pending', topic: g.topic }))
   // 只展示未被软删除（采纳后未恢复）的卡片
   const keptItems = (compilation?.items ?? []).filter((it) => it.kept !== false)
   /** 本汇编的来源编号数量 + 缺年份（时间待核）的段落数（工具栏统计） */
@@ -610,8 +621,7 @@ function CompilationStep({
             type="button"
             className="source-list__btn source-list__btn--primary"
             onClick={onConfirm}
-            disabled={busy || pending.length > 0}
-            title={pending.length > 0 ? t.pendingContradictions.replace('{count}', String(pending.length)) : undefined}
+            disabled={busy}
           >
             {t.exportBtn}
           </button>
@@ -783,7 +793,18 @@ function CompilationStep({
                       {it.sourceOrdinal}
                     </button>
                   ) : null}
-                  {conflictForItem(it.id) ? <span className="compilation-chip conflict">⚠ {t.contradict}</span> : null}
+                  {conflictGroupsForItem(it.id).map((g) =>
+                    g.pending ? (
+                      <span key={g.id} className="compilation-chip conflict" title={g.topic}>
+                        ⚠ {t.contradictNo.replace('{n}', String(g.no))}
+                      </span>
+                    ) : (
+                      /* 已采纳/已忽略的组也标出编号（灰色）：编号与导出文档一致，便于对照审阅 */
+                      <span key={g.id} className="compilation-chip is-done" title={g.topic}>
+                        {t.contradictNo.replace('{n}', String(g.no))}
+                      </span>
+                    )
+                  )}
                   {fix ? (
                     <button
                       type="button"

@@ -4531,18 +4531,50 @@ textarea:focus-visible {
   line-height: 1.7;
 }
 /* Phase 7.3：连续文档查看器 —— 段首时间徽标 + 正文 + 段尾来源圆标，按年份分节 */
+/*
+ * Phase 7.6（用户要求）：资料汇编查看器的字号档位，由设置页选择、落库持久化，
+ * 由 App 写到 `document.documentElement` 的 `data-doc-scale`（与 `data-theme` 同机制）。
+ * `small` 就是改造前的字号与文档宽度；`medium`（默认）/`large` 依次放大字号并收窄两侧留白。
+ */
+:root {
+  --doc-max-width: 100%;
+  --doc-font-size: 15px;
+  --doc-year-font-size: 14px;
+  --doc-time-font-size: 11.5px;
+  --doc-line-height: 2;
+  --doc-pad-y: 6px;
+  --doc-pad-x: 2px;
+}
+:root[data-doc-scale='small'] {
+  --doc-max-width: 860px;
+  --doc-font-size: 13.5px;
+  --doc-year-font-size: 13px;
+  --doc-time-font-size: 11px;
+  --doc-line-height: 1.9;
+  --doc-pad-y: 4px;
+  --doc-pad-x: 2px;
+}
+:root[data-doc-scale='large'] {
+  --doc-max-width: 100%;
+  --doc-font-size: 17px;
+  --doc-year-font-size: 15px;
+  --doc-time-font-size: 12.5px;
+  --doc-line-height: 2.05;
+  --doc-pad-y: 10px;
+  --doc-pad-x: 0px;
+}
 .compilation-doc {
   flex: 1;
   overflow-y: auto;
-  padding: 4px 2px 40px;
-  max-width: 860px;
+  padding: var(--doc-pad-y) var(--doc-pad-x) 40px;
+  max-width: var(--doc-max-width);
   width: 100%;
   margin: 0 auto;
 }
 .compilation-doc__year {
   margin: 18px 0 6px;
   padding-bottom: 4px;
-  font-size: 13px;
+  font-size: var(--doc-year-font-size);
   font-weight: 600;
   color: var(--accent);
   border-bottom: 1px solid var(--border);
@@ -4554,8 +4586,8 @@ textarea:focus-visible {
   margin: 0 0 6px;
   border-left: 2px solid transparent;
   border-radius: var(--radius);
-  font-size: 13.5px;
-  line-height: 1.9;
+  font-size: var(--doc-font-size);
+  line-height: var(--doc-line-height);
   color: var(--fg);
   transition: background 0.15s, border-color 0.15s;
 }
@@ -4580,7 +4612,7 @@ textarea:focus-visible {
   border-radius: 999px;
   background: var(--bg-elevated);
   color: var(--fg-soft);
-  font-size: 11px;
+  font-size: var(--doc-time-font-size);
   line-height: 1.7;
   white-space: nowrap;
 }
@@ -4655,6 +4687,10 @@ textarea:focus-visible {
   color: inherit;
   text-decoration: none;
   border-radius: 3px;
+}
+.compilation-chip.is-done {
+  color: var(--fg-soft);
+  background: var(--bg-elevated);
 }
 .compilation-chip.conflict {
   color: var(--danger);
@@ -5425,6 +5461,11 @@ textarea:focus-visible {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+/* 与说明文字同排使用（字号档位那一行），不参与换行挤压 */
+.settings__theme-row--inline {
+  flex-shrink: 0;
+  flex-wrap: nowrap;
 }
 .settings__theme-option {
   padding: 6px 14px;

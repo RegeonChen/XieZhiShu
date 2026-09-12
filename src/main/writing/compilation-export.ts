@@ -102,13 +102,28 @@ export function compilationDocxXml(comp: Compilation): string {
     if (it.sourceOrdinal == null) continue
     if (!sourceTitles.has(it.sourceOrdinal)) sourceTitles.set(it.sourceOrdinal, sourceTitleOf(it))
   }
+  /**
+   * 矛盾分组编号（Phase 7.6，用户要求）：**按汇编内矛盾数组顺序 1..N**。
+   * 与查看器同一口径（数组顺序来自 `ORDER BY rowid`，稳定），因此界面上的「矛盾3」与本文档里的编号一致；
+   * 编号覆盖**全部**组（含已采纳/已忽略），不随取舍变化而漂移。
+   */
+  const contradictions = comp.contradictions ?? []
+  const groupsByItem = new Map<string, number[]>()
+  contradictions.forEach((c, i) => {
+    for (const v of c.variants) {
+      const list = groupsByItem.get(v.itemId) ?? []
+      if (!list.includes(i + 1)) list.push(i + 1)
+      groupsByItem.set(v.itemId, list)
+    }
+  })
 
   const paras: string[] = []
   paras.push(para(`资料汇编：${comp.title}`, { bold: true, size: 36 }))
   paras.push(
     para(
       `生成时间：${comp.updatedAt || comp.createdAt}｜状态：${comp.status === 'finalized' ? '已确认' : comp.status}` +
-        `｜共 ${items.length} 段 / ${sourceTitles.size} 篇来源`
+        `｜共 ${items.length} 段 / ${sourceTitles.size} 篇来源` +
+        (contradictions.length > 0 ? ` / ${contradictions.length} 组矛盾` : '')
     )
   )
   paras.push(para(''))
@@ -123,6 +138,9 @@ export function compilationDocxXml(comp: Compilation): string {
       const runs: DocxRun[] = [{ text: time + '　', bold: true }, { text: it.excerpt }]
       if (it.sourceOrdinal != null) runs.push({ text: String(it.sourceOrdinal), superscript: true })
       else runs.push({ text: '（来源待补）' })
+      // 段尾注明属于第几组矛盾，便于与文末的矛盾汇总逐组对照审阅
+      const nos = groupsByItem.get(it.id)
+      if (nos && nos.length > 0) runs.push({ text: `（矛盾${nos.join('、')}）` })
       paras.push(paraRuns(runs))
     }
   }
@@ -135,13 +153,17 @@ export function compilationDocxXml(comp: Compilation): string {
     }
   }
 
-  const contradictions = comp.contradictions ?? []
   if (contradictions.length > 0) {
     paras.push(para(''))
-    paras.push(para(`三、矛盾说明（共 ${contradictions.length} 组）`, { bold: true, size: 30 }))
+    paras.push(para(`三、矛盾汇总（共 ${contradictions.length} 组）`, { bold: true, size: 30 }))
+    paras.push(para('说明：正文段落末尾的「矛盾N」与本表编号一一对应。'))
     contradictions.forEach((c, i) => {
-      const variants = c.variants.map((v) => `「${v.variantText}」（《${sourceTitleOf(v)}》）`).join('；')
-      paras.push(para(`${i + 1}. ${c.topic}（${c.kind}）：${variants}`))
+      const status = c.status === 'resolved' ? '已采纳' : c.status === 'ignored' ? '已忽略' : '待处理'
+      paras.push(para(`矛盾 ${i + 1}｜${c.topic}（${c.kind}，${status}）`, { bold: true }))
+      c.variants.forEach((v, vi) => {
+        const chosen = c.chosenItemId && c.chosenItemId === v.itemId ? '　← 已采纳该说法' : ''
+        paras.push(para(`　说法 ${vi + 1}：「${v.variantText}」（《${sourceTitleOf(v)}》）${chosen}`))
+      })
     })
   }
 
@@ -354,10 +376,43 @@ if (import.meta.vitest) {
       expect(xml).toContain('来源 2：《长乐年鉴2019》')
       // 编号顺序按 ordinal 升序排列（1 在 2 之前）
       expect(xml.indexOf('来源 1：《教育发展报告》')).toBeLessThan(xml.indexOf('来源 2：《长乐年鉴2019》'))
-      expect(xml).toContain('三、矛盾说明（共 1 组）')
-      expect(xml).toContain('「30 所」（《长乐年鉴2019》）')
+      expect(xml).toContain('三、矛盾汇总（共 1 组）')
+      expect(xml).toContain('矛盾 1｜2018 年普通中学数量（data，已采纳）')
+      expect(xml).toContain('说法 1：「30 所」（《长乐年鉴2019》）　← 已采纳该说法')
+      expect(xml).toContain('说法 2：「32 所」（《教育发展报告》）')
       // 统计行给出段数与来源篇数
       expect(xml).toContain('共 3 段 / 2 篇来源')
+    })
+
+    it('numbers contradiction groups and marks each paragraph with its group (Phase 7.6)', () => {
+      const xml = compilationDocxXml(makeComp())
+      // 组号 = 矛盾数组顺序（1 起），段尾注明属于第几组——与界面上的「矛盾N」同源
+      expect(xml).toContain('<w:t xml:space="preserve">（矛盾1）</w:t>')
+      // i1/i2 同属第 1 组，各标一次；i3 不属于任何矛盾组 → 不标注
+      expect(xml.split('（矛盾1）')).toHaveLength(3)
+      // 组号随数组顺序（新增一组后原第 1 组仍是 1，新组是 2）
+      const twoGroups = makeComp({
+        contradictions: [
+          ...makeComp().contradictions,
+          {
+            id: 'g2',
+            compilationId: 'c1',
+            topic: '教职工人数',
+            kind: 'data',
+            status: 'pending',
+            createdAt: '2026-01-03',
+            variants: [
+              { id: 'v3', contradictionId: 'g2', itemId: 'i2', variantText: '900 人', sourceId: 's2', sourceTitle: '教育发展报告', createdAt: '2026-01-03' },
+              { id: 'v4', contradictionId: 'g2', itemId: 'i3', variantText: '880 人', sourceId: 's1', sourceTitle: '长乐年鉴2019', createdAt: '2026-01-03' }
+            ]
+          }
+        ]
+      })
+      const xml2 = compilationDocxXml(twoGroups)
+      expect(xml2).toContain('（矛盾1、2）') // i2 同时属于第 1、2 组
+      expect(xml2).toContain('（矛盾2）') // i3 只属于第 2 组
+      expect(xml2).toContain('矛盾 2｜教职工人数（data，待处理）')
+      expect(xml2).toContain('　说法 1：「900 人」（《教育发展报告》）')
     })
 
     it('escapes XML special characters in paragraph text', () => {

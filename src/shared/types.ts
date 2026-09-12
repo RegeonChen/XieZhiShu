@@ -496,7 +496,15 @@ export interface AppSettings {
   draftProviderId?: string
   /** Phase A：长任务（生成汇编/初稿/整理）期间保持电脑唤醒；缺省/未设为 true 时开启，false 关闭 */
   keepAwake?: boolean
+  /**
+   * Phase 7.6：资料汇编查看器的字号档位（用户 2026-09-10 提出）。
+   * `small` = 改造前的字号与文档宽度；`medium`（缺省）/`large` 依次放大字号并收窄两侧留白。
+   */
+  docScale?: DocScale
 }
+
+/** 资料汇编查看器字号档位 */
+export type DocScale = 'small' | 'medium' | 'large'
 
 // ============================================================
 // 统一错误返回

@@ -10,6 +10,7 @@ import WritingTaskList from './components/WritingTaskList'
 import WritingEmptyState from './components/WritingEmptyState'
 import WritingWorkspace from './components/WritingWorkspace'
 import ResizeHandle from './components/ResizeHandle'
+import type { DocScale } from '../../shared/types'
 import PaneEdgeToggle from './components/PaneEdgeToggle'
 import ErrorBoundary from './components/ErrorBoundary'
 import OnboardingOverlay from './components/OnboardingOverlay/OnboardingOverlay'
@@ -118,6 +119,21 @@ export default function App() {
       return 'light'
     }
   })
+  /**
+   * Phase 7.6：资料汇编查看器字号档位（用户要求可持久化、重启后仍生效）。
+   * 持久化落在数据库 settings（`doc_scale`），与主题用 localStorage 的做法不同——
+   * 主题是纯前端偏好，而字号属于"设置"，设置页里改、主进程里存。
+   */
+  const [docScale, setDocScale] = useState<DocScale>('medium')
+  useEffect(() => {
+    void (async () => {
+      const res = await window.api.getSettings()
+      if (res.ok && res.data) setDocScale((res.data as { docScale?: DocScale }).docScale ?? 'medium')
+    })()
+  }, [])
+  useEffect(() => {
+    document.documentElement.setAttribute('data-doc-scale', docScale)
+  }, [docScale])
 
   /** 区块导航跳转：平滑滚动到对应区块并即时高亮 */
   const handleSettingsNavigate = useCallback((id: string) => {
@@ -352,7 +368,7 @@ export default function App() {
       case 'settings':
         return (
           <main className="work-pane">
-            <Settings onOpenOnboarding={() => setOnboardingOpen(true)} onActiveChange={(id) => setSettingsActive(id)} theme={theme} onThemeChange={setTheme} />
+            <Settings onOpenOnboarding={() => setOnboardingOpen(true)} onActiveChange={(id) => setSettingsActive(id)} theme={theme} onThemeChange={setTheme} docScale={docScale} onDocScaleChange={setDocScale} />
           </main>
         )
     }
