@@ -50,6 +50,9 @@ export interface ExtractCandidate {
   sourceTitle: string
   excerpt: string
   ts?: string
+  /** 来源类型（file/url）与网页发布时间：段首时间兜底的依据选择（网页不能用年鉴 −1 规则） */
+  sourceKind?: 'file' | 'url'
+  sourcePublishedAt?: string
 }
 
 /** 一批的产出：已校验（或降级）的段落草稿 */
@@ -296,7 +299,7 @@ export function logExtractBatchStats(batchNo: number, total: number, stats: Extr
 function degraded(candidate: ExtractCandidate, evidence?: string): ExtractedDraft {
   const located = evidence ? locateVerbatim(candidate.excerpt, evidence) : null
   const text = located ? candidate.excerpt.slice(located.start, located.end) : candidate.excerpt
-  const time = withFallbackYear(candidate.ts, candidate.sourceTitle)
+  const time = withFallbackYear(candidate.ts, candidate.sourceTitle, { kind: candidate.sourceKind, publishedAt: candidate.sourcePublishedAt })
   return {
     parentIndex: candidate.index,
     text,
@@ -353,8 +356,8 @@ export function collectExtractResults(
     // 段落归属：优先归到 evidence 所在的那张卡片（用于矛盾说法映射与诊断），否则归该来源第一张
     const evidence = (draft.evidence ?? '').trim()
     const parent = (evidence ? group.find((c) => locateVerbatim(c.excerpt, evidence) !== null) : undefined) ?? group[0]
-    // 段首时间兜底：模型没给年份时，用来源标题推断（《长乐年鉴2019》→ 2018 年，标为 inferred）
-    const time = withFallbackYear(validation.timeLabel, parent.sourceTitle)
+    // 段首时间兜底：模型没给年份时按来源推断（年鉴类标题 −1；网页标题/发布时间按原样，标为 inferred）
+    const time = withFallbackYear(validation.timeLabel, parent.sourceTitle, { kind: parent.sourceKind, publishedAt: parent.sourcePublishedAt })
     stats.accepted += 1
     stats.retainedChars += validation.text.length
     drafts.push({

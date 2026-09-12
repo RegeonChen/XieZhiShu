@@ -12,7 +12,8 @@ import type { Source } from '../../shared/types'
 import { fetchUrl } from '../import/url-fetcher'
 import { logMain } from '../logger'
 import { bigrams } from '../rag/retrieval'
-import { getSourceByUrl, getAnySourceByUrl, insertSource } from '../db/sources'
+import { enqueueIndex } from '../rag/indexer'
+import { getSourceByUrl, getAnySourceByUrl, insertSource, updateSourcePublishedAt } from '../db/sources'
 import {
   getWebSiteById,
   getSiteArticle,
@@ -570,10 +571,19 @@ export async function importSiteArticle(
     return null
   }
   const existing = getSourceByUrl(url, taskId)
-  if (existing) return existing
+  const existingMeta = siteId ? getSiteArticle(siteId, url) : null
+  if (existing) {
+    // 老库升级后（Migration 037 之前抓的）该行没有发布时间：顺手从 web_site_articles 补齐，
+    // 否则同一任务重新生成时，这些网页段落仍然拿不到年份兜底的依据。
+    if (!existing.publishedAt && existingMeta?.publishedAt) {
+      updateSourcePublishedAt(existing.id, existingMeta.publishedAt)
+      return { ...existing, publishedAt: existingMeta.publishedAt }
+    }
+    return existing
+  }
   try {
     // B4: 条件请求——带上上次抓取该页面时的 ETag / Last-Modified，内容未变则 304 复用已有正文
-    const meta = siteId ? getSiteArticle(siteId, url) : null
+    const meta = existingMeta
     const result = await fetchUrl(url, {
       ifNoneMatch: meta?.etag,
       ifModifiedSince: meta?.lastModified
@@ -581,6 +591,8 @@ export async function importSiteArticle(
     let cleanedText = result.cleanedText
     let snapshotAt = result.snapshotAt
     let pageTitle = title || ''
+    /** 文章发布时间（E10 解析）：落库到 sources 供段首年份兜底使用（网页不能用年鉴 −1 规则） */
+    let publishedAt: string | undefined = meta?.publishedAt
     if (result.notModified) {
       // 304：内容未变——若同一 URL 已抓过正文（任意任务）则复用，否则放弃该篇
       const reused = getAnySourceByUrl(url)
@@ -591,6 +603,7 @@ export async function importSiteArticle(
       cleanedText = reused.cleanedText
       snapshotAt = reused.urlSnapshotAt ?? new Date().toISOString()
       pageTitle = title || reused.title || url
+      publishedAt = reused.publishedAt ?? publishedAt
       logMain('web', '条件请求 304 复用正文 url=' + url + ' 标题=' + pageTitle + ' 正文字数=' + cleanedText.length)
     } else {
       pageTitle = title || extractPageTitle(result.rawHtml) || url
@@ -602,8 +615,8 @@ export async function importSiteArticle(
         return null
       }
       cleanedText = richText
-      // E10：从正文/元数据解析发布时间并记录（供文章清单按时间排序）
-      const publishedAt = extractPublishedDate(result.rawHtml)
+      // E10：从正文/元数据解析发布时间并记录（供文章清单按时间排序 + 段落年份兜底）
+      publishedAt = extractPublishedDate(result.rawHtml) ?? publishedAt
       // 记录抓取元数据（ETag / Last-Modified / 正文哈希），供条件请求与正文去重用
       if (siteId) {
         updateSiteArticleFetched(siteId, url, {
@@ -622,13 +635,21 @@ export async function importSiteArticle(
       title: pageTitle,
       url,
       urlSnapshotAt: snapshotAt,
+      publishedAt,
       cleanedText,
       status: 'ready',
       taskId,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     }
-    return insertSource(source)
+    const inserted = insertSource(source)
+    /*
+     * 向量索引：手工添加网址与文件导入都会 enqueue（index.ts），网页资料库此前漏了这一步，
+     * 导致网页文章 index_state 一直是 pending、chunk_embeddings 为空——保守闸门里
+     * "字面无关但语义相关"的向量兜底对网页完全失效。这里补上，并在生成前等待就绪。
+     */
+    enqueueIndex(inserted.id)
+    return inserted
   } catch {
     return null // 单篇抓取失败跳过，不阻断整体
   }

@@ -12,6 +12,7 @@ export interface SourceRow {
   file_path: string | null
   url: string | null
   url_snapshot_at: string | null
+  published_at: string | null
   raw_text: string | null
   cleaned_text: string
   status: SourceStatus
@@ -33,6 +34,7 @@ function rowToSource(row: SourceRow): Source {
     filePath: row.file_path ?? undefined,
     url: row.url ?? undefined,
     urlSnapshotAt: row.url_snapshot_at ?? undefined,
+    publishedAt: row.published_at ?? undefined,
     cleanedText: row.cleaned_text,
     status: row.status,
     errorCode: row.error_code ?? undefined,
@@ -120,9 +122,9 @@ export function insertSource(source: Omit<Source, 'createdAt' | 'updatedAt'>): S
   const db = getDb()
   const now = new Date().toISOString()
   db.prepare(
-    `INSERT INTO sources (id, kind, title, file_path, url, url_snapshot_at, cleaned_text, status, error_code,
+    `INSERT INTO sources (id, kind, title, file_path, url, url_snapshot_at, published_at, cleaned_text, status, error_code,
        content_hash, file_mtime, file_size, workspace, task_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     source.id,
     source.kind,
@@ -130,6 +132,7 @@ export function insertSource(source: Omit<Source, 'createdAt' | 'updatedAt'>): S
     source.filePath ?? null,
     source.url ?? null,
     source.urlSnapshotAt ?? null,
+    source.publishedAt ?? null,
     source.cleanedText,
     source.status,
     source.errorCode ?? null,
@@ -142,6 +145,12 @@ export function insertSource(source: Omit<Source, 'createdAt' | 'updatedAt'>): S
     now
   )
   return { ...source, createdAt: now, updatedAt: now }
+}
+
+/** 补写网页文章的发布时间（Migration 037 之后抓取已自带；这里用于升级后首次重跑时回填旧行） */
+export function updateSourcePublishedAt(id: string, publishedAt: string): void {
+  const db = getDb()
+  db.prepare('UPDATE sources SET published_at = ?, updated_at = ? WHERE id = ?').run(publishedAt, new Date().toISOString(), id)
 }
 
 export function updateSourceTitle(id: string, title: string): Source | null {

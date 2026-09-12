@@ -259,38 +259,103 @@ export function numbersCoveredBy(text: string, sourceText: string): boolean {
 }
 
 /**
- * 从来源标题推断年份（兜底）：地方志/年鉴的惯例是「《长乐年鉴2019》记述的是 2018 年」，
- * 故取标题中的 4 位年份**减 1** 作为兜底年份（用户 2026-09-10 明确要求）。
- * 标题里没有 4 位年份时返回 undefined（不硬凑）。
+ * 年鉴/年报类来源标题判定：只有这类"次年产出的年度出版物"，其标题年份才表示**记述年份的上一年**
+ * （《长乐年鉴2019》记述 2018 年）。普通文件（《2019年教育统计表》）与网页新闻标题（《2021年全区教育工作总结》）
+ * 里的年份指向的是**内容年本身**，不能减 1——这是 2026-09-10 网页资料库并入后修掉的一处静默错年。
+ */
+export function isYearbookLikeTitle(title?: string | null): boolean {
+  return /(年鉴|年报|年度报告|大事记|地方志|县志|市志|区志|省志|专业志|志书)/.test(title ?? '')
+}
+
+/**
+ * 从来源标题推断年份（**年鉴惯例**）：仅对年鉴/年报类标题生效，取标题中的 4 位年份**减 1**。
+ * 非年鉴标题（含网页新闻标题）不在此处理——见 `inferYearFromSource`。
  */
 export function inferYearFromSourceTitle(title?: string | null): number | undefined {
+  if (!isYearbookLikeTitle(title)) return undefined
   const m = (title ?? '').match(/(?:18|19|20)\d{2}/)
   if (!m) return undefined
   const year = Number(m[0]) - 1
   return year >= 1900 ? year : undefined
 }
 
+/** 年份兜底的依据（用于日志与诊断，说明这一年是怎么来的） */
+export type YearBasis = 'text' | 'title-yearbook' | 'title' | 'published'
+
+export interface InferredYear {
+  year: number
+  basis: YearBasis
+}
+
+/** 从任意日期字符串取 4 位年份（发布时间可能是 ISO 或「2021-03-05」「2021年3月5日」） */
+export function yearOfDate(value?: string | null): number | undefined {
+  const m = (value ?? '').match(/(?:18|19|20)\d{2}/)
+  if (!m) return undefined
+  const year = Number(m[0])
+  return year >= 1900 ? year : undefined
+}
+
 /**
- * 段首时间兜底（纯函数）：模型的 `timeLabel` 里没有年份时，用来源标题推断的年份补上，标为 `inferred`。
+ * 段落缺少年份时的**来源级兜底**（纯函数，优先级从高到低）：
+ * 1. 年鉴/年报类标题 → 标题年份 − 1（`title-yearbook`，地方志行业惯例）；
+ * 2. 其它标题里出现的年份 → **原样采用**（`title`；新闻标题《2021年全区教育工作总结》指的就是 2021 年）；
+ * 3. 网页来源（kind='url'）且解析到发布时间 → 发布时间年份（`published`；网页正文常用「近日/今年」，
+ *    标题里也没年份时这是唯一可靠依据）；
+ * 4. 都推不出 → undefined（保持「时间待核」，**不编造**）。
+ */
+export function inferYearFromSource(source: {
+  title?: string | null
+  kind?: 'file' | 'url'
+  publishedAt?: string | null
+}): InferredYear | undefined {
+  const yearbook = inferYearFromSourceTitle(source.title)
+  if (yearbook != null) return { year: yearbook, basis: 'title-yearbook' }
+  const titleYear = yearOfDate(source.title)
+  if (titleYear != null) return { year: titleYear, basis: 'title' }
+  if (source.kind === 'url') {
+    const published = yearOfDate(source.publishedAt)
+    if (published != null) return { year: published, basis: 'published' }
+  }
+  return undefined
+}
+
+/**
+ * 段首时间兜底（纯函数）：模型的 `timeLabel` 里没有年份时，用来源信息推断的年份补上，标为 `inferred`。
  * - 原标签带月份（如「5 月 19 日」）→ 拼成「2018 年 5 月 19 日」；
  * - 原标签只有日（如「29 日」，缺月份本身已无意义）或为空 → 只写「2018 年」；
- * - 标题也推断不出年份 → 保持 `unknown`（界面「时间待核」），不编造。
+ * - 来源也推断不出年份 → 保持 `unknown`（界面「时间待核」），不编造。
+ * 依据（`basis`）透出给调用方做诊断：年鉴惯例 / 标题年份 / 网页发布时间。
  */
 export function withFallbackYear(
   timeLabel: string | undefined,
-  sourceTitle: string | undefined
-): { timeLabel?: string; year?: number; month?: number; day?: number; timeConfidence: CompilationTimeConfidence } {
+  sourceTitle: string | undefined,
+  source?: { kind?: 'file' | 'url'; publishedAt?: string | null }
+): {
+  timeLabel?: string
+  year?: number
+  month?: number
+  day?: number
+  timeConfidence: CompilationTimeConfidence
+  basis?: YearBasis
+} {
   const parsed = parseTimeLabel(timeLabel)
   if (parsed.year) {
-    return { timeLabel: parsed.label, year: parsed.year, month: parsed.month, day: parsed.day, timeConfidence: 'exact' }
+    return { timeLabel: parsed.label, year: parsed.year, month: parsed.month, day: parsed.day, timeConfidence: 'exact', basis: 'text' }
   }
-  const inferred = inferYearFromSourceTitle(sourceTitle)
-  if (inferred == null) {
+  const inferred = inferYearFromSource({ title: sourceTitle, kind: source?.kind, publishedAt: source?.publishedAt })
+  if (!inferred) {
     return { timeLabel: parsed.label, month: parsed.month, day: parsed.day, timeConfidence: 'unknown' }
   }
   const rest = (parsed.label ?? '').replace(/(?:18|19|20)\d{2}\s*年?/, '').trim()
-  const label = /月/.test(rest) ? String(inferred) + ' 年 ' + rest : String(inferred) + ' 年'
-  return { timeLabel: label, year: inferred, month: parsed.month, day: parsed.day, timeConfidence: 'inferred' }
+  const label = /月/.test(rest) ? String(inferred.year) + ' 年 ' + rest : String(inferred.year) + ' 年'
+  return {
+    timeLabel: label,
+    year: inferred.year,
+    month: parsed.month,
+    day: parsed.day,
+    timeConfidence: 'inferred',
+    basis: inferred.basis
+  }
 }
 
 /** 大模型「整合提取」返回的一段（本地校验前的原始形态） */
@@ -631,19 +696,22 @@ if (import.meta.vitest) {
     })
 
     it('infers a fallback year from the source title (年鉴年份 − 1) when the label has no year', () => {
-      // 年鉴惯例：《长乐年鉴2019》记述的是 2018 年
+      // 年鉴惯例：《长乐年鉴2019》记述的是 2018 年（**只对年鉴/年报类标题生效**）
       expect(inferYearFromSourceTitle('长乐年鉴2019')).toBe(2018)
       expect(inferYearFromSourceTitle('长乐年鉴2023（完整版）.pdf')).toBe(2022)
       expect(inferYearFromSourceTitle('教育发展报告')).toBeUndefined()
       expect(inferYearFromSourceTitle(undefined)).toBeUndefined()
+      // 非年鉴标题（含网页新闻标题）不走 −1：年份指的就是内容年
+      expect(inferYearFromSourceTitle('2021年全区教育工作总结')).toBeUndefined()
 
-      // 有年份 → exact，原样保留
+      // 有年份 → exact，原样保留（依据记为 text）
       expect(withFallbackYear('2018 年 5 月', '长乐年鉴2020')).toEqual({
         timeLabel: '2018 年 5 月',
         year: 2018,
         month: 5,
         day: undefined,
-        timeConfidence: 'exact'
+        timeConfidence: 'exact',
+        basis: 'text'
       })
       // 缺年份 + 标题可推断 → inferred，并补出年份（带月份时保留月日）
       expect(withFallbackYear('5 月 19 日', '长乐年鉴2019')).toEqual({
@@ -651,13 +719,51 @@ if (import.meta.vitest) {
         year: 2018,
         month: 5,
         day: 19,
-        timeConfidence: 'inferred'
+        timeConfidence: 'inferred',
+        basis: 'title-yearbook'
       })
       // 只有日（缺月份本身已无意义）→ 只写年份
       expect(withFallbackYear('29 日', '长乐年鉴2019')).toMatchObject({ timeLabel: '2018 年', timeConfidence: 'inferred' })
       expect(withFallbackYear(undefined, '长乐年鉴2019')).toMatchObject({ timeLabel: '2018 年', timeConfidence: 'inferred' })
       // 标题也推断不出 → 保持 unknown（不编造）
       expect(withFallbackYear('7—9 日', '教育发展报告')).toMatchObject({ timeConfidence: 'unknown' })
+    })
+
+    it('infers the year for web sources without applying the yearbook −1 rule (Phase 7.7 网页第一批)', () => {
+      // ① 网页新闻标题里的年份 = 内容年，**不减 1**（旧实现会推成 2020，静默错年）
+      expect(inferYearFromSource({ title: '2021年全区教育工作总结', kind: 'url' })).toEqual({ year: 2021, basis: 'title' })
+      // ② 网页标题没有年份 → 用发布时间（网页正文常用「近日/今年」，这是唯一依据）
+      expect(inferYearFromSource({ title: '全区教育工作会议召开', kind: 'url', publishedAt: '2021-03-05T00:00:00.000Z' })).toEqual({
+        year: 2021,
+        basis: 'published'
+      })
+      // ③ 标题里有年份时**标题优先于发布时间**（内容年比发布年更贴近事实）
+      expect(inferYearFromSource({ title: '2020年工作总结', kind: 'url', publishedAt: '2021-03-05' })).toEqual({
+        year: 2020,
+        basis: 'title'
+      })
+      // ④ 网页年鉴页仍按年鉴惯例 −1（同一站点既发新闻也发年鉴）
+      expect(inferYearFromSource({ title: '福州新区年鉴（2025）', kind: 'url' })).toEqual({ year: 2024, basis: 'title-yearbook' })
+      // ⑤ 本地文件里出现年份也不再一律 −1（只有年鉴类才 −1）
+      expect(inferYearFromSource({ title: '2019年教育统计表.xlsx', kind: 'file' })).toEqual({ year: 2019, basis: 'title' })
+      // ⑥ 本地文件不会用发布时间兜底（文件没有"发布时间"概念）
+      expect(inferYearFromSource({ title: '教育发展报告', kind: 'file', publishedAt: '2021-03-05' })).toBeUndefined()
+      // ⑦ 都没有 → 不编造
+      expect(inferYearFromSource({ title: '教育发展报告', kind: 'url' })).toBeUndefined()
+
+      // 落到段首时间兜底：网页段落缺年份时按发布时间补，标 inferred
+      expect(withFallbackYear('近日', '全区教育工作会议召开', { kind: 'url', publishedAt: '2021-03-05' })).toMatchObject({
+        timeLabel: '2021 年',
+        year: 2021,
+        timeConfidence: 'inferred',
+        basis: 'published'
+      })
+      expect(withFallbackYear('', '2021年全区教育工作总结', { kind: 'url', publishedAt: '2022-01-20' })).toMatchObject({
+        timeLabel: '2021 年',
+        year: 2021,
+        basis: 'title'
+      })
+      expect(withFallbackYear('近日', '教育发展报告', { kind: 'url' })).toMatchObject({ timeConfidence: 'unknown' })
     })
 
     it('assembles a document: dedupes duplicates, keeps conflicting numbers, sorts and numbers sources', () => {

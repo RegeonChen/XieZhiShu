@@ -301,6 +301,45 @@ if (import.meta.vitest) {
       old.close()
     })
 
+    it('migration 037 adds sources.published_at and keeps existing rows readable (Phase 7.7 网页第一批)', () => {
+      const old = new Database(':memory:')
+      old.exec(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `)
+      const insertMigration = old.prepare('INSERT INTO schema_migrations (version) VALUES (?)')
+      const applyAll = old.transaction(() => {
+        for (const m of MIGRATIONS.filter((x) => x.version < 37)) {
+          if (m.run) m.run(old)
+          else if (m.sql) old.exec(m.sql)
+          insertMigration.run(m.version)
+        }
+      })
+      applyAll()
+      // 升级前：库里已有资料（没有发布时间列）；网页文章清单里已有发布时间（Migration 025 起）
+      old.prepare("INSERT INTO sources (id, kind, title, cleaned_text) VALUES ('s1','file','长乐年鉴2019','正文')").run()
+      old.prepare("INSERT INTO sources (id, kind, title, url, cleaned_text, task_id) VALUES ('s2','url','全区教育工作会议召开','https://x.gov.cn/a.htm','正文','t1')").run()
+      old.prepare("INSERT INTO web_sites (id, root_url, title, created_at, updated_at) VALUES ('w1','https://x.gov.cn','示例站','2026-01-01','2026-01-01')").run()
+      old.prepare("INSERT INTO web_site_articles (site_id, url, title, discovered_at, published_at) VALUES ('w1','https://x.gov.cn/a.htm','全区教育工作会议召开','2026-01-01','2021-03-05')").run()
+      expect((old.prepare('PRAGMA table_info(sources)').all() as { name: string }[]).some((c) => c.name === 'published_at')).toBe(false)
+
+      const m37 = MIGRATIONS.find((m) => m.version === 37)!
+      if (m37.run) m37.run(old)
+      else if (m37.sql) old.exec(m37.sql)
+
+      // 新列存在且为 NULL（不影响存量资料）；网页来源按 URL 回填 web_site_articles 的发布时间
+      const cols = old.prepare('PRAGMA table_info(sources)').all() as { name: string; notnull: number }[]
+      expect(cols.some((c) => c.name === 'published_at' && c.notnull === 0)).toBe(true)
+      expect(old.prepare('SELECT published_at FROM sources WHERE id = ?').get('s1')).toEqual({ published_at: null })
+      expect(old.prepare('SELECT published_at FROM sources WHERE id = ?').get('s2')).toEqual({ published_at: '2021-03-05' })
+      // 新写入的发布时间可落库（供年份兜底）
+      old.prepare("UPDATE sources SET published_at = '2022-01-20' WHERE id = 's1'").run()
+      expect(old.prepare('SELECT published_at FROM sources WHERE id = ?').get('s1')).toEqual({ published_at: '2022-01-20' })
+      old.close()
+    })
+
     it('migration 030/031 adds the paragraph model and backfills ordinals, years and a v1 version (2026-09-10, Phase 7.1)', () => {
       // 模拟升级前状态：应用迁移 1-29（含 028 清库，故测试数据在其后插入）
       const old = new Database(':memory:')

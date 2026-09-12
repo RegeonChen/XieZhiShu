@@ -10,6 +10,12 @@ export interface Source {
   filePath?: string // kind=file，dataDir 相对路径（workspace 资料为工作区相对路径）
   url?: string // kind=url
   urlSnapshotAt?: string // 抓取时间 ISO
+  /**
+   * 文章自身标注/页面解析出的**发布时间**（ISO 或「2021-03-05」样式；仅网页来源会有）。
+   * 用途：网页段落正文里没有年份时，作为**年份兜底**的依据（标为 inferred），
+   * 见 `inferYearFromSource`（网页文件名的"年鉴惯例 −1"规则**不适用**于网页文章）。
+   */
+  publishedAt?: string
   cleanedText: string // 清洗后正文
   status: 'pending' | 'processing' | 'ready' | 'failed'
   errorCode?: string
@@ -131,6 +137,9 @@ export interface RetrievedChunk {
   position: string
   text: string
   score: number
+  /** 来源类型与发布时间（供段首时间的年份兜底：网页不能用「年鉴 −1」规则） */
+  sourceKind?: 'file' | 'url'
+  sourcePublishedAt?: string
 }
 
 // ============================================================

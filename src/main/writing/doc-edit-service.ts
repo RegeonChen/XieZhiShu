@@ -424,13 +424,18 @@ export function collectDocEditChange(
   return { changedIds, added, modified, removed }
 }
 
-/** 段首时间兜底（供 handler 在应用后重算 year/confidence，与整合提取同口径） */export function resolveTimeForEdit(timeLabel: string | undefined, sourceTitle: string | undefined): {
+/** 段首时间兜底（供 handler 在应用后重算 year/confidence，与整合提取同口径） */
+export function resolveTimeForEdit(
+  timeLabel: string | undefined,
+  sourceTitle: string | undefined,
+  source?: { kind?: 'file' | 'url'; publishedAt?: string | null }
+): {
   year?: number
   month?: number
   day?: number
   timeConfidence: 'exact' | 'inferred' | 'unknown'
 } {
-  const t = withFallbackYear(timeLabel, sourceTitle)
+  const t = withFallbackYear(timeLabel, sourceTitle, source)
   return { year: t.year, month: t.month, day: t.day, timeConfidence: t.timeConfidence }
 }
 

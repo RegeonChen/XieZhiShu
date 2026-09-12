@@ -102,6 +102,41 @@ export async function indexAllPending(): Promise<{ indexed: number; failed: numb
   return { indexed, failed }
 }
 
+/**
+ * 同步等待一批资料索引就绪（网页资料库用）：生成汇编前必须让本次抓取的网页文章进入向量索引，
+ * 否则保守闸门里那些"字面不相关但语义相关"的网页段落会因为查不到向量而被整篇丢弃。
+ * - 已 ready 的跳过；
+ * - 串行索引（嵌入本身是 CPU 密集且内部已分批），总耗时受 `budgetMs` 约束，超预算即返回并记 `skipped`；
+ * - 单篇失败不抛出（宁可少一些向量兜底，也不能让生成中断）。
+ */
+export async function ensureSourcesIndexed(
+  sourceIds: string[],
+  budgetMs = 120000
+): Promise<{ indexed: number; failed: number; skipped: number }> {
+  const db = getDb()
+  const startedAt = Date.now()
+  let indexed = 0
+  let failed = 0
+  let skipped = 0
+  for (const id of Array.from(new Set(sourceIds))) {
+    const row = db.prepare('SELECT index_state FROM sources WHERE id = ?').get(id) as { index_state: string } | undefined
+    if (!row) continue
+    if (row.index_state === 'ready') continue
+    if (Date.now() - startedAt > budgetMs) {
+      skipped += 1
+      continue
+    }
+    try {
+      const res = await indexSource(id)
+      if (res.ok) indexed += 1
+      else failed += 1
+    } catch {
+      failed += 1
+    }
+  }
+  return { indexed, failed, skipped }
+}
+
 // ---- 后台串行索引队列 ----
 // 工作区对账（reconcile）只负责"解析入库"，向量化改为异步提交到此队列后台执行：
 // 新文件立刻出现在列表，向量索引在后台推进（推理在 Worker 线程），不阻塞主进程与 UI。
