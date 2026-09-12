@@ -315,7 +315,7 @@ export function parseKeywordExtraction(text: string): KeywordExtraction | null {
   return { title, keywords }
 }
 
-/** 本地兜底：先用 extractTopicTerms 取引号/“标题为”后的核心词，再做领域下位词扩展 */
+/** 本地兜底：先用 extractTopicTerms 取引号/"标题为·主题为"后的核心词，再做领域下位词扩展 */
 export function fallbackCoarseQuery(instruction: string): string {
   const terms = extractTopicTerms(instruction)
   const q = [...new Set([...terms, ...expandDomainHints(terms)])].filter(Boolean).join(' ')

@@ -225,7 +225,7 @@ export const zhCN = {
     /* Phase 7.6（用户要求）：资料汇编字号档位，可持久化 */
     docScale: {
       title: '资料汇编字号',
-      hint: '调整「生成汇编」右栏正文的字号与左右留白：小 = 改造前的字号与宽度，中、大依次放大字号并收窄留白。设置会保存，重启后仍然生效。',
+      hint: '调整「生成汇编」右栏正文的字号与文档宽度：小 = 改造前的字号与宽度；中（默认）字号更大、文档固定宽度更宽；大字号最大、文档铺满右栏。设置会保存，重启后仍然生效。',
       small: '小',
       medium: '中',
       large: '大'
@@ -493,9 +493,9 @@ export const zhCN = {
     presetGroupAdjust: '调整现有汇编',
     presetLockedHint: '生成汇编后可用',
     presetInsert: '填入',
-    presetTitleReqLabel: '输入标题与需求',
-    presetTitleReqDesc: '一次交代撰写标题与覆盖范围',
-    presetTitleReq: '本次撰写任务的标题为 「……」，具体包括 「……」',
+    presetTitleReqLabel: '输入主题与需求',
+    presetTitleReqDesc: '一次交代资料收集的主题与覆盖范围',
+    presetTitleReq: '本次资料收集的主题为 「……」，具体包括 「……」',
     presetBatchDeleteLabel: '批量删除',
     presetBatchDeleteDesc: '删除与示例高度相似或重复的段落',
     presetBatchDelete: '请删除资料汇编中与「……」高度相似或重复的段落。',

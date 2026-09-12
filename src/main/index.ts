@@ -127,6 +127,7 @@ import { generateCompilation, continueCompilation } from './writing/compilation-
 import { renderCompilationDocx, serializeCompilationArchive } from './writing/compilation-export'
 import { adjustCompilation } from './writing/compilation-adjust'
 import {
+  pushUndo,
   undoCompilation,
   redoCompilation,
   getUndoCount,
@@ -703,12 +704,12 @@ handleLogged(
     try {
       const status = params.action === 'resolve' ? 'resolved' : 'ignored'
       const undoCid = compilationIdOfContradiction(params.contradictionId)
+      // 矛盾取舍会保留/排除段落 → 登记撤销栈，使用户可用「撤销 / 恢复」反复调整这一决定（用户 2026-09-10 要求）
+      if (undoCid) pushUndo(undoCid)
       const contradiction = updateCompilationContradictionStatus(params.contradictionId, status, params.chosenItemId)
       if (!contradiction) {
         return { ok: false, error: { code: 'INVALID_PARAM', message: '矛盾不存在，或保留的卡片不属于该矛盾' } }
       }
-      // 采纳/忽略会保留或排除段落 → 属于"非对话改动"，必须让「撤销」不再指向更早的对话编辑（避免误伤）
-      clearUndoStacks(undoCid)
       return { ok: true, data: { contradiction } }
     } catch (err) {
       return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }

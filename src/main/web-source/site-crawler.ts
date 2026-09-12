@@ -182,11 +182,12 @@ export function extractTopicTerms(query: string): string[] {
   for (const m of query.matchAll(/[「『“"']([^」』”"']{2,20})[」』”"']/g)) {
     add(m[1])
   }
-  // 2) "标题为/标题是/标题：…" 后的短词（无引号时的兜底）。
+  // 2) "标题为/标题是/标题：…" 后的短词（无引号时的兜底）。`主题` 同样计入：
+  //    预设提示词已改为「本次资料收集的主题为 ……」，用户若删掉引号，这一步才兜得住。
   //    2026-08-14 容错：捕获组前允许一个可选的引号字符，兼容"标题为“学前教育“"这类
   //    引号不配对（结尾误用左引号）的输入——否则会因紧跟引号而提取失败、回退整句，
   //    导致矛盾扫描/网页检索的主题词不稳定（test3 漏检矛盾的直接根因）。
-  const titled = query.match(/(?:标题|题目)[为是]?\s*[:：]?\s*[「『“"'」』”]?([^\s，。；、,.「『』」“”"']+)/)
+  const titled = query.match(/(?:标题|题目|主题)[为是]?\s*[:：]?\s*[「『“"'」』”]?([^\s，。；、,.「『』」“”"']+)/)
   if (titled) add(titled[1])
   // 3) 提取不到任何短词时回退整句（兼容"无标题、纯要求"的指令）
   if (out.length === 0) {
@@ -757,6 +758,14 @@ if (import.meta.vitest) {
       // 结尾误用左引号“而非右引号”，仍应提取出标题短词，而非回退整句
       expect(extractTopicTerms('这次撰写任务的标题为“学前教育“')).toEqual(['学前教育'])
       expect(extractTopicTerms('这次撰写任务的标题为“学前教育”')).toEqual(['学前教育'])
+    })
+
+    it('extracts the term after 主题为 as well (preset wording, 2026-09-10)', () => {
+      // 预设提示词已改为「本次资料收集的主题为 ……」——用户删掉引号后，本地兜底要认得「主题为」
+      expect(extractTopicTerms('本次资料收集的主题为 高中教育')).toEqual(['高中教育'])
+      expect(extractTopicTerms('本次资料收集的主题是：高中教育')).toEqual(['高中教育'])
+      // 带引号的预设原样（占位符未替换）与替换后都应取到内容
+      expect(extractTopicTerms('本次资料收集的主题为「高中教育」，具体包括「课程与升学」')).toEqual(['高中教育', '课程与升学'])
     })
 
     it('expands education domain hints from topic term', () => {
