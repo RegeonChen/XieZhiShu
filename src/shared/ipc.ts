@@ -468,7 +468,7 @@ export type CompilationRecycleBinListRes = { items: CompilationRecycleBinItem[] 
 export interface CompilationRecycleBinRestoreReq {
   binId: string
 }
-export type CompilationRecycleBinRestoreRes = { contradiction?: CompilationContradiction; item?: CompilationItem; card?: CompilationItem }
+export type CompilationRecycleBinRestoreRes = { contradiction?: CompilationContradiction }
 
 
 /** 导出资料汇编为 .docx（生成汇编功能区，2026-09） */
@@ -493,17 +493,16 @@ export interface WorkspaceSourceRemovalPending {
   title: string
   cardCount: number
   contradictionCount: number
-  repairCount: number
   /** workspace = 检测到工作区文件被删除；manual = 用户在资料库中直接删除该资料 */
   origin: 'workspace' | 'manual'
 }
 export type WorkspaceSourceRemovalListRes = { items: WorkspaceSourceRemovalPending[] }
 export interface WorkspaceSourceRemovalDecideReq {
   sourceId: string
-  /** delete = 删除该来源在全部资料汇编中的卡片（含矛盾/二次改动，不入回收站）；keep = 仅删来源、保留卡片 */
+  /** delete = 删除该来源在全部资料汇编中的卡片（含矛盾，不入回收站）；keep = 仅删来源、保留卡片 */
   action: 'delete' | 'keep'
 }
-export type WorkspaceSourceRemovalDecideRes = { deletedItems: number; deletedContradictions: number; deletedRepairs: number }
+export type WorkspaceSourceRemovalDecideRes = { deletedItems: number; deletedContradictions: number }
 
 export interface StyleGuideListRes { items: StyleGuide[] }
 

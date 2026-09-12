@@ -11,6 +11,7 @@ import WritingEmptyState from './components/WritingEmptyState'
 import WritingWorkspace from './components/WritingWorkspace'
 import ResizeHandle from './components/ResizeHandle'
 import type { DocScale } from '../../shared/types'
+import type { WorkspaceSourceRemovalPending } from '../../shared/ipc'
 import PaneEdgeToggle from './components/PaneEdgeToggle'
 import ErrorBoundary from './components/ErrorBoundary'
 import OnboardingOverlay from './components/OnboardingOverlay/OnboardingOverlay'
@@ -82,12 +83,12 @@ export default function App() {
   const [bulkMode, setBulkMode] = useState(false)
   const [sourcesVersion, setSourcesVersion] = useState(0)
   // 工作区来源移除确认（2026-08-28）：文件被删除且已被资料汇编引用时，弹框决定是否清理该来源的卡片
-  const [sourceRemoval, setSourceRemoval] = useState<{ sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' } | null>(null)
-  const sourceRemovalQueueRef = useRef<{ sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' }[]>([])
+  const [sourceRemoval, setSourceRemoval] = useState<WorkspaceSourceRemovalPending | null>(null)
+  const sourceRemovalQueueRef = useRef<WorkspaceSourceRemovalPending[]>([])
   // 已登记（排队或正在展示）的来源 id，避免同一来源被多次登记/对账重复弹框（2026-08-28）
   const enqueuedSourceRemovalIdsRef = useRef<Set<string>>(new Set())
   // 当前正在展示的确认框（同步镜像 sourceRemoval 状态）；当前项不放入队列，避免确认后又被 shift 回来重复弹框
-  const sourceRemovalRef = useRef<{ sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' } | null>(null)
+  const sourceRemovalRef = useRef<WorkspaceSourceRemovalPending | null>(null)
   // 生成汇编功能区选中的任务
   const [selectedCompileId, setSelectedCompileId] = useState<string | null>(null)
   // 撰写初稿功能区选中的任务
@@ -199,7 +200,7 @@ export default function App() {
   }, [])
 
   // 工作区来源移除确认（2026-08-28）：登记待确认、依次弹框；决定后刷新资料库列表
-  const showSourceRemoval = useCallback((item: { sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' }) => {
+  const showSourceRemoval = useCallback((item: WorkspaceSourceRemovalPending) => {
     sourceRemovalRef.current = item
     setSourceRemoval(item)
   }, [])
@@ -217,7 +218,7 @@ export default function App() {
     const next = sourceRemovalQueueRef.current.shift()
     if (next) showSourceRemoval(next)
   }, [showSourceRemoval])
-  const enqueueSourceRemoval = useCallback((item: { sourceId: string; title: string; cardCount: number; contradictionCount: number; repairCount: number; origin: 'workspace' | 'manual' }) => {
+  const enqueueSourceRemoval = useCallback((item: WorkspaceSourceRemovalPending) => {
     // 对同一来源去重：主进程可能因手动删除 + 工作区对账等多条路径重复登记，避免弹出多个相同确认框
     if (enqueuedSourceRemovalIdsRef.current.has(item.sourceId)) return
     enqueuedSourceRemovalIdsRef.current.add(item.sourceId)
@@ -439,8 +440,7 @@ export default function App() {
               .replace('{summary}', [
                 // Phase 7.6：汇编已是连续文档，"卡片"口径改为"段落"（count 本身就是该来源被引用的段数）
                 `${sourceRemoval.cardCount} 段`,
-                sourceRemoval.contradictionCount > 0 ? `${sourceRemoval.contradictionCount} 组矛盾` : null,
-                sourceRemoval.repairCount > 0 ? `${sourceRemoval.repairCount} 条大模型修正` : null
+                sourceRemoval.contradictionCount > 0 ? `${sourceRemoval.contradictionCount} 组矛盾` : null
               ].filter(Boolean).join('，'))
           }
           confirmText={zhCN.sourceRemoval.confirm}
