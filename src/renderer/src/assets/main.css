@@ -4738,6 +4738,12 @@ textarea:focus-visible {
   color: var(--accent);
   background: var(--accent-soft);
 }
+/* 「仅可对话修改」：同一胶囊样式但用弱色，避免和"人工修改中"混淆 */
+.compilation-stat.is-manual.is-muted {
+  color: var(--fg-soft);
+  background: var(--bg-elevated);
+  cursor: help;
+}
 .compilation-manual-warn {
   margin: 8px 0 4px;
   font-size: 13px;

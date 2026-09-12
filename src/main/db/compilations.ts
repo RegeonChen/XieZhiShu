@@ -25,7 +25,7 @@ import type {
 import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
 import { insertRepair, listRepairsByCompilation } from './compilation-repairs'
-import { buildParagraphSnapshot, renderDocumentMarkdown, summarizeParagraphChange } from '../writing/compilation-document'
+import { buildParagraphSnapshot, renderDocumentMarkdown, summarizeParagraphChange, withFallbackYear } from '../writing/compilation-document'
 
 interface CompilationRow {
   id: string
@@ -330,6 +330,15 @@ export function updateCompilationItem(itemId: string, patch: CompilationItemPatc
   if (patch.ts !== undefined) {
     fields.push('ts = ?')
     values.push(patch.ts)
+    /*
+     * 时间标签改了就必须**一起重算结构化时间**（year/month/day/time_confidence）。
+     * 否则人工修改模式下把「无时间」补成「2018 年」后，段落仍落在"待补年份"统计里、
+     * 年份小标题不变、也不参与按年份分节与排序——用户一眼可见的不一致（2026-09-10 修）。
+     * 年鉴惯例兜底（来源标题年份 −1）与整合提取、对话编辑同一口径。
+     */
+    const t = withFallbackYear(patch.ts ?? undefined, loadSourceTitles([row.source_id]).get(row.source_id))
+    fields.push('year = ?', 'month = ?', 'day = ?', 'time_confidence = ?')
+    values.push(t.year ?? null, t.month ?? null, t.day ?? null, t.timeConfidence)
   }
   if (patch.note !== undefined) {
     fields.push('note = ?')
@@ -342,6 +351,16 @@ export function updateCompilationItem(itemId: string, patch: CompilationItemPatc
   if (patch.kept !== undefined) {
     fields.push('kept = ?')
     values.push(patch.kept ? 1 : 0)
+  }
+  /*
+   * 正文或时间被实际改写 = 用户手动编辑 → 标记 origin 并递增段级修订号，与对话编辑（llm-edit）
+   * 同一口径，便于审计"这段是谁改的"。注意：本函数的语义就是**用户手动编辑**；
+   * LLM 路径统一走 `upsertCompilationParagraphs`。旧链路 `compilation-adjust.ts`（UI 已不可达、
+   * Phase 7.7 删除）仍调用本函数，其改动会被记成 user-edit，属已知偏差。
+   */
+  if ((patch.excerpt !== undefined && patch.excerpt !== row.excerpt) || (patch.ts !== undefined && patch.ts !== row.ts)) {
+    fields.push('origin = ?', 'revision = ?')
+    values.push('user-edit', (row.revision ?? 1) + 1)
   }
   if (fields.length > 0) {
     db.prepare('UPDATE compilation_items SET ' + fields.join(', ') + ' WHERE id = ?').run(...values, itemId)
@@ -1346,6 +1365,41 @@ if (import.meta.vitest) {
 
       deleteCompilationItem(item.id)
       expect(getCompilationById(c.id)!.items).toHaveLength(0)
+    })
+
+    it('recomputes structured time and marks origin when the user edits text or the time label', () => {
+      const { taskId, sourceIds } = seed()
+      const c = createCompilation({ taskId, title: '汇编' })
+      insertCompilationItems(c.id, [
+        { sourceId: sourceIds[0], excerpt: '首占校区工程' },
+        { sourceId: sourceIds[1], excerpt: '另一段', ts: '2019 年' }
+      ])
+      const [a, b] = getCompilationById(c.id)!.items
+      expect(a.year ?? null).toBeNull()
+
+      // 补时间：结构化时间必须跟着算出来，否则仍计入「待补年份」且不参与年份分节
+      const filled = updateCompilationItem(a.id, { ts: '2018 年 5 月' })!
+      expect(filled.year).toBe(2018)
+      expect(filled.month).toBe(5)
+      expect(filled.timeConfidence).toBe('exact')
+      expect(filled.origin).toBe('user-edit')
+      expect(filled.revision).toBe(2)
+
+      // 改正文：时间不变（本行 ts 是旧的整段插入，year 本就未结构化），origin/revision 递增
+      const rewritten = updateCompilationItem(b.id, { excerpt: '改写后的另一段' })!
+      expect(rewritten.year ?? null).toBeNull()
+      expect(rewritten.origin).toBe('user-edit')
+      expect(rewritten.revision).toBe(2)
+
+      // 清空时间 → 回到"待补年份"
+      const cleared = updateCompilationItem(a.id, { ts: null })!
+      expect(cleared.year ?? null).toBeNull()
+      expect(cleared.timeConfidence).toBe('unknown')
+
+      // 只改 kept（如矛盾取舍的软删除）不算用户编辑，不动 origin/revision
+      const untouched = updateCompilationItem(b.id, { kept: false })!
+      expect(untouched.origin).toBe('user-edit')
+      expect(untouched.revision).toBe(2)
     })
 
     it('stores contradiction groups with variants and resolves/ignores with ownership check', () => {

@@ -447,7 +447,13 @@ function CompilationStep({
               {t.manualEditBadge}
             </span>
           ) : compilation.status !== 'finalized' ? (
-            <span className="compilation-stat">{t.docChatOnlyEditHint}</span>
+            <span
+              className="compilation-stat is-manual is-muted"
+              onMouseEnter={(e) => showHint(e.currentTarget, t.docChatOnlyEditHint)}
+              onMouseLeave={() => setHint(null)}
+            >
+              {t.docChatOnlyBadge}
+            </span>
           ) : (
             <button
               type="button"
