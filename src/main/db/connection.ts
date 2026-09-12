@@ -237,7 +237,11 @@ if (import.meta.vitest) {
         "INSERT INTO compilation_repair_recycle_bin (id, compilation_id, repair_id, item_id, original_text, revised_text, chosen, created_at) VALUES ('b1','c1','r1','i1','原文一','修正一','accepted','2026-01-01')"
       ).run()
 
-      runMigrations(old)
+      // 只应用 029：本用例校验的是这一迁移本身。**不能跑 runMigrations**——后续 036 会删掉这两张表
+      // （见下一个用例「migration 036 drops ...」），跑到最后就查不到 029 的产物了。
+      const m29 = MIGRATIONS.find((m) => m.version === 29)!
+      if (m29.run) m29.run(old)
+      else if (m29.sql) old.exec(m29.sql)
 
       // accepted 保留为 applied；pending 按“默认采纳”口径转为 applied；rejected 丢弃
       const statuses = old.prepare('SELECT id, status FROM compilation_repairs ORDER BY id').all() as { id: string; status: string }[]
@@ -259,6 +263,41 @@ if (import.meta.vitest) {
           )
           .run()
       ).toThrow()
+      old.close()
+    })
+
+    it('migration 036 drops the repair table and the card recycle bin, keeping the contradiction bin (2026-09-10, Phase 7.7)', () => {
+      const old = new Database(':memory:')
+      old.exec(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+      `)
+      const insertMigration = old.prepare('INSERT INTO schema_migrations (version) VALUES (?)')
+      const applyAll = old.transaction(() => {
+        for (const m of MIGRATIONS.filter((x) => x.version < 36)) {
+          if (m.run) m.run(old)
+          else if (m.sql) old.exec(m.sql)
+          insertMigration.run(m.version)
+        }
+      })
+      applyAll()
+
+      const tableNames = (): string[] =>
+        (old
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('compilation_repairs','compilation_card_recycle_bin','compilation_recycle_bin') ORDER BY name"
+          )
+          .all() as { name: string }[]).map((r) => r.name)
+      expect(tableNames()).toEqual(['compilation_card_recycle_bin', 'compilation_recycle_bin', 'compilation_repairs'])
+
+      const m36 = MIGRATIONS.find((m) => m.version === 36)!
+      if (m36.run) m36.run(old)
+      else if (m36.sql) old.exec(m36.sql)
+
+      // 两张表被删除，矛盾回收站保留（回收站收缩为仅矛盾）
+      expect(tableNames()).toEqual(['compilation_recycle_bin'])
       old.close()
     })
 

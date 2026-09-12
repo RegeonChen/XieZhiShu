@@ -25,9 +25,6 @@ interface RowVariant {
 interface RowRecycle {
   id: string; compilation_id: string; contradiction_id: string; topic: string; kind: string; status: string; created_at: string
 }
-interface RowRepair {
-  id: string; compilation_id: string; item_id: string; original_text: string; revised_text: string; reason: string; status: string; created_at: string; updated_at: string
-}
 interface RowComp {
   id: string; task_id: string; title: string; status: string; created_at: string; updated_at: string
 }
@@ -38,7 +35,6 @@ export interface CompilationSnapshot {
   contradictions: RowContra[]
   variants: RowVariant[]
   recycleBin: RowRecycle[]
-  repairs: RowRepair[]
 }
 
 const undoStacks = new Map<string, CompilationSnapshot[]>()
@@ -60,8 +56,7 @@ export function captureCompilationSnapshot(compilationId: string): CompilationSn
     ? db.prepare('SELECT * FROM compilation_contradiction_variants WHERE contradiction_id IN (' + place(contraIds.length) + ')').all(...contraIds) as RowVariant[]
     : []
   const recycleBin = db.prepare('SELECT * FROM compilation_recycle_bin WHERE compilation_id = ?').all(compilationId) as RowRecycle[]
-  const repairs = db.prepare('SELECT * FROM compilation_repairs WHERE compilation_id = ?').all(compilationId) as RowRepair[]
-  return { compilation: comp, items, contradictions, variants, recycleBin, repairs }
+  return { compilation: comp, items, contradictions, variants, recycleBin }
 }
 
 /** 用快照替换某汇编的全部状态（先清空 5 张表中属于该汇编的行，再按原 ID 重插）。 */
@@ -73,7 +68,6 @@ export function restoreCompilationSnapshot(snapshot: CompilationSnapshot): void 
   try {
     const tx = db.transaction(() => {
       db.prepare('DELETE FROM compilation_recycle_bin WHERE compilation_id = ?').run(cid)
-      db.prepare('DELETE FROM compilation_repairs WHERE compilation_id = ?').run(cid)
       db.prepare('DELETE FROM compilation_contradiction_variants WHERE contradiction_id IN (SELECT id FROM compilation_contradictions WHERE compilation_id = ?)').run(cid)
       db.prepare('DELETE FROM compilation_contradictions WHERE compilation_id = ?').run(cid)
       db.prepare('DELETE FROM compilation_items WHERE compilation_id = ?').run(cid)
@@ -103,9 +97,6 @@ export function restoreCompilationSnapshot(snapshot: CompilationSnapshot): void 
 
       const insRecycle = db.prepare('INSERT INTO compilation_recycle_bin (id, compilation_id, contradiction_id, topic, kind, status, created_at) VALUES (?,?,?,?,?,?,?)')
       for (const r of snapshot.recycleBin) insRecycle.run(r.id, r.compilation_id, r.contradiction_id, r.topic, r.kind, r.status, r.created_at)
-
-      const insRepair = db.prepare('INSERT INTO compilation_repairs (id, compilation_id, item_id, original_text, revised_text, reason, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)')
-      for (const r of snapshot.repairs) insRepair.run(r.id, r.compilation_id, r.item_id, r.original_text, r.revised_text, r.reason, r.status, r.created_at, r.updated_at)
     })
     tx()
   } finally {
@@ -189,11 +180,9 @@ export function compilationIdOfContradiction(id: string): string | null {
   const row = db.prepare('SELECT compilation_id FROM compilation_contradictions WHERE id = ?').get(id) as { compilation_id: string } | undefined
   return row?.compilation_id ?? null
 }
-/** 由回收站条目 id 反查所属汇编 id（被删除的资料卡片回收站）。 */
+/** 由回收站条目 id 反查所属汇编 id。 */
 export function compilationIdOfBin(binId: string): string | null {
   const db = getDb()
   const a = db.prepare('SELECT compilation_id FROM compilation_recycle_bin WHERE id = ?').get(binId) as { compilation_id: string } | undefined
-  if (a) return a.compilation_id
-  const b = db.prepare('SELECT compilation_id FROM compilation_card_recycle_bin WHERE id = ?').get(binId) as { compilation_id: string } | undefined
-  return b?.compilation_id ?? null
+  return a?.compilation_id ?? null
 }

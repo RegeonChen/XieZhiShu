@@ -952,6 +952,19 @@ ALTER TABLE compilations ADD COLUMN manual_edit INTEGER NOT NULL DEFAULT 0;
     sql: `
 ALTER TABLE compilations DROP COLUMN manual_edit;
 `
+  },
+  {
+    // 2026-09-10（Phase 7.7 破坏性清理）：Phase 7.2 的「整合提取」取代了「提纯 + 大模型修正」两趟，
+    // 7.6 又把「资料卡片」改造成连续文档——「卡片级修正记录」与「卡片回收站」两套机制再无入口：
+    //   · compilation_repairs：修正记录不再产生，也不再有徽标/弹窗/回退通道；
+    //   · compilation_card_recycle_bin：软件内已无逐段删除入口，卡片回收站不会再新增条目。
+    // 回收站因此收缩为**仅矛盾**（保留 compilation_recycle_bin）。
+    // 迁移账本只增不改：029 建立/改写这两张表的条目保持原样，此处只做删除。
+    version: 36,
+    sql: `
+DROP TABLE IF EXISTS compilation_repairs;
+DROP TABLE IF EXISTS compilation_card_recycle_bin;
+`
   }
 ]
 

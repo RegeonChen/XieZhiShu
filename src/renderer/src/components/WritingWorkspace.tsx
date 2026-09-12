@@ -1191,24 +1191,13 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
                 {recycleBinItems.map((item) => (
                   <div key={item.id} className="recycle-bin-item">
                     <div className="recycle-bin-item-head">
-                      {item.kind === 'contradiction' ? <b>⚠ {item.topic}</b> : <b>{zhCN.compilation.recycleBinCard}</b>}
-                      <span>
-                        {item.kind === 'contradiction'
-                          ? (item.status === 'resolved' ? zhCN.compilation.resolved : zhCN.compilation.ignored)
-                          : (item.sourceTitle ?? '来源已删除')}
-                      </span>
+                      <b>⚠ {item.topic}</b>
+                      <span>{item.status === 'resolved' ? zhCN.compilation.resolved : zhCN.compilation.ignored}</span>
                     </div>
                     <div className="recycle-bin-item-variants">
-                      {item.kind === 'contradiction' ? (
-                        item.contradiction.variants.map((v) => (
-                          <div key={v.id} className="recycle-bin-variant">《{v.sourceTitle ?? v.sourceId}》 {v.variantText}</div>
-                        ))
-                      ) : (
-                        <div className="recycle-bin-variant">
-                          {item.sourceTitle ? <div>《{item.sourceTitle}》</div> : null}
-                          <div>{item.excerpt}</div>
-                        </div>
-                      )}
+                      {item.contradiction.variants.map((v) => (
+                        <div key={v.id} className="recycle-bin-variant">《{v.sourceTitle ?? v.sourceId}》 {v.variantText}</div>
+                      ))}
                     </div>
                     <div className="recycle-bin-item-actions">
                       <button type="button" className="source-list__btn source-list__btn--primary" onClick={() => void handleRestoreRecycleBin(item.id)}>

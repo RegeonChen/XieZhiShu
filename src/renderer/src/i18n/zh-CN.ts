@@ -512,7 +512,6 @@ export const zhCN = {
     recycleBin: '回收站',
     recycleBinTitle: '回收站',
     recycleBinEmpty: '回收站为空。',
-    recycleBinCard: '资料卡片',
     restore: '恢复',
     close: '关闭',
     restored: '已从回收站恢复该条目，请重新选择。',

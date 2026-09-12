@@ -98,7 +98,6 @@ import {
   listRecycleBinByCompilation,
   restoreRecycleBinContradiction,
   reorderCompilationItemsByTs,
-  restoreCompilationCardRecycleBin,
   listFinalizedCompilationsForImport,
   importCompilationIntoTask,
   listCompilationVersions,
@@ -940,11 +939,6 @@ handleLogged(IPC.COMPILATION_RECYCLE_BIN_RESTORE, (_event, params: CompilationRe
     if (contradiction) {
       clearUndoStacks(undoCid)
       return { ok: true, data: { contradiction } }
-    }
-    const card = restoreCompilationCardRecycleBin(params.binId)
-    if (card) {
-      clearUndoStacks(undoCid)
-      return { ok: true, data: { card } }
     }
     return { ok: false, error: { code: 'INVALID_PARAM', message: '回收站条目不存在' } }
   } catch (err) {
