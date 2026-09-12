@@ -57,6 +57,8 @@ jobs:
           files: dist/*
           draft: false
           prerelease: false
-          generate_release_notes: true
+          # 发布说明写在 docs/release-notes.md（每次发版前更新，含本版变更明细与验证数据）；
+          # 不再用自动生成的 PR 清单——本项目为单人开发，自动说明没有信息量。
+          body_path: docs/release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
