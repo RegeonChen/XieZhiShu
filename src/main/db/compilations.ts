@@ -316,9 +316,15 @@ export function updateCompilationItem(itemId: string, patch: CompilationItemPatc
      * 时间标签改了就必须**一起重算结构化时间**（year/month/day/time_confidence）。
      * 否则把「无时间」补成「2018 年」后，段落仍落在"待补年份"统计里、年份小标题不变、
      * 也不参与按年份分节与排序——用户一眼可见的不一致（2026-09-10 修）。
-     * 年鉴惯例兜底（来源标题年份 −1）与整合提取、对话编辑同一口径。
+     * 年份兜底与整合提取、对话编辑同一口径：年鉴类标题按 −1，网页按标题年份/发布时间原样推断。
      */
-    const t = withFallbackYear(patch.ts ?? undefined, loadSourceTitles([row.source_id]).get(row.source_id))
+    const srcRow = db.prepare('SELECT kind, published_at FROM sources WHERE id = ?').get(row.source_id) as
+      | { kind: 'file' | 'url'; published_at: string | null }
+      | undefined
+    const t = withFallbackYear(patch.ts ?? undefined, loadSourceTitles([row.source_id]).get(row.source_id), {
+      kind: srcRow?.kind,
+      publishedAt: srcRow?.published_at ?? undefined
+    })
     fields.push('year = ?', 'month = ?', 'day = ?', 'time_confidence = ?')
     values.push(t.year ?? null, t.month ?? null, t.day ?? null, t.timeConfidence)
   }

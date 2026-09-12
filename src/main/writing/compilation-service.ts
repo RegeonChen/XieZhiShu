@@ -19,6 +19,7 @@ import { getSourcesByIds } from '../db/sources'
 import { bigrams, chunkByParagraphs, scoreChunk } from '../rag/retrieval'
 import { embedTexts } from '../rag/embed'
 import { vectorSearch } from '../rag/vector-store'
+import { ensureSourcesIndexed } from '../rag/indexer'
 import { getSettings } from '../db/settings'
 import { getProviderSecret } from '../llm/provider-store'
 import { safeStorageCodec } from '../llm/secret'
@@ -324,7 +325,9 @@ export function recallCandidateChunks(scopeIds: string[], query: string): Retrie
         sourceTitle: s.title,
         position: c.position,
         text: c.text,
-        score: scoreChunk(q, c.text, s.title, qBigrams, qTerms)
+        score: scoreChunk(q, c.text, s.title, qBigrams, qTerms),
+        sourceKind: s.kind,
+        sourcePublishedAt: s.publishedAt
       })
     }
   }
@@ -369,7 +372,7 @@ export function recallCompilationCandidates(
 
   const relevantSources = new Set<string>()
   const dedicatedSources = new Set<string>()
-  const indexed: { sourceId: string; sourceTitle: string; position: string; text: string; score: number; vecHit: boolean; inlineRelevant: boolean; paragraphKey: string }[] = []
+  const indexed: { sourceId: string; sourceTitle: string; position: string; text: string; score: number; vecHit: boolean; inlineRelevant: boolean; paragraphKey: string; sourceKind?: 'file' | 'url'; sourcePublishedAt?: string }[] = []
   const maxScoreBySource = new Map<string, number>()
   const totalLenBySource = new Map<string, number>()
   // 段级相关（Phase A/B：整段为一个保留/剔除单元——段内任一子块有信号 → 整段所有子块一起保留）
@@ -388,7 +391,7 @@ export function recallCompilationCandidates(
       // "可能相关"；只剔除与标题完全无任何信号（score==0 且无向量命中）的"肯定无关"段。
       const inlineRelevant = score > RECALL_LEX_MIN || vecHit
       const paragraphKey = c.position.match(/第(\d+)段/)?.[0] ?? c.position
-      indexed.push({ sourceId: s.id, sourceTitle: s.title, position: c.position, text: c.text, score, vecHit, inlineRelevant, paragraphKey })
+      indexed.push({ sourceId: s.id, sourceTitle: s.title, position: c.position, text: c.text, score, vecHit, inlineRelevant, paragraphKey, sourceKind: s.kind, sourcePublishedAt: s.publishedAt })
       if (inlineRelevant) {
         relevantSources.add(s.id)
         paragraphRelevant.add(s.id + '|' + paragraphKey)
@@ -412,7 +415,7 @@ export function recallCompilationCandidates(
     if (!relevantSources.has(it.sourceId)) continue
     // 整段级判定：专属来源整篇保留，否则仅保留“所在段”有任一子块信号的全部子块
     if (dedicatedSources.has(it.sourceId) || paragraphRelevant.has(it.sourceId + '|' + it.paragraphKey)) {
-      out.push({ sourceId: it.sourceId, sourceTitle: it.sourceTitle, position: it.position, text: it.text, score: it.score })
+      out.push({ sourceId: it.sourceId, sourceTitle: it.sourceTitle, position: it.position, text: it.text, score: it.score, sourceKind: it.sourceKind, sourcePublishedAt: it.sourcePublishedAt })
     }
   }
   return { chunks: sortChunksStable(out), candidateSources: relevantSources.size }
@@ -422,6 +425,9 @@ export interface SourceRefEntry {
   index: number
   sourceId: string
   title: string
+  /** 来源类型与发布时间：段首时间兜底要区分「年鉴惯例」与「网页发布时间」两种依据 */
+  kind?: 'file' | 'url'
+  publishedAt?: string
 }
 
 export function buildCompilationSourceRefs(chunks: RetrievedChunk[]): SourceRefEntry[] {
@@ -430,7 +436,7 @@ export function buildCompilationSourceRefs(chunks: RetrievedChunk[]): SourceRefE
   for (const c of chunks) {
     if (!seen.has(c.sourceId)) {
       seen.add(c.sourceId)
-      list.push({ index: list.length + 1, sourceId: c.sourceId, title: c.sourceTitle })
+      list.push({ index: list.length + 1, sourceId: c.sourceId, title: c.sourceTitle, kind: c.sourceKind, publishedAt: c.sourcePublishedAt })
     }
   }
   return list
@@ -873,7 +879,19 @@ export async function generateCompilation(
 
   onProgress?.({ stage: '正在检索网页资料库…', percent: 8, etaSeconds: preWindowEta(PHASE_RECALL_ETA_S + PHASE_GATE_ETA_S) })
   const webIds = await fetchRelatedSiteSources(coarseQuery, taskId).catch(() => [] as string[])
-  if (webIds.length > 0) scopeIds = Array.from(new Set([...scopeIds, ...webIds]))
+  if (webIds.length > 0) {
+    scopeIds = Array.from(new Set([...scopeIds, ...webIds]))
+    /*
+     * 网页文章必须先进入向量索引，否则保守闸门查不到它们的向量，只能靠词法命中——
+     * "字面无关但语义相关"的网页段落会被整篇丢掉（本地资料库一直有索引兜底，网页此前没有）。
+     * 索引以预算为上限，超预算或个别失败都不阻断生成（只是少一层向量兜底）。
+     */
+    onProgress?.({ stage: '正在为网页资料建立检索索引…', percent: 9, etaSeconds: preWindowEta(PHASE_GATE_ETA_S) })
+    const idx = await ensureSourcesIndexed(webIds).catch(() => ({ indexed: 0, failed: 0, skipped: 0 }))
+    if (idx.failed > 0 || idx.skipped > 0) {
+      logMain('compilation', `网页资料索引 就绪=${idx.indexed} 失败=${idx.failed} 超预算跳过=${idx.skipped}（这些文章本轮只能靠词法命中）`)
+    }
+  }
 
   onProgress?.({ stage: '正在本地召回资料（宁多勿漏）…', percent: 10, etaSeconds: preWindowEta(PHASE_GATE_ETA_S) })
   const allChunks = recallCandidateChunks(scopeIds, coarseQuery)
@@ -1259,13 +1277,16 @@ async function runExtractPhase(
   }
   if (!state.extractBatches) {
     const sourceTitleByRef = new Map(state.refs.map((r) => ['#' + r.index, r.title]))
+    const sourceMetaByRef = new Map(state.refs.map((r) => ['#' + r.index, { kind: r.kind, publishedAt: r.publishedAt }]))
     state.extractCandidates = items.map((it, i) => ({
       index: i,
       key: 'c' + (i + 1),
       sourceRef: it.sourceRef,
       sourceTitle: sourceTitleByRef.get(it.sourceRef) ?? '',
       excerpt: it.excerpt,
-      ts: it.ts ?? undefined
+      ts: it.ts ?? undefined,
+      sourceKind: sourceMetaByRef.get(it.sourceRef)?.kind,
+      sourcePublishedAt: sourceMetaByRef.get(it.sourceRef)?.publishedAt
     }))
     state.extractBatches = splitExtractBatches(state.extractCandidates)
     state.extractDrafts = state.extractDrafts ?? []

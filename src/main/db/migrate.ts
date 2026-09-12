@@ -965,6 +965,22 @@ ALTER TABLE compilations DROP COLUMN manual_edit;
 DROP TABLE IF EXISTS compilation_repairs;
 DROP TABLE IF EXISTS compilation_card_recycle_bin;
 `
+  },
+  {
+    // 2026-09-10（Phase 7.7 收尾后补强：网页资料库并入修志流程·第一批）：
+    // 网页文章的**发布时间**此前只写在 `web_site_articles.published_at`（仅用于文章清单排序），
+    // 抓成 `sources` 后完全丢失，于是网页段落缺年份时只能按标题兜底——而「年鉴惯例 −1」用在新闻标题上
+    // 是**错的**（「2021年全区教育工作总结」会被推成 2020 年）。故把发布时间落到 sources 上，
+    // 供年份兜底使用（标为 inferred），并可在来源小卡中查证。
+    version: 37,
+    sql: `
+ALTER TABLE sources ADD COLUMN published_at TEXT;
+UPDATE sources SET published_at = (
+  SELECT w.published_at FROM web_site_articles w
+   WHERE w.url = sources.url AND w.published_at IS NOT NULL
+   LIMIT 1
+) WHERE kind = 'url' AND published_at IS NULL;
+`
   }
 ]
 

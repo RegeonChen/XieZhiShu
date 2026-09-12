@@ -184,6 +184,17 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
       .filter((s) => s.sourceId)
       .map((s) => [s.ordinal, s.sourceId as string])
   )
+  /** 段首时间兜底要按来源区分依据（年鉴 −1 / 网页标题年份 / 网页发布时间） */
+  const sourceMetaByOrdinal = new Map(
+    listCompilationSources(compilationId)
+      .filter((s) => s.sourceId)
+      .map((s) => {
+        const src = getSourceById(s.sourceId as string)
+        return [s.ordinal, { kind: src?.kind, publishedAt: src?.publishedAt }] as const
+      })
+  )
+  const metaOf = (ordinal?: number): { kind?: 'file' | 'url'; publishedAt?: string } =>
+    (ordinal != null ? sourceMetaByOrdinal.get(ordinal) : undefined) ?? {}
   let nextRefs = applyDocOps(refs, accepted)
   /*
    * 时间被改动（或插入了新段）→ **同一次操作内**按时间重排，否则文档会静默违反"按时间排序"。
@@ -196,7 +207,7 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
   if (timeTouched) {
     nextRefs = sortParagraphsByTime(
       nextRefs.map((p, i) => {
-        const t = resolveTimeForEdit(p.timeLabel, p.sourceTitle)
+        const t = resolveTimeForEdit(p.timeLabel, p.sourceTitle, metaOf(p.sourceOrdinal))
         return { p, ordinal: i, year: t.year, month: t.month, sourceOrdinal: p.sourceOrdinal }
       })
     ).map((x) => x.p)
@@ -208,7 +219,7 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
   upsertCompilationParagraphs(
     compilationId,
     nextRefs.map((p) => {
-      const time = resolveTimeForEdit(p.timeLabel, p.sourceTitle)
+      const time = resolveTimeForEdit(p.timeLabel, p.sourceTitle, metaOf(p.sourceOrdinal))
       const prev = metaById.get(p.id)
       const touched = changedIds.has(p.id)
       return {
