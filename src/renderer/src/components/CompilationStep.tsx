@@ -82,6 +82,8 @@ export interface CompilationView {
   items: CompilationItemView[]
   contradictions: CompilationContradictionView[]
   repairs?: CompilationRepairView[]
+  /** Phase 7.5：是否已解锁人工修改模式（落库、不可逆；Migration 034） */
+  manualEdit?: boolean
 }
 
 interface Props {
@@ -123,9 +125,11 @@ interface Props {
   onDocSend?: (instruction: string) => void
   /** 打开对话框时按需拉取历史 */
   onDocOpen?: () => void
-  /** D5：确认汇编后才解锁的人工修改模式 */
+  /** D5：确认汇编后才解锁的人工修改模式（由 `compilation.manualEdit` 派生，落库持久） */
   manualMode?: boolean
   onStartManualEdit?: () => void
+  /** 手动改完时间、自动重排后要定位并短暂高亮的段落（nonce 变化即重新触发） */
+  refocus?: { id: string; nonce: number } | null
 }
 
 export interface CompilationMessageView {
@@ -190,7 +194,8 @@ function CompilationStep({
   onDocSend,
   onDocOpen,
   manualMode,
-  onStartManualEdit
+  onStartManualEdit,
+  refocus
 }: Props) {
   const t = zhCN.compilation
   /** 差异段按段 id 建索引（渲染时给段落上色 / 段内高亮） */
@@ -290,9 +295,49 @@ function CompilationStep({
   const panelRef = useRef<HTMLDivElement | null>(null)
   const chatListRef = useRef<HTMLDivElement | null>(null)
   const dragRef = useRef<{ dx: number; dy: number } | null>(null)
-  const changedSet = new Set(docChangedIds ?? [])
+  /**
+   * 本次改动的高亮：只在收到新一批改动后亮 **约 3.5 秒**，然后自动清除。
+   * 用户 2026-09-10 反馈：原实现把 `docChangedIds` 一直留着，改动段底色永不消失。
+   */
+  const [highlightIds, setHighlightIds] = useState<string[]>([])
+  /** 手动改时间并自动重排后，要定位 + 短暂高亮（2 秒）的段落 */
+  const [refocusId, setRefocusId] = useState<string | null>(null)
+  const changedSet = new Set(highlightIds)
   const messages = docMessages ?? []
   const canSend = chatInput.trim().length > 0 && docEditing !== true
+
+  useEffect(() => {
+    const ids = docChangedIds ?? []
+    if (ids.length === 0) {
+      setHighlightIds([])
+      return
+    }
+    setHighlightIds(ids)
+    const timer = window.setTimeout(() => setHighlightIds([]), 3500)
+    return () => window.clearTimeout(timer)
+  }, [docChangedIds])
+
+  /**
+   * 手动修改时间后主进程会自动按时间重排（position 变化可能很大），
+   * 所以保存后要**滚动到该段的新位置**并短暂高亮 2 秒，否则用户找不到它被排到哪儿去了。
+   */
+  useEffect(() => {
+    if (!refocus) {
+      setRefocusId(null)
+      return
+    }
+    setRefocusId(refocus.id)
+    // 主进程在改时间后按**正序**重排，工具栏的排序状态要跟着回到 ↑，否则图标与实际顺序不一致
+    setSortOrder('asc')
+    const scrollTimer = window.setTimeout(() => {
+      cardsRef.current?.querySelector<HTMLElement>(`[data-card-id="${refocus.id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 80)
+    const clearTimer = window.setTimeout(() => setRefocusId(null), 2000)
+    return () => {
+      window.clearTimeout(scrollTimer)
+      window.clearTimeout(clearTimer)
+    }
+  }, [refocus])
 
   // 新消息/编辑中 → 对话列表滚到底部
   useEffect(() => {
@@ -360,9 +405,19 @@ function CompilationStep({
     setTs(it.ts ?? '')
   }
 
+  /**
+   * 保存段落编辑：**只提交真正改动的字段**。
+   * 原因（2026-09-10）：每次保存都带上 `ts` 会让主进程误判"时间被改动"→ 无谓地重排整份汇编、
+   * 还会把用户手动调过的顺序冲掉，并触发一次多余的"滚动定位"。只改正文时不应发生这些。
+   */
   const saveEdit = (): void => {
     if (!editing) return
-    onUpdateItem(editing.id, { excerpt: excerpt.trim(), ts: ts.trim() ? ts.trim() : null })
+    const nextExcerpt = excerpt.trim()
+    const nextTs = ts.trim() ? ts.trim() : null
+    const patch: { excerpt?: string; ts?: string | null } = {}
+    if (nextExcerpt !== editing.excerpt) patch.excerpt = nextExcerpt
+    if (nextTs !== (editing.ts ?? null)) patch.ts = nextTs
+    if (patch.excerpt !== undefined || patch.ts !== undefined) onUpdateItem(editing.id, patch)
     setEditing(null)
   }
 
@@ -623,6 +678,7 @@ function CompilationStep({
                     fix ? 'is-repair' : '',
                     locatedId === it.id ? 'is-located' : '',
                     changedSet.has(it.id) ? 'is-changed' : '',
+                    refocusId === it.id ? 'is-refocused' : '',
                     /* Phase 7.4：对比模式下的差异标记 */
                     diff ? 'diff-' + diff.kind : ''
                   )}

@@ -65,6 +65,8 @@ export const IPC = {
   COMPILATION_DELETE_ITEM: 'compilation:deleteItem',
   COMPILATION_RESOLVE_CONTRADICTION: 'compilation:resolveContradiction',
   COMPILATION_CONFIRM: 'compilation:confirm',
+  /* Phase 7.5：解锁人工修改模式（不可逆，Migration 034 落库） */
+  COMPILATION_MANUAL_EDIT: 'compilation:manualEdit',
   COMPILATION_ADJUST: 'compilation:adjust',
   COMPILATION_REORDER: 'compilation:reorder',
   /* Phase 7.4：版本管控（列表 / 差异 / 恢复） */
@@ -441,7 +443,14 @@ export interface CompilationUpdateItemReq {
   extraTags?: string[]
   kept?: boolean
 }
-export type CompilationUpdateItemRes = { item: CompilationItem }
+export type CompilationUpdateItemRes = {
+  item: CompilationItem
+  /**
+   * Phase 7.5：当本次改动包含时间标签时，主进程会**顺带按时间重排整份汇编**（用户要求"改完时间自动重排"），
+   * 因此返回重排后的完整汇编供渲染层整体替换——不能只替换单个 item，否则界面顺序与库中 position 不一致。
+   */
+  compilation?: Compilation
+}
 
 export interface CompilationDeleteItemReq {
   itemId: string
@@ -459,6 +468,12 @@ export interface CompilationConfirmReq {
   compilationId: string
 }
 export type CompilationConfirmRes = { compilation: Compilation }
+
+/** Phase 7.5（D5 补充裁定）：解锁「人工修改」模式；**不可逆**（没有反向通道） */
+export interface CompilationManualEditReq {
+  compilationId: string
+}
+export type CompilationManualEditRes = { compilation: Compilation }
 
 export interface CompilationRecycleBinListReq {
   compilationId: string
@@ -814,6 +829,7 @@ export interface IpcMapping {
   [IPC.COMPILATION_DELETE_ITEM]: { _req: CompilationDeleteItemReq; _res: ApiResult<void> }
   [IPC.COMPILATION_RESOLVE_CONTRADICTION]: { _req: CompilationResolveContradictionReq; _res: ApiResult<CompilationResolveContradictionRes> }
   [IPC.COMPILATION_CONFIRM]: { _req: CompilationConfirmReq; _res: ApiResult<CompilationConfirmRes> }
+  [IPC.COMPILATION_MANUAL_EDIT]: { _req: CompilationManualEditReq; _res: ApiResult<CompilationManualEditRes> }
   [IPC.COMPILATION_ADJUST]: { _req: CompilationAdjustReq; _res: ApiResult<CompilationAdjustRes> }
   [IPC.COMPILATION_REORDER]: { _req: CompilationReorderReq; _res: ApiResult<CompilationReorderRes> }
   [IPC.COMPILATION_VERSIONS]: { _req: CompilationVersionsReq; _res: ApiResult<CompilationVersionsRes> }

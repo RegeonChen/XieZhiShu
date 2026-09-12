@@ -190,12 +190,16 @@ const api = {
   listCompilationMessages(compilationId: string): Promise<ApiResult<{ messages: unknown[] }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_MESSAGES, { compilationId })
   },
+  /** Phase 7.5：解锁人工修改模式（不可逆；确认汇编后才可用） */
+  enterCompilationManualEdit(compilationId: string): Promise<ApiResult<{ compilation: unknown }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_MANUAL_EDIT, { compilationId })
+  },
   /** 查询当前汇编可撤销/可恢复的步数 */
   getCompilationUndoState(compilationId: string): Promise<ApiResult<{ undoAvailable: number; redoAvailable: number }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_UNDO_STATE, { compilationId })
   },
   /** 编辑资料卡片 */
-  updateCompilationItem(itemId: string, patch: { excerpt?: string; ts?: string | null; note?: string | null; extraTags?: string[]; kept?: boolean }): Promise<ApiResult<{ item: unknown }>> {
+  updateCompilationItem(itemId: string, patch: { excerpt?: string; ts?: string | null; note?: string | null; extraTags?: string[]; kept?: boolean }): Promise<ApiResult<{ item: unknown; compilation?: unknown }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_UPDATE_ITEM, { itemId, ...patch })
   },
   /** 删除资料卡片 */

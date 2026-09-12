@@ -171,8 +171,11 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   const [docEditing, setDocEditing] = useState(false)
   const [docError, setDocError] = useState<string | null>(null)
   const [docChangedIds, setDocChangedIds] = useState<string[]>([])
-  /** 确认汇编（finalized）后经不可逆二次确认解锁的人工修改模式（切换汇编时重置） */
-  const [manualMode, setManualMode] = useState(false)
+  /**
+   * 手动改完时间后要定位 + 短暂高亮的段落（nonce 每次递增，保证同一段连续改两次也能重新触发）。
+   * 主进程会在改时间时自动按时间重排，段落位置可能变化很大，所以要主动滚过去。
+   */
+  const [refocus, setRefocus] = useState<{ id: string; nonce: number } | null>(null)
 
   /** 读取某汇编的版本列表；有 ≥2 版时才显示版本控件 */
   const loadVersions = useCallback(async (compilationId: string): Promise<void> => {
@@ -209,12 +212,13 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   void 0
 
   /* ---- Phase 7.5：与文档对话（大模型按 ops 修改汇编） ---- */
-  // 换汇编时清空对话/改动高亮/人工修改模式（人工修改模式是"确认后手动解锁"的会话内状态）
+  // 换汇编时清空对话/改动高亮/定位（人工修改模式不在这里重置：它是落库的、不可逆的，
+  // 由 `compilation.manualEdit` 派生，切换任务或重启后依然生效）
   useEffect(() => {
     setDocMessages([])
     setDocError(null)
     setDocChangedIds([])
-    setManualMode(false)
+    setRefocus(null)
     setDocEditing(false)
   }, [compilation?.id])
 
@@ -748,11 +752,32 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     }
   }
 
+  /**
+   * 进入人工修改模式（Phase 7.5 / D5 补充裁定）：**不可逆**、落库持久，
+   * 因此界面状态一律从 `compilation.manualEdit` 派生，切换任务或重启后依然生效。
+   */
+  const handleStartManualEdit = async () => {
+    if (!compilation) return
+    const res = await window.api.enterCompilationManualEdit(compilation.id)
+    if (res.ok && res.data) {
+      setCompilation(res.data.compilation as CompilationView)
+    } else {
+      appendAssistant('开启人工修改模式失败：' + (res.error?.message ?? ''))
+    }
+  }
+
   const handleUpdateItem = async (itemId: string, patch: { excerpt?: string; ts?: string | null; note?: string | null }) => {
     const res = await window.api.updateCompilationItem(itemId, patch)
     if (res.ok && res.data) {
-      const item = res.data.item as CompilationView['items'][number]
-      setCompilation((cur) => (cur ? { ...cur, items: cur.items.map((it) => (it.id === itemId ? item : it)) } : cur))
+      if (res.data.compilation) {
+        // 改时间时主进程顺带按时间重排了整份汇编 → 必须整体替换（只换单个 item 顺序会与库不一致）
+        setCompilation(res.data.compilation as CompilationView)
+      } else {
+        const item = res.data.item as CompilationView['items'][number]
+        setCompilation((cur) => (cur ? { ...cur, items: cur.items.map((it) => (it.id === itemId ? item : it)) } : cur))
+      }
+      // 改过时间 → 重排后滚动定位到该段新位置并高亮 2 秒
+      if (patch.ts !== undefined) setRefocus({ id: itemId, nonce: Date.now() })
     } else {
       appendAssistant('编辑资料卡片失败：' + (res.error?.message ?? ''))
     }
@@ -1057,8 +1082,9 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           onDocOpen={() => {
             if (compilation) void loadDocMessages(compilation.id)
           }}
-          manualMode={manualMode}
-          onStartManualEdit={() => setManualMode(true)}
+          manualMode={compilation?.manualEdit === true}
+          onStartManualEdit={() => void handleStartManualEdit()}
+          refocus={refocus}
         />
       )
     }

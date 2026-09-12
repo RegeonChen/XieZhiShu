@@ -61,6 +61,8 @@ import {
   type CompilationDocEditRes,
   type CompilationMessagesReq,
   type CompilationMessagesRes,
+  type CompilationManualEditReq,
+  type CompilationManualEditRes,
   type CompilationUndoReq,
   type CompilationUndoRes,
   type CompilationUndoStateRes,
@@ -104,6 +106,7 @@ import {
   listRecycleBinByCompilation,
   restoreRecycleBinContradiction,
   reorderCompilationItemsByTs,
+  setCompilationManualEdit,
   restoreCompilationCardRecycleBin,
   listFinalizedCompilationsForImport,
   importCompilationIntoTask,
@@ -691,8 +694,15 @@ handleLogged(IPC.COMPILATION_UPDATE_ITEM, (_event, params: CompilationUpdateItem
       kept: params.kept
     })
     if (!item) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料卡片不存在' } }
+    /*
+     * 时间标签被改动 → **同一次操作内**按时间重排整份汇编（用户 2026-09-10 要求"改完时间自动重排"）。
+     * 刻意放在这里而不是让渲染层再调一次 `compilation:reorder`：那样会记出两个版本，
+     * 而用户视角这是**一次**编辑。重排只改 position，段 id 不变，故前端可凭 id 定位到新位置。
+     */
+    if (params.ts !== undefined && undoCid) reorderCompilationItemsByTs(undoCid, 'asc')
     recordVersionAfterChange(undoCid, 'user-edit')
-    return { ok: true, data: { item } }
+    const compilation = params.ts !== undefined && undoCid ? getCompilationById(undoCid) : null
+    return { ok: true, data: compilation ? { item, compilation } : { item } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
@@ -742,6 +752,22 @@ handleLogged(IPC.COMPILATION_CONFIRM, (_event, params: CompilationConfirmReq): A
     pushUndo(params.compilationId)
     const compilation = confirmCompilation(params.compilationId)
     if (!compilation) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料汇编不存在' } }
+    return { ok: true, data: { compilation } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+/**
+ * Phase 7.5（D5 补充裁定）：解锁「人工修改」模式。
+ * 用户明确"进入一次即不可逆、跨任务切换与重启都要保持"，故落库（`compilations.manual_edit`，Migration 034）。
+ * 不改汇编内容，因此**不记版本**、不登记撤销栈（否则撤销会把它退回去，违背"不可逆"）。
+ */
+handleLogged(IPC.COMPILATION_MANUAL_EDIT, (_event, params: CompilationManualEditReq): ApiResult<CompilationManualEditRes> => {
+  try {
+    const compilation = setCompilationManualEdit(params.compilationId, true)
+    if (!compilation) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料汇编不存在' } }
+    logMain('compilation', '开启人工修改模式 汇编=' + params.compilationId)
     return { ok: true, data: { compilation } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }

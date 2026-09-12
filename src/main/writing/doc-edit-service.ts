@@ -38,8 +38,14 @@ export interface DocEditOp {
   sourceOrdinal?: number
   /** split：按字符偏移切分 */
   at?: number
+  /**
+   * 用户**明确要求**修改某个数字/数值时置 true → 跳过"数字必须来自来源"的本地校验。
+   * 用户裁定（2026-09-10）："如果用户明确要求修改某个数字，那么不应该再进行校验，大模型和软件都照做即可。"
+   * 提示词要求仅在用户点名某个具体数值时才加此字段；软件完全信任它（不再二次判断）。
+   */
+  allowNewNumbers?: boolean
   /** replaceAll：整篇重写 */
-  paragraphs?: { text: string; timeLabel?: string; sourceOrdinal?: number }[]
+  paragraphs?: { text: string; timeLabel?: string; sourceOrdinal?: number; allowNewNumbers?: boolean }[]
 }
 
 export interface DocEditParsed {
@@ -82,13 +88,15 @@ export function parseDocEditOutput(text: string): DocEditParsed | null {
     if (typeof o.timeLabel === 'string') entry.timeLabel = o.timeLabel
     if (typeof o.sourceOrdinal === 'number') entry.sourceOrdinal = o.sourceOrdinal
     if (typeof o.at === 'number') entry.at = o.at
+    if (o.allowNewNumbers === true) entry.allowNewNumbers = true
     if (Array.isArray(o.paragraphs)) {
       entry.paragraphs = o.paragraphs
         .filter((p): p is Record<string, unknown> => !!p && typeof p === 'object')
         .map((p) => ({
           text: typeof p.text === 'string' ? p.text : '',
           timeLabel: typeof p.timeLabel === 'string' ? p.timeLabel : undefined,
-          sourceOrdinal: typeof p.sourceOrdinal === 'number' ? p.sourceOrdinal : undefined
+          sourceOrdinal: typeof p.sourceOrdinal === 'number' ? p.sourceOrdinal : undefined,
+          allowNewNumbers: p.allowNewNumbers === true ? true : undefined
         }))
     }
     ops.push(entry)
@@ -117,8 +125,12 @@ export function validateDocOps(
   const reject = (op: DocEditOp, reason: string): void => {
     rejected.push({ op: op.op, reason })
   }
-  /** 文本里的数字是否都能在该来源原文中找到 */
-  const numbersOk = (text: string, ordinal: number | undefined): boolean => {
+  /**
+   * 文本里的数字是否都能在该来源原文中找到。
+   * `allowNewNumbers`（用户明确要求改数字）为 true 时**直接放行**——用户裁定"大模型和软件都照做"。
+   */
+  const numbersOk = (text: string, ordinal: number | undefined, allowNewNumbers?: boolean): boolean => {
+    if (allowNewNumbers === true) return true
     if (ordinal == null) return true
     const source = sourceTextByOrdinal.get(ordinal)
     if (!source) return true // 拿不到来源原文时不做数字校验（不误杀）
@@ -155,7 +167,7 @@ export function validateDocOps(
           reject(op, '段落不存在')
           break
         }
-        if (op.op !== 'setTime' && typeof op.text === 'string' && !numbersOk(op.text, target.sourceOrdinal)) {
+        if (op.op !== 'setTime' && typeof op.text === 'string' && !numbersOk(op.text, target.sourceOrdinal, op.allowNewNumbers)) {
           reject(op, '正文里的数字在来源原文中找不到（疑似编造）')
           break
         }
@@ -184,7 +196,7 @@ export function validateDocOps(
           reject(op, '来源编号超出范围')
           break
         }
-        if (!numbersOk(op.text, op.sourceOrdinal)) {
+        if (!numbersOk(op.text, op.sourceOrdinal, op.allowNewNumbers)) {
           reject(op, '正文里的数字在来源原文中找不到（疑似编造）')
           break
         }
@@ -225,7 +237,7 @@ export function validateDocOps(
           reject(op, '来源编号超出范围')
           break
         }
-        const badNumber = list.find((p) => !numbersOk(p.text, p.sourceOrdinal))
+        const badNumber = list.find((p) => !numbersOk(p.text, p.sourceOrdinal, p.allowNewNumbers))
         if (badNumber) {
           reject(op, '正文里的数字在来源原文中找不到（疑似编造）')
           break
@@ -360,6 +372,10 @@ export function buildDocEditMessages(
     '   · {"op":"split","id":"p5","at":30,"text":"该段完整正文"} 按字符位置拆分；',
     '   · {"op":"setTime","id":"p5","timeLabel":"2019 年"} 只改段首时间。',
     '3. **不得编造事实**：正文里的数字、日期、人名、地名必须来自该段所属来源；不得凭空增加数据。',
+    '   **唯一例外**：用户**明确要求**把某个数字/数值改成指定值时（如"把在校生数改成 5000 人"），',
+    '   **照做即可**，不要因为来源里没有这个数字就拒绝或改成别的值；此时必须在该 op 上加 `"allowNewNumbers":true`，',
+    '   软件会据此跳过数字校验。**只有用户点名具体数值时才能加这个字段**，其它任何情况一律不加，',
+    '   绝不可用它给自己的推测、估算、补齐数据开口子。',
     '4. 时间标签必须含 4 位年份（如「2018 年」「2018 年 5 月」）。',
     '5. 不要删除用户没有要求删除的内容；改动尽量小、贴合用户要求。',
     '6. 若用户的要求无法用上述 ops 表达，则不要输出任何 op，只在 reply 里说明原因。'
@@ -469,6 +485,33 @@ if (import.meta.vitest) {
       ])
     })
 
+    it('skips the number check when the user explicitly asked for that number (allowNewNumbers)', () => {
+      // 用户点名"把 30 所改成 32 所" → 模型照做并在 op 上标 allowNewNumbers，软件不再拦
+      const asked = validateDocOps(
+        [{ op: 'replace', id: 'p1', text: '2018 年，全区普通中学 32 所。', allowNewNumbers: true }],
+        paras,
+        sourceText
+      )
+      expect(asked.accepted).toHaveLength(1)
+      expect(asked.rejected).toHaveLength(0)
+      // 插入同样支持；整篇重写按段落各自判断
+      expect(
+        validateDocOps([{ op: 'insertAfter', afterId: 'p1', text: '新增 32 所。', sourceOrdinal: 1, allowNewNumbers: true }], paras, sourceText).accepted
+      ).toHaveLength(1)
+      const all = validateDocOps(
+        [{ op: 'replaceAll', paragraphs: [{ text: '全区 999 所。', sourceOrdinal: 1, allowNewNumbers: true }, { text: '甲。', sourceOrdinal: 1 }] }],
+        paras,
+        sourceText
+      )
+      expect(all.accepted).toHaveLength(1)
+      // 未标豁免的段落仍然被拦（不会因为同批里有豁免就整体放行）
+      const mixed = validateDocOps([{ op: 'replaceAll', paragraphs: [{ text: '全区 999 所。', sourceOrdinal: 1 }] }], paras, sourceText)
+      expect(mixed.rejected[0].reason).toBe('正文里的数字在来源原文中找不到（疑似编造）')
+      // 解析层要能读到这个字段（模型写 true 才生效，写别的值不算）
+      expect(parseDocEditOutput('{"reply":"x","ops":[{"op":"replace","id":"p1","text":"2018 年 32 所。","allowNewNumbers":true}]}')!.ops[0].allowNewNumbers).toBe(true)
+      expect(parseDocEditOutput('{"reply":"x","ops":[{"op":"replace","id":"p1","text":"a","allowNewNumbers":"yes"}]}')!.ops[0].allowNewNumbers).toBeUndefined()
+    })
+
     it('never lets an op delete the whole document', () => {
       const { accepted, rejected } = validateDocOps([{ op: 'delete', ids: ['p1', 'p2', 'p3'] }], paras, sourceText)
       expect(accepted).toHaveLength(0)
@@ -510,6 +553,7 @@ if (import.meta.vitest) {
       expect(sys).toContain('"reply"')
       expect(sys).toContain('"op":"delete"')
       expect(sys).toContain('不得编造事实')
+      expect(sys).toContain('allowNewNumbers')
       expect(sys).toContain('必须给 sourceOrdinal')
       expect(buildDocEditMessages(paras, 'x', [])[1].content).toBe('x')
     })

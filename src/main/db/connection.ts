@@ -349,6 +349,9 @@ if (import.meta.vitest) {
       // ④ 空汇编不建版本（避免噪声版本）
       old.prepare("INSERT INTO compilations (id, task_id, title, status, created_at, updated_at) VALUES ('c2','t1','空汇编','drafting','2026-01-01','2026-01-01')").run()
       expect(old.prepare('SELECT COUNT(*) AS c FROM compilation_versions WHERE compilation_id = ?').get('c2')).toEqual({ c: 0 })
+      // ⑤ Migration 034：人工修改模式落库（既有汇编升级后默认 0 = 未解锁，NOT NULL 对旧行也成立）
+      const manual = old.prepare('SELECT manual_edit FROM compilations WHERE id = ?').get('c1') as { manual_edit: number }
+      expect(manual.manual_edit).toBe(0)
       old.close()
     })
   })

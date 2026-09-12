@@ -22,6 +22,7 @@ import {
   upsertCompilationParagraphs
 } from '../db/compilations'
 import { logMain } from '../logger'
+import { pushUndo } from './compilation-undo'
 import {
   applyDocOps,
   buildDocEditMessages,
@@ -146,6 +147,10 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
   // 应用 → 落库（保留段 id：原段沿用 id，新段由仓储分配）
   // 注意：必须**一次性**把全部段落交给 upsert——该函数会删除"不在入参里"的段落，
   // 因此来源 id 要在落库前解析好，不能事后逐条补写。
+  //
+  // 落库前登记撤销栈：对话编辑与「手动编辑/删除/矛盾取舍」必须一样可被「撤销操作」回退，
+  // 否则撤销会跳过这次改动、直接回退到上一个 pushUndo 时的状态（2026-09-10 用户实测）。
+  pushUndo(compilationId)
   const ordinalToSourceId = new Map(
     listCompilationSources(compilationId)
       .filter((s) => s.sourceId)
