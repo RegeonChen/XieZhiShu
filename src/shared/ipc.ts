@@ -118,6 +118,10 @@ export const IPC = {
   SETTINGS_GET: 'settings:get',
   SETTINGS_UPDATE: 'settings:update',
 
+  /* 本地向量索引（语义检索）状态与重建（2026-09-12：索引失败原因此前无处可查） */
+  RAG_INDEX_STATUS: 'rag:indexStatus',
+  RAG_REINDEX: 'rag:reindex',
+
   /* 工作区（Phase 2.2） */
   WORKSPACE_STATUS: 'workspace:status',
   WORKSPACE_MIGRATE: 'workspace:migrate',
@@ -230,6 +234,24 @@ export interface SourceUpdateTitleReq {
   title: string
 }
 export type SourceSummarizeAllRes = { processed: number; ok: number; failed: number }
+
+/**
+ * 本地向量索引状态（2026-09-12）：语义检索依赖 onnxruntime 引擎与本地模型，任一不可用都会让
+ * 全部资料的 `index_state` 变成 failed——此前失败原因只在日志里，界面看不到。此契约把
+ * 计数 + 最近失败原因透出，并支持"重建索引"（后台串行队列，界面轮询本接口看进度）。
+ */
+export type RagIndexStatusRes = {
+  total: number
+  ready: number
+  pending: number
+  indexing: number
+  failed: number
+  lastError: string | null
+  lastErrorAt: string | null
+  /** 后台队列里尚未处理的资料数（>0 表示正在重建） */
+  queued: number
+}
+export type RagReindexRes = { queued: number; reset: number }
 export interface SourceGetSummaryReq {
   id: string
 }
@@ -802,6 +824,9 @@ export interface IpcMapping {
   // 设置
   [IPC.SETTINGS_GET]: { _req: void; _res: ApiResult<AppSettings> }
   [IPC.SETTINGS_UPDATE]: { _req: SettingsUpdateReq; _res: ApiResult<AppSettings> }
+  // 本地向量索引状态与重建
+  [IPC.RAG_INDEX_STATUS]: { _req: void; _res: ApiResult<RagIndexStatusRes> }
+  [IPC.RAG_REINDEX]: { _req: void; _res: ApiResult<RagReindexRes> }
   // 工作区
   [IPC.WORKSPACE_STATUS]: { _req: void; _res: ApiResult<WorkspaceStatusRes> }
   [IPC.WORKSPACE_MIGRATE]: { _req: void; _res: ApiResult<WorkspaceMigrateRes> }

@@ -48,7 +48,7 @@ interface SettingsProps {
 }
 
 /** 设置页区块顺序（与中栏导航一致；scroll-spy 观察对象） */
-const SETTING_SECTIONS = ['overview', 'appearance', 'workspace', 'preset', 'stepModels', 'provider'] as const
+const SETTING_SECTIONS = ['overview', 'appearance', 'workspace', 'index', 'preset', 'stepModels', 'provider'] as const
 
 function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docScale, onDocScaleChange }: SettingsProps) {
   const [providers, setProviders] = useState<ProviderItem[] | null>(null)
@@ -85,6 +85,65 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docS
   const [workspaceMsg, setWorkspaceMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [legacySources, setLegacySources] = useState(0)
   const [migrating, setMigrating] = useState(false)
+
+  // 本地向量索引状态（2026-09-12）：语义检索不可用时此前只能翻日志，界面看不到
+  const [ragStatus, setRagStatus] = useState<{
+    total: number
+    ready: number
+    pending: number
+    indexing: number
+    failed: number
+    lastError: string | null
+    queued: number
+  } | null>(null)
+  const [reindexing, setReindexing] = useState(false)
+  const [indexMsg, setIndexMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  const loadRagStatus = useCallback(async () => {
+    const res = await window.api.getRagIndexStatus()
+    if (res.ok && res.data) setRagStatus(res.data)
+  }, [])
+
+  useEffect(() => {
+    void loadRagStatus()
+  }, [loadRagStatus])
+
+  // 重建期间轮询进度（索引在后台串行队列里跑，界面只负责看"已索引"数上升）
+  useEffect(() => {
+    if (!reindexing) return
+    const timer = window.setInterval(() => void loadRagStatus(), 2000)
+    return () => window.clearInterval(timer)
+  }, [reindexing, loadRagStatus])
+
+  // 队列清空即视为重建结束（成功与否都给出结论，失败原因在下方单独显示）
+  useEffect(() => {
+    if (!reindexing || !ragStatus) return
+    if (ragStatus.queued > 0 || ragStatus.pending > 0 || ragStatus.indexing > 0) return
+    setReindexing(false)
+    setIndexMsg(
+      ragStatus.failed === 0
+        ? { ok: true, text: zhCN.settingsPage.index.done }
+        : { ok: false, text: zhCN.settingsPage.index.doneWithFailures.replace('{count}', String(ragStatus.failed)) }
+    )
+  }, [reindexing, ragStatus])
+
+  const handleReindex = async () => {
+    setIndexMsg(null)
+    setReindexing(true)
+    try {
+      const res = await window.api.reindexRag()
+      if (res.ok && res.data) {
+        setIndexMsg({ ok: true, text: zhCN.settingsPage.index.queued.replace('{count}', String(res.data.queued)) })
+        await loadRagStatus()
+      } else {
+        setIndexMsg({ ok: false, text: zhCN.settingsPage.index.failed.replace('{message}', res.error?.message ?? '') })
+        setReindexing(false)
+      }
+    } catch (e) {
+      setIndexMsg({ ok: false, text: zhCN.settingsPage.index.failed.replace('{message}', String(e)) })
+      setReindexing(false)
+    }
+  }
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -456,6 +515,55 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docS
         </p>
         {workspaceMsg ? (
           <p className={`settings__hint ${workspaceMsg.ok ? 'settings__hint--ok' : 'settings__hint--err'}`}>{workspaceMsg.text}</p>
+        ) : null}
+      </section>
+
+      <section className="settings__section" id="settings-index">
+        <div className="settings__section-header">
+          <span className="settings__section-icon settings__section-icon--workspace" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M4 7h16M4 12h16M4 17h10" />
+              <circle cx="18" cy="17" r="3" />
+            </svg>
+          </span>
+          <h4 className="settings__section-title">{zhCN.settingsPage.index.title}</h4>
+          <div className="settings__workspace-actions">
+            <button
+              type="button"
+              className="source-list__btn source-list__btn--primary"
+              onClick={() => void handleReindex()}
+              disabled={reindexing}
+            >
+              {reindexing ? zhCN.settingsPage.index.rebuilding : zhCN.settingsPage.index.rebuildBtn}
+            </button>
+          </div>
+        </div>
+        <p className="settings__hint">{zhCN.settingsPage.index.hint}</p>
+        {ragStatus ? (
+          <p className="settings__workspace-path">
+            <span className={`settings__status-chip${ragStatus.failed === 0 && ragStatus.ready === ragStatus.total && ragStatus.total > 0 ? ' is-ok' : ''}`}>
+              {ragStatus.failed > 0
+                ? zhCN.settingsPage.index.stateFailed
+                : ragStatus.ready === ragStatus.total && ragStatus.total > 0
+                  ? zhCN.settingsPage.index.stateReady
+                  : zhCN.settingsPage.index.statePending}
+            </span>
+            <span>
+              {zhCN.settingsPage.index.counts
+                .replace('{ready}', String(ragStatus.ready))
+                .replace('{total}', String(ragStatus.total))
+                .replace('{failed}', String(ragStatus.failed))
+                .replace('{queued}', String(ragStatus.queued))}
+            </span>
+          </p>
+        ) : null}
+        {ragStatus?.lastError ? (
+          <p className="settings__hint settings__hint--err">
+            {zhCN.settingsPage.index.lastError}：<code>{ragStatus.lastError}</code>
+          </p>
+        ) : null}
+        {indexMsg ? (
+          <p className={`settings__hint ${indexMsg.ok ? 'settings__hint--ok' : 'settings__hint--err'}`}>{indexMsg.text}</p>
         ) : null}
       </section>
 
