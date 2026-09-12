@@ -4774,6 +4774,22 @@ textarea:focus-visible {
   touch-action: none;
   user-select: none;
 }
+/* 生成模式（7.6.1）：面板要给「消息 + 进度 + 中断卡片 + 输入框」留足高度 */
+.compilation-docchat.is-generating {
+  width: min(420px, calc(100% - 36px));
+  height: min(620px, calc(100% - 100px));
+  max-height: min(620px, calc(100% - 100px));
+}
+.compilation-docchat__chatpanel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.compilation-docchat__chatpanel .chat-panel {
+  flex: 1;
+  min-height: 0;
+}
 .compilation-docchat__head:active {
   cursor: grabbing;
 }
