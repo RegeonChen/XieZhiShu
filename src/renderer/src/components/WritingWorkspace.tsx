@@ -68,7 +68,7 @@ function buildGeneratedSummary(
 ): string {
   const pendingCount = comp.contradictions.filter((c) => c.status === 'pending').length
   const fixCount = (comp.repairs ?? []).filter((r) => r.status === 'applied').length
-  const parts: string[] = [prefix + comp.items.length + ' 张卡片']
+  const parts: string[] = [prefix + comp.items.length + ' 段']
   const ps = scans.extractScan
   if (ps && ps.inputCards != null && ps.outputParagraphs != null) {
     const keptPct = Math.round(((ps.outputChars ?? 0) / Math.max(1, ps.inputChars ?? 1)) * 100)

@@ -4,7 +4,7 @@
  * 篇幅由材料中实际可用的有效内容自然决定，不做人为的片段切分与字数限定。
  */
 import type { Contradiction, ContradictionInput, ContradictionKind } from '../../shared/types'
-import type { Draft, RetrievedChunk } from '../../shared/types'
+import type { Draft, RetrievedChunk, CompilationItem } from '../../shared/types'
 import { ErrorCodes } from '../../shared/types'
 import { getTaskById, resolveScopeSourceIds, getAllSourceIds, updateTaskArticleTitle, updateTaskInstruction } from '../db/tasks'
 import { getDraftRowByVersion, createDraft, addSegment, getDraftById, deleteDraftByVersion } from '../db/drafts'
@@ -88,12 +88,47 @@ function buildSystemPrompt(contradictionBlock?: string, styleGuide: string = DEF
   return lines.join('\n')
 }
 
-function buildUserPrompt(instruction: string, chunks: RetrievedChunk[], styleGuide: string = DEFAULT_STYLE_GUIDE, modelText?: string, materialsOrigin?: string): string {
+/**
+ * 由**已确认资料汇编**的段落构造第三步（撰写初稿）的素材文本（纯函数，便于单测）。
+ *
+ * Phase 7.6：素材不再是"卡片块"，而是**段落数组**——每段带段首时间与来源标题，
+ * 并按 `year` **分年份分组**呈现（与查看器的年份分节同口径），让大模型能按时间脉络落笔。
+ * 无年份的段落集中在「年份待核」组，绝不编造年份。
+ */
+export function buildCompilationMaterials(items: CompilationItem[]): string {
+  const kept = items.filter((it) => it.kept !== false)
+  const groups: { year?: number; lines: string[] }[] = []
+  for (const it of kept) {
+    const line =
+      (it.ts && it.ts.trim() ? it.ts.trim() : '时间待核') +
+      '　' +
+      it.excerpt +
+      (it.sourceTitle ? `（来源：《${it.sourceTitle}》）` : '')
+    const last = groups[groups.length - 1]
+    if (last && last.year === it.year) last.lines.push(line)
+    else groups.push({ year: it.year, lines: [line] })
+  }
+  return groups
+    .map((g) => '【' + (g.year != null ? `${g.year} 年` : '年份待核') + '】\n' + g.lines.join('\n'))
+    .join('\n\n')
+}
+
+function buildUserPrompt(
+  instruction: string,
+  chunks: RetrievedChunk[],
+  styleGuide: string = DEFAULT_STYLE_GUIDE,
+  modelText?: string,
+  materialsOrigin?: string,
+  /** Phase 7.6：已确认汇编的素材改为"按年份分组的段落文本"，由 `buildCompilationMaterials` 预渲染后直接使用 */
+  materialsOverride?: string
+): string {
   // Task 3.4.7：材料不再截断、不设块数上限——把过滤后保留的全部有效段落完整提交，
   // 篇幅由资料中实际有多少有效、有关联的内容自然决定
-  const materials = chunks
-    .map((c, i) => `[${i + 1}]（sourceId: ${c.sourceId}，标题：《${c.sourceTitle}》，位置：${c.position}）\n${c.text}`)
-    .join('\n\n')
+  const materials =
+    materialsOverride ??
+    chunks
+      .map((c, i) => `[${i + 1}]（sourceId: ${c.sourceId}，标题：《${c.sourceTitle}》，位置：${c.position}）\n${c.text}`)
+      .join('\n\n')
 
   // Phase 6.4.2：有任务级范本时注入【参考范本】作为行文体例/风格参照
   const parts = [
@@ -119,7 +154,6 @@ function buildUserPrompt(instruction: string, chunks: RetrievedChunk[], styleGui
 // ============================================================
 // Phase 3.7 Task 3.7.2 —— 矛盾预扫描 / 生成注入 / 定位审查
 // ============================================================
-
 const CONTRADICTION_KIND_LABEL: Record<ContradictionKind, string> = {
   data: '数据',
   time: '时间',
@@ -553,17 +587,28 @@ export async function generateDraft(
     .map((it) => ({
       sourceId: it.sourceId,
       sourceTitle: it.sourceTitle ?? it.sourceId,
-      position: it.note ?? '',
+      // 文档模型下 note 已不再是"位置"，改用段首时间，便于溯源时看清是哪一年的材料
+      position: it.ts ?? '',
       text: it.excerpt,
       score: 0
     }))
-  if (chunks.length === 0) return fail(ErrorCodes.LLM_NO_CANDIDATES, '资料汇编中没有可用的资料卡片')
+  if (chunks.length === 0) return fail(ErrorCodes.LLM_NO_CANDIDATES, '资料汇编中没有可用的资料段落')
 
   const styleGuide = getDefaultStyleGuide()?.content ?? DEFAULT_STYLE_GUIDE
-  const materialsOrigin = '【参考材料】（来自你已确认的资料汇编，已剔除矛盾取舍中被排除的卡片）'
+  const materialsOrigin = '【参考材料】（来自你已确认的资料汇编：段落已按时间排序、按年份分组，并已剔除矛盾取舍中被排除的段落）'
   const messages: ChatMessage[] = [
     { role: 'system', content: buildSystemPrompt(undefined, styleGuide) },
-    { role: 'user', content: buildUserPrompt(inst, chunks, styleGuide, task.modelText, materialsOrigin) }
+    {
+      role: 'user',
+      content: buildUserPrompt(
+        inst,
+        chunks,
+        styleGuide,
+        task.modelText,
+        materialsOrigin,
+        buildCompilationMaterials(compilation.items)
+      )
+    }
   ]
 
   onProgress?.('正在基于已确认汇编生成初稿…', GENERATE_PROGRESS.generateFrom, estimateLlmSeconds('generate', 180))
@@ -804,11 +849,52 @@ if (import.meta.vitest) {
 
     it('marks materials as from the confirmed compilation (Step 3, materialsOrigin)', () => {
       const chunks: RetrievedChunk[] = [{ sourceId: 's1', sourceTitle: '某报告', position: '第1段', text: '正文。', score: 1 }]
-      const origin = '【参考材料】（来自你已确认的资料汇编，已剔除矛盾取舍中被排除的卡片）'
+      const origin = '【参考材料】（来自你已确认的资料汇编：段落已按时间排序、按年份分组，并已剔除矛盾取舍中被排除的段落）'
       const user = buildUserPrompt('标题为学前教育', chunks, DEFAULT_STYLE_GUIDE, undefined, origin)
       expect(user).toContain('来自你已确认的资料汇编')
-      expect(user).toContain('已剔除矛盾取舍中被排除的卡片')
+      expect(user).toContain('按年份分组')
       expect(user).not.toContain('【参考范本】')
+    })
+
+    it('uses the pre-rendered year-grouped materials when they are supplied (Phase 7.6 step 3)', () => {
+      const chunks: RetrievedChunk[] = [{ sourceId: 's1', sourceTitle: '某报告', position: '2018 年', text: '正文。', score: 1 }]
+      const user = buildUserPrompt('标题为高中教育', chunks, DEFAULT_STYLE_GUIDE, undefined, undefined, '【2018 年】\n2018 年　正文。')
+      expect(user).toContain('【2018 年】')
+      // 预渲染素材已给出时不再退回"卡片块"格式（旧的 sourceId/位置 行不再出现）
+      expect(user).not.toContain('sourceId:')
+      expect(user).not.toContain('位置：')
+    })
+
+    it('groups confirmed-compilation paragraphs by year for the draft material (Phase 7.6)', () => {
+      const item = (over: Partial<CompilationItem>): CompilationItem => ({
+        id: 'i',
+        compilationId: 'c1',
+        position: 0,
+        sourceId: 's1',
+        excerpt: '正文。',
+        extraTags: [],
+        kept: true,
+        createdAt: '2026-01-01',
+        ...over
+      })
+      const text = buildCompilationMaterials([
+        item({ id: 'a', excerpt: '全区普通中学 30 所。', ts: '2018 年 5 月', year: 2018, sourceTitle: '长乐年鉴2019' }),
+        item({ id: 'b', excerpt: '全区教职工 900 人。', ts: '2019 年', year: 2019, sourceTitle: '教育发展报告' }),
+        item({ id: 'c', excerpt: '同年的另一段。', ts: '2019 年 9 月', year: 2019, sourceTitle: '教育发展报告' }),
+        item({ id: 'd', excerpt: '年份不明的段落。', ts: undefined, year: undefined }),
+        item({ id: 'e', excerpt: '已排除的段落。', ts: '2020 年', year: 2020, kept: false })
+      ])
+      // 按年份分组：2018 / 2019（两段同组） / 年份待核
+      expect(text.split('\n\n')).toHaveLength(3)
+      expect(text).toContain('【2018 年】')
+      expect(text).toContain('2018 年 5 月　全区普通中学 30 所。（来源：《长乐年鉴2019》）')
+      expect(text).toContain('【2019 年】')
+      expect(text).toContain('2019 年　全区教职工 900 人。（来源：《教育发展报告》）\n2019 年 9 月　同年的另一段。（来源：《教育发展报告》）')
+      // 缺年份的段进「年份待核」组，不编造年份；被排除（kept=false）的段不进入素材
+      expect(text).toContain('【年份待核】')
+      expect(text).toContain('时间待核　年份不明的段落。')
+      expect(text).not.toContain('已排除的段落')
+      expect(text).not.toContain('卡片')
     })
   })
 
