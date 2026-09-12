@@ -374,6 +374,8 @@ if (import.meta.vitest) {
       expect(buildCompilationFileName(undefined, 'docx')).toBe('资料汇编.docx')
       // 过长的标题截断，避免超出文件名长度上限
       expect(buildCompilationFileName('长'.repeat(200), 'docx')).toBe('长'.repeat(80) + '-资料汇编.docx')
+      // 软件专用格式与 Word 同一命名规则（用户 2026-09-10 要求一并统一）
+      expect(buildCompilationFileName('福州市学前教育事业发展概况', 'xzsc')).toBe('福州市学前教育事业发展概况-资料汇编.xzsc')
     })
 
     it('exports one paragraph per kept item: time prefix, body, superscript source ordinal', () => {
