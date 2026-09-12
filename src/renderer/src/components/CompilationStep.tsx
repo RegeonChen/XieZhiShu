@@ -82,8 +82,6 @@ export interface CompilationView {
   items: CompilationItemView[]
   contradictions: CompilationContradictionView[]
   repairs?: CompilationRepairView[]
-  /** Phase 7.5：是否已解锁人工修改模式（落库、不可逆；Migration 034） */
-  manualEdit?: boolean
 }
 
 interface Props {
@@ -92,8 +90,6 @@ interface Props {
   candidateChunks?: number
   onConfirm: () => void
   onOpenSource: (sourceId: string) => void
-  onUpdateItem: (itemId: string, patch: { excerpt?: string; ts?: string | null; note?: string | null }) => void
-  onDeleteItem: (itemId: string) => void
   onResolve: (contradictionId: string, action: 'resolve' | 'ignore', chosenItemId?: string) => void
   /** 回退（applied=true 时）或再次应用（applied=false 时）一条大模型修正 */
   onDecideRepair: (repairId: string, applied: boolean) => void
@@ -102,34 +98,33 @@ interface Props {
   onRedo: () => void
   undoAvailable: number
   redoAvailable: number
-  /* ---- Phase 7.4：版本管控 ---- */
-  /** 版本列表（含变更统计）；长度 ≤1 时不显示版本控件 */
-  versions?: CompilationVersionView[]
-  /** 对比基线版本号（null = 不对比，显示当前文档） */
-  compareFrom?: number | null
-  /** 基线 → 当前 的差异段（compareFrom != null 时由主进程算好） */
+  /* ---- Phase 7.5：版本复核（对话修改后自动进入对比模式） ---- */
+  /**
+   * 「本次对话修改前后」的差异段。**非空即表示正处于复核态**：由 `WritingWorkspace` 在
+   * 每次对话修改成功后自动置上（用户 2026-09-10 裁定：不再需要用户手点「与上一版对比」）。
+   */
   versionDiff?: CompilationVersionDiffView | null
+  /** 本次修改产生的版本号（仅用于复核条上的标注） */
+  reviewVersionNo?: number | null
   /** 仅显示改动段落 */
   onlyChanged?: boolean
-  onSelectVersion?: (versionNo: number | null) => void
   onToggleOnlyChanged?: (value: boolean) => void
-  /* ---- Phase 7.5：悬浮对话框（人机协同编辑）+ 人工修改解锁（D5） ---- */
+  /** 采纳本次修改（保留改动、退出复核） */
+  onAcceptEdit?: () => void
+  /** 回退本次修改（弹出撤销栈最近一次操作、退出复核；**不产生新版本**） */
+  onRevertEdit?: () => void
+  /* ---- Phase 7.5：悬浮对话框（人机协同编辑） ---- */
   /** 汇编级对话历史（含大模型修改记录） */
   docMessages?: CompilationMessageView[]
   /** 大模型正在修改汇编 */
   docEditing?: boolean
   /** 上一次修改的失败原因（未配置模型 / 调用失败 / 格式无法解析） */
   docError?: string | null
-  /** 本次改动涉及的段 id（高亮 + 滚动到首个改动段） */
+  /** 本次改动涉及的段 id（滚动到首个改动段） */
   docChangedIds?: string[]
   onDocSend?: (instruction: string) => void
   /** 打开对话框时按需拉取历史 */
   onDocOpen?: () => void
-  /** D5：确认汇编后才解锁的人工修改模式（由 `compilation.manualEdit` 派生，落库持久） */
-  manualMode?: boolean
-  onStartManualEdit?: () => void
-  /** 手动改完时间、自动重排后要定位并短暂高亮的段落（nonce 变化即重新触发） */
-  refocus?: { id: string; nonce: number } | null
 }
 
 export interface CompilationMessageView {
@@ -149,8 +144,6 @@ export interface CompilationVersionView {
 }
 
 export interface CompilationVersionDiffView {
-  fromVersionNo: number
-  toVersionNo: number
   segments: {
     kind: 'added' | 'removed' | 'modified' | 'unchanged'
     id: string
@@ -165,15 +158,13 @@ export interface CompilationVersionDiffView {
 
 const cls = (...parts: Array<string | false | null | undefined>): string => parts.filter(Boolean).join(' ')
 
-/** Step 1：资料汇编卡片审阅 */
+/** Step 1：资料汇编文档查看器 + 对话编辑 */
 function CompilationStep({
   compilation,
   busy,
   candidateChunks,
   onConfirm,
   onOpenSource,
-  onUpdateItem,
-  onDeleteItem,
   onResolve,
   onDecideRepair,
   onReorderItems,
@@ -181,21 +172,18 @@ function CompilationStep({
   onRedo,
   undoAvailable,
   redoAvailable,
-  versions,
-  compareFrom,
   versionDiff,
+  reviewVersionNo,
   onlyChanged,
-  onSelectVersion,
   onToggleOnlyChanged,
+  onAcceptEdit,
+  onRevertEdit,
   docMessages,
   docEditing,
   docError,
   docChangedIds,
   onDocSend,
-  onDocOpen,
-  manualMode,
-  onStartManualEdit,
-  refocus
+  onDocOpen
 }: Props) {
   const t = zhCN.compilation
   /** 差异段按段 id 建索引（渲染时给段落上色 / 段内高亮） */
@@ -237,28 +225,8 @@ function CompilationStep({
       </span>
     </div>
   )
-  /** 版本来源标签（对比模式下在工具栏提示里显示） */
-  const originLabel = (origin: CompilationVersionView['origin']): string =>
-    ({
-      generate: t.versionOriginGenerate,
-      'llm-edit': t.versionOriginLlmEdit,
-      'user-edit': t.versionOriginUserEdit,
-      restore: t.versionOriginRestore,
-      contradiction: t.versionOriginContradiction,
-      import: t.versionOriginImport
-    })[origin]
-  const compareHint =
-    compareFrom != null && versions && versions.length > 1
-      ? t.versionCompareHint
-          .replace('{origin}', originLabel(versions[versions.length - 2].origin))
-          .replace('{time}', new Date(versions[versions.length - 2].createdAt).toLocaleTimeString('zh-CN'))
-      : ''
-  const [editing, setEditing] = useState<CompilationItemView | null>(null)
+  /** 复核态（versionDiff 非空）下的「仅看改动」筛选 */
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
-  const [excerpt, setExcerpt] = useState('')
-  const [ts, setTs] = useState('')
-  /** 当前悬停的段落 id（悬停才显示段级操作，保持"连续文档"观感） */
-  const [hoverId, setHoverId] = useState<string | null>(null)
   /** 当前打开「来源小卡」的来源编号（点击段尾圆标） */
   const [sourceCardFor, setSourceCardFor] = useState<number | null>(null)
   /** 当前展开「修正详情」弹窗的卡片修正记录（一次只看一张） */
@@ -287,57 +255,16 @@ function CompilationStep({
   /* ---- Phase 7.5：悬浮对话框（人机协同编辑） ---- */
   const [chatOpen, setChatOpen] = useState(false)
   const [chatInput, setChatInput] = useState('')
-  /** D5：进入人工修改模式前的不可逆二次确认弹窗 */
-  const [manualConfirm, setManualConfirm] = useState(false)
   /** 对话面板位置（null = 默认贴右下角；拖动后为相对 `.compilation-step` 的坐标） */
   const [panelPos, setPanelPos] = useState<{ x: number; y: number } | null>(null)
   const paneRef = useRef<HTMLDivElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
   const chatListRef = useRef<HTMLDivElement | null>(null)
   const dragRef = useRef<{ dx: number; dy: number } | null>(null)
-  /**
-   * 本次改动的高亮：只在收到新一批改动后亮 **约 3.5 秒**，然后自动清除。
-   * 用户 2026-09-10 反馈：原实现把 `docChangedIds` 一直留着，改动段底色永不消失。
-   */
-  const [highlightIds, setHighlightIds] = useState<string[]>([])
-  /** 手动改时间并自动重排后，要定位 + 短暂高亮（2 秒）的段落 */
-  const [refocusId, setRefocusId] = useState<string | null>(null)
-  const changedSet = new Set(highlightIds)
   const messages = docMessages ?? []
   const canSend = chatInput.trim().length > 0 && docEditing !== true
-
-  useEffect(() => {
-    const ids = docChangedIds ?? []
-    if (ids.length === 0) {
-      setHighlightIds([])
-      return
-    }
-    setHighlightIds(ids)
-    const timer = window.setTimeout(() => setHighlightIds([]), 3500)
-    return () => window.clearTimeout(timer)
-  }, [docChangedIds])
-
-  /**
-   * 手动修改时间后主进程会自动按时间重排（position 变化可能很大），
-   * 所以保存后要**滚动到该段的新位置**并短暂高亮 2 秒，否则用户找不到它被排到哪儿去了。
-   */
-  useEffect(() => {
-    if (!refocus) {
-      setRefocusId(null)
-      return
-    }
-    setRefocusId(refocus.id)
-    // 主进程在改时间后按**正序**重排，工具栏的排序状态要跟着回到 ↑，否则图标与实际顺序不一致
-    setSortOrder('asc')
-    const scrollTimer = window.setTimeout(() => {
-      cardsRef.current?.querySelector<HTMLElement>(`[data-card-id="${refocus.id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    }, 80)
-    const clearTimer = window.setTimeout(() => setRefocusId(null), 2000)
-    return () => {
-      window.clearTimeout(scrollTimer)
-      window.clearTimeout(clearTimer)
-    }
-  }, [refocus])
+  /** 复核态：对话修改完成后由父组件自动置上差异，用户「采纳 / 回退」后才退出 */
+  const reviewing = versionDiff != null
 
   // 新消息/编辑中 → 对话列表滚到底部
   useEffect(() => {
@@ -345,7 +272,7 @@ function CompilationStep({
     if (el) el.scrollTop = el.scrollHeight
   }, [messages.length, docEditing, chatOpen])
 
-  // 本次改动 → 滚动到首个改动段（用户要求"查看器自动刷新 + 高亮 + 滚动到首个改动段"）
+  // 本次改动 → 滚动到首个改动段
   useEffect(() => {
     if (!docChangedIds || docChangedIds.length === 0) return
     const id = docChangedIds[0]
@@ -392,34 +319,9 @@ function CompilationStep({
   const pending = compilation?.contradictions.filter((c) => c.status === 'pending') ?? []
   // 只展示未被软删除（采纳后未恢复）的卡片
   const keptItems = (compilation?.items ?? []).filter((it) => it.kept !== false)
-  /**
-   * Phase 7.1 验收用（7.3 由正式查看器取代）：把迁移回填的段落元数据显示出来——
-   * 本汇编的来源编号数量、缺年份（时间待核）的段落数，以及每张卡片所属的来源编号。
-   */
+  /** 本汇编的来源编号数量 + 缺年份（时间待核）的段落数（工具栏统计） */
   const sourceCount = new Set(keptItems.map((it) => it.sourceOrdinal).filter((n): n is number => n != null)).size
   const pendingTimeCount = keptItems.filter((it) => (it.timeConfidence ?? (it.year != null ? 'exact' : 'unknown')) === 'unknown').length
-
-  const startEdit = (it: CompilationItemView): void => {
-    setEditing(it)
-    setExcerpt(it.excerpt)
-    setTs(it.ts ?? '')
-  }
-
-  /**
-   * 保存段落编辑：**只提交真正改动的字段**。
-   * 原因（2026-09-10）：每次保存都带上 `ts` 会让主进程误判"时间被改动"→ 无谓地重排整份汇编、
-   * 还会把用户手动调过的顺序冲掉，并触发一次多余的"滚动定位"。只改正文时不应发生这些。
-   */
-  const saveEdit = (): void => {
-    if (!editing) return
-    const nextExcerpt = excerpt.trim()
-    const nextTs = ts.trim() ? ts.trim() : null
-    const patch: { excerpt?: string; ts?: string | null } = {}
-    if (nextExcerpt !== editing.excerpt) patch.excerpt = nextExcerpt
-    if (nextTs !== (editing.ts ?? null)) patch.ts = nextTs
-    if (patch.excerpt !== undefined || patch.ts !== undefined) onUpdateItem(editing.id, patch)
-    setEditing(null)
-  }
 
   const conflictForItem = (itemId: string): boolean => pending.some((g) => g.variants.some((v) => v.itemId === itemId))
 
@@ -462,25 +364,6 @@ function CompilationStep({
     <div className="compilation-step" ref={paneRef}>
       <div className="compilation-toolbar">
         <span className="compilation-stat">{t.docStats.replace('{paragraphs}', String(keptItems.length)).replace('{sources}', String(sourceCount))}</span>
-        {versionDiff ? (
-          <>
-            <span className="compilation-stat is-diff">
-              {t.versionDiffSummary
-                .replace('{added}', String(versionDiff.summary.added))
-                .replace('{modified}', String(versionDiff.summary.modified))
-                .replace('{removed}', String(versionDiff.summary.removed))}
-            </span>
-            {compareHint ? <span className="compilation-stat">{compareHint}</span> : null}
-            <label className="compilation-diff-toggle">
-              <input
-                type="checkbox"
-                checked={onlyChanged === true}
-                onChange={(e) => onToggleOnlyChanged?.(e.target.checked)}
-              />
-              <span>{t.versionOnlyChanged}</span>
-            </label>
-          </>
-        ) : null}
         {candidateChunks ? <span className="compilation-stat">{t.candidate.replace('{chunks}', String(candidateChunks))}</span> : null}
         {pendingTimeCount > 0 ? (
           <span
@@ -496,53 +379,12 @@ function CompilationStep({
           {pending.length ? t.pendingContradictions.replace('{count}', String(pending.length)) : t.noContradictions}
         </span>
         <div className="compilation-actions">
-          {/* Phase 7.5 / D5：确认汇编前只允许"对话修改"，工具栏明确标注；确认后才出现「开始人工修改」 */}
-          {manualMode ? (
-            <span className="compilation-stat is-manual" title={t.manualEditHint}>
-              {t.manualEditBadge}
-            </span>
-          ) : compilation.status !== 'finalized' ? (
-            <span
-              className="compilation-stat is-manual is-muted"
-              onMouseEnter={(e) => showHint(e.currentTarget, t.docChatOnlyEditHint)}
-              onMouseLeave={() => setHint(null)}
-            >
-              {t.docChatOnlyBadge}
-            </span>
-          ) : (
-            <button
-              type="button"
-              className="source-list__btn"
-              disabled={busy}
-              title={t.manualEditHint}
-              onClick={() => setManualConfirm(true)}
-            >
-              {t.startManualEdit}
-            </button>
-          )}
-          {/* Phase 7.4（用户 2026-09-10 简化）：只支持"与改动前的上一版对比"，故不再需要版本下拉——
-              仅保留一个对比开关；上一版之后的历史不再保留。 */}
-          {versions && versions.length > 1 ? (
-            <>
-              <button
-                type="button"
-                className={cls('compilation-round-btn', compareFrom != null ? 'is-active' : '')}
-                disabled={busy}
-                title={compareFrom != null ? t.versionExitCompare : t.versionCompareWithPrev}
-                aria-label={compareFrom != null ? t.versionExitCompare : t.versionCompareWithPrev}
-                onClick={() => {
-                  const prev = versions[versions.length - 2]
-                  onSelectVersion?.(compareFrom != null ? null : prev.versionNo)
-                }}
-              >
-                &#8646;
-              </button>
-            </>
-          ) : null}
+          {/* 复核态下禁用撤销/恢复/排序：此时唯一出口是下面复核条的「采纳 / 回退」，
+              避免出现两条互相矛盾的路径（点撤销=回退，但复核条还在） */}
           <button
             type="button"
             className="compilation-round-btn"
-            disabled={busy || undoAvailable <= 0}
+            disabled={busy || reviewing || undoAvailable <= 0}
             title={t.undo}
             aria-label={t.undo}
             onClick={onUndo}
@@ -552,7 +394,7 @@ function CompilationStep({
           <button
             type="button"
             className="compilation-round-btn"
-            disabled={busy || redoAvailable <= 0}
+            disabled={busy || reviewing || redoAvailable <= 0}
             title={t.redo}
             aria-label={t.redo}
             onClick={onRedo}
@@ -562,7 +404,7 @@ function CompilationStep({
           <button
             type="button"
             className="compilation-round-btn"
-            disabled={busy}
+            disabled={busy || reviewing}
             title={sortOrder === 'asc' ? t.sortAsc : t.sortDesc}
             aria-label={sortOrder === 'asc' ? t.sortAsc : t.sortDesc}
             onClick={() => {
@@ -583,6 +425,45 @@ function CompilationStep({
           </button>
         </div>
       </div>
+
+      {/* 复核条（用户 2026-09-10 裁定）：每次对话修改后**自动**进入对比模式，
+          用户只需点「采纳」或「回退」二选一，选完即退出对比模式。 */}
+      {versionDiff ? (
+        <div className="compilation-review">
+          <span className="compilation-review__title">
+            {t.versionReviewTitle}
+            {reviewVersionNo != null ? '（v' + reviewVersionNo + '）' : ''}
+          </span>
+          <span className="compilation-stat is-diff">
+            {t.versionDiffSummary
+              .replace('{added}', String(versionDiff.summary.added))
+              .replace('{modified}', String(versionDiff.summary.modified))
+              .replace('{removed}', String(versionDiff.summary.removed))}
+          </span>
+          <label className="compilation-diff-toggle">
+            <input
+              type="checkbox"
+              checked={onlyChanged === true}
+              onChange={(e) => onToggleOnlyChanged?.(e.target.checked)}
+            />
+            <span>{t.versionOnlyChanged}</span>
+          </label>
+          <span className="compilation-review__hint">{t.versionReviewHint}</span>
+          <div className="compilation-review__actions">
+            <button type="button" className="source-list__btn" disabled={busy} title={t.versionRevertHint} onClick={onRevertEdit}>
+              {t.versionRevert}
+            </button>
+            <button
+              type="button"
+              className="source-list__btn source-list__btn--primary"
+              disabled={busy}
+              onClick={onAcceptEdit}
+            >
+              {t.versionAccept}
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       {pending.length > 0 && contradictionsOpen ? (
         <div className="compilation-contradictions">
@@ -677,13 +558,9 @@ function CompilationStep({
                     conflictForItem(it.id) ? 'has-conflict' : '',
                     fix ? 'is-repair' : '',
                     locatedId === it.id ? 'is-located' : '',
-                    changedSet.has(it.id) ? 'is-changed' : '',
-                    refocusId === it.id ? 'is-refocused' : '',
-                    /* Phase 7.4：对比模式下的差异标记 */
+                    /* Phase 7.5：复核态下按差异上色（红=删除 / 黄=修改 / 绿=新增） */
                     diff ? 'diff-' + diff.kind : ''
                   )}
-                  onMouseEnter={() => setHoverId(it.id)}
-                  onMouseLeave={() => setHoverId((cur) => (cur === it.id ? null : cur))}
                 >
                   <span className={cls('compilation-doc__time', pendingTime ? 'is-pending' : '')}>
                     {it.ts ?? t.noTime}
@@ -725,12 +602,6 @@ function CompilationStep({
                     >
                       {fix.status === 'applied' ? t.repairBadge : t.repairBadgeReverted}
                     </button>
-                  ) : null}
-                  {hoverId === it.id && manualMode === true ? (
-                    <span className="compilation-para__actions">
-                      <button type="button" onClick={() => startEdit(it)}>{t.edit}</button>
-                      <button type="button" className="is-danger" onClick={() => onDeleteItem(it.id)}>{t.delete}</button>
-                    </span>
                   ) : null}
                 </div>
               </Fragment>
@@ -822,26 +693,6 @@ function CompilationStep({
               >
                 {fixDetail.status === 'applied' ? t.repairRevert : t.repairReapply}
               </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {editing ? (
-        <div className="skills-manager__modal-backdrop" onMouseDown={() => setEditing(null)}>
-          <div className="skills-manager__modal" onMouseDown={(e) => e.stopPropagation()}>
-            <h4 className="skills-manager__modal-title">{t.editTitle}</h4>
-            <label className="skills-manager__field">
-              <span>{t.excerptLabel}</span>
-              <textarea className="skills-manager__textarea" rows={6} value={excerpt} onChange={(e) => setExcerpt(e.target.value)} />
-            </label>
-            <label className="skills-manager__field">
-              <span>{t.tsLabel}</span>
-              <input className="source-list__url-input" value={ts} onChange={(e) => setTs(e.target.value)} />
-            </label>
-            <div className="skills-manager__modal-actions">
-              <button type="button" className="source-list__btn" onClick={() => setEditing(null)}>{t.cancel}</button>
-              <button type="button" className="source-list__btn source-list__btn--primary" onClick={saveEdit}>{t.save}</button>
             </div>
           </div>
         </div>
@@ -945,31 +796,6 @@ function CompilationStep({
                 }}
               >
                 {docEditing ? t.docChatEditing : t.docChatSend}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {/* D5：进入人工修改模式的不可逆二次确认 */}
-      {manualConfirm ? (
-        <div className="skills-manager__modal-backdrop" onMouseDown={() => setManualConfirm(false)}>
-          <div className="skills-manager__modal" onMouseDown={(e) => e.stopPropagation()}>
-            <h4 className="skills-manager__modal-title">{t.manualEditConfirmTitle}</h4>
-            <p className="compilation-manual-warn">{t.manualEditConfirmBody}</p>
-            <div className="skills-manager__modal-actions">
-              <button type="button" className="source-list__btn" onClick={() => setManualConfirm(false)}>
-                {t.manualEditCancel}
-              </button>
-              <button
-                type="button"
-                className="source-list__btn source-list__btn--primary"
-                onClick={() => {
-                  setManualConfirm(false)
-                  onStartManualEdit?.()
-                }}
-              >
-                {t.manualEditConfirmOk}
               </button>
             </div>
           </div>

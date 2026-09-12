@@ -114,8 +114,7 @@ export function restoreCompilationSnapshot(snapshot: CompilationSnapshot): void 
 }
 
 /** 在执行一次可变操作前调用：把当前状态压入撤销栈，并清空恢复栈。 */
-export function pushUndo(compilationId: string): CompilationSnapshot | null {
-  const snap = captureCompilationSnapshot(compilationId)
+export function pushUndo(compilationId: string): CompilationSnapshot | null {  const snap = captureCompilationSnapshot(compilationId)
   if (!snap) return null
   const stack = undoStacks.get(compilationId) ?? []
   stack.push(snap)
@@ -152,6 +151,20 @@ export function redoCompilation(compilationId: string): CompilationSnapshot | nu
   }
   restoreCompilationSnapshot(next)
   return next
+}
+
+/**
+ * 清空某汇编的撤销/恢复栈。
+ *
+ * 用户 2026-09-10 裁定：**只有对话编辑**登记撤销栈（"撤销操作"就是回退上一次大模型改动）。
+ * 快照是整个汇编的状态，若在两次对话编辑之间发生了别的改动（排序 / 矛盾取舍 / 回收站恢复 / 修正回退…），
+ * 直接弹栈会把那些改动**一并**回滚掉。因此这些路径改为：内容一变就清空栈，
+ * 让「撤销」要么精确回退上一次对话编辑，要么不可用——绝不误伤。
+ */
+export function clearUndoStacks(compilationId: string | null | undefined): void {
+  if (!compilationId) return
+  undoStacks.delete(compilationId)
+  redoStacks.delete(compilationId)
 }
 
 export function getUndoCount(compilationId: string): number {

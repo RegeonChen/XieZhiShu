@@ -6,7 +6,7 @@
  * 乐观锁：请求可带 `baseVersionNo`，与当前最新版本号不一致则拒绝（避免并发覆盖）。
  * 解析失败 / 无 Provider / 校验后一条都没应用 → **文档不变**，只回错误或说明。
  */
-import { ErrorCodes } from '../../shared/types'
+import { ErrorCodes, type CompilationParagraph } from '../../shared/types'
 import { getSettings } from '../db/settings'
 import { getProviderSecret } from '../llm/provider-store'
 import { safeStorageCodec } from '../llm/secret'
@@ -23,6 +23,8 @@ import {
 } from '../db/compilations'
 import { logMain } from '../logger'
 import { pushUndo } from './compilation-undo'
+import { buildParagraphSnapshot, sortParagraphsByTime } from './compilation-document'
+import { diffParagraphVersions, summarizeParagraphDiff, type ParagraphDiffSegment } from './compilation-diff'
 import {
   applyDocOps,
   buildDocEditMessages,
@@ -43,9 +45,11 @@ export interface DocEditSummary {
   /** 被本地校验拒绝的 op 与原因（回给用户看） */
   rejected: { op: string; reason: string }[]
   versionNo?: number
-  /** 本次改动的段 id（前端高亮 + 滚动到首个改动段） */
+  /** 本次改动的段 id（前端滚动到首个改动段） */
   changedIds: string[]
   changeSummary: { added: number; modified: number; removed: number }
+  /** 本次修改前后的差异（前端据此自动进入对比模式，让用户「采纳 / 回退」） */
+  diff: { segments: ParagraphDiffSegment[]; summary: { added: number; removed: number; modified: number; unchanged: number } }
 }
 
 export type DocEditResult =
@@ -90,6 +94,21 @@ export function buildSourceTextByOrdinal(compilationId: string, refs: DocEditPar
     map.set(ref.ordinal, parts.join('\n'))
   }
   return map
+}
+
+/** 读取当前文档的段落快照（用于算"本次修改前后"的差异，与版本快照同形状） */
+function readParagraphSnapshot(compilationId: string): CompilationParagraph[] {
+  const comp = getCompilationById(compilationId)
+  if (!comp) return []
+  const refs = new Map(
+    listCompilationSources(compilationId)
+      .filter((s) => s.sourceId)
+      .map((s) => [s.sourceId as string, s])
+  )
+  return buildParagraphSnapshot(
+    comp.items.filter((it) => it.kept),
+    refs
+  )
 }
 
 export async function runDocEdit(compilationId: string, instruction: string, baseVersionNo?: number): Promise<DocEditResult> {
@@ -140,7 +159,15 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
     insertCompilationMessage({ compilationId, role: 'assistant', content: reply, rejected })
     return {
       ok: true,
-      summary: { compilationId, reply, applied: 0, rejected, changedIds: [], changeSummary: { added: 0, modified: 0, removed: 0 } }
+      summary: {
+        compilationId,
+        reply,
+        applied: 0,
+        rejected,
+        changedIds: [],
+        changeSummary: { added: 0, modified: 0, removed: 0 },
+        diff: { segments: [], summary: { added: 0, removed: 0, modified: 0, unchanged: 0 } }
+      }
     }
   }
 
@@ -148,15 +175,32 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
   // 注意：必须**一次性**把全部段落交给 upsert——该函数会删除"不在入参里"的段落，
   // 因此来源 id 要在落库前解析好，不能事后逐条补写。
   //
-  // 落库前登记撤销栈：对话编辑与「手动编辑/删除/矛盾取舍」必须一样可被「撤销操作」回退，
-  // 否则撤销会跳过这次改动、直接回退到上一个 pushUndo 时的状态（2026-09-10 用户实测）。
+  // 落库前登记撤销栈：对话编辑是**唯一**会动汇编内容的入口（人工修改模式已按用户新需求删除），
+  // 因此撤销栈只由这里登记、也只回退这里产生的改动。
+  const before = readParagraphSnapshot(compilationId)
   pushUndo(compilationId)
   const ordinalToSourceId = new Map(
     listCompilationSources(compilationId)
       .filter((s) => s.sourceId)
       .map((s) => [s.ordinal, s.sourceId as string])
   )
-  const nextRefs = applyDocOps(refs, accepted)
+  let nextRefs = applyDocOps(refs, accepted)
+  /*
+   * 时间被改动（或插入了新段）→ **同一次操作内**按时间重排，否则文档会静默违反"按时间排序"。
+   * 人工修改模式删除后，对话是唯一能改时间的入口，所以这套排序必须挂在这里。
+   * 只在"时间真的变了"时才排：纯 `move`（用户明确要求调序）不能被排序覆盖掉。
+   */
+  const prevTimeById = new Map(refs.map((r) => [r.id, r.timeLabel]))
+  const timeTouched =
+    nextRefs.some((p) => !prevTimeById.has(p.id)) || nextRefs.some((p) => prevTimeById.has(p.id) && prevTimeById.get(p.id) !== p.timeLabel)
+  if (timeTouched) {
+    nextRefs = sortParagraphsByTime(
+      nextRefs.map((p, i) => {
+        const t = resolveTimeForEdit(p.timeLabel, p.sourceTitle)
+        return { p, ordinal: i, year: t.year, month: t.month, sourceOrdinal: p.sourceOrdinal }
+      })
+    ).map((x) => x.p)
+  }
   const change = collectDocEditChange(refs, nextRefs, accepted)
   const changedIds = new Set(change.changedIds)
   /** 未被本次改动触及的段落要**保留原有 origin/revision**，否则一次对话会把全篇都标成"对话修改" */
@@ -211,9 +255,21 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
     rejected
   })
   logMain('compilation', '对话编辑完成 汇编=' + compilationId + ' 应用=' + applied + ' 拒绝=' + rejected.length)
+  // 「本次修改前后」的差异：直接比对改前快照与改后快照（读库），供前端自动进入对比模式
+  const after = readParagraphSnapshot(compilationId)
+  const segments = diffParagraphVersions(before, after)
   return {
     ok: true,
-    summary: { compilationId, reply: replyText, applied, rejected, versionNo: version?.versionNo, changedIds: change.changedIds, changeSummary: { added: change.added, modified: change.modified, removed: change.removed } }
+    summary: {
+      compilationId,
+      reply: replyText,
+      applied,
+      rejected,
+      versionNo: version?.versionNo,
+      changedIds: change.changedIds,
+      changeSummary: { added: change.added, modified: change.modified, removed: change.removed },
+      diff: { segments, summary: summarizeParagraphDiff(segments) }
+    }
   }
 }
 

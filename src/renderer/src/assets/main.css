@@ -6,14 +6,6 @@
   --fg-soft: #6b7280;
   --accent: #2f6fed;
   --accent-soft: #e8effd;
-  /*
-   * 「刚刚改动/请看这里」的高亮色（Phase 7.5）：**刻意不跟随主题 accent**。
-   * accent 在三套主题里分别是蓝、蓝、暗红（classic 的 accent-soft 是浅粉红），
-   * 用 accent 标"本次改动"会和对比模式里的 diff 红/黄糊在一起（用户 2026-09-10 实测反馈）。
-   * 统一用青绿系，与红（删除）/黄（修改）/绿（新增）都能区分；时长由 JS 控制（几秒后自动清除）。
-   */
-  --hl-changed: #0d9488;
-  --hl-changed-soft: rgba(13, 148, 136, 0.14);
 }
 
 * {
@@ -4599,34 +4591,6 @@ textarea:focus-visible {
   white-space: pre-wrap;
   word-break: break-word;
 }
-.compilation-para__actions {
-  position: absolute;
-  top: 4px;
-  right: 8px;
-  display: inline-flex;
-  gap: 4px;
-  padding: 2px 4px;
-  border-radius: 999px;
-  background: var(--bg-panel);
-  box-shadow: var(--shadow-sm, 0 1px 3px rgba(0, 0, 0, 0.12));
-}
-.compilation-para__actions button {
-  border: none;
-  background: transparent;
-  color: var(--fg-soft);
-  font-size: 11px;
-  cursor: pointer;
-  padding: 2px 6px;
-  border-radius: 999px;
-  font-family: inherit;
-}
-.compilation-para__actions button:hover {
-  background: var(--bg-elevated);
-  color: var(--fg);
-}
-.compilation-para__actions button.is-danger:hover {
-  color: var(--danger);
-}
 .compilation-source-card {
   max-width: 620px;
 }
@@ -4656,19 +4620,7 @@ textarea:focus-visible {
 .compilation-source-card__item:hover {
   border-color: var(--accent);
 }
-/* Phase 7.4：版本管控（版本下拉 + 差异高亮） */
-.compilation-version-select {
-  max-width: 240px;
-  height: 26px;
-  padding: 0 6px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--bg-panel);
-  color: var(--fg);
-  font-size: 11.5px;
-  font-family: inherit;
-  cursor: pointer;
-}
+/* Phase 7.5：复核条的「仅看改动」开关（原版本下拉 `.compilation-version-select` 已随对比开关一并移除） */
 .compilation-stat.is-diff {
   color: var(--accent);
 }
@@ -4739,43 +4691,33 @@ textarea:focus-visible {
   color: var(--warning);
   cursor: help;
 }
-/* 人工修改模式标记（Phase 7.5 / D5） */
-.compilation-stat.is-manual {
-  padding: 2px 9px;
-  border-radius: 999px;
-  color: var(--accent);
+/* ---- Phase 7.5：复核条（对话修改后自动进入对比模式，用户「采纳 / 回退」二选一） ---- */
+.compilation-review {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius, 8px);
   background: var(--accent-soft);
 }
-/* 「仅可对话修改」：同一胶囊样式但用弱色，避免和"人工修改中"混淆 */
-.compilation-stat.is-manual.is-muted {
-  color: var(--fg-soft);
-  background: var(--bg-elevated);
-  cursor: help;
-}
-.compilation-manual-warn {
-  margin: 8px 0 4px;
+.compilation-review__title {
   font-size: 13px;
-  line-height: 1.9;
+  font-weight: 600;
+  color: var(--accent);
+}
+.compilation-review__hint {
+  flex: 1;
+  min-width: 180px;
+  font-size: 12px;
+  line-height: 1.6;
   color: var(--fg-soft);
 }
-/* 本次改动 / 重排后定位的高亮（Phase 7.5）：青绿色，几秒后由 JS 清除，不残留 */
-.compilation-para.is-changed,
-.compilation-para.is-refocused {
-  border-left-color: var(--hl-changed);
-  background: var(--hl-changed-soft);
-  animation: compilation-changed-pulse 1.8s ease-out;
-  transition: background 0.6s ease-out, border-color 0.6s ease-out;
-}
-@keyframes compilation-changed-pulse {
-  0% {
-    box-shadow: 0 0 0 0 var(--hl-changed-soft);
-  }
-  30% {
-    box-shadow: 0 0 0 6px var(--hl-changed-soft);
-  }
-  100% {
-    box-shadow: 0 0 0 3px var(--hl-changed-soft);
-  }
+.compilation-review__actions {
+  display: inline-flex;
+  gap: 8px;
 }
 /* ---- Phase 7.5：右下悬浮对话框（机器人圆按钮 + 可拖动面板） ---- */
 .compilation-docchat-fab {
@@ -5437,8 +5379,6 @@ textarea:focus-visible {
   --danger-soft: #3a2426;
   --success: #3fae6a;
   --warning: #d18a3d;
-  --hl-changed: #2dd4bf;
-  --hl-changed-soft: rgba(45, 212, 191, 0.16);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
   --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.45);
   --shadow-lg: 0 8px 28px rgba(0, 0, 0, 0.55);
@@ -5459,8 +5399,6 @@ textarea:focus-visible {
   --danger-soft: #f7e2e0;
   --success: #5f7d4a;
   --warning: #a96b1f;
-  --hl-changed: #0f766e;
-  --hl-changed-soft: rgba(15, 118, 110, 0.15);
   --shadow-sm: 0 1px 2px rgba(90, 70, 40, 0.12);
   --shadow-md: 0 4px 16px rgba(90, 70, 40, 0.18);
   --shadow-lg: 0 8px 28px rgba(90, 70, 40, 0.24);

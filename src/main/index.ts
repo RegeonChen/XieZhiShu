@@ -61,8 +61,6 @@ import {
   type CompilationDocEditRes,
   type CompilationMessagesReq,
   type CompilationMessagesRes,
-  type CompilationManualEditReq,
-  type CompilationManualEditRes,
   type CompilationUndoReq,
   type CompilationUndoRes,
   type CompilationUndoStateRes,
@@ -106,35 +104,15 @@ import {
   listRecycleBinByCompilation,
   restoreRecycleBinContradiction,
   reorderCompilationItemsByTs,
-  setCompilationManualEdit,
   restoreCompilationCardRecycleBin,
   listFinalizedCompilationsForImport,
   importCompilationIntoTask,
-  snapshotCompilationVersion,
   listCompilationVersions,
   getCompilationVersion,
   restoreCompilationFromVersion
 } from './db/compilations'
 import { diffParagraphVersions, summarizeParagraphDiff } from './writing/compilation-diff'
 import { runDocEdit, listDocMessages } from './writing/doc-edit-runner'
-
-/**
- * 任何**改变汇编内容**的操作之后记录一个版本（用户裁定 D6：以版本为准，取代进程内撤销栈）。
- * 触发点与 PLAN 7.4 对齐：生成（在 finalize 内）、矛盾取舍、恢复历史版本，以及本函数覆盖的
- * 手动编辑 / 删除 / 回收站恢复 / 修正回退与再应用 / 排序 / 汇编调整 / 确认。
- * 失败只记日志、不影响主操作结果。
- */
-function recordVersionAfterChange(
-  compilationId: string | null | undefined,
-  origin: 'generate' | 'llm-edit' | 'user-edit' | 'restore' | 'contradiction' | 'import'
-): void {
-  if (!compilationId) return
-  try {
-    snapshotCompilationVersion(compilationId, origin)
-  } catch (err) {
-    logMain('compilation', '记录版本失败（不影响本次操作）：' + String(err))
-  }
-}
 import { setRepairApplied } from './db/compilation-repairs'
 import {
   listStyleGuides,
@@ -148,11 +126,11 @@ import { generateCompilation, continueCompilation } from './writing/compilation-
 import { renderCompilationDocx, serializeCompilationArchive } from './writing/compilation-export'
 import { adjustCompilation } from './writing/compilation-adjust'
 import {
-  pushUndo,
   undoCompilation,
   redoCompilation,
   getUndoCount,
   getRedoCount,
+  clearUndoStacks,
   compilationIdOfItem,
   compilationIdOfContradiction,
   compilationIdOfRepair,
@@ -685,7 +663,6 @@ handleLogged(IPC.COMPILATION_CONTINUE, async (event, params: CompilationContinue
 handleLogged(IPC.COMPILATION_UPDATE_ITEM, (_event, params: CompilationUpdateItemReq): ApiResult<CompilationUpdateItemRes> => {
   try {
     const undoCid = compilationIdOfItem(params.itemId)
-    if (undoCid) pushUndo(undoCid)
     const item = updateCompilationItem(params.itemId, {
       excerpt: params.excerpt,
       ts: params.ts,
@@ -695,12 +672,12 @@ handleLogged(IPC.COMPILATION_UPDATE_ITEM, (_event, params: CompilationUpdateItem
     })
     if (!item) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料卡片不存在' } }
     /*
-     * 时间标签被改动 → **同一次操作内**按时间重排整份汇编（用户 2026-09-10 要求"改完时间自动重排"）。
-     * 刻意放在这里而不是让渲染层再调一次 `compilation:reorder`：那样会记出两个版本，
-     * 而用户视角这是**一次**编辑。重排只改 position，段 id 不变，故前端可凭 id 定位到新位置。
+     * 时间标签被改动 → **同一次操作内**按时间重排整份汇编（否则文档会静默违反"按时间排序"）。
+     * 重排只改 position，段 id 不变。注意：该接口当前已无界面入口（人工修改模式按用户要求删除，
+     * 段落级编辑不再暴露），保留为 API 并保持行为正确。
      */
     if (params.ts !== undefined && undoCid) reorderCompilationItemsByTs(undoCid, 'asc')
-    recordVersionAfterChange(undoCid, 'user-edit')
+    clearUndoStacks(undoCid)
     const compilation = params.ts !== undefined && undoCid ? getCompilationById(undoCid) : null
     return { ok: true, data: compilation ? { item, compilation } : { item } }
   } catch (err) {
@@ -711,9 +688,8 @@ handleLogged(IPC.COMPILATION_UPDATE_ITEM, (_event, params: CompilationUpdateItem
 handleLogged(IPC.COMPILATION_DELETE_ITEM, (_event, params: CompilationDeleteItemReq): ApiResult<void> => {
   try {
     const undoCid = compilationIdOfItem(params.itemId)
-    if (undoCid) pushUndo(undoCid)
     deleteCompilationItem(params.itemId)
-    recordVersionAfterChange(undoCid, 'user-edit')
+    clearUndoStacks(undoCid)
     return { ok: true, data: undefined }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
@@ -726,20 +702,12 @@ handleLogged(
     try {
       const status = params.action === 'resolve' ? 'resolved' : 'ignored'
       const undoCid = compilationIdOfContradiction(params.contradictionId)
-      if (undoCid) pushUndo(undoCid)
       const contradiction = updateCompilationContradictionStatus(params.contradictionId, status, params.chosenItemId)
       if (!contradiction) {
         return { ok: false, error: { code: 'INVALID_PARAM', message: '矛盾不存在，或保留的卡片不属于该矛盾' } }
       }
-      // Phase 7.3：采纳/忽略会在文档里删除（软化）其它说法所在的段落，按 D6「以版本为准」记一个版本，
-      // 使这次改动可对比、可回滚（撤销栈是进程内的，重启即失；版本历史是落库的）。
-      if (undoCid) {
-        try {
-          snapshotCompilationVersion(undoCid, 'contradiction')
-        } catch (err) {
-          logMain('compilation', '矛盾取舍后记录版本失败（不影响取舍结果）：' + String(err))
-        }
-      }
+      // 采纳/忽略会保留或排除段落 → 属于"非对话改动"，必须让「撤销」不再指向更早的对话编辑（避免误伤）
+      clearUndoStacks(undoCid)
       return { ok: true, data: { contradiction } }
     } catch (err) {
       return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
@@ -749,25 +717,8 @@ handleLogged(
 
 handleLogged(IPC.COMPILATION_CONFIRM, (_event, params: CompilationConfirmReq): ApiResult<CompilationConfirmRes> => {
   try {
-    pushUndo(params.compilationId)
     const compilation = confirmCompilation(params.compilationId)
     if (!compilation) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料汇编不存在' } }
-    return { ok: true, data: { compilation } }
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-})
-
-/**
- * Phase 7.5（D5 补充裁定）：解锁「人工修改」模式。
- * 用户明确"进入一次即不可逆、跨任务切换与重启都要保持"，故落库（`compilations.manual_edit`，Migration 034）。
- * 不改汇编内容，因此**不记版本**、不登记撤销栈（否则撤销会把它退回去，违背"不可逆"）。
- */
-handleLogged(IPC.COMPILATION_MANUAL_EDIT, (_event, params: CompilationManualEditReq): ApiResult<CompilationManualEditRes> => {
-  try {
-    const compilation = setCompilationManualEdit(params.compilationId, true)
-    if (!compilation) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料汇编不存在' } }
-    logMain('compilation', '开启人工修改模式 汇编=' + params.compilationId)
     return { ok: true, data: { compilation } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
@@ -836,13 +787,13 @@ handleLogged(IPC.COMPILATION_IMPORT_ARCHIVE, async (_event, _params: Compilation
 // 汇编调整也是一次可长达数分钟的 LLM 调用：同样纳入“保持唤醒（不熄屏）”范围
 handleLogged(IPC.COMPILATION_ADJUST, async (_event, params: CompilationAdjustReq): Promise<ApiResult<CompilationAdjustRes>> => withKeepAwake(async () => {
   try {
-    pushUndo(params.compilationId)
     // 用户对资料汇编的调整消息持久化到对话历史
     const inst = params.instruction.trim()
     if (inst) addTaskMessage(params.taskId, 'user', inst, 'chat')
     const res = await adjustCompilation(params.compilationId, inst)
     if (!res.ok) return { ok: false, error: res.error }
-    recordVersionAfterChange(params.compilationId, 'llm-edit')
+    // 非对话改动 → 撤销栈作废（只允许回退对话编辑，不能跨改动误伤）
+    clearUndoStacks(params.compilationId)
     return {
       ok: true,
       data: {
@@ -893,11 +844,11 @@ handleLogged(IPC.COMPILATION_VERSION_DIFF, (_event, params: CompilationVersionDi
 handleLogged(IPC.COMPILATION_VERSION_RESTORE, (_event, params: CompilationVersionRestoreReq): ApiResult<CompilationVersionRestoreRes> => {
   try {
     if (!params.compilationId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
-    pushUndo(params.compilationId)
     const restored = restoreCompilationFromVersion(params.compilationId, params.versionNo)
     if (!restored) return { ok: false, error: { code: 'INVALID_PARAM', message: '版本不存在' } }
-    // 恢复动作**不记录新版本**（用户 2026-09-10 裁定）：恢复只是把文档退回上一版内容，
-    // 不是一次"改动"，若也记版本会让"上一版"的含义变得混乱。UI 上的「恢复到上一版」按钮暂不提供。
+    // 恢复动作**不记录新版本**（用户 2026-09-10 裁定）；也作废撤销栈（它不是对话编辑）。
+    // UI 上的「恢复到上一版」按钮暂不提供。
+    clearUndoStacks(params.compilationId)
     const compilation = getCompilationById(params.compilationId)
     if (!compilation) return { ok: false, error: { code: 'INTERNAL_ERROR', message: '资料汇编不存在' } }
     return { ok: true, data: { compilation, restoredFrom: params.versionNo } }
@@ -910,11 +861,12 @@ handleLogged(IPC.COMPILATION_REORDER, (_event, params: CompilationReorderReq): A
     if (!params.compilationId || (params.direction !== 'asc' && params.direction !== 'desc')) {
       return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
     }
-    pushUndo(params.compilationId)
     reorderCompilationItemsByTs(params.compilationId, params.direction)
     const compilation = getCompilationById(params.compilationId)
     if (!compilation) return { ok: false, error: { code: 'COMPILATION_NOT_FOUND', message: '资料汇编不存在' } }
-    recordVersionAfterChange(params.compilationId, 'user-edit')
+    // 排序不是对话编辑：既不登记撤销栈、也不记版本（用户 2026-09-10：点排序按钮就点亮「撤销」显然不对）。
+    // 但顺序确实变了，所以要**作废**撤销栈，避免「撤销」把更早的对话编辑连同这次排序一起回滚。
+    clearUndoStacks(params.compilationId)
     return { ok: true, data: { compilation } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
@@ -939,7 +891,8 @@ handleLogged(IPC.COMPILATION_DOC_EDIT, async (_event, params: CompilationDocEdit
           rejected: res.summary.rejected,
           versionNo: res.summary.versionNo,
           changedIds: res.summary.changedIds,
-          changeSummary: res.summary.changeSummary
+          changeSummary: res.summary.changeSummary,
+          diff: res.summary.diff
         }
       }
     } catch (err) {
@@ -1002,15 +955,14 @@ handleLogged(IPC.COMPILATION_RECYCLE_BIN_LIST, (_event, params: CompilationRecyc
 handleLogged(IPC.COMPILATION_RECYCLE_BIN_RESTORE, (_event, params: CompilationRecycleBinRestoreReq): ApiResult<CompilationRecycleBinRestoreRes> => {
   try {
     const undoCid = compilationIdOfBin(params.binId)
-    if (undoCid) pushUndo(undoCid)
     const contradiction = restoreRecycleBinContradiction(params.binId)
     if (contradiction) {
-      recordVersionAfterChange(undoCid, 'user-edit')
+      clearUndoStacks(undoCid)
       return { ok: true, data: { contradiction } }
     }
     const card = restoreCompilationCardRecycleBin(params.binId)
     if (card) {
-      recordVersionAfterChange(undoCid, 'user-edit')
+      clearUndoStacks(undoCid)
       return { ok: true, data: { card } }
     }
     return { ok: false, error: { code: 'INVALID_PARAM', message: '回收站条目不存在' } }
@@ -1023,10 +975,9 @@ handleLogged(IPC.COMPILATION_RECYCLE_BIN_RESTORE, (_event, params: CompilationRe
 handleLogged(IPC.COMPILATION_REPAIR_REVERT, (_event, params: CompilationRepairRevertReq): ApiResult<CompilationRepairRevertRes> => {
   try {
     const undoCid = compilationIdOfRepair(params.repairId)
-    if (undoCid) pushUndo(undoCid)
     const res = setRepairApplied(params.repairId, false)
     if (!res) return { ok: false, error: { code: 'INVALID_PARAM', message: '大模型修正记录不存在' } }
-    recordVersionAfterChange(undoCid, 'user-edit')
+    clearUndoStacks(undoCid)
     return { ok: true, data: { item: res.item, repair: res.repair } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
@@ -1036,10 +987,9 @@ handleLogged(IPC.COMPILATION_REPAIR_REVERT, (_event, params: CompilationRepairRe
 handleLogged(IPC.COMPILATION_REPAIR_APPLY, (_event, params: CompilationRepairApplyReq): ApiResult<CompilationRepairApplyRes> => {
   try {
     const undoCid = compilationIdOfRepair(params.repairId)
-    if (undoCid) pushUndo(undoCid)
     const res = setRepairApplied(params.repairId, true)
     if (!res) return { ok: false, error: { code: 'INVALID_PARAM', message: '大模型修正记录不存在' } }
-    recordVersionAfterChange(undoCid, 'user-edit')
+    clearUndoStacks(undoCid)
     return { ok: true, data: { item: res.item, repair: res.repair } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
