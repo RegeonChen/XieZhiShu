@@ -127,6 +127,8 @@ export const IPC = {
 
   /* 纳入新网页材料（第三批 A1：材料集合首次落定后，新文章由用户显式纳入） */
   COMPILATION_ADOPT_WEB_MATERIALS: 'compilation:adoptWebMaterials',
+  /** 重新检索网页材料：清空并重算本任务的网页材料集合（第三批 A1 补强） */
+  COMPILATION_REFRESH_WEB_MATERIALS: 'compilation:refreshWebMaterials',
 
   /* 工作区（Phase 2.2） */
   WORKSPACE_STATUS: 'workspace:status',
@@ -317,6 +319,23 @@ export type CompilationAdoptWebMaterialsRes = {
   skippedByCap: number
   siteErrors: number
 }
+
+/**
+ * 重新检索网页材料（第三批 A1 补强）：清空本任务已锁定的集合 → 重新发现/排序/抓取 → 重新锁定。
+ * 用途：首次落定用的材料不理想时（例如抓取上限截断丢掉了切题文章），不必新建任务就能重算。
+ * 只改材料集合，不改已有汇编——需再点一次「重新生成汇编」才会生效。
+ */
+export interface CompilationRefreshWebMaterialsReq {
+  taskId: string
+  /** 用于标题粗筛与相关度排序的查询（通常沿用该任务的撰写要求/标题） */
+  query: string
+}
+export type CompilationRefreshWebMaterialsRes = CompilationWebScan & {
+  /** 重算后锁定的篇数（= 本轮采用的网页材料数） */
+  pinned: number
+  /** 重算前被清空的锁定条数 */
+  cleared: number
+}
 export interface SourceGetSummaryReq {
   id: string
 }
@@ -430,6 +449,10 @@ export type CompilationWebScan = {
   skippedByCap: number
   /** 落库正文总字数 */
   chars: number
+  /** 本轮**复用**已锁定网页材料的篇数（第三批 A1；>0 = 本次是重新生成，沿用首次落定的集合） */
+  reused?: number
+  /** 站点上检测到、但未纳入的新命中文章数（由用户点「纳入新材料」决定是否抓取） */
+  newCandidates?: number
 }
 export type CompilationGenerateRes = {
   compilation: Compilation
@@ -915,6 +938,7 @@ export interface IpcMapping {
   [IPC.SOURCES_GET_SNAPSHOT]: { _req: SourceSnapshotReq; _res: ApiResult<SourceSnapshotRes> }
   // 纳入新网页材料
   [IPC.COMPILATION_ADOPT_WEB_MATERIALS]: { _req: CompilationAdoptWebMaterialsReq; _res: ApiResult<CompilationAdoptWebMaterialsRes> }
+  [IPC.COMPILATION_REFRESH_WEB_MATERIALS]: { _req: CompilationRefreshWebMaterialsReq; _res: ApiResult<CompilationRefreshWebMaterialsRes> }
   // 工作区
   [IPC.WORKSPACE_STATUS]: { _req: void; _res: ApiResult<WorkspaceStatusRes> }
   [IPC.WORKSPACE_MIGRATE]: { _req: void; _res: ApiResult<WorkspaceMigrateRes> }

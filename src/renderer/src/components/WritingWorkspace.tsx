@@ -13,6 +13,7 @@ import CompilationStep, {
   type CompilationMessageView
 } from './CompilationStep'
 import type { Contradiction, CompilationRecycleBinItem } from '../../../shared/types'
+import type { CompilationWebScan } from '../../../shared/ipc'
 
 interface TaskItem {
   id: string
@@ -194,17 +195,10 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   const [docError, setDocError] = useState<string | null>(null)
   const [docChangedIds, setDocChangedIds] = useState<string[]>([])
   /** 第三批 A1：最近一次生成的网页材料情况（面板据此提示"已锁定 N 篇 / 新文章 M 篇"） */
-  const [lastWebScan, setLastWebScan] = useState<{
-    sites: number
-    siteErrors: number
-    hits: number
-    fetched: number
-    skippedByCap: number
-    chars: number
-    reused?: number
-    newCandidates?: number
-  } | null>(null)
+  const [lastWebScan, setLastWebScan] = useState<CompilationWebScan | null>(null)
   const [adoptingWeb, setAdoptingWeb] = useState(false)
+  /** 正在重新检索网页材料（清空并重算本任务的材料集合） */
+  const [refreshingWeb, setRefreshingWeb] = useState(false)
 
   /** 读取某汇编的版本列表（用于乐观锁的 baseVersionNo；不再有版本下拉/对比开关） */
   const loadVersions = useCallback(async (compilationId: string): Promise<void> => {
@@ -841,6 +835,46 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     }
   }
 
+  /**
+   * 重新检索网页材料（第三批 A1 补强）：清空并重算本任务锁定的网页材料集合。
+   * 用途：首次落定用的材料不理想（例如抓取上限按错误的顺序截断、切题文章没抓到）时不必新建任务。
+   * 只改材料集合，不动当前汇编——需再点一次「重新生成汇编」才生效。
+   */
+  const handleRefreshWebMaterials = async () => {
+    if (refreshingWeb) return
+    setRefreshingWeb(true)
+    try {
+      const query = compilationInstruction.trim() || (task?.userInstruction ?? '').trim()
+      const res = await window.api.refreshWebMaterials(taskId, query)
+      if (res.ok && res.data) {
+        const d = res.data
+        const text = zhCN.compilation.webMaterialsRefreshed
+          .replace('{fetched}', String(d.pinned))
+          .replace('{hits}', String(d.hits))
+          .replace('{skipped}', String(d.skippedByCap))
+        appendAssistant(text)
+        void window.api.addTaskMessage(taskId, 'assistant', text, 'notice')
+        // 材料集合已重算：面板显示"已锁定 N 篇"，新命中数归零（下次生成时重新统计）
+        setLastWebScan({
+          sites: d.sites,
+          siteErrors: d.siteErrors,
+          hits: d.hits,
+          fetched: d.fetched,
+          skippedByCap: d.skippedByCap,
+          chars: d.chars,
+          reused: d.pinned,
+          newCandidates: 0
+        })
+      } else {
+        appendAssistant(zhCN.compilation.webMaterialsRefreshFailed.replace('{message}', res.error?.message ?? ''))
+      }
+    } catch (e) {
+      appendAssistant(zhCN.compilation.webMaterialsRefreshFailed.replace('{message}', String(e)))
+    } finally {
+      setRefreshingWeb(false)
+    }
+  }
+
   // ---- 初稿生成（Phase 6.3）----
   const handleGenerateDraft = async (instruction: string) => {
     if (busy) return
@@ -1084,6 +1118,8 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           webScan={lastWebScan}
           adoptingWeb={adoptingWeb}
           onAdoptWebMaterials={() => void handleAdoptWebMaterials()}
+          refreshingWeb={refreshingWeb}
+          onRefreshWebMaterials={() => void handleRefreshWebMaterials()}
           sourceRefs={sourceRefs}
         />
       )

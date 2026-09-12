@@ -79,6 +79,7 @@ export interface AppApi {
   reindexRag(): Promise<{ ok: boolean; data?: { queued: number; reset: number }; error?: { code: string; message: string } }>
   getSourceSnapshot(id: string): Promise<{ ok: boolean; data?: { id: string; kind: 'file' | 'url'; title: string; url?: string; snapshotAt?: string; publishedAt?: string; text: string; totalChars: number; truncated: boolean; shortText: boolean }; error?: { code: string; message: string } }>
   adoptWebMaterials(taskId: string, query: string): Promise<{ ok: boolean; data?: { added: number; skippedByCap: number; siteErrors: number }; error?: { code: string; message: string } }>
+  refreshWebMaterials(taskId: string, query: string): Promise<{ ok: boolean; data?: { sites: number; siteErrors: number; hits: number; fetched: number; skippedByCap: number; chars: number; pinned: number; cleared: number }; error?: { code: string; message: string } }>
   getWorkspaceStatus(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   workspaceNavSync(): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   migrateLegacyWorkspace(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>

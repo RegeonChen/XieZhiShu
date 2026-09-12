@@ -208,7 +208,16 @@ export function extractTopicTerms(query: string): string[] {
   //    导致矛盾扫描/网页检索的主题词不稳定（test3 漏检矛盾的直接根因）。
   const titled = query.match(/(?:标题|题目|主题)[为是]?\s*[:：]?\s*[「『“"'」』”]?([^\s，。；、,.「『』」“”"']+)/)
   if (titled) add(titled[1])
-  // 3) 提取不到任何短词时回退整句（兼容"无标题、纯要求"的指令）
+  // 3) 引号/引导语都没取到时，若检索词本身就是**关键词列表**（生成管线把大模型提取的
+  //    「标题 + 关键词」用空格拼成 coarseQuery），必须逐词当作检索词，不能抹掉词间空格拼成一整句——
+  //    否则 `title.includes(整串)` 永远不成立。2026-09-12 实测：正是这一步把
+  //    「高中学校设置 高中 新建 扩建 …」压成一个长串，导致抓取上限的"按相关度排序"全部 0 分、
+  //    退化成按清单顺序截断（丢掉 478 篇里的切题材料，汇编网页段落 77 → 4 段）。
+  if (out.length === 0) {
+    const tokens = query.split(/\s+/).map((s) => s.trim()).filter(Boolean)
+    if (tokens.length >= 2) for (const tk of tokens) add(tk)
+  }
+  // 4) 仍提取不到任何短词时回退整句（兼容"无标题、纯要求"的指令）
   if (out.length === 0) {
     const fallback = query.replace(/\s+/g, '')
     if (fallback) out.push(fallback)
@@ -691,24 +700,56 @@ export async function syncSite(siteId: string): Promise<number> {
  * 真实库里一次生成曾抓 **477 篇**、耗时 **9 分 43 秒**（占整次生成 26.9 分钟的 36%），
  * 而且每篇都要解析+入向量索引。上限按"标题相关度"优先保留，超出部分记入 `skippedByCap` 并在生成汇总里告知。
  */
-export const WEB_FETCH_MAX_ARTICLES = 80
+/**
+ * 单次生成抓取的文章篇数上限（成本保险丝，**不承担相关性取舍**）。
+ * 2026-09-12 实测：从 80 提到 300。80 篇时切题网页正文只剩 9.4 万字（无上限那次为 94.1 万字），
+ * 汇编网页段落 77 → 4 段、69 段网页内容整段消失。**注意**：只要上限小于标题粗筛后的候选数
+ * （真实站点同一主题实测 495–3,293 篇），按标题排序总归会丢掉"标题不含主题词、正文却切题"的文章
+ * （如《融侨国际双语学校奠基仪式举行》《福州长乐多所名校合力助滨海新城办学》）——
+ * 相关性取舍最终靠**正文**：抓取时的正文精过滤 + 保守闸门 + 细读窗口。上限只保证成本可控。
+ * A1 材料集合锁定让这笔抓取代价**每个任务只付一次**（重新生成复用），故可以放宽。
+ */
+export const WEB_FETCH_MAX_ARTICLES = 300
 /** 单次生成所有站点合计的正文抓取量上限（防止个别站点命中过多） */
-export const WEB_FETCH_MAX_CHARS = 400000
+export const WEB_FETCH_MAX_CHARS = 1500000
+
+/** 完整检索词命中标题的额外加权（远强于零星 bigram 重叠） */
+const FULL_TERM_BONUS = 10
 
 /**
- * 按"标题与主题词的匹配度"给候选文章排序（纯函数）：命中词越多越靠前，同分保持原顺序（清单本身按发布时间倒序）。
+ * 按"标题与主题词的匹配度"给候选文章排序（纯函数）：命中越多越靠前，同分保持原顺序（清单本身按发布时间倒序）。
  * 用于抓取上限下优先保留最相关的文章——原来只按清单顺序取前 N 篇，等于按时间新旧决定取舍。
+ *
+ * **打分口径必须与 `matchesAny` 一致（bigram 重叠）**，否则会出现"筛进来了、却全部 0 分"：
+ * 2026-09-12 实测真实站点的 477 篇候选、以及上限截断后的 80 篇，标题打分**全部为 0**
+ * （旧实现用 `title.includes(term)`，而检索词是长词/整串），排序完全失效、退化成按清单顺序截断——
+ * 正是本函数要修掉的那个问题。改为 bigram 重叠计数后，「高中」「中学」「学校」「新建」等
+ * 与主题直接相关的标题才会排到前面。
+ *
+ * 领域下位词（`expandDomainHints`）**不参与排序**：它服务召回（宁多勿漏），用于排序会把
+ * 同为教育、却不是本主题的下位领域（如"教育"带出的幼儿园词）顶到前面。
  */
 export function rankArticlesByQuery<T extends { url: string; title: string }>(
   articles: T[],
   query: string
 ): (T & { matchScore: number })[] {
   const terms = extractTopicTerms(query)
-  const allTerms = [...new Set([...terms, ...expandDomainHints(terms)])]
+  const termBigrams = new Set<string>()
+  for (const t of terms) for (const g of bigrams(t)) termBigrams.add(g)
   const scored = articles.map((a, i) => {
     const title = (a.title ?? '').trim()
     // 无标题（sitemap 发现）给 0 分：保守保留为候选，但排序靠后
-    const matchScore = title ? allTerms.filter((t) => title.includes(t)).length : 0
+    let matchScore = 0
+    if (title && termBigrams.size > 0) {
+      const seen = new Set<string>()
+      for (const g of bigrams(title)) {
+        if (termBigrams.has(g) && !seen.has(g)) {
+          seen.add(g)
+          matchScore += 1
+        }
+      }
+      for (const t of terms) if (t.length >= 2 && title.includes(t)) matchScore += FULL_TERM_BONUS
+    }
     return { article: a, matchScore, originalIndex: i }
   })
   scored.sort((a, b) => b.matchScore - a.matchScore || a.originalIndex - b.originalIndex)
@@ -956,7 +997,22 @@ if (import.meta.vitest) {
       expect(matchesExact('长乐区幼儿园开展入学报名', terms)).toBe(true)
     })
 
-    it('ranks candidate articles by title relevance for the fetch cap (2026-09-12 第二批)', () => {
+    it('treats a space-joined keyword list as separate terms (2026-09-12 修正)', () => {
+      // 生成管线的 coarseQuery = 大模型提取的「标题 + 关键词」用空格拼接，此前会被压成一个长串
+      expect(extractTopicTerms('高中学校设置 高中 新建 扩建 合并 规模 招生人数')).toEqual([
+        '高中学校设置',
+        '高中',
+        '新建',
+        '扩建',
+        '合并',
+        '规模',
+        '招生人数'
+      ])
+      // 单条长句（无空格）仍回退整句，保持既有行为
+      expect(extractTopicTerms('请把学校建设情况整理成汇编')).toEqual(['请把学校建设情况整理成汇编'])
+    })
+
+    it('ranks candidate articles by title relevance for the fetch cap (2026-09-12 第二批；同日修正打分口径)', () => {
       const articles = [
         { url: 'https://x.gov.cn/a.htm', title: '关于组织学习的通知' },
         { url: 'https://x.gov.cn/b.htm', title: '福州新区年鉴（2025）' },
@@ -967,9 +1023,27 @@ if (import.meta.vitest) {
       // 标题命中主题词的排前面；无标题/无关的排后面；同分保持原顺序（清单本身按发布时间倒序）
       expect(ranked[0].title).toBe('高中学校设置与达标高中建设情况')
       expect(ranked[ranked.length - 1].title).toBe('')
+      expect(ranked[0].matchScore).toBeGreaterThan(0)
       expect(ranked[0].matchScore).toBeGreaterThan(ranked[ranked.length - 1].matchScore)
       // 不丢项
       expect(ranked.map((a) => a.url).sort()).toEqual(articles.map((a) => a.url).sort())
+    })
+
+    it('still separates relevant titles when the query is a long keyword list (真实站点 477 篇全 0 分回归)', () => {
+      // 回归根因：旧打分用 title.includes(term)，而 coarseQuery 是一个长关键词串 → 所有标题 0 分、排序失效
+      const ranked = rankArticlesByQuery(
+        [
+          { url: 'a', title: '长乐将新增幼儿学位4500个' },
+          { url: 'b', title: '融侨国际双语学校奠基仪式举行' },
+          { url: 'c', title: '福建将扩大普通高中教育资源 试点中职和普高互融互通' }
+        ],
+        '高中学校设置 高中 新建 扩建 合并 规模 招生人数 地理分布'
+      )
+      // 与主题直接相关（含「高中」「学校」）的排前面；同分的（均为 1 个 bigram 命中）保持原清单顺序
+      expect(ranked[0].title).toContain('普通高中')
+      expect(ranked[1].title).toContain('融侨国际双语学校')
+      expect(ranked[2].title).toContain('幼儿学位')
+      expect(ranked[0].matchScore).toBeGreaterThan(ranked[2].matchScore)
     })
 
     it('dedupes http/https article urls to the same key', () => {
