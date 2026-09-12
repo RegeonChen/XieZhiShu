@@ -105,7 +105,7 @@ import {
   ensureDefaultStyleGuide
 } from './db/style-guides'
 import { ensureDemoTask } from './db/demo-task'
-import { generateCompilation, continueCompilation } from './writing/compilation-service'
+import { generateCompilation, continueCompilation, type GenerateCompilationResult } from './writing/compilation-service'
 import { buildCompilationFileName, renderCompilationDocx, serializeCompilationArchive } from './writing/compilation-export'
 import {
   pushUndo,
@@ -565,17 +565,7 @@ handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerate
     }
   }
   // 不让生成管线裸抛 reject 导致进度冻结/无反馈：任何异常都转成结构化错误
-  let res:
-    | {
-        ok: true
-        compilationId: string
-        candidateChunks: number
-        contradictions: number
-        contradictionScan?: { ok: boolean; message?: string }
-        extractScan?: { ok: boolean; message?: string; inputCards?: number; outputParagraphs?: number; inputChars?: number; outputChars?: number; accepted?: number; degraded?: number; droppedCards?: number; omitted?: number; passthrough?: number }
-        interrupted?: { stage: string; message: string; percent: number; retryable?: boolean }
-      }
-    | { ok: false; error: { code: string; message: string } }
+  let res: GenerateCompilationResult
   try {
     res = await generateCompilation(params.taskId, params.title, onProgress, onAdvice)
   } catch (err) {
@@ -590,6 +580,7 @@ handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerate
       compilation,
       contradictionScan: res.contradictionScan,
       extractScan: res.extractScan,
+      webScan: res.webScan,
       interrupted: res.interrupted
     }
   }
@@ -611,17 +602,7 @@ handleLogged(IPC.COMPILATION_CONTINUE, async (event, params: CompilationContinue
       event.sender.send(IPC_EVENTS.COMPILATION_ADVICE, { taskId: progressTaskId, kind })
     }
   }
-  let res:
-    | {
-        ok: true
-        compilationId: string
-        candidateChunks: number
-        contradictions: number
-        contradictionScan?: { ok: boolean; message?: string }
-        extractScan?: { ok: boolean; message?: string; inputCards?: number; outputParagraphs?: number; inputChars?: number; outputChars?: number; accepted?: number; degraded?: number; droppedCards?: number; omitted?: number; passthrough?: number }
-        interrupted?: { stage: string; message: string; percent: number; retryable?: boolean }
-      }
-    | { ok: false; error: { code: string; message: string } }
+  let res: GenerateCompilationResult
   try {
     res = await continueCompilation(params.compilationId, onProgress, onAdvice)
   } catch (err) {
@@ -636,6 +617,7 @@ handleLogged(IPC.COMPILATION_CONTINUE, async (event, params: CompilationContinue
       compilation,
       contradictionScan: res.contradictionScan,
       extractScan: res.extractScan,
+      webScan: res.webScan,
       interrupted: res.interrupted
     }
   }

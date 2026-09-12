@@ -533,6 +533,9 @@ export const zhCN = {
     extractDropped: '模型判定与主题无关而整卡丢弃 {count} 张',
     extractConflictsKept: '{count} 段因「疑似同一事实但数字不一致」特意保留（交给矛盾扫描）',
     extractScanFailed: '整合提取未完成（{reason}），部分卡片可能仍按原文原样保留、未做裁剪整合。',
+    /* 网页资料抓取情况（2026-09-12 第二批）：如实告知本轮用了多少网页材料、是否被上限截断 */
+    webScan: '网页资料：标题命中 {hits} 篇，实际采用 {fetched} 篇（{chars} 字）',
+    webScanCapped: '（另有 {count} 篇因抓取上限未采用，可提高上限或分多次生成）',
     /* 大模型修正（2026-09-08 引入）已随 Phase 7.7 整体移除：软件内不再有「修正记录」概念 */
     recycleBin: '回收站',
     recycleBinTitle: '回收站',

@@ -674,21 +674,66 @@ export async function syncSite(siteId: string): Promise<number> {
 }
 
 /**
+ * 单次生成最多抓取多少篇网页文章（2026-09-12 第二批，实测教训）：
+ * 真实库里一次生成曾抓 **477 篇**、耗时 **9 分 43 秒**（占整次生成 26.9 分钟的 36%），
+ * 而且每篇都要解析+入向量索引。上限按"标题相关度"优先保留，超出部分记入 `skippedByCap` 并在生成汇总里告知。
+ */
+export const WEB_FETCH_MAX_ARTICLES = 80
+/** 单次生成所有站点合计的正文抓取量上限（防止个别站点命中过多） */
+export const WEB_FETCH_MAX_CHARS = 400000
+
+/**
+ * 按"标题与主题词的匹配度"给候选文章排序（纯函数）：命中词越多越靠前，同分保持原顺序（清单本身按发布时间倒序）。
+ * 用于抓取上限下优先保留最相关的文章——原来只按清单顺序取前 N 篇，等于按时间新旧决定取舍。
+ */
+export function rankArticlesByQuery<T extends { url: string; title: string }>(
+  articles: T[],
+  query: string
+): (T & { matchScore: number })[] {
+  const terms = extractTopicTerms(query)
+  const allTerms = [...new Set([...terms, ...expandDomainHints(terms)])]
+  const scored = articles.map((a, i) => {
+    const title = (a.title ?? '').trim()
+    // 无标题（sitemap 发现）给 0 分：保守保留为候选，但排序靠后
+    const matchScore = title ? allTerms.filter((t) => title.includes(t)).length : 0
+    return { article: a, matchScore, originalIndex: i }
+  })
+  scored.sort((a, b) => b.matchScore - a.matchScore || a.originalIndex - b.originalIndex)
+  return scored.map((s) => ({ ...s.article, matchScore: s.matchScore }))
+}
+
+export interface WebFetchStats {
+  /** 注册站点数 */
+  sites: number
+  /** 标题级命中的候选文章数（所有站点合计） */
+  hits: number
+  /** 实际落库成功的文章数 */
+  fetched: number
+  /** 因上限而跳过的候选数 */
+  skippedByCap: number
+  /** 落库正文总字数 */
+  chars: number
+}
+
+/**
  * 生成初稿时的网页资料检索入口（全局绑定：遍历所有注册站点）：
- * 同步清单 → 标题粗筛(query) → 抓正文做正文级精过滤 → 返回命中的 sourceIds（并入生成 scope）。
+ * 同步清单 → 标题粗筛(query) → 按相关度排序 → 抓正文做正文级精过滤 → 返回命中的 sourceIds（并入生成 scope）。
  * 命中文章按 taskId 落库为"任务绑定的网页缓存文章"。任一站点失败不阻断其他站点。
+ * **带上限**（篇数 + 总字数），并把统计一并返回，供生成汇总如实告知用户"本轮用了多少网页材料、是否被截断"。
  */
 export async function fetchRelatedSiteSources(
   query: string,
   taskId: string,
   onSite?: (siteTitle: string) => void
-): Promise<string[]> {
+): Promise<{ ids: string[]; stats: WebFetchStats }> {
   const sites = listWebSites()
-  if (sites.length === 0) return []
+  const stats: WebFetchStats = { sites: sites.length, hits: 0, fetched: 0, skippedByCap: 0, chars: 0 }
+  if (sites.length === 0) return { ids: [], stats }
   const terms = extractTopicTerms(query)
   const allTerms = [...new Set([...terms, ...expandDomainHints(terms)])]
-  if (allTerms.length === 0) return []
+  if (allTerms.length === 0) return { ids: [], stats }
   const ids: string[] = []
+  let budgetChars = WEB_FETCH_MAX_CHARS
   for (const site of sites) {
     onSite?.(site.title || site.rootUrl)
     try {
@@ -700,18 +745,33 @@ export async function fetchRelatedSiteSources(
     try { host = new URL(site.rootUrl).host } catch { host = site.rootUrl }
     const robots = await fetchRobotsTxt(site.rootUrl).catch(() => ({ crawlDelay: undefined, disallow: [] }))
     const articles = listSiteArticles(site.id)
-    const hits = filterArticlesByQuery(articles, query)
+    const hits = rankArticlesByQuery(filterArticlesByQuery(articles, query), query)
+    stats.hits += hits.length
     let imported = 0
     for (const h of hits) {
       // C6 礼貌限速：单站串行 + 请求间隔（robots crawl-delay 或默认最小间隔）
       if (isPathDisallowed(h.url, robots.disallow)) continue
+      // 上限（篇数 / 字数）：命中太多时按相关度优先保留，其余记入 skippedByCap
+      if (stats.fetched >= WEB_FETCH_MAX_ARTICLES || budgetChars <= 0) {
+        stats.skippedByCap += 1
+        continue
+      }
       await politeDelay(host, robots.crawlDelay)
       const src = await importSiteArticle(h.url, h.title, allTerms, taskId, site.id)
-      if (src) { ids.push(src.id); imported++ }
+      if (src) {
+        ids.push(src.id)
+        imported++
+        stats.fetched += 1
+        stats.chars += src.cleanedText?.length ?? 0
+        budgetChars -= src.cleanedText?.length ?? 0
+      }
     }
     logMain('web', `网页资料检索 站点=${site.title || site.rootUrl} 文章清单=${articles.length} 标题命中=${hits.length} 落库=${imported} robots.crawlDelay=${robots.crawlDelay ?? '-'}`)
   }
-  return ids
+  if (stats.skippedByCap > 0) {
+    logMain('web', `网页资料检索达上限：落库 ${stats.fetched} 篇 / ${stats.chars} 字，跳过 ${stats.skippedByCap} 篇（上限 ${WEB_FETCH_MAX_ARTICLES} 篇 / ${WEB_FETCH_MAX_CHARS} 字）`)
+  }
+  return { ids, stats }
 }
 
 // ---- vitest inline test ----
@@ -819,6 +879,22 @@ if (import.meta.vitest) {
       expect(terms).not.toContain('入学')
       expect(matchesExact('要深入学习贯彻习近平总书记重要讲话精神', terms)).toBe(false)
       expect(matchesExact('长乐区幼儿园开展入学报名', terms)).toBe(true)
+    })
+
+    it('ranks candidate articles by title relevance for the fetch cap (2026-09-12 第二批)', () => {
+      const articles = [
+        { url: 'https://x.gov.cn/a.htm', title: '关于组织学习的通知' },
+        { url: 'https://x.gov.cn/b.htm', title: '福州新区年鉴（2025）' },
+        { url: 'https://x.gov.cn/c.htm', title: '' }, // sitemap 发现的无标题候选：保留但排最后
+        { url: 'https://x.gov.cn/d.htm', title: '高中学校设置与达标高中建设情况' }
+      ]
+      const ranked = rankArticlesByQuery(articles, '本次资料收集的主题为「高中学校设置」')
+      // 标题命中主题词的排前面；无标题/无关的排后面；同分保持原顺序（清单本身按发布时间倒序）
+      expect(ranked[0].title).toBe('高中学校设置与达标高中建设情况')
+      expect(ranked[ranked.length - 1].title).toBe('')
+      expect(ranked[0].matchScore).toBeGreaterThan(ranked[ranked.length - 1].matchScore)
+      // 不丢项
+      expect(ranked.map((a) => a.url).sort()).toEqual(articles.map((a) => a.url).sort())
     })
 
     it('dedupes http/https article urls to the same key', () => {

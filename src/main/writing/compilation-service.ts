@@ -25,7 +25,7 @@ import { getProviderSecret } from '../llm/provider-store'
 import { safeStorageCodec } from '../llm/secret'
 import { chatCompletion, type ChatMessage } from '../llm/chat'
 import { logMain } from '../logger'
-import { fetchRelatedSiteSources, extractTopicTerms, expandDomainHints } from '../web-source/site-crawler'
+import { fetchRelatedSiteSources, extractTopicTerms, expandDomainHints, type WebFetchStats } from '../web-source/site-crawler'
 import { assembleDocument, parseTimeLabel, stripSpaces, textSimilarity, type AssembledParagraph } from './compilation-document'
 import {
   emptyExtractStats,
@@ -147,6 +147,8 @@ export type GenerateCompilationResult =
         passthrough?: number
       }
       interrupted?: CompilationInterrupt
+      /** 网页资料本轮的抓取情况（2026-09-12 第二批：达上限时如实告知，避免"以为用了几百篇"） */
+      webScan?: WebFetchStats
     }
   | { ok: false; error: { code: string; message: string } };
 
@@ -877,19 +879,31 @@ export async function generateCompilation(
     vecQuery = coarseQuery
   }
 
-  onProgress?.({ stage: '正在检索网页资料库…', percent: 8, etaSeconds: preWindowEta(PHASE_RECALL_ETA_S + PHASE_GATE_ETA_S) })
-  const webIds = await fetchRelatedSiteSources(coarseQuery, taskId).catch(() => [] as string[])
-  if (webIds.length > 0) {
-    scopeIds = Array.from(new Set([...scopeIds, ...webIds]))
-    /*
-     * 网页文章必须先进入向量索引，否则保守闸门查不到它们的向量，只能靠词法命中——
-     * "字面无关但语义相关"的网页段落会被整篇丢掉（本地资料库一直有索引兜底，网页此前没有）。
-     * 索引以预算为上限，超预算或个别失败都不阻断生成（只是少一层向量兜底）。
-     */
-    onProgress?.({ stage: '正在为网页资料建立检索索引…', percent: 9, etaSeconds: preWindowEta(PHASE_GATE_ETA_S) })
-    const idx = await ensureSourcesIndexed(webIds).catch(() => ({ indexed: 0, failed: 0, skipped: 0 }))
-    if (idx.failed > 0 || idx.skipped > 0) {
-      logMain('compilation', `网页资料索引 就绪=${idx.indexed} 失败=${idx.failed} 超预算跳过=${idx.skipped}（这些文章本轮只能靠词法命中）`)
+  /*
+   * 无 Provider → **跳过网页抓取**，直接用本地闸门收窄后的材料做降级汇编。
+   * 此前是先抓网页、再把"宽召回的全部段落"（未过闸门）灌进汇编：477 篇网页 × 几千字会把降级产物撑到不可用，
+   * 而且明知不会调用大模型还白等近 10 分钟抓取（2026-09-12 第二批）。
+   * 注意查询向量由**本地嵌入模型**生成，与是否配置 LLM Provider 无关。
+   */
+  const webStats: WebFetchStats = { sites: 0, hits: 0, fetched: 0, skippedByCap: 0, chars: 0 }
+  if (!prov.ok) {
+    logMain('compilation', '未配置大模型：跳过网页资料抓取，改用本地闸门材料生成降级汇编')
+  } else {
+    onProgress?.({ stage: '正在检索网页资料库…', percent: 8, etaSeconds: preWindowEta(PHASE_RECALL_ETA_S + PHASE_GATE_ETA_S) })
+    const web = await fetchRelatedSiteSources(coarseQuery, taskId).catch(() => ({ ids: [] as string[], stats: webStats }))
+    Object.assign(webStats, web.stats)
+    if (web.ids.length > 0) {
+      scopeIds = Array.from(new Set([...scopeIds, ...web.ids]))
+      /*
+       * 网页文章必须先进入向量索引，否则保守闸门查不到它们的向量，只能靠词法命中——
+       * "字面无关但语义相关"的网页段落会被整篇丢掉（本地资料库一直有索引兜底，网页此前没有）。
+       * 索引以预算为上限，超预算或个别失败都不阻断生成（只是少一层向量兜底）。
+       */
+      onProgress?.({ stage: '正在为网页资料建立检索索引…', percent: 9, etaSeconds: preWindowEta(PHASE_GATE_ETA_S) })
+      const idx = await ensureSourcesIndexed(web.ids).catch(() => ({ indexed: 0, failed: 0, skipped: 0 }))
+      if (idx.failed > 0 || idx.skipped > 0) {
+        logMain('compilation', `网页资料索引 就绪=${idx.indexed} 失败=${idx.failed} 超预算跳过=${idx.skipped}（这些文章本轮只能靠词法命中）`)
+      }
     }
   }
 
@@ -897,9 +911,14 @@ export async function generateCompilation(
   const allChunks = recallCandidateChunks(scopeIds, coarseQuery)
   if (allChunks.length === 0) return fail(ErrorCodes.LLM_NO_CANDIDATES, '资料库中没有可召回的资料')
 
-  // 无 Provider → 本地降级（卡片 = 全部候选块，无矛盾；用全量集合避免降级丢失任何可能相关材料）
+  // 无 Provider → 本地降级：**用保守闸门收窄后的材料**（而不是宽召回全量），避免降级产物被无关内容淹没
   if (!prov.ok) {
-    return finalizeCompilationLocal(taskId, title, allChunks)
+    onProgress?.({ stage: '正在按主题收敛候选材料（保守闸门）…', percent: 11, etaSeconds: preWindowEta(0) })
+    const localVectors = await embedTexts([vecQuery]).catch(() => null)
+    const gated = recallCompilationCandidates(scopeIds, coarseQuery, localVectors ? localVectors[0] : undefined)
+    const localChunks = gated.chunks.length > 0 ? gated.chunks : allChunks
+    logMain('compilation', `本地降级材料：宽召回 ${allChunks.length} 段 → 闸门后 ${gated.chunks.length} 段（来源 ${gated.candidateSources} 个）`)
+    return finalizeCompilationLocal(taskId, title, localChunks, webStats)
   }
 
   // 2026-08-25 优化：调用大模型前用保守本地闸门收窄提交物——把"任务范围内全部段落"收敛为
@@ -1082,10 +1101,15 @@ async function readWindow(
   return failedMsg ? { out: null, failed: true, message: failedMsg, rateLimited } : { out: null, failed: false }
 }
 
-function finalizeCompilationLocal(taskId: string, title: string, chunks: RetrievedChunk[]): GenerateCompilationResult {
+function finalizeCompilationLocal(
+  taskId: string,
+  title: string,
+  chunks: RetrievedChunk[],
+  webScan?: WebFetchStats
+): GenerateCompilationResult {
   const compilation = createCompilation({ taskId, title })
   persistLocalFallback(compilation.id, localFallbackParagraphs(chunks))
-  return { ok: true, compilationId: compilation.id, candidateChunks: chunks.length, contradictions: 0 }
+  return { ok: true, compilationId: compilation.id, candidateChunks: chunks.length, contradictions: 0, webScan }
 }
 
 /**
