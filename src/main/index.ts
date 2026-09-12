@@ -47,8 +47,6 @@ import {
   type CompilationResolveContradictionRes,
   type CompilationConfirmReq,
   type CompilationConfirmRes,
-  type CompilationAdjustReq,
-  type CompilationAdjustRes,
   type CompilationReorderReq,
   type CompilationReorderRes,
   type CompilationVersionsReq,
@@ -125,7 +123,6 @@ import {
 import { ensureDemoTask } from './db/demo-task'
 import { generateCompilation, continueCompilation } from './writing/compilation-service'
 import { renderCompilationDocx, serializeCompilationArchive } from './writing/compilation-export'
-import { adjustCompilation } from './writing/compilation-adjust'
 import {
   pushUndo,
   undoCompilation,
@@ -798,31 +795,6 @@ handleLogged(IPC.COMPILATION_IMPORT_ARCHIVE, async (_event, _params: Compilation
   // 预留：外部 .xzsc 导入「撰写初稿」——当前返回未实现，后端解析待后续接入
   return { ok: false, error: { code: 'NOT_IMPLEMENTED', message: '外部资料汇编导入功能开发中' } }
 })
-
-// 汇编调整也是一次可长达数分钟的 LLM 调用：同样纳入“保持唤醒（不熄屏）”范围
-handleLogged(IPC.COMPILATION_ADJUST, async (_event, params: CompilationAdjustReq): Promise<ApiResult<CompilationAdjustRes>> => withKeepAwake(async () => {
-  try {
-    // 用户对资料汇编的调整消息持久化到对话历史
-    const inst = params.instruction.trim()
-    if (inst) addTaskMessage(params.taskId, 'user', inst, 'chat')
-    const res = await adjustCompilation(params.compilationId, inst)
-    if (!res.ok) return { ok: false, error: res.error }
-    // 非对话改动 → 撤销栈作废（只允许回退对话编辑，不能跨改动误伤）
-    clearUndoStacks(params.compilationId)
-    return {
-      ok: true,
-      data: {
-        compilation: res.compilation,
-        explain: res.explain,
-        removedCards: res.removedCards,
-        addedCards: res.addedCards,
-        updatedCards: res.updatedCards
-      }
-    }
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-}))
 
 // 资料汇编卡片重新按时间排序（2026-08-28）：asc 正序 / desc 反序，重写 position 并返回最新汇编
 // Phase 7.4：版本管控 —— 列表 / 两版差异 / 恢复到某版

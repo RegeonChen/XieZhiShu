@@ -483,7 +483,6 @@ export const zhCN = {
     continueFailed: '继续生成失败：',
     confirmed: '资料汇编已确认，可进入下一步指定行文规范。',
     regenerated: '已重新生成资料汇编：{count} 段。',
-    adjusting: '正在调整资料汇编…',
     contradictionScanFailed: '矛盾扫描未完成（{reason}），可能存在遗漏，请酌情复核。',
     /* 预设提示词（2026-09-08：弹出面板 + 分组；点击填入输入框并选中「……」占位符） */
     presetButton: '预设提示词',

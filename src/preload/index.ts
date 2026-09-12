@@ -149,10 +149,6 @@ const api = {
   continueCompilation(compilationId: string): Promise<ApiResult<{ compilation: unknown; interrupted?: { stage: string; message: string; percent: number } }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_CONTINUE, { compilationId })
   },
-  /** 重新生成资料汇编（AI 服务 Phase 6.1 实现） */
-  adjustCompilation(taskId: string, compilationId: string, instruction: string): Promise<ApiResult<{ compilation: unknown; explain?: string; removedCards?: number; addedCards?: number; updatedCards?: number }>> {
-    return ipcRenderer.invoke(IPC.COMPILATION_ADJUST, { taskId, compilationId, instruction })
-  },
   /** 资料汇编卡片重新按时间排序（asc 正序 / desc 反序） */
   reorderCompilation(compilationId: string, direction: 'asc' | 'desc'): Promise<ApiResult<{ compilation: unknown }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_REORDER, { compilationId, direction })

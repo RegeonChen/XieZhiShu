@@ -36,7 +36,6 @@ export interface AppApi {
   getCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
   generateCompilation(taskId: string, title: string): Promise<{ ok: boolean; data?: { compilation: unknown; interrupted?: { stage: string; message: string; percent: number } }; error?: { code: string; message: string } }>
   continueCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown; interrupted?: { stage: string; message: string; percent: number } }; error?: { code: string; message: string } }>
-  adjustCompilation(taskId: string, compilationId: string, instruction: string): Promise<{ ok: boolean; data?: { compilation: unknown; explain?: string; removedCards?: number; addedCards?: number; updatedCards?: number }; error?: { code: string; message: string } }>
   reorderCompilation(compilationId: string, direction: 'asc' | 'desc'): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
   undoCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown; undoAvailable: number; redoAvailable: number }; error?: { code: string; message: string } }>
   redoCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown; undoAvailable: number; redoAvailable: number }; error?: { code: string; message: string } }>

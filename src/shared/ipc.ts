@@ -65,7 +65,6 @@ export const IPC = {
   COMPILATION_DELETE_ITEM: 'compilation:deleteItem',
   COMPILATION_RESOLVE_CONTRADICTION: 'compilation:resolveContradiction',
   COMPILATION_CONFIRM: 'compilation:confirm',
-  COMPILATION_ADJUST: 'compilation:adjust',
   COMPILATION_REORDER: 'compilation:reorder',
   /* Phase 7.4：版本管控（列表 / 差异 / 恢复） */
   COMPILATION_VERSIONS: 'compilation:versions',
@@ -352,19 +351,6 @@ export type CompilationContinueRes = {
   contradictionScan?: CompilationStageScan
   extractScan?: CompilationExtractScan
   interrupted?: CompilationInterrupt
-}
-/** 资料汇编调整（2026-08-28，Phase 6.4.4）：首条消息生成汇编后续每条消息都是对汇编的调整（批量删除/增补/自定义编辑） */
-export interface CompilationAdjustReq {
-  taskId: string
-  compilationId: string
-  instruction: string
-}
-export interface CompilationAdjustRes {
-  compilation: Compilation
-  explain?: string
-  removedCards?: number
-  addedCards?: number
-  updatedCards?: number
 }
 /** 资料汇编卡片重新按时间排序（2026-08-28）：asc = 正序（旧→新），desc = 反序（新→旧） */
 export interface CompilationReorderReq {
@@ -832,7 +818,6 @@ export interface IpcMapping {
   [IPC.COMPILATION_DELETE_ITEM]: { _req: CompilationDeleteItemReq; _res: ApiResult<void> }
   [IPC.COMPILATION_RESOLVE_CONTRADICTION]: { _req: CompilationResolveContradictionReq; _res: ApiResult<CompilationResolveContradictionRes> }
   [IPC.COMPILATION_CONFIRM]: { _req: CompilationConfirmReq; _res: ApiResult<CompilationConfirmRes> }
-  [IPC.COMPILATION_ADJUST]: { _req: CompilationAdjustReq; _res: ApiResult<CompilationAdjustRes> }
   [IPC.COMPILATION_REORDER]: { _req: CompilationReorderReq; _res: ApiResult<CompilationReorderRes> }
   [IPC.COMPILATION_VERSIONS]: { _req: CompilationVersionsReq; _res: ApiResult<CompilationVersionsRes> }
   [IPC.COMPILATION_VERSION_DIFF]: { _req: CompilationVersionDiffReq; _res: ApiResult<CompilationVersionDiffRes> }
