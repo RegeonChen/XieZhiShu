@@ -17,6 +17,44 @@ function renderInlineMarkdown(text: string): ReactNode[] {
   })
 }
 
+/** 快照抓取时间显示（YYYY-MM-DD HH:mm，本地时区；解析失败则原样返回） */
+function formatSnapshotTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/**
+ * 快照正文渲染（第三批 C）：把该段的引文在正文里高亮。
+ * 段落的 excerpt 与库里快照可能只差空白/换行（提取时做了归一化），所以用**去空白比对**定位，
+ * 再映射回原文下标——这是"这段确实出自原文"的可视化证据，必须尽量命中而不是靠精确匹配。
+ */
+function renderSnapshotText(text: string, highlight: string): ReactNode[] {
+  const body = text ?? ''
+  const needle = (highlight ?? '').trim()
+  if (!needle) return [body]
+  // 去空白后的正文 + 到原下标的映射
+  const map: number[] = []
+  let stripped = ''
+  for (let i = 0; i < body.length; i++) {
+    if (/\s/.test(body[i])) continue
+    stripped += body[i]
+    map.push(i)
+  }
+  const needleStripped = needle.replace(/\s+/g, '')
+  if (!needleStripped) return [body]
+  const at = stripped.indexOf(needleStripped)
+  if (at < 0) return [body]
+  const start = map[at]
+  const end = map[Math.min(map.length - 1, at + needleStripped.length - 1)] + 1
+  return [
+    body.slice(0, start),
+    <mark key="hl" className="compilation-snapshot__hit">{body.slice(start, end)}</mark>,
+    body.slice(end)
+  ]
+}
+
 export interface CompilationItemView {
   id: string
   compilationId: string
@@ -125,6 +163,12 @@ interface Props {
   onRetryCompilation?: () => void
   /** 首次生成汇编（提交标题与要求） */
   onGenerate?: (instruction: string) => void
+  /** 第三批 A1：最近一次生成的网页材料统计（已锁定 / 新发现未纳入） */
+  webScan?: { sites: number; siteErrors: number; hits: number; fetched: number; skippedByCap: number; chars: number; reused?: number; newCandidates?: number } | null
+  /** 正在纳入新网页材料 */
+  adoptingWeb?: boolean
+  /** 纳入新网页材料（抓取站点上新命中但未纳入的文章并锁定到本任务） */
+  onAdoptWebMaterials?: () => void
   /** 来源引用清单（消息内 #N 渲染为可点击来源） */
   sourceRefs?: SourceRefItem[]
 }
@@ -187,6 +231,10 @@ function CompilationStep({
   onDocOpen,
   taskMessages,
   generating,
+  /** 第三批 A1：最近一次生成的网页材料情况（用于面板里的"已锁定 N 篇 / 新文章 M 篇"提示） */
+  webScan,
+  adoptingWeb,
+  onAdoptWebMaterials,
   generatingText,
   generateProgress,
   generateInterrupt,
@@ -195,6 +243,9 @@ function CompilationStep({
   sourceRefs
 }: Props) {
   const t = zhCN.compilation
+  /** 第三批 A1：网页材料提示数字（`reused`/`newCandidates` 是可缺省字段，统一取 0 后再参与判断） */
+  const webPinned = webScan?.reused ?? 0
+  const webNew = webScan?.newCandidates ?? 0
   /** 差异段按段 id 建索引（渲染时给段落上色 / 段内高亮） */
   const diffById = new Map((versionDiff?.segments ?? []).map((s) => [s.id, s]))
   /** 被删除的段落按 beforeId 归组：渲染时插回"它被删除前所在的位置"（用户 2026-09-10 要求） */
@@ -238,6 +289,23 @@ function CompilationStep({
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
   /** 当前打开「来源小卡」的来源编号（点击段尾圆标） */
   const [sourceCardFor, setSourceCardFor] = useState<number | null>(null)
+  /** 本地快照弹窗（第三批 C）：离线核对抓取当时正文；highlight = 该段引文（在正文里高亮） */
+  const [snapshot, setSnapshot] = useState<{
+    id: string
+    kind: 'file' | 'url'
+    title: string
+    snapshotAt?: string
+    publishedAt?: string
+    text: string
+    totalChars: number
+    truncated: boolean
+    shortText: boolean
+  } | null>(null)
+  const [snapshotHighlight, setSnapshotHighlight] = useState('')
+  const [snapshotLoading, setSnapshotLoading] = useState(false)
+  const [snapshotError, setSnapshotError] = useState<string | null>(null)
+  /** 来源小卡头部的元信息（抓取时间 + 正文是否过短）：打开卡片时按需读取 */
+  const [cardMeta, setCardMeta] = useState<{ snapshotAt?: string; shortText: boolean } | null>(null)
   /** 矛盾窗口是否展开（默认展开，可收起） */
   const [contradictionsOpen, setContradictionsOpen] = useState(true)
   /** 刚被「定位到该段」命中的卡片（短暂高亮，便于用户在下方列表中找到） */
@@ -257,6 +325,48 @@ function CompilationStep({
   const showHint = (el: HTMLElement, text: string): void => {
     const r = el.getBoundingClientRect()
     setHint({ x: r.left + r.width / 2, y: r.top, text })
+  }
+
+  /** 来源小卡打开时读取元信息（抓取时间 / 正文过短提示），供卡片头部展示（第三批 C） */
+  useEffect(() => {
+    if (sourceCardFor == null) {
+      setCardMeta(null)
+      return
+    }
+    const item = (compilation?.items ?? []).find((x) => x.sourceOrdinal === sourceCardFor)
+    if (!item) return
+    let alive = true
+    void window.api
+      .getSourceSnapshot(item.sourceId)
+      .then((res) => {
+        if (alive && res.ok && res.data) setCardMeta({ snapshotAt: res.data.snapshotAt, shortText: res.data.shortText })
+      })
+      .catch(() => {
+        /* 元信息读不到不影响卡片本身 */
+      })
+    return () => {
+      alive = false
+    }
+  }, [sourceCardFor, compilation])
+
+  /** 打开本地快照（读库里已存正文，不联网）；失败时给出明确提示而不是静默无反应 */
+  const openSnapshot = async (sourceId: string, highlight: string): Promise<void> => {
+    setSnapshotError(null)
+    setSnapshotLoading(true)
+    try {
+      const res = await window.api.getSourceSnapshot(sourceId)
+      if (res.ok && res.data) {
+        setSnapshotHighlight(highlight)
+        setSnapshot(res.data)
+        setSourceCardFor(null)
+      } else {
+        setSnapshotError(res.error?.message ?? '读取快照失败')
+      }
+    } catch (e) {
+      setSnapshotError(String(e))
+    } finally {
+      setSnapshotLoading(false)
+    }
   }
 
   /* ---- Phase 7.5：悬浮对话框（人机协同编辑） ---- */
@@ -323,6 +433,8 @@ function CompilationStep({
   /** 本汇编的来源编号数量 + 缺年份（时间待核）的段落数（工具栏统计） */
   const sourceCount = new Set(keptItems.map((it) => it.sourceOrdinal).filter((n): n is number => n != null)).size
   const pendingTimeCount = keptItems.filter((it) => (it.timeConfidence ?? (it.year != null ? 'exact' : 'unknown')) === 'unknown').length
+  /** 段 id → 段首时间（矛盾面板里并排标注两个说法的时间，便于判断是否同一时点） */
+  const itemTimeById = new Map(keptItems.map((it) => [it.id, it.ts ?? '']))
 
   const conflictForItem = (itemId: string): boolean => pending.some((g) => g.variants.some((v) => v.itemId === itemId))
 
@@ -452,6 +564,34 @@ function CompilationStep({
    */
   const generateBody = (
     <div className="compilation-docchat__chatpanel">
+      {/*
+        第三批 A1：网页材料集合在首次生成时落定，重新生成默认复用同一批。
+        站点上出现的新命中文章只报数量，由用户点「纳入新材料」才抓取——避免"重新生成"悄悄换材料。
+      */}
+      {webScan && (webPinned > 0 || webNew > 0) ? (
+        <div className="compilation-webinfo">
+          {webPinned > 0 ? (
+            <span>{t.webMaterialsPinned.replace('{count}', String(webPinned))}</span>
+          ) : (
+            <span>{t.webMaterialsFetched.replace('{count}', String(webScan.fetched))}</span>
+          )}
+          {webNew > 0 ? (
+            <>
+              <span className="compilation-webinfo__new">
+                {t.webMaterialsNew.replace('{count}', String(webNew))}
+              </span>
+              <button
+                type="button"
+                className="source-list__btn"
+                disabled={adoptingWeb === true}
+                onClick={() => onAdoptWebMaterials?.()}
+              >
+                {adoptingWeb ? t.webMaterialsAdopting : t.webMaterialsAdopt}
+              </button>
+            </>
+          ) : null}
+        </div>
+      ) : null}
       <ChatPanel
         messages={taskMessages ?? []}
         draftExisted={false}
@@ -655,7 +795,14 @@ function CompilationStep({
                 {g.variants.map((v) => (
                   <div key={v.id} className="compilation-variant">
                     <div className="compilation-variant-text">{v.variantText}</div>
-                    <div className="compilation-variant-src">来源：《{v.sourceTitle ?? v.sourceId}》</div>
+                    {/*
+                      第三批 D：把两个说法的**时间**并排显示，便于判断"是不是同一时点的事"——
+                      实测多数"矛盾"其实是规划/在建/投用等不同阶段的正常差异。
+                    */}
+                    <div className="compilation-variant-src">
+                      来源：《{v.sourceTitle ?? v.sourceId}》
+                      {itemTimeById.get(v.itemId) ? `　时间：${itemTimeById.get(v.itemId)}` : ''}
+                    </div>
                     <div className="compilation-variant-actions">
                       <button
                         type="button"
@@ -798,8 +945,13 @@ function CompilationStep({
                 return title ? ' 《' + title + '》' : ''
               })()}
             </h4>
-            <div className="compilation-source-card__list">
-              {keptItems
+            {cardMeta?.snapshotAt ? (
+              <p className="settings__hint">
+                {t.snapshotAt.replace('{time}', formatSnapshotTime(cardMeta.snapshotAt))}
+                {cardMeta.shortText ? '　' + t.snapshotShortBadge : ''}
+              </p>
+            ) : null}
+            <div className="compilation-source-card__list">              {keptItems
                 .filter((x) => x.sourceOrdinal === sourceCardFor)
                 .map((x) => (
                   <button
@@ -816,8 +968,21 @@ function CompilationStep({
                   </button>
                 ))}
             </div>
+            {snapshotError ? <p className="settings__hint settings__hint--err">{snapshotError}</p> : null}
             <div className="skills-manager__modal-actions">
               <button type="button" className="source-list__btn" onClick={() => setSourceCardFor(null)}>{t.cancel}</button>
+              {/* 第三批 C：网站会改版/撤稿 → 提供"查看本地快照"（读库里抓取当时的正文，不联网） */}
+              <button
+                type="button"
+                className="source-list__btn"
+                disabled={snapshotLoading}
+                onClick={() => {
+                  const item = keptItems.find((x) => x.sourceOrdinal === sourceCardFor)
+                  if (item) void openSnapshot(item.sourceId, item.excerpt)
+                }}
+              >
+                {snapshotLoading ? t.snapshotLoading : t.snapshotOpen}
+              </button>
               <button
                 type="button"
                 className="source-list__btn source-list__btn--primary"
@@ -829,6 +994,27 @@ function CompilationStep({
               >
                 {t.openSource}
               </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* 本地快照弹窗（第三批 C）：离线可核对的抓取当时正文，命中的段落引文高亮显示 */}
+      {snapshot ? (
+        <div className="skills-manager__modal-backdrop" onMouseDown={() => setSnapshot(null)}>
+          <div className="skills-manager__modal compilation-snapshot" onMouseDown={(e) => e.stopPropagation()}>
+            <h4 className="skills-manager__modal-title">{t.snapshotTitle}</h4>
+            <p className="settings__hint">
+              {snapshot.kind === 'url' ? t.snapshotUrlHint : t.snapshotFileHint}
+              {snapshot.snapshotAt ? '　' + t.snapshotAt.replace('{time}', formatSnapshotTime(snapshot.snapshotAt)) : ''}
+              {snapshot.truncated ? '　' + t.snapshotTruncated.replace('{chars}', String(snapshot.totalChars)) : ''}
+            </p>
+            {snapshot.shortText ? <p className="settings__hint settings__hint--err">{t.snapshotShort}</p> : null}
+            <div className="compilation-snapshot__body">
+              {renderSnapshotText(snapshot.text, snapshotHighlight)}
+            </div>
+            <div className="skills-manager__modal-actions">
+              <button type="button" className="source-list__btn" onClick={() => setSnapshot(null)}>{t.close}</button>
             </div>
           </div>
         </div>

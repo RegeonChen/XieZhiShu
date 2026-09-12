@@ -295,6 +295,13 @@ export function yearOfDate(value?: string | null): number | undefined {
   return year >= 1900 ? year : undefined
 }
 
+/** 标题是否像一个 URL/域名（E2：URL 里的 `t20251203` 之类数字不能被当作年份依据） */
+export function looksLikeUrl(value?: string | null): boolean {
+  const v = (value ?? '').trim()
+  if (!v) return false
+  return /^https?:\/\//i.test(v) || /^[a-z0-9.-]+\.[a-z]{2,}(\/|$)/i.test(v)
+}
+
 /**
  * 段落缺少年份时的**来源级兜底**（纯函数，优先级从高到低）：
  * 1. 年鉴/年报类标题 → 标题年份 − 1（`title-yearbook`，地方志行业惯例）；
@@ -302,16 +309,20 @@ export function yearOfDate(value?: string | null): number | undefined {
  * 3. 网页来源（kind='url'）且解析到发布时间 → 发布时间年份（`published`；网页正文常用「近日/今年」，
  *    标题里也没年份时这是唯一可靠依据）；
  * 4. 都推不出 → undefined（保持「时间待核」，**不编造**）。
+ * 注：标题若本身就是 URL/域名则**跳过第 1、2 条**——`/202512/t20251203_xxx.htm` 这类数字不是内容年份。
  */
 export function inferYearFromSource(source: {
   title?: string | null
   kind?: 'file' | 'url'
   publishedAt?: string | null
 }): InferredYear | undefined {
-  const yearbook = inferYearFromSourceTitle(source.title)
-  if (yearbook != null) return { year: yearbook, basis: 'title-yearbook' }
-  const titleYear = yearOfDate(source.title)
-  if (titleYear != null) return { year: titleYear, basis: 'title' }
+  const titleUsable = !looksLikeUrl(source.title)
+  if (titleUsable) {
+    const yearbook = inferYearFromSourceTitle(source.title)
+    if (yearbook != null) return { year: yearbook, basis: 'title-yearbook' }
+    const titleYear = yearOfDate(source.title)
+    if (titleYear != null) return { year: titleYear, basis: 'title' }
+  }
   if (source.kind === 'url') {
     const published = yearOfDate(source.publishedAt)
     if (published != null) return { year: published, basis: 'published' }

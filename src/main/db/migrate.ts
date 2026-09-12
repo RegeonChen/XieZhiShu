@@ -990,6 +990,25 @@ UPDATE sources SET published_at = (
     sql: `
 ALTER TABLE sources ADD COLUMN index_error TEXT;
 `
+  },
+  {
+    // 2026-09-12（第三批 A1）：**网页材料集合在首次生成时落定**。
+    // 动因：此前每次生成都会重新发现并抓取最新命中文章，同一指令在不同时间生成的材料集合不同；
+    // 用户点「重新生成汇编」时可能引入从未见过的网页段落，还会污染版本差异与矛盾编号。
+    // 现在把"某任务实际采用的网页来源"记在这张表里：重新生成默认复用同一批，
+    // 新发现但未纳入的文章只报数量（由用户点「纳入新材料」才抓取入库）。
+    version: 39,
+    sql: `
+CREATE TABLE IF NOT EXISTS task_web_materials (
+    task_id TEXT NOT NULL REFERENCES writing_tasks(id) ON DELETE CASCADE,
+    source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    url TEXT,
+    title TEXT,
+    added_at TEXT NOT NULL,
+    PRIMARY KEY (task_id, source_id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_web_materials_task ON task_web_materials(task_id);
+`
   }
 ]
 

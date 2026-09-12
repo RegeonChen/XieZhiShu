@@ -25,7 +25,7 @@ import { getProviderSecret } from '../llm/provider-store'
 import { safeStorageCodec } from '../llm/secret'
 import { chatCompletion, type ChatMessage } from '../llm/chat'
 import { logMain } from '../logger'
-import { fetchRelatedSiteSources, extractTopicTerms, expandDomainHints, type WebFetchStats } from '../web-source/site-crawler'
+import { fetchRelatedSiteSources, collectSiteCandidates, extractTopicTerms, expandDomainHints, type WebFetchStats } from '../web-source/site-crawler'
 import { assembleDocument, parseTimeLabel, stripSpaces, textSimilarity, type AssembledParagraph } from './compilation-document'
 import {
   emptyExtractStats,
@@ -49,6 +49,7 @@ import {
   type CompilationItemInput,
   type CompilationContradictionInput
 } from '../db/compilations'
+import { listPinnedWebMaterials, pinWebMaterials } from '../db/web-materials'
 
 const COMPILATION_TIMEOUT_MS = 600000
 const WINDOW_MAX_CHARS = 30000
@@ -620,6 +621,19 @@ async function scanCardContradictions(
     '你是一名地方志资料校对员。下面给出若干【资料卡片】（每条含编号、来源、时间、摘录），它们都已按“可能描述同一事实”预筛过。',
     '请只比较同一事实的不同说法：数据、时间、地点、主体或结果相互矛盾时，归为一组矛盾。',
     '多数卡片并不冲突；没有实质冲突时直接输出空数组。不要输出解释或其它文字。',
+    /*
+     * 2026-09-12（第三批 D）：真实数据里 5+ 组"矛盾"多数是**同一件事在不同阶段/口径下的正常差异**——
+     * 规划班级数 vs 建成班级数、在建 vs 投用时间、预计投资 vs 实际投资、累计 vs 当年。
+     * 这类差异是志书要如实分阶段记述的内容，不是需要用户裁定的冲突；在这里把它们排除，
+     * 用户的裁定负担才落在真正的冲突上。
+     */
+    '**以下情形不算矛盾，不要归组**：',
+    '① 同一事实在不同时点/阶段的表述（规划 vs 建成、在建 vs 投用、预计 vs 实际、一期 vs 二期、初稿 vs 定稿）；',
+    '② 统计口径不同的并存数据（累计 vs 当年、全口径 vs 某一类别、含/不含某部分）；',
+    '③ 仅措辞、详略、单位换算或四舍五入不同的表述；',
+    '④ 一条比另一条信息更全，且更全的那条与另一条并不冲突。',
+    '只有当**同一时点、同一口径**下，数据/时间/地点/主体/结果明确不同，才算矛盾（例：同一年的新增园所数两个来源给出不同数字）。',
+    '判断时请利用每条卡片给出的「时间」字段：时间不同的两条通常属于情形 ①。',
     '只输出一个 JSON 对象，不得输出其它文字或代码块围栏：',
     '"contradictions":[{"topic":"事实主题","kind":"data|time|place|fact|other","cardIndices":[1,3]}]'
   ].join('\n')
@@ -885,24 +899,57 @@ export async function generateCompilation(
    * 而且明知不会调用大模型还白等近 10 分钟抓取（2026-09-12 第二批）。
    * 注意查询向量由**本地嵌入模型**生成，与是否配置 LLM Provider 无关。
    */
-  const webStats: WebFetchStats = { sites: 0, hits: 0, fetched: 0, skippedByCap: 0, chars: 0 }
+  const webStats: WebFetchStats = { sites: 0, siteErrors: 0, hits: 0, fetched: 0, skippedByCap: 0, chars: 0, reused: 0, newCandidates: 0 }
   if (!prov.ok) {
     logMain('compilation', '未配置大模型：跳过网页资料抓取，改用本地闸门材料生成降级汇编')
   } else {
-    onProgress?.({ stage: '正在检索网页资料库…', percent: 8, etaSeconds: preWindowEta(PHASE_RECALL_ETA_S + PHASE_GATE_ETA_S) })
-    const web = await fetchRelatedSiteSources(coarseQuery, taskId).catch(() => ({ ids: [] as string[], stats: webStats }))
-    Object.assign(webStats, web.stats)
-    if (web.ids.length > 0) {
-      scopeIds = Array.from(new Set([...scopeIds, ...web.ids]))
-      /*
-       * 网页文章必须先进入向量索引，否则保守闸门查不到它们的向量，只能靠词法命中——
-       * "字面无关但语义相关"的网页段落会被整篇丢掉（本地资料库一直有索引兜底，网页此前没有）。
-       * 索引以预算为上限，超预算或个别失败都不阻断生成（只是少一层向量兜底）。
-       */
-      onProgress?.({ stage: '正在为网页资料建立检索索引…', percent: 9, etaSeconds: preWindowEta(PHASE_GATE_ETA_S) })
-      const idx = await ensureSourcesIndexed(web.ids).catch(() => ({ indexed: 0, failed: 0, skipped: 0 }))
-      if (idx.failed > 0 || idx.skipped > 0) {
-        logMain('compilation', `网页资料索引 就绪=${idx.indexed} 失败=${idx.failed} 超预算跳过=${idx.skipped}（这些文章本轮只能靠词法命中）`)
+    /*
+     * 第三批 A1：网页材料集合在**首次生成**时落定，重新生成复用同一批。
+     * 这样同一任务连续生成的汇编材料一致（可复现、版本差异干净）；
+     * 期间站点有新文章时只统计数量并告知用户，由他点「纳入新材料」才抓取。
+     */
+    const pinned = listPinnedWebMaterials(taskId)
+    if (pinned.length > 0) {
+      const stillThere = new Set(getSourcesByIds(pinned.map((p) => p.sourceId)).map((s) => s.id))
+      const usable = pinned.filter((p) => stillThere.has(p.sourceId))
+      scopeIds = Array.from(new Set([...scopeIds, ...usable.map((p) => p.sourceId)]))
+      webStats.reused = usable.length
+      onProgress?.({ stage: `正在核对网页材料（复用已锁定的 ${usable.length} 篇）…`, percent: 8, etaSeconds: preWindowEta(PHASE_RECALL_ETA_S + PHASE_GATE_ETA_S) })
+      const collected = await collectSiteCandidates(coarseQuery, new Set(pinned.map((p) => p.url ?? ''))).catch(() => null)
+      if (collected) {
+        Object.assign(webStats, {
+          sites: collected.stats.sites,
+          siteErrors: collected.stats.siteErrors,
+          hits: collected.stats.hits,
+          newCandidates: collected.candidates.length
+        })
+        if (collected.candidates.length > 0) {
+          logMain('compilation', `网页材料已锁定：复用 ${usable.length} 篇；另有 ${collected.candidates.length} 篇新命中文章未纳入（用户可在面板点「纳入新材料」）`)
+        }
+      }
+    } else {
+      onProgress?.({ stage: '正在检索网页资料库…', percent: 8, etaSeconds: preWindowEta(PHASE_RECALL_ETA_S + PHASE_GATE_ETA_S) })
+      const web = await fetchRelatedSiteSources(coarseQuery, taskId).catch(() => ({ ids: [] as string[], stats: webStats }))
+      Object.assign(webStats, web.stats)
+      if (web.ids.length > 0) {
+        scopeIds = Array.from(new Set([...scopeIds, ...web.ids]))
+        // A1：把本轮实际采用的网页来源**锁定**到该任务（重新生成默认复用这一批）
+        const sources = getSourcesByIds(web.ids)
+        const pinnedCount = pinWebMaterials(
+          taskId,
+          sources.map((s) => ({ sourceId: s.id, url: s.url, title: s.title }))
+        )
+        logMain('compilation', `网页材料首次落定：锁定 ${pinnedCount} 篇（本任务后续生成默认复用）`)
+        /*
+         * 网页文章必须先进入向量索引，否则保守闸门查不到它们的向量，只能靠词法命中——
+         * "字面无关但语义相关"的网页段落会被整篇丢掉（本地资料库一直有索引兜底，网页此前没有）。
+         * 索引以预算为上限，超预算或个别失败都不阻断生成（只是少一层向量兜底）。
+         */
+        onProgress?.({ stage: '正在为网页资料建立检索索引…', percent: 9, etaSeconds: preWindowEta(PHASE_GATE_ETA_S) })
+        const idx = await ensureSourcesIndexed(web.ids).catch(() => ({ indexed: 0, failed: 0, skipped: 0 }))
+        if (idx.failed > 0 || idx.skipped > 0) {
+          logMain('compilation', `网页资料索引 就绪=${idx.indexed} 失败=${idx.failed} 超预算跳过=${idx.skipped}（这些文章本轮只能靠词法命中）`)
+        }
       }
     }
   }

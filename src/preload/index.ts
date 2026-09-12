@@ -275,6 +275,14 @@ const api = {
   reindexRag(): Promise<ApiResult<{ queued: number; reset: number }>> {
     return ipcRenderer.invoke(IPC.RAG_REINDEX)
   },
+  /** 来源本地快照（第三批 C）：读库里已存的正文，不联网；用于"网站改版后仍能核对原文" */
+  getSourceSnapshot(id: string): Promise<ApiResult<{ id: string; kind: 'file' | 'url'; title: string; url?: string; snapshotAt?: string; publishedAt?: string; text: string; totalChars: number; truncated: boolean; shortText: boolean }>> {
+    return ipcRenderer.invoke(IPC.SOURCES_GET_SNAPSHOT, { id })
+  },
+  /** 纳入新网页材料（第三批 A1）：抓取站点上新出现且未纳入的命中文章并锁定到本任务 */
+  adoptWebMaterials(taskId: string, query: string): Promise<ApiResult<{ added: number; skippedByCap: number; siteErrors: number }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_ADOPT_WEB_MATERIALS, { taskId, query })
+  },
   /** 工作区状态（目录 + 资料统计） */
   getWorkspaceStatus(): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.WORKSPACE_STATUS)

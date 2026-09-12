@@ -64,12 +64,16 @@ import {
   type WorkspaceSourceRemovalDecideRes,
   type RagIndexStatusRes,
   type RagReindexRes,
+  type SourceSnapshotReq,
+  type SourceSnapshotRes,
+  type CompilationAdoptWebMaterialsReq,
+  type CompilationAdoptWebMaterialsRes,
   type SourceDeleteRes,
   type SourceDeleteManyRes
 } from '../shared/ipc'
 import type { ApiResult, Source, Tag, LlmProviderConfig, AppSettings, WritingTask, Draft, RetrievedChunk } from '../shared/types'
 import { getDb } from './db/connection'
-import { listSources, getSourceById, deleteSource, deleteSources, updateSourceTitle, updateSourceFingerprint } from './db/sources'
+import { listSources, getSourceById, getSourcesByIds, deleteSource, deleteSources, updateSourceTitle, updateSourceFingerprint } from './db/sources'
 import { listTags, createTag, updateTag, deleteTag, addTagToSource, removeTagFromSource, getTagsBySource, batchAddTags, searchTags, getSourceIdsByTag } from './db/tags'
 import { importFiles, importUrl } from './import'
 import { setPdfCmapsDir } from './import/file-parser'
@@ -122,7 +126,9 @@ import { generateDraft, regenerateDraft, retrieveForTask, chatWithTask } from '.
 import { applyContradictionEdit } from './writing/contradiction-apply'
 import { askSourceForTask } from './writing/source-query'
 import { configureEmbedModel, getEmbedEngineStats, stopEmbedWorker } from './rag/embed'
-import { enqueueIndex, getIndexStatus, getQueueSize, getRebuildProgress, initIndexingState, requeuePendingIndexes } from './rag/indexer'
+import { enqueueIndex, getIndexStatus, getQueueSize, getRebuildProgress, initIndexingState, requeuePendingIndexes, ensureSourcesIndexed } from './rag/indexer'
+import { listPinnedWebMaterials, pinWebMaterials } from './db/web-materials'
+import { collectSiteCandidates, importSiteCandidates } from './web-source/site-crawler'
 import { summarizeAllPending, getSourceSummary } from './rag/summarizer'
 import { getWorkspaceDir, type ReconcileProgress } from './workspace/reconcile'
 import { startWorkspaceWatcher, restartWorkspaceWatcher, stopWorkspaceWatcher } from './workspace/watcher'
@@ -1193,6 +1199,58 @@ handleLogged(IPC.RAG_REINDEX, (): ApiResult<RagReindexRes> => {
     const res = requeuePendingIndexes(true)
     logMain('rag', `重建索引：重置失败 ${res.reset} 篇，排队 ${res.queued} 篇`)
     return { ok: true, data: res }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 纳入新网页材料（第三批 A1）：材料集合首次落定后，站点新出现的命中文章由用户显式纳入
+handleLogged(IPC.COMPILATION_ADOPT_WEB_MATERIALS, async (_event, params: CompilationAdoptWebMaterialsReq): Promise<ApiResult<CompilationAdoptWebMaterialsRes>> => {
+  try {
+    if (!params.taskId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
+    const pinned = listPinnedWebMaterials(params.taskId)
+    const collected = await collectSiteCandidates(params.query, new Set(pinned.map((p) => p.url ?? '')))
+    if (collected.candidates.length === 0) {
+      return { ok: true, data: { added: 0, skippedByCap: 0, siteErrors: collected.stats.siteErrors } }
+    }
+    const imported = await importSiteCandidates(collected.candidates, params.query, params.taskId)
+    const sources = getSourcesByIds(imported.ids)
+    const added = pinWebMaterials(params.taskId, sources.map((s) => ({ sourceId: s.id, url: s.url, title: s.title })))
+    if (imported.ids.length > 0) {
+      // 新纳入的文章要先索引，重新生成时才能被语义召回覆盖
+      const idx = await ensureSourcesIndexed(imported.ids).catch(() => ({ indexed: 0, failed: 0, skipped: 0 }))
+      logMain('compilation', `纳入新网页材料：新增 ${added} 篇（索引就绪 ${idx.indexed}、失败 ${idx.failed}、超预算 ${idx.skipped}）`)
+    }
+    return { ok: true, data: { added, skippedByCap: imported.stats.skippedByCap, siteErrors: collected.stats.siteErrors } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 来源本地快照（第三批 C）：只读库里已存的正文，不联网——网页改版/撤稿后仍可核对原文
+handleLogged(IPC.SOURCES_GET_SNAPSHOT, (_event, params: SourceSnapshotReq): ApiResult<SourceSnapshotRes> => {
+  try {
+    const source = getSourceById(params.id)
+    if (!source) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料不存在' } }
+    const full = source.cleanedText ?? ''
+    const LIMIT = 200000
+    const truncated = full.length > LIMIT
+    // E3：正文过短（<500 字）多为只抓到导航/页脚，提示用户该篇可信度存疑
+    return {
+      ok: true,
+      data: {
+        id: source.id,
+        kind: source.kind,
+        title: source.title,
+        url: source.url,
+        snapshotAt: source.urlSnapshotAt,
+        publishedAt: source.publishedAt,
+        text: truncated ? full.slice(0, LIMIT) : full,
+        totalChars: full.length,
+        truncated,
+        shortText: full.trim().length > 0 && full.trim().length < 500
+      }
+    }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }

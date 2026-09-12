@@ -484,6 +484,17 @@ export const zhCN = {
     pendingContradictions: '{count} 组矛盾待处理',
     noContradictions: '无未处理矛盾',
     openSource: '打开来源',
+    /* 第三批 C：本地快照（网站改版/撤稿后仍能核对抓取当时的原文） */
+    snapshotOpen: '查看本地快照',
+    snapshotLoading: '读取中…',
+    snapshotTitle: '本地快照正文（抓取时保存，不联网）',
+    snapshotUrlHint: '这是软件在抓取该网页时保存下来的正文快照，与当前线上页面可能已不一致。',
+    snapshotFileHint: '这是该资料入库时解析出的正文。',
+    snapshotAt: '抓取于 {time}',
+    snapshotTruncated: '（正文过长，仅显示前 {chars} 字中的一部分）',
+    /* E3：正文过短多为只抓到导航/页脚，提示该篇可信度存疑 */
+    snapshotShort: '注意：这篇的正文很短（可能只抓到导航/页脚，正文由脚本加载），引用时请谨慎核对。',
+    snapshotShortBadge: '（正文过短，可信度存疑）',
     cancel: '取消',
     resolve: '采纳该说法',
     ignore: '忽略该矛盾',
@@ -536,6 +547,19 @@ export const zhCN = {
     /* 网页资料抓取情况（2026-09-12 第二批）：如实告知本轮用了多少网页材料、是否被上限截断 */
     webScan: '网页资料：标题命中 {hits} 篇，实际采用 {fetched} 篇（{chars} 字）',
     webScanCapped: '（另有 {count} 篇因抓取上限未采用，可提高上限或分多次生成）',
+    webScanSiteErrors: '（注意：{count} 个站点同步失败，本轮网页材料可能不完整）',
+    webScanEmpty: '（本次未取得任何网页文章：标题未命中或正文未通过精过滤）',
+    webScanReused: '网页资料：复用已锁定的 {count} 篇材料',
+    webScanNewCandidates: '（站点上另有 {count} 篇新命中文章未纳入，可在生成面板点「纳入新材料」）',
+    /* 第三批 A1：网页材料集合首次落定后的提示与"纳入新材料"入口 */
+    webMaterialsPinned: '本任务已锁定 {count} 篇网页材料（重新生成将复用同一批）',
+    webMaterialsFetched: '本次新采用 {count} 篇网页材料',
+    webMaterialsNew: '站点上另有 {count} 篇新命中文章未纳入',
+    webMaterialsAdopt: '纳入新材料',
+    webMaterialsAdopting: '纳入中…',
+    webMaterialsAdopted: '已纳入 {count} 篇新网页材料；点「重新生成汇编」即可使用（材料集合会随本次纳入而更新）。',
+    webMaterialsAdoptNone: '没有可纳入的新文章（站点无新命中或已全部纳入）。',
+    webMaterialsAdoptFailed: '纳入新网页材料失败：{message}',
     /* 大模型修正（2026-09-08 引入）已随 Phase 7.7 整体移除：软件内不再有「修正记录」概念 */
     recycleBin: '回收站',
     recycleBinTitle: '回收站',
