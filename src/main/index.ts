@@ -66,10 +66,6 @@ import {
   type RagReindexRes,
   type SourceSnapshotReq,
   type SourceSnapshotRes,
-  type CompilationAdoptWebMaterialsReq,
-  type CompilationAdoptWebMaterialsRes,
-  type CompilationRefreshWebMaterialsReq,
-  type CompilationRefreshWebMaterialsRes,
   type CompilationWebMaterialsReq,
   type CompilationWebMaterialsRes,
   type SourceDeleteRes,
@@ -77,7 +73,7 @@ import {
 } from '../shared/ipc'
 import type { ApiResult, Source, Tag, LlmProviderConfig, AppSettings, WritingTask, Draft, RetrievedChunk } from '../shared/types'
 import { getDb } from './db/connection'
-import { listSources, getSourceById, getSourcesByIds, deleteSource, deleteSources, updateSourceTitle, updateSourceFingerprint } from './db/sources'
+import { listSources, getSourceById, deleteSource, deleteSources, updateSourceTitle, updateSourceFingerprint } from './db/sources'
 import { listTags, createTag, updateTag, deleteTag, addTagToSource, removeTagFromSource, getTagsBySource, batchAddTags, searchTags, getSourceIdsByTag } from './db/tags'
 import { importFiles, importUrl } from './import'
 import { setPdfCmapsDir } from './import/file-parser'
@@ -130,9 +126,8 @@ import { generateDraft, regenerateDraft, retrieveForTask, chatWithTask } from '.
 import { applyContradictionEdit } from './writing/contradiction-apply'
 import { askSourceForTask } from './writing/source-query'
 import { configureEmbedModel, getEmbedEngineStats, stopEmbedWorker } from './rag/embed'
-import { enqueueIndex, getIndexStatus, getQueueSize, getRebuildProgress, initIndexingState, requeuePendingIndexes, ensureSourcesIndexed } from './rag/indexer'
-import { clearPinnedWebMaterials, listPinnedWebMaterials, pinWebMaterials } from './db/web-materials'
-import { collectSiteCandidates, fetchRelatedSiteSources, importSiteCandidates } from './web-source/site-crawler'
+import { enqueueIndex, getIndexStatus, getQueueSize, getRebuildProgress, initIndexingState, requeuePendingIndexes } from './rag/indexer'
+import { listPinnedWebMaterials } from './db/web-materials'
 import { summarizeAllPending, getSourceSummary } from './rag/summarizer'
 import { getWorkspaceDir, type ReconcileProgress } from './workspace/reconcile'
 import { startWorkspaceWatcher, restartWorkspaceWatcher, stopWorkspaceWatcher } from './workspace/watcher'
@@ -1208,61 +1203,10 @@ handleLogged(IPC.RAG_REINDEX, (): ApiResult<RagReindexRes> => {
   }
 })
 
-// 纳入新网页材料（第三批 A1）：材料集合首次落定后，站点新出现的命中文章由用户显式纳入
-handleLogged(IPC.COMPILATION_ADOPT_WEB_MATERIALS, async (_event, params: CompilationAdoptWebMaterialsReq): Promise<ApiResult<CompilationAdoptWebMaterialsRes>> => {
-  try {
-    if (!params.taskId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
-    const pinned = listPinnedWebMaterials(params.taskId)
-    const collected = await collectSiteCandidates(params.query, new Set(pinned.map((p) => p.url ?? '')))
-    if (collected.candidates.length === 0) {
-      return { ok: true, data: { added: 0, skippedByCap: 0, siteErrors: collected.stats.siteErrors } }
-    }
-    const imported = await importSiteCandidates(collected.candidates, params.query, params.taskId)
-    const sources = getSourcesByIds(imported.ids)
-    const added = pinWebMaterials(params.taskId, sources.map((s) => ({ sourceId: s.id, url: s.url, title: s.title })))
-    if (imported.ids.length > 0) {
-      // 新纳入的文章要先索引，重新生成时才能被语义召回覆盖
-      const idx = await ensureSourcesIndexed(imported.ids).catch(() => ({ indexed: 0, failed: 0, skipped: 0 }))
-      logMain('compilation', `纳入新网页材料：新增 ${added} 篇（索引就绪 ${idx.indexed}、失败 ${idx.failed}、超预算 ${idx.skipped}）`)
-    }
-    return { ok: true, data: { added, skippedByCap: imported.stats.skippedByCap, siteErrors: collected.stats.siteErrors } }
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-})
-
 /*
- * 重新检索网页材料（第三批 A1 补强）：
- * 首次落定的材料集合若不理想（典型情形：抓取上限按错误的顺序截断，把切题文章挡在门外），
- * 用户不必新建任务——清空锁定集合后重新"发现 → 按标题相关度排序 → 抓取（含上限）→ 重新锁定"。
- * 只改材料集合，不动已有汇编：需用户再点「重新生成汇编」才生效。
- * 旧的任务绑定网页来源（sources.task_id）保留在库里作缓存，但不再并入检索范围（范围只并 pin 住的）。
+ * 已锁定的网页材料篇数（只读）：让面板显示「本任务已锁定 N 篇」，重启软件后同样可见
+ * （不依赖"本次会话生成过一次"）。
  */
-handleLogged(IPC.COMPILATION_REFRESH_WEB_MATERIALS, async (_event, params: CompilationRefreshWebMaterialsReq): Promise<ApiResult<CompilationRefreshWebMaterialsRes>> => {
-  try {
-    if (!params.taskId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
-    const cleared = clearPinnedWebMaterials(params.taskId)
-    const web = await fetchRelatedSiteSources(params.query, params.taskId)
-    const sources = getSourcesByIds(web.ids)
-    const pinned = pinWebMaterials(params.taskId, sources.map((s) => ({ sourceId: s.id, url: s.url, title: s.title })))
-    if (web.ids.length > 0) {
-      const idx = await ensureSourcesIndexed(web.ids).catch(() => ({ indexed: 0, failed: 0, skipped: 0 }))
-      logMain(
-        'compilation',
-        `重新检索网页材料：清空 ${cleared} 篇 → 采用 ${web.stats.fetched} 篇 / ${web.stats.chars} 字（锁定 ${pinned} 篇，上限跳过 ${web.stats.skippedByCap} 篇，站点失败 ${web.stats.siteErrors}；索引就绪 ${idx.indexed}、失败 ${idx.failed}、超预算 ${idx.skipped}）`
-      )
-    } else {
-      logMain('compilation', `重新检索网页材料：清空 ${cleared} 篇 → 本轮没有取到网页材料（站点失败 ${web.stats.siteErrors}）`)
-    }
-    return { ok: true, data: { ...web.stats, pinned, cleared } }
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-})
-
-// 已锁定的网页材料篇数（第三批 A1 补强，只读）：让面板在非生成状态/重启后也能显示
-// 「本任务已锁定 N 篇」与「重新检索网页材料」入口——此前该入口只在生成模式下才渲染，
-// 而重新生成又会先按旧集合复用，用户根本够不到"换一批材料"。
 handleLogged(IPC.COMPILATION_WEB_MATERIALS, (_event, params: CompilationWebMaterialsReq): ApiResult<CompilationWebMaterialsRes> => {
   try {
     if (!params.taskId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
