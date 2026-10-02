@@ -123,7 +123,10 @@ export const zhCN = {
     summaryTitle: '资料摘要',
     keywords: '主题词',
     entities: '关键实体',
-    back: '返回'
+    back: '返回',
+    // 大文档分批渲染（Phase 8 / S2）：还有 N 块未渲染时显示
+    moreRemaining: '为加快打开速度，剩余 {n} 部分未展开',
+    revealAll: '全部展开'
   },
   sourceStatus: {
     ready: '已就绪',
