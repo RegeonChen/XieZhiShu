@@ -486,6 +486,10 @@ export const zhCN = {
     pendingTimeHint: '这些段落的时间标签里没有年份，无法按年份分节与排序',
     pendingYearSuffix: '（待补年份）',
     sourceBadgeTitle: '来自本汇编第 {n} 篇来源（点击查看该来源的段落）',
+    /* Phase 7.12 多来源标注：一段由多个来源共同记载时，除主来源外再标出并列来源 */
+    sourceBadgeAlsoTitle: '另一处出处：本汇编第 {n} 篇来源（点击查看该来源的段落）',
+    sourceMultiHint: '这段由 {count} 个来源共同记载：',
+    sourceMultiCurrent: '当前查看',
     noTime: '无时间',
     pendingContradictions: '{count} 组矛盾待处理',
     noContradictions: '无未处理矛盾',
@@ -589,7 +593,9 @@ export const zhCN = {
     messageWorkspace: '检测到您刚刚从工作区中删除了一个文件《{title}》，请问是否需要删除资料汇编中所有来源于该文件的条目？（{summary}）',
     messageManual: '您正在删除资料《{title}》，该资料已被资料汇编引用（{summary}），请问是否需要一并删除资料汇编中所有来源于该资料的条目？',
     confirm: '是，删除资料汇编条目',
-    cancel: '否，保留'
+    cancel: '否，保留',
+    /* Phase 7.12（多来源）：还有其它来源共同记载的段不会被删，主来源会改指剩下的那个来源 */
+    sharedNote: '其中 {count} 段还有其它来源共同记载，将保留并改指其它来源'
   },
   draftEditor: {
     saving: '保存中...',
