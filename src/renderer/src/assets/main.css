@@ -1092,8 +1092,22 @@ body {
   padding: 16px 0;
 }
 
+/* Phase 8 / S1：表头（「返回 / 用系统默认程序打开 / 关闭」一行 + 定位条「上一处/下一处」）
+   一并吸顶固化，不随正文滚动消失。要点与 PDF 工具栏相同：链路上只能有一个真正的滚动容器
+   （资料库是 .work-pane，生成汇编分栏是 .writing-workspace__source），中间不得再出现 overflow 祖先。 */
 .source-viewer__header {
+  position: sticky;
+  top: 0;
+  z-index: 6;
   margin-bottom: 20px;
+  /* 必须不透明：否则正文会从表头底下透出来（默认 = 工作栏背景色） */
+  background: var(--bg-primary);
+  /* 用浅阴影而不是 border：正文自带 border-top，加边框会出现两条线 */
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+/* 生成汇编的分栏背景是面板色，表头要跟着它，吸顶时才看不出色差 */
+.writing-workspace__source .source-viewer__header {
+  background: var(--bg-panel);
 }
 
 .source-viewer__back {
@@ -1353,10 +1367,12 @@ body {
      实际滚动发生在外层 .work-pane，工具栏吸顶挂在它上面。 */
 }
 
-/* 工具栏固定在栏顶（不随 PDF 滚动消失）：页码跳转 / 上一页 / 下一页 / 缩放 */
+/* 工具栏固定在栏顶（不随 PDF 滚动消失）：页码跳转 / 上一页 / 下一页 / 缩放。
+   `--source-sticky-top` 由 SourceViewer 按表头实测高度写入：表头也吸顶，工具栏要挂在它下面，
+   否则两者都停在 top: 0 会互相盖住。 */
 .pdf-viewer__toolbar {
   position: sticky;
-  top: 0;
+  top: var(--source-sticky-top, 0px);
   z-index: 5;
   display: flex;
   align-items: center;

@@ -92,6 +92,9 @@ function SourceViewer({
   const [externalError, setExternalError] = useState<string | null>(null)
 
   const hostRef = useRef<HTMLDivElement | null>(null)
+  const headerRef = useRef<HTMLDivElement | null>(null)
+  /** 表头（操作行 + 定位行）吸顶后的实际高度：PDF 工具栏要挂在它下面，否则两者会在 top:0 重叠 */
+  const [stickyTop, setStickyTop] = useState(0)
   /** 上一次算出的命中矩形（等值短路：避免 ResizeObserver 与重渲染互相触发） */
   const locateRectsRef = useRef<LocateRect[]>([])
   const needles = useMemo(() => (locate?.snippet ? buildNeedles(locate.snippet) : []), [locate?.snippet])
@@ -259,6 +262,21 @@ function SourceViewer({
     return () => ro.disconnect()
   }, [refreshLocate, data, htmlContent, fileUrl])
 
+  /**
+   * 量出吸顶表头的高度（标题可能两行、标签/元信息会换行、定位条时有时无），
+   * 通过 CSS 变量交给 PDF 工具栏做 `top`，两行才能一上一下叠着吸顶而不是互相盖住。
+   */
+  useEffect(() => {
+    const el = headerRef.current
+    if (!el) return
+    const measure = (): void => setStickyTop(el.offsetHeight)
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [data, htmlContent, locate?.snippet, locateState, externalError, dense])
+
   /** 当前命中的矩形滚动到视野中间：直接让覆盖层自己 scrollIntoView（比手工算滚动位置更准） */
   const focusActiveHit = useCallback(() => {
     const host = hostRef.current
@@ -333,8 +351,11 @@ function SourceViewer({
     ) : null
 
   return (
-    <div className={`source-viewer${dense ? ' source-viewer--dense' : ''}`}>
-      <div className="source-viewer__header">
+    <div
+      className={`source-viewer${dense ? ' source-viewer--dense' : ''}`}
+      style={{ ['--source-sticky-top' as string]: `${stickyTop}px` } as React.CSSProperties}
+    >
+      <div className="source-viewer__header" ref={headerRef}>
         <div className="source-viewer__header-actions">
           {onBack ? (
             <button type="button" className="source-viewer__back" onClick={onBack} title={zhCN.sourceViewer.back}>

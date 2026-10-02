@@ -1130,6 +1130,9 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 
 **本轮未做**：PDF 的文字层定位（S3）、网页内置浏览器（S4）；资料库侧仍按"打开整篇资料"处理，未做锚定入口（S4 一并处理）。
 
+**实测反馈追加（2026-10-02）**：用户要求「返回 / 用系统默认程序打开」那一行与「上一处 / 下一处」那一行**一并吸顶固化**。做法：`.source-viewer__header`（含操作行 + 标题/标签/元信息 + 定位条）整体 `position: sticky; top: 0; z-index: 6` + 不透明底色（默认 `--bg-primary`，生成汇编分栏内改 `--bg-panel`，与该栏背景一致）+ 浅阴影（**不用 border**：正文自带 `border-top`，加边框会出现两条线）。
+**随之必须处理的冲突**：PDF 工具栏此前也吸顶在 `top: 0`，两者会互相盖住 → `SourceViewer` 用 `ResizeObserver` 量出表头**实测高度**写入 CSS 变量 `--source-sticky-top`，`.pdf-viewer__toolbar` 改为 `top: var(--source-sticky-top, 0px)`，于是工具栏挂在表头**下面**逐层吸顶（标题两行 / 标签 / 元信息换行 / 定位条有无都能自适应）。验证：typecheck 零错误、**304/305 单测通过**、生产构建成功（CSS 130.62 kB / JS 4,221.87 kB）。
+
 ## Last Phase（收尾阶段）: Acceptance & Packaging（待进行）
 > **说明**：本阶段是**整个项目的收尾阶段**，在所有功能阶段（Phase 1–6.x）全部完成后才执行。此处保留「Phase 5」的旧编号仅为历史追溯，不代表其应在 Phase 6 之前完成；序号与执行顺序无关。
 
