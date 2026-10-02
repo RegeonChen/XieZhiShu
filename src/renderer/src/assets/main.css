@@ -4713,6 +4713,40 @@ textarea:focus-visible {
   background: var(--accent);
   color: var(--bg);
 }
+/* Phase 7.12 多来源标注：并列来源圆标（同一段还有别的出处）——虚线描边与主来源区分，
+   刻意不用颜色区分（classic 主题的 accent 是暗红，靠颜色容易误读成"警告"） */
+.compilation-src-badge.is-also {
+  border-style: dashed;
+  opacity: 0.85;
+}
+/* 来源小卡里的「本段共有 N 个出处」行：可点编号切换查看 */
+.compilation-source-card__multi {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.compilation-source-card__chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px dashed var(--border);
+  background: transparent;
+  color: var(--fg);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.compilation-source-card__chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.compilation-source-card__chip.is-current {
+  border-style: solid;
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+  cursor: default;
+}
 .compilation-chip.is-pending {
   color: var(--warning);
   background: var(--bg-elevated);

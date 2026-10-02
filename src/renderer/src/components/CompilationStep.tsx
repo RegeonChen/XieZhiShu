@@ -75,6 +75,12 @@ export interface CompilationItemView {
   timeConfidence?: 'exact' | 'inferred' | 'unknown'
   /** 段尾来源圆标数字（指向本汇编的来源编号 1..N） */
   sourceOrdinal?: number
+  /**
+   * 并列来源编号 / 标题（Phase 7.12）：同一件事被多个来源分别收录、合并为一段时的**其它出处**。
+   * 与 `alsoSourceTitles` 一一对应；不含主来源 `sourceOrdinal`。
+   */
+  alsoSourceOrdinals?: number[]
+  alsoSourceTitles?: string[]
 }
 
 export interface CompilationVariantView {
@@ -300,6 +306,8 @@ function CompilationStep({
     shortText: boolean
   } | null>(null)
   const [snapshotHighlight, setSnapshotHighlight] = useState('')
+  /** 点开来源小卡的那一段（Phase 7.12：用于在小卡里列出"本段共有哪几个出处"） */
+  const [sourceCardFromItemId, setSourceCardFromItemId] = useState<string | null>(null)
   const [snapshotLoading, setSnapshotLoading] = useState(false)
   const [snapshotError, setSnapshotError] = useState<string | null>(null)
   /** 来源小卡头部的元信息（抓取时间 + 正文是否过短）：打开卡片时按需读取 */
@@ -909,18 +917,39 @@ function CompilationStep({
                         )
                       : renderInlineMarkdown(it.excerpt)}
                   </span>
+                  {/* Phase 7.12 多来源标注：主来源圆标 + 并列来源圆标（并列来源用细描边区分）。
+                      点击任一个都打开该来源的小卡；「列出本段全部出处」在小卡里给出。 */}
                   {it.sourceOrdinal != null ? (
                     <button
                       type="button"
                       className="compilation-src-badge"
                       aria-label={t.sourceBadgeTitle.replace('{n}', String(it.sourceOrdinal))}
-                      onClick={() => setSourceCardFor(it.sourceOrdinal ?? null)}
+                      onClick={() => {
+                        setSourceCardFromItemId(it.id)
+                        setSourceCardFor(it.sourceOrdinal ?? null)
+                      }}
                       onMouseEnter={(e) => showHint(e.currentTarget, t.sourceBadgeTitle.replace('{n}', String(it.sourceOrdinal)))}
                       onMouseLeave={() => setHint(null)}
                     >
                       {it.sourceOrdinal}
                     </button>
                   ) : null}
+                  {(it.alsoSourceOrdinals ?? []).map((ord) => (
+                    <button
+                      key={'also-' + it.id + '-' + ord}
+                      type="button"
+                      className="compilation-src-badge is-also"
+                      aria-label={t.sourceBadgeAlsoTitle.replace('{n}', String(ord))}
+                      onClick={() => {
+                        setSourceCardFromItemId(it.id)
+                        setSourceCardFor(ord)
+                      }}
+                      onMouseEnter={(e) => showHint(e.currentTarget, t.sourceBadgeAlsoTitle.replace('{n}', String(ord)))}
+                      onMouseLeave={() => setHint(null)}
+                    >
+                      {ord}
+                    </button>
+                  ))}
                   {conflictGroupsForItem(it.id).map((g) =>
                     g.pending ? (
                       <span key={g.id} className="compilation-chip conflict" title={g.topic}>
@@ -953,6 +982,36 @@ function CompilationStep({
                 return title ? ' 《' + title + '》' : ''
               })()}
             </h4>
+            {(() => {
+              /* Phase 7.12：列出"这一段共有哪几个出处"（主来源 + 并列来源），点编号可在小卡间切换 */
+              const cardItem = sourceCardFromItemId ? keptItems.find((x) => x.id === sourceCardFromItemId) : undefined
+              if (!cardItem) return null
+              const list: { ordinal: number; title?: string }[] = []
+              if (cardItem.sourceOrdinal != null) list.push({ ordinal: cardItem.sourceOrdinal, title: cardItem.sourceTitle })
+              ;(cardItem.alsoSourceOrdinals ?? []).forEach((ord, i) =>
+                list.push({ ordinal: ord, title: cardItem.alsoSourceTitles?.[i] })
+              )
+              if (list.length <= 1) return null
+              return (
+                <p className="settings__hint compilation-source-card__multi">
+                  {t.sourceMultiHint.replace('{count}', String(list.length))}
+                  {list.map((s) => (
+                    <button
+                      key={s.ordinal}
+                      type="button"
+                      className={cls('compilation-source-card__chip', s.ordinal === sourceCardFor ? 'is-current' : '')}
+                      onClick={() => setSourceCardFor(s.ordinal)}
+                      onMouseEnter={(e) => showHint(e.currentTarget, t.sourceBadgeTitle.replace('{n}', String(s.ordinal)))}
+                      onMouseLeave={() => setHint(null)}
+                    >
+                      {t.sourceCardTitle.replace('{n}', String(s.ordinal))}
+                      {s.title ? '《' + s.title + '》' : ''}
+                      {s.ordinal === sourceCardFor ? '（' + t.sourceMultiCurrent + '）' : ''}
+                    </button>
+                  ))}
+                </p>
+              )
+            })()}
             {cardMeta?.snapshotAt ? (
               <p className="settings__hint">
                 {t.snapshotAt.replace('{time}', formatSnapshotTime(cardMeta.snapshotAt))}
