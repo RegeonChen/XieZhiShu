@@ -132,7 +132,11 @@ export const zhCN = {
     locatePrev: '上一处',
     locateNext: '下一处',
     locateNotFound: '未在正文中找到该句（原文可能已改版，或该句来自其它段落）',
-    locatePdfPending: 'PDF 的文内定位将在下一步支持；可先用工具栏的页码跳转',
+    // PDF 文内定位（Phase 8 / S3）
+    locatePdfSearching: '正在 PDF 里定位…（已扫描 {scanned} / {total} 页）',
+    locatePdfFound: '已定位到第 {page} 页，并高亮该句',
+    locatePdfNotFound: '未在该 PDF 的文字中找到该句（原文可能是改写版本）',
+    locatePdfNoText: '该 PDF 没有文字层（扫描件），无法定位到具体页；可用页码跳转或「用系统默认程序打开」',
     locateNoText: '该文件没有可检索的文字层，无法定位',
     openExternal: '用系统默认程序打开',
     openExternalFailed: '打开失败：{message}',

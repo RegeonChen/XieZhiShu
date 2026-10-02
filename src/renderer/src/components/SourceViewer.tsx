@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
-import PdfViewer from './PdfViewer'
+import PdfViewer, { type PdfLocateState } from './PdfViewer'
 import { IncrementalHtml, IncrementalText } from './IncrementalContent'
 import { buildNeedles, findNeedle, normalizeWithMap, toOriginalRange } from '../lib/locate'
 import { zhCN } from '../i18n/zh-CN'
@@ -87,6 +87,8 @@ function SourceViewer({
   const [activeHit, setActiveHit] = useState(0)
   /** 定位结果：idle=没有锚；found=命中；not-found=搜遍正文也没找到；unsupported=格式不支持文内定位 */
   const [locateState, setLocateState] = useState<'idle' | 'found' | 'not-found' | 'unsupported'>('idle')
+  /** PDF 的定位进展由 PdfViewer 回报（文字在 PDF 内部，不在 DOM 里，须由它自己搜） */
+  const [pdfLocate, setPdfLocate] = useState<PdfLocateState | null>(null)
   const [revealTick, setRevealTick] = useState(0)
   /** 外部打开失败的就地提示（不静默失败） */
   const [externalError, setExternalError] = useState<string | null>(null)
@@ -109,8 +111,7 @@ function SourceViewer({
     if (!res.ok) setExternalError(res.error?.message ?? '打开失败')
   }, [sourceId])
 
-  const load = useCallback(async () => {
-    setLoading(true)
+  const load = useCallback(async () => {    setLoading(true)
     setError(null)
     try {
       const res = await window.api.getSource(sourceId)
@@ -189,11 +190,16 @@ function SourceViewer({
       setLocateState('idle')
       return
     }
-    // PDF / 图片：没有可检索的文字层（PDF 文字层在 S3 做，扫描件按裁定只到页）→ 如实提示，不谎报"未找到"
+    // 图片没有文字层（如实提示）；PDF 的文字在 PDF 内部，交给 PdfViewer 自己搜（见其 onLocate 回报）
     const path = (data?.source.filePath ?? '').toLowerCase()
-    if (/\.(pdf|png|jpe?g|bmp)$/.test(path)) {
+    if (/\.(png|jpe?g|bmp)$/.test(path)) {
       setLocateRects([])
       setLocateState('unsupported')
+      return
+    }
+    if (/\.pdf$/.test(path)) {
+      setLocateRects([])
+      setLocateState('idle')
       return
     }
     const nodes = collectTextNodes(host)
@@ -311,9 +317,30 @@ function SourceViewer({
   const locateBar =
     needles.length > 0 ? (
       <div className="source-viewer__locate">
-        {locateState === 'unsupported' ? (
+        {isPdf ? (
+          /* PDF：文字在 PDF 内部，由 PdfViewer 搜索并回报进展（S3） */
+          pdfLocate?.status === 'found' ? (
+            <span className="source-viewer__locate-text">
+              {zhCN.sourceViewer.locatePdfFound.replace('{page}', String(pdfLocate.page ?? 1))}
+            </span>
+          ) : pdfLocate?.status === 'no-text' ? (
+            <span className="source-viewer__locate-text source-viewer__locate-text--miss">
+              {zhCN.sourceViewer.locatePdfNoText}
+            </span>
+          ) : pdfLocate?.status === 'not-found' ? (
+            <span className="source-viewer__locate-text source-viewer__locate-text--miss">
+              {zhCN.sourceViewer.locatePdfNotFound}
+            </span>
+          ) : (
+            <span className="source-viewer__locate-text">
+              {zhCN.sourceViewer.locatePdfSearching
+                .replace('{scanned}', String(pdfLocate?.scanned ?? 0))
+                .replace('{total}', String(pdfLocate?.total ?? '?'))}
+            </span>
+          )
+        ) : locateState === 'unsupported' ? (
           <span className="source-viewer__locate-text">
-            {isPdf ? zhCN.sourceViewer.locatePdfPending : zhCN.sourceViewer.locateNoText}
+            {isPdf ? zhCN.sourceViewer.locatePdfNoText : zhCN.sourceViewer.locateNoText}
           </span>
         ) : locateState === 'not-found' ? (
           <span className="source-viewer__locate-text source-viewer__locate-text--miss">
@@ -443,7 +470,8 @@ function SourceViewer({
               onReveal={() => setRevealTick((t) => t + 1)}
             />
           ) : isPdf && fileUrl ? (
-            <PdfViewer url={fileUrl} />
+            // S3：把定位锚交给 PdfViewer（它逐页搜 PDF 文字 → 滚到命中页 → 几何高亮该句）
+            <PdfViewer url={fileUrl} locateNeedles={needles} onLocate={setPdfLocate} />
           ) : isImage && fileUrl ? (
             <img className="source-viewer__image" src={fileUrl} alt={source.title} />
           ) : isNativeView ? (

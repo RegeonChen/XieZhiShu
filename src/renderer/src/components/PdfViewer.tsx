@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { getDocument } from 'pdfjs-dist'
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
+import { findNeedle, normalizeWithMap, toOriginalRange } from '../lib/locate'
+import { hitRectsForPage, type PdfHitRect, type PdfHitSpan, type PdfTextItemLike } from '../lib/pdf-hit'
 import { keepRange, parsePageInput, shouldRelease } from '../lib/pdf-pages'
 // 在主线程加载 worker 模块：其末尾会执行 globalThis.pdfjsWorker = { WorkerMessageHandler }。
 // pdf.js 检测到该全局对象后，使用 LoopbackPort 在主线程运行 worker —— 无需真实 Worker 构造，
@@ -40,7 +42,27 @@ function clampZoom(value: number): number {
 
 interface PdfViewerProps {
   url: string
+  /** 定位锚（已归一化的候选检索词，Phase 8 / S3）：在 PDF 文字里查找并滚到命中页、高亮该句 */
+  locateNeedles?: string[]
+  /** 把定位进展回报给外层查看器（由它显示在定位条上） */
+  onLocate?: (state: PdfLocateState) => void
 }
+
+/** PDF 文内定位的进展（S3） */
+export interface PdfLocateState {
+  status: 'idle' | 'searching' | 'found' | 'not-found' | 'no-text'
+  /** 命中的页码（1 起） */
+  page?: number
+  /** 已扫描页数 / 总页数（用于"正在定位…已扫描 N/M 页"） */
+  scanned?: number
+  total?: number
+}
+
+/** 一页的文字块（pdf.js TextContent 里我们用到的那部分） */
+type PageTextItems = PdfTextItemLike[]
+
+/** 命中矩形（以页面的百分比表示 → 不依赖任何像素缩放，窗口/分栏尺寸变化都不用重算） */
+type PdfHitRects = PdfHitRect[]
 
 /**
  * PDF 查看器（Phase 8 / S2 起改为**虚拟化渲染**）。
@@ -56,7 +78,7 @@ interface PdfViewerProps {
  * 说明：pdf.js 仍以**主线程 LoopbackPort** 运行 worker（本项目在 dev/http 与生产 file:// 下都验证过的方式，
  * 见下方 import 注释）；切到真实 Worker 会改变构建与协议行为，留待单独评估。
  */
-export default function PdfViewer({ url }: PdfViewerProps) {
+export default function PdfViewer({ url, locateNeedles, onLocate }: PdfViewerProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const loadingTaskRef = useRef<PDFDocumentLoadingTask | null>(null)
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null)
@@ -66,6 +88,11 @@ export default function PdfViewer({ url }: PdfViewerProps) {
   const [currentPage, setCurrentPage] = useState(1)
   const [pageInput, setPageInput] = useState('')
   const [renderingPages, setRenderingPages] = useState(0)
+  /** 命中位置（等到命中页真正渲染出来时才算得出矩形） */
+  const pdfHitRef = useRef<{ page: number; spans: PdfHitSpan[] } | null>(null)
+  /** 文字块缓存：搜索时已经取过，算矩形时不必重新解析 */
+  const textContentRef = useRef<Map<number, PageTextItems>>(new Map())
+  const needlesKey = useMemo(() => (locateNeedles ?? []).join('\u0000'), [locateNeedles])
 
   /** 每页占位块（长度 = 页数；doc 变化时重建） */
   const pageElsRef = useRef<(HTMLDivElement | null)[]>([])
@@ -116,6 +143,56 @@ export default function PdfViewer({ url }: PdfViewerProps) {
     }
   }, [url])
 
+  /** 取某页的文字块（命中页已搜过 → 直接命中缓存；否则现取一次并缓存） */
+  const getPageTextItems = useCallback(
+    async (pageNumber: number): Promise<PageTextItems> => {
+      const cached = textContentRef.current.get(pageNumber)
+      if (cached) return cached
+      const d = doc
+      if (!d) return []
+      try {
+        const page = await d.getPage(pageNumber)
+        const tc = (await page.getTextContent()) as { items: PageTextItems }
+        textContentRef.current.set(pageNumber, tc.items)
+        return tc.items
+      } catch {
+        return []
+      }
+    },
+    [doc]
+  )
+
+  /**
+   * 把命中矩形画到该页上（Phase 8 / S3）。
+   * 用真实 DOM 元素而不是状态驱动：页面元素本身是命令式创建的，且元素能被 `scrollIntoView`
+   * 直接滚到视野中间（比手工算滚动位置更准）。
+   */
+  const paintHitRects = useCallback((pageNumber: number, rects: PdfHitRect[]) => {
+    containerRef.current?.querySelectorAll('.pdf-viewer__pdf-layer').forEach((n) => n.remove())
+    const el = pageElsRef.current[pageNumber - 1]
+    if (!el || rects.length === 0) return
+    const layer = document.createElement('div')
+    layer.className = 'pdf-viewer__pdf-layer'
+    for (const r of rects) {
+      const span = document.createElement('span')
+      span.className = 'pdf-viewer__pdf-hit'
+      span.style.left = `${r.left}%`
+      span.style.top = `${r.top}%`
+      span.style.width = `${r.width}%`
+      span.style.height = `${r.height}%`
+      if (r.angle) span.style.transform = `rotate(${r.angle}rad)`
+      layer.appendChild(span)
+    }
+    el.appendChild(layer)
+    ;(layer.firstElementChild as HTMLElement | null)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [])
+
+  /** 清掉某一页上的命中层（该页被释放/重渲染时调用，避免高亮浮在占位块上） */
+  const clearHitLayer = useCallback((pageNumber: number) => {
+    const el = pageElsRef.current[pageNumber - 1]
+    el?.querySelectorAll('.pdf-viewer__pdf-layer').forEach((n) => n.remove())
+  }, [])
+
   /** 释放一页占用的资源（取消任务 + pdf.js 页缓存 + 移除 canvas），占位块保留（高度不变，滚动不跳） */
   const releasePage = useCallback((pageNumber: number) => {
     const task = tasksRef.current.get(pageNumber)
@@ -124,6 +201,7 @@ export default function PdfViewer({ url }: PdfViewerProps) {
       tasksRef.current.delete(pageNumber)
     }
     inFlightRef.current.delete(pageNumber)
+    clearHitLayer(pageNumber)
     const el = pageElsRef.current[pageNumber - 1]
     if (el) {
       const canvas = el.querySelector('canvas')
@@ -135,7 +213,7 @@ export default function PdfViewer({ url }: PdfViewerProps) {
     if (renderedRef.current.delete(pageNumber)) {
       void doc?.getPage(pageNumber).then((p) => p.cleanup()).catch(() => {})
     }
-  }, [doc])
+  }, [doc, clearHitLayer])
 
   /** 渲染一页（加入队列；真实渲染在 pumpQueue 中按并发上限执行） */
   const requestPage = useCallback((pageNumber: number) => {
@@ -182,6 +260,13 @@ export default function PdfViewer({ url }: PdfViewerProps) {
           if (gen !== generationRef.current) return
           renderedRef.current.add(pageNumber)
           el.classList.add('is-rendered')
+          // Phase 8 / S3：命中页渲染出来后，取该页文字块算高亮矩形并画上去
+          const hit = pdfHitRef.current
+          if (hit && hit.page === pageNumber) {
+            const items = await getPageTextItems(pageNumber)
+            const rects: PdfHitRects = hitRectsForPage(viewport, items, hit.spans)
+            if (gen === generationRef.current && rects.length > 0) paintHitRects(pageNumber, rects)
+          }
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err)
           // 单页渲染失败（含取消，`RenderingCancelledException`）不应毁掉整个查看器
@@ -300,6 +385,88 @@ export default function PdfViewer({ url }: PdfViewerProps) {
     if (n != null) jumpToPage(n)
     setPageInput('')
   }, [jumpToPage, numPages, pageInput])
+
+  /**
+   * 文内定位（Phase 8 / S3）：把定位锚（引文）在 PDF 文字里查一遍。
+   *
+   * 逐页 `getTextContent()` 顺序扫描、**命中即停**（年鉴几百页时通常前几页就命中，
+   * 不必扫全文）；每页把文本块拼成字符串并用与查看器同一套「去空白归一化 + 最长前缀退让」
+   * 口径匹配，命中后把字符区间落到具体文本块上，供几何高亮使用。
+   *
+   * 全程如实回报进展：正在定位（已扫描 N/M 页）/ 已定位到第 P 页 / 未找到 /
+   * **该 PDF 没有文字层（扫描件）**——最后一种按用户裁定只提示，不假装能定位。
+   */
+  useEffect(() => {
+    if (!doc) return
+    if (!needlesKey) {
+      pdfHitRef.current = null
+      containerRef.current?.querySelectorAll('.pdf-viewer__pdf-layer').forEach((n) => n.remove())
+      onLocate?.({ status: 'idle' })
+      return
+    }
+    const needles = needlesKey.split('\u0000')
+    let cancelled = false
+    const gen = generationRef.current
+    ;(async () => {
+      onLocate?.({ status: 'searching', scanned: 0, total: doc.numPages })
+      let textBlocks = 0
+      try {
+        for (let p = 1; p <= doc.numPages; p++) {
+          if (cancelled || gen !== generationRef.current) return
+          const page = await doc.getPage(p)
+          const tc = (await page.getTextContent()) as { items: PageTextItems }
+          textContentRef.current.set(p, tc.items)
+          // 逐块拼接，并记录每块在拼接串里的起始位置
+          let hay = ''
+          const blocks: { itemIndex: number; start: number; length: number }[] = []
+          for (let i = 0; i < tc.items.length; i++) {
+            const s = tc.items[i]?.str ?? ''
+            if (!s) continue
+            blocks.push({ itemIndex: i, start: hay.length, length: s.length })
+            hay += s
+          }
+          textBlocks += blocks.length
+          if (blocks.length === 0) continue
+          const { normalized, map } = normalizeWithMap(hay)
+          const found = findNeedle(normalized, needles)
+          if (!found) {
+            if (p % 20 === 0) onLocate?.({ status: 'searching', scanned: p, total: doc.numPages })
+            continue
+          }
+          const range = toOriginalRange(map, found.start, found.end)
+          if (!range) continue
+          const spans = blocks
+            .filter((b) => range.start < b.start + b.length && range.end > b.start)
+            .map((b) => ({
+              itemIndex: b.itemIndex,
+              from: Math.max(0, range.start - b.start),
+              to: Math.min(b.length, range.end - b.start)
+            }))
+          if (spans.length === 0) continue
+          pdfHitRef.current = { page: p, spans }
+          onLocate?.({ status: 'found', page: p, scanned: p, total: doc.numPages })
+          // 命中页可能已渲染过（高亮会缺失）→ 释放后重新渲染，渲染完成时按最新的命中信息画高亮
+          releasePage(p)
+          requestPage(p)
+          jumpToPage(p)
+          return
+        }
+      } catch {
+        // 单页文字提取失败不应中断：继续扫后面的页
+      }
+      if (cancelled || gen !== generationRef.current) return
+      pdfHitRef.current = null
+      onLocate?.(
+        textBlocks === 0
+          ? { status: 'no-text', total: doc.numPages }
+          : { status: 'not-found', scanned: doc.numPages, total: doc.numPages }
+      )
+    })()
+    return () => {
+      cancelled = true
+    }
+    // releasePage / requestPage / jumpToPage 都是稳定引用（依赖只在 doc 变化时重建）
+  }, [doc, needlesKey, onLocate, releasePage, requestPage, jumpToPage])
 
   return (
     <div className="pdf-viewer">
