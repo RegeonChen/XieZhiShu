@@ -335,6 +335,23 @@ export function matchesExact(text: string, terms: string[]): boolean {
   return terms.some((t) => t && corpus.includes(t))
 }
 
+/**
+ * 正文精过滤的匹配语料（纯函数、可测试）：**标题 + 正文全文**。
+ *
+ * 2026-10-02（7.11 遗留 B 的 A 方案，用户裁定）：
+ * - **不再截断前 12,000 字**。原实现的截断是一个**静默失败点**：主题词出现在正文更靠后位置的长文
+ *   （年鉴式/政府工作报告式网页）会被判"不切题"直接丢弃，且用户从任何界面都看不出来。
+ *   实测当前站点正文最长 10,419 字（中位数 2,511 字），所以截断从未咬到过——它只会在**将来登记了
+ *   长文类站点**时咬人，因此按"零成本保险"处理。匹配成本可忽略：单篇约 1 万字 × 十来个词的 `indexOf`。
+ * - **标题仍参与匹配**（不做 B-1）。实测依据：本轮采用的 300 篇材料里"仅标题命中、正文不命中"的
+ *   **一篇都没有**（0 收益）；而标题是作者对主题的概括，去掉它会让精过滤对措辞更敏感、有丢切题材料
+ *   的风险（与"宁多勿漏"冲突）。真正的噪声来源是**泛词**（新建/扩建/改建/规模/招生…）而不是标题，
+ *   这件事留待 §PLAN 7.11 的后续项单独裁定。
+ */
+export function buildBodyMatchText(pageTitle: string, cleanedText: string): string {
+  return (pageTitle ?? '') + '\n' + (cleanedText ?? '')
+}
+
 /** 常见跟踪参数（URL 规范化时移除，避免同一文章多入口重复抓取/入库） */
 const TRACKING_QUERY_KEYS = new Set([
   'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'spm', 'from', 'ref', 'share', 'source', 'redirect'
@@ -722,8 +739,8 @@ export async function importSiteArticle(
       // A2：清洗正文（去导航/面包屑/推荐列表/页脚）
       const cleaned = cleanArticleText(richText, pageTitle)
       cleanedText = cleaned || richText
-      // 正文级精过滤：标题 + 正文前 12000 字（足以判定主题，避免超长正文拖慢匹配）
-      if (terms.length > 0 && !matchesExact((pageTitle + '\n' + cleanedText).slice(0, 12000), terms)) {
+      // 正文级精过滤：标题 + **正文全文**（2026-10-02 起不再截断前 12,000 字，见 buildBodyMatchText 注释）
+      if (terms.length > 0 && !matchesExact(buildBodyMatchText(pageTitle, cleanedText), terms)) {
         logMain('web', '正文精过滤未命中，丢弃 url=' + url + ' 标题=' + pageTitle)
         return null
       }
@@ -1097,6 +1114,21 @@ if (import.meta.vitest) {
       expect(terms).not.toContain('入学')
       expect(matchesExact('要深入学习贯彻习近平总书记重要讲话精神', terms)).toBe(false)
       expect(matchesExact('长乐区幼儿园开展入学报名', terms)).toBe(true)
+    })
+
+    it('matches the whole article body, not just the first 12,000 chars (7.11 遗留 B / 方案 A)', () => {
+      const terms = ['高中']
+      const longBody = 'x'.repeat(12500) + '高中' + 'y'.repeat(500)
+      /*
+       * 回归护栏：原实现 `(标题 + 正文).slice(0, 12000)` 会把主题词在第 12,000 字之后出现的长文
+       * 判成"不切题"直接丢弃，而且界面上看不出来（静默丢材料）。这里钉住"不再截断"。
+       */
+      expect(buildBodyMatchText('某篇长文', longBody).length).toBe('某篇长文'.length + 1 + longBody.length)
+      expect(matchesExact(buildBodyMatchText('某篇长文', longBody), terms)).toBe(true)
+      // 反向：正文确实不含主题词时仍要挡掉（放宽窗口不等于放水）
+      expect(matchesExact(buildBodyMatchText('某篇长文', 'x'.repeat(20000)), terms)).toBe(false)
+      // 标题仍参与匹配（B-1 明确不做）：标题命中即可过闸门
+      expect(matchesExact(buildBodyMatchText('我区高中改扩建工程', '与主题用词不同的正文'), terms)).toBe(true)
     })
 
     it('treats a space-joined keyword list as separate terms (2026-09-12 修正)', () => {
