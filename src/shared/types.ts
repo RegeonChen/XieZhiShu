@@ -258,6 +258,17 @@ export interface CompilationItem {
   timeConfidence?: CompilationTimeConfidence
   /** 段尾来源圆标数字（指向 CompilationSourceRef.ordinal）；缺省 = 无来源段 */
   sourceOrdinal?: number
+  /**
+   * 并列来源编号（Phase 7.12「多来源标注」）：同一件事被多个来源分别收录、合并后只留一段时，
+   * 记录"另一个来源也记载了这件事"。**升序排列且不含主编号** `sourceOrdinal`。
+   * 主来源（= evidence 依据的那一个）仍是 `sourceId`/`sourceOrdinal`，因此
+   * 「不得跨来源拼接」（Phase 7.2 裁定 D1）与矛盾归因口径都不变。
+   */
+  alsoSourceOrdinals?: number[]
+  /** 与 `alsoSourceOrdinals` 一一对应的来源 id（文档层与落库回写用） */
+  alsoSourceIds?: string[]
+  /** 与 `alsoSourceOrdinals` 一一对应的来源标题（服务端 JOIN 填充，界面直接显示） */
+  alsoSourceTitles?: string[]
   /** 该段的原文证据引文（逐字校验 + 「查看出处」） */
   evidence?: string
   origin?: CompilationParagraphOrigin
@@ -280,7 +291,11 @@ export interface CompilationParagraph {
   timeConfidence: CompilationTimeConfidence
   /** 段尾来源圆标数字 */
   sourceOrdinal?: number
+  /** 主来源 id（= `evidence` 所依据的那一个来源；并列来源不改变它） */
   sourceId?: string
+  /** 并列来源编号与 id（Phase 7.12；见 `CompilationItem.alsoSourceOrdinals`） */
+  alsoSourceOrdinals?: number[]
+  alsoSourceIds?: string[]
   sourceTitle?: string
   evidence?: string
   kind: CompilationParagraphKind

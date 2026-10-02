@@ -100,7 +100,53 @@ function loadSourceTitles(ids: string[]): Map<string, string> {
   return titles
 }
 
-function mapItem(row: CompilationItemRow, titles: Map<string, string>): CompilationItem {
+interface ItemAlsoSourceRow {
+  item_id: string
+  source_id: string
+  ordinal: number | null
+  title: string | null
+}
+
+/**
+ * 读取「并列来源」关系（Phase 7.12）：按段落聚合，编号升序（无编号的排最后）。
+ * 标题直接取编号表 `compilation_sources.title`——与段尾圆标同一口径，避免再查一次 `sources`。
+ */
+function loadAlsoSourcesByItems(itemIds: string[]): Map<string, { id: string; ordinal?: number; title?: string }[]> {
+  const db = getDb()
+  const out = new Map<string, { id: string; ordinal?: number; title?: string }[]>()
+  if (itemIds.length === 0) return out
+  const placeholders = itemIds.map(() => '?').join(',')
+  const rows = db
+    .prepare(
+      `SELECT r.item_id AS item_id, r.source_id AS source_id, s.ordinal AS ordinal, s.title AS title
+         FROM compilation_item_sources r
+         JOIN compilation_items i ON i.id = r.item_id
+         LEFT JOIN compilation_sources s ON s.compilation_id = i.compilation_id AND s.source_id = r.source_id
+        WHERE r.item_id IN (` + placeholders + `)`
+    )
+    .all(...itemIds) as ItemAlsoSourceRow[]
+  for (const r of rows) {
+    const list = out.get(r.item_id) ?? []
+    list.push({ id: r.source_id, ordinal: r.ordinal ?? undefined, title: r.title ?? undefined })
+    out.set(r.item_id, list)
+  }
+  for (const list of out.values()) {
+    list.sort(
+      (a, b) => (a.ordinal ?? Number.MAX_SAFE_INTEGER) - (b.ordinal ?? Number.MAX_SAFE_INTEGER) || a.id.localeCompare(b.id)
+    )
+  }
+  return out
+}
+
+function mapItem(
+  row: CompilationItemRow,
+  titles: Map<string, string>,
+  alsoSources: { id: string; ordinal?: number; title?: string }[] = []
+): CompilationItem {
+  // 并列来源（Phase 7.12）：关系表里除主来源之外的那些；只把**已分配到编号**的条目透出给界面，
+  // 避免出现"有来源却显示不出编号"的空圆标（未编号的仍保留在 alsoSourceIds 里，回写时不丢）。
+  const also = alsoSources.filter((s) => s.id && s.id !== row.source_id)
+  const alsoWithOrdinal = also.filter((s) => s.ordinal != null)
   return {
     id: row.id,
     compilationId: row.compilation_id,
@@ -118,6 +164,9 @@ function mapItem(row: CompilationItemRow, titles: Map<string, string>): Compilat
     day: row.day ?? undefined,
     timeConfidence: row.time_confidence ?? undefined,
     sourceOrdinal: row.source_ordinal ?? undefined,
+    alsoSourceIds: also.length > 0 ? also.map((s) => s.id) : undefined,
+    alsoSourceOrdinals: alsoWithOrdinal.length > 0 ? alsoWithOrdinal.map((s) => s.ordinal as number) : undefined,
+    alsoSourceTitles: alsoWithOrdinal.length > 0 ? alsoWithOrdinal.map((s) => s.title ?? s.id) : undefined,
     evidence: row.evidence ?? undefined,
     origin: row.origin ?? undefined,
     revision: row.revision ?? undefined,
@@ -181,7 +230,8 @@ function getItemsByCompilation(compilationId: string): CompilationItem[] {
     .prepare('SELECT * FROM compilation_items WHERE compilation_id = ? ORDER BY position ASC, rowid ASC')
     .all(compilationId) as CompilationItemRow[]
   const titles = loadSourceTitles(rows.map((r) => r.source_id))
-  return rows.map((r) => mapItem(r, titles))
+  const also = loadAlsoSourcesByItems(rows.map((r) => r.id))
+  return rows.map((r) => mapItem(r, titles, also.get(r.id) ?? []))
 }
 
 export function getCompilationById(id: string): Compilation | null {
@@ -259,6 +309,10 @@ export function insertCompilationItems(compilationId: string, inputs: Compilatio
   const ins = db.prepare(
     'INSERT INTO compilation_items (id, compilation_id, position, source_id, excerpt, ts, note, extra_tags, kept, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)'
   )
+  /* 保持不变量「并列来源关系表 = 该段的全部来源」（Phase 7.12）：
+     这条旧卡片写入路径（续跑中间产物 / 演示数据 / 单测）也必须登记关系行，
+     否则实时引用计数（`listCompilationSources`）会漏掉这些段落。 */
+  const insRel = db.prepare('INSERT OR IGNORE INTO compilation_item_sources (item_id, source_id, created_at) VALUES (?,?,?)')
   const tx = db.transaction(() => {
     inputs.forEach((it, i) => {
       const itemId = crypto.randomUUID()
@@ -273,6 +327,7 @@ export function insertCompilationItems(compilationId: string, inputs: Compilatio
         JSON.stringify(it.extraTags ?? []),
         now
       )
+      if (it.sourceId) insRel.run(itemId, it.sourceId, now)
     })
   })
   tx()
@@ -355,7 +410,7 @@ export function updateCompilationItem(itemId: string, patch: CompilationItemPatc
   }
   const titles = loadSourceTitles([row.source_id])
   const after = db.prepare('SELECT * FROM compilation_items WHERE id = ?').get(itemId) as CompilationItemRow
-  return mapItem(after, titles)
+  return mapItem(after, titles, loadAlsoSourcesByItems([itemId]).get(itemId) ?? [])
 }
 
 /** 删除一张资料卡片（硬删除：卡片回收站已随 Phase 7.7 移除，软件内也不再提供逐段删除入口）。 */
@@ -637,7 +692,15 @@ export function listFinalizedCompilationsForImport(): { taskId: string; taskTitl
   return out
 }
 
-/** 把一份资料汇编深拷贝到指定任务（用于「撰写初稿」从「生成汇编」导入）。目标任务与源任务须不同。 */
+/**
+ * 把一份资料汇编深拷贝到指定任务（用于「撰写初稿」从「生成汇编」导入）。目标任务与源任务须不同。
+ *
+ * Phase 7.12 修正：原实现只写旧卡片模型的 **10 列**——导入后的汇编**年份分节、来源编号圆标、
+ * 证据引文、段落 origin/revision、并列来源关系全部丢失**（界面看起来"年份标题消失、圆标不见了"）。
+ * 这与 7.7 已修复的「演示数据/本地降级走段落模型」是同一类问题，只是这条路径当时漏了。
+ * 现在按 **19 列 + 编号表 + 并列来源关系**整体深拷贝；**编号沿用源汇编**（编号是"本汇编内首次引用顺序"
+ * 的语义，深拷贝必须保持一致，否则正文里的引用会错位）。
+ */
 export function importCompilationIntoTask(taskId: string, source: Compilation): Compilation {
   const db = getDb()
   const now = new Date().toISOString()
@@ -646,14 +709,57 @@ export function importCompilationIntoTask(taskId: string, source: Compilation): 
     .run(newCompId, taskId, source.title, `finalized`, now, now)
 
   const itemIdMap = new Map<string, string>()
-  const insItem = db.prepare("INSERT INTO compilation_items (id, compilation_id, position, source_id, excerpt, ts, note, extra_tags, kept, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+  const insItem = db.prepare(
+    `INSERT INTO compilation_items
+      (id, compilation_id, position, source_id, excerpt, ts, note, extra_tags, kept, created_at,
+       year, month, day, time_confidence, source_ordinal, evidence, origin, revision, kind)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  )
+  const insRel = db.prepare('INSERT OR IGNORE INTO compilation_item_sources (item_id, source_id, created_at) VALUES (?,?,?)')
+  const insSrcRef = db.prepare(
+    'INSERT OR IGNORE INTO compilation_sources (id, compilation_id, source_id, ordinal, title, cited_count, created_at) VALUES (?,?,?,?,?,0,?)'
+  )
   const insC = db.prepare("INSERT INTO compilation_contradictions (id, compilation_id, topic, kind, status, chosen_item_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
   const insV = db.prepare("INSERT INTO compilation_contradiction_variants (id, contradiction_id, item_id, variant_text, source_id, created_at) VALUES (?, ?, ?, ?, ?, ?)")
   const tx = db.transaction(() => {
+    /* 编号表原样复制；源汇编不在库（外部归档导入）时没有编号表行，退回"按段落上的编号自建" */
+    const refs = source.id ? listCompilationSources(source.id) : []
+    for (const r of refs) {
+      insSrcRef.run(crypto.randomUUID(), newCompId, r.sourceId ?? null, r.ordinal, r.title, now)
+    }
     source.items.forEach((it, i) => {
       const nid = crypto.randomUUID()
       itemIdMap.set(it.id, nid)
-      insItem.run(nid, newCompId, i, it.sourceId, it.excerpt, it.ts ?? null, it.note ?? null, JSON.stringify(it.extraTags ?? []), it.kept ? 1 : 0, it.createdAt || now)
+      insItem.run(
+        nid,
+        newCompId,
+        i,
+        it.sourceId,
+        it.excerpt,
+        it.ts ?? null,
+        it.note ?? null,
+        JSON.stringify(it.extraTags ?? []),
+        it.kept ? 1 : 0,
+        it.createdAt || now,
+        it.year ?? null,
+        it.month ?? null,
+        it.day ?? null,
+        it.timeConfidence ?? (it.year != null ? 'exact' : 'unknown'),
+        it.sourceOrdinal ?? null,
+        it.evidence ?? null,
+        it.origin ?? 'generate',
+        it.revision ?? 1,
+        it.kind ?? 'paragraph'
+      )
+      for (const sid of dedupeSourceIds([it.sourceId, ...(it.alsoSourceIds ?? [])])) insRel.run(nid, sid, now)
+      if (refs.length === 0) {
+        if (it.sourceOrdinal != null) {
+          insSrcRef.run(crypto.randomUUID(), newCompId, it.sourceId || null, it.sourceOrdinal, it.sourceTitle ?? it.sourceId ?? '', now)
+        }
+        ;(it.alsoSourceOrdinals ?? []).forEach((ord, k) => {
+          insSrcRef.run(crypto.randomUUID(), newCompId, null, ord, it.alsoSourceTitles?.[k] ?? '', now)
+        })
+      }
     })
     for (const c of source.contradictions) {
       const ncid = crypto.randomUUID()
@@ -676,6 +782,8 @@ export function importCompilationIntoTask(taskId: string, source: Compilation): 
 export interface CompilationParagraphInput {
   id?: string
   sourceId: string
+  /** 并列来源 id（Phase 7.12：同一件事的其它出处；不含 `sourceId` 本身，函数内部会去重） */
+  alsoSourceIds?: string[]
   text: string
   timeLabel?: string
   year?: number
@@ -729,8 +837,21 @@ export function pruneCompilationVersions(compilationId: string, keep = 2): void 
 /** 列出某汇编的来源编号表（按 ordinal 升序） */
 export function listCompilationSources(compilationId: string): CompilationSourceRef[] {
   const db = getDb()
+  /* `cited_count` 改为**按需实时查询**（2026-10-02，用户裁定 Q5）：
+     原实现由 `ensureCompilationSources` 维护一列计数，但它在段落写入**之前**执行，
+     数到的是上一轮（首次生成时为空）的段落 → 真实库 98 行**全部为 0**，而且渲染层从未使用过该字段。
+     现在按「并列来源关系表」实时统计，多来源段落的每一个出处都能被正确计入。 */
   const rows = db
-    .prepare('SELECT * FROM compilation_sources WHERE compilation_id = ? ORDER BY ordinal ASC')
+    .prepare(
+      `SELECT s.*, (
+         SELECT COUNT(*) FROM compilation_item_sources r
+           JOIN compilation_items i ON i.id = r.item_id
+          WHERE i.compilation_id = s.compilation_id AND r.source_id = s.source_id
+       ) AS cited_count
+         FROM compilation_sources s
+        WHERE s.compilation_id = ?
+        ORDER BY s.ordinal ASC`
+    )
     .all(compilationId) as CompilationSourceRow[]
   return rows.map(mapSourceRef)
 }
@@ -739,6 +860,10 @@ export function listCompilationSources(compilationId: string): CompilationSource
  * 按「文档中首次被引用」的顺序补齐来源编号（纯函数逻辑 + 落库）：
  * 已有编号的来源保持不变（**编号只增不回收**，避免历史版本与正文中的编号漂移），
  * 新出现的来源追加到末尾。返回最新的编号表。
+ *
+ * Phase 7.12：调用方传入的 `ordered` 必须**同时包含并列来源**（主来源 + `alsoSourceIds`），
+ * 否则被合并掉的那一处出处拿不到编号，界面上就显示不出"两个出处"。
+ * 引用计数不再在此维护（见 `listCompilationSources`，已改为实时查询）。
  */
 export function ensureCompilationSources(compilationId: string, ordered: { sourceId: string; title: string }[]): CompilationSourceRef[] {
   const db = getDb()
@@ -757,10 +882,6 @@ export function ensureCompilationSources(compilationId: string, ordered: { sourc
       ins.run(id, compilationId, o.sourceId, nextOrdinal, o.title || o.sourceId, now)
       bySource.set(o.sourceId, { id, compilationId, sourceId: o.sourceId, ordinal: nextOrdinal, title: o.title || o.sourceId, citedCount: 0 })
     }
-    // 引用计数（用于"删除来源影响多少段"的提示）
-    db.prepare(
-      'UPDATE compilation_sources SET cited_count = (SELECT COUNT(*) FROM compilation_items i WHERE i.compilation_id = compilation_sources.compilation_id AND i.source_id = compilation_sources.source_id) WHERE compilation_id = ?'
-    ).run(compilationId)
   })
   tx()
   return listCompilationSources(compilationId)
@@ -773,6 +894,16 @@ export function ensureCompilationSources(compilationId: string, ordered: { sourc
  * - 目标集合中不再出现的段落 → DELETE。
  * 与旧的 `replaceCompilationItems`（先删后插、id 全变）不同，本函数保证 id 稳定。
  */
+/** 去重并剔除空值：关系表主键是 `(item_id, source_id)`，重复插入会违反主键，必须先归一 */
+export function dedupeSourceIds(ids: (string | undefined | null)[]): string[] {
+  const out: string[] = []
+  for (const id of ids) {
+    if (!id) continue
+    if (!out.includes(id)) out.push(id)
+  }
+  return out
+}
+
 export function upsertCompilationParagraphs(compilationId: string, inputs: CompilationParagraphInput[]): CompilationItem[] {
   const db = getDb()
   const now = new Date().toISOString()
@@ -792,6 +923,10 @@ export function upsertCompilationParagraphs(compilationId: string, inputs: Compi
        year = ?, month = ?, day = ?, time_confidence = ?, source_ordinal = ?, evidence = ?, origin = ?, revision = ?, kind = ?
      WHERE id = ?`
   )
+  /* 并列来源关系（Phase 7.12）：关系行 = 该段的**全部**来源（主来源 + 并列来源），
+     先删后插保证与入参一致；段落被删除时其关系行随外键级联清理。 */
+  const delRel = db.prepare('DELETE FROM compilation_item_sources WHERE item_id = ?')
+  const insRel = db.prepare('INSERT OR IGNORE INTO compilation_item_sources (item_id, source_id, created_at) VALUES (?,?,?)')
   const tx = db.transaction(() => {
     inputs.forEach((it, i) => {
       const confidence = it.timeConfidence ?? (it.year != null ? 'exact' : 'unknown')
@@ -801,6 +936,7 @@ export function upsertCompilationParagraphs(compilationId: string, inputs: Compi
       const note = it.note ?? null
       const tags = JSON.stringify(it.extraTags ?? [])
       const kept = it.kept === false ? 0 : 1
+      let itemId = it.id ?? ''
       if (it.id && existingIds.has(it.id)) {
         keepIds.add(it.id)
         upd.run(
@@ -825,6 +961,7 @@ export function upsertCompilationParagraphs(compilationId: string, inputs: Compi
       } else {
         const id = it.id ?? crypto.randomUUID()
         keepIds.add(id)
+        itemId = id
         ins.run(
           id,
           compilationId,
@@ -847,6 +984,8 @@ export function upsertCompilationParagraphs(compilationId: string, inputs: Compi
           kind
         )
       }
+      delRel.run(itemId)
+      for (const sid of dedupeSourceIds([it.sourceId, ...(it.alsoSourceIds ?? [])])) insRel.run(itemId, sid, now)
     })
     for (const id of existingIds) {
       if (!keepIds.has(id)) db.prepare('DELETE FROM compilation_items WHERE id = ?').run(id)
@@ -1091,6 +1230,7 @@ export function restoreCompilationFromVersion(compilationId: string, versionNo: 
     version.paragraphs.map((p) => ({
       id: p.id,
       sourceId: p.sourceId ?? '',
+      alsoSourceIds: p.alsoSourceIds,
       text: p.text,
       timeLabel: p.timeLabel,
       year: p.year,
@@ -1544,6 +1684,122 @@ if (import.meta.vitest) {
       expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant'])
       expect(msgs[1].versionNo).toBe(2)
       expect(msgs[0].content).toBe('删掉校区建设内容')
+    })
+
+    /* ---- Phase 7.12（多来源标注）---- */
+
+    it('writes 并列来源 relations and surfaces their ordinals/titles (Phase 7.12)', () => {
+      const { taskId, sourceIds } = seed()
+      const c = createCompilation({ taskId, title: '高中教育' })
+      const refs = ensureCompilationSources(c.id, [
+        { sourceId: sourceIds[0], title: '统计表' },
+        { sourceId: sourceIds[1], title: '教育发展报告' }
+      ])
+      const ordinalOf = (sid: string): number => refs.find((r) => r.sourceId === sid)!.ordinal
+      const items = upsertCompilationParagraphs(c.id, [
+        {
+          sourceId: sourceIds[0],
+          alsoSourceIds: [sourceIds[1]],
+          sourceOrdinal: ordinalOf(sourceIds[0]),
+          text: '2020 年，全区普通中学 28 所。',
+          timeLabel: '2020 年'
+        },
+        { sourceId: sourceIds[1], sourceOrdinal: ordinalOf(sourceIds[1]), text: '2019 年，全区教职工 900 人。', timeLabel: '2019 年' }
+      ])
+      const loaded = getCompilationById(c.id)!
+      const first = loaded.items.find((i) => i.id === items[0].id)!
+      expect(first.sourceId).toBe(sourceIds[0])
+      expect(first.alsoSourceIds).toEqual([sourceIds[1]])
+      expect(first.alsoSourceOrdinals).toEqual([ordinalOf(sourceIds[1])])
+      expect(first.alsoSourceTitles).toEqual(['教育发展报告'])
+      // 单来源段落不受影响（回归：不能凭空长出并列来源）
+      const second = loaded.items.find((i) => i.id === items[1].id)!
+      expect(second.alsoSourceIds).toBeUndefined()
+      expect(second.alsoSourceOrdinals).toBeUndefined()
+    })
+
+    it('recomputes cited counts in real time, counting 并列来源 too (Q5)', () => {
+      const { taskId, sourceIds } = seed()
+      const c = createCompilation({ taskId, title: '高中教育' })
+      const refs = ensureCompilationSources(c.id, [
+        { sourceId: sourceIds[0], title: '统计表' },
+        { sourceId: sourceIds[1], title: '教育发展报告' }
+      ])
+      const ordinalOf = (sid: string): number => refs.find((r) => r.sourceId === sid)!.ordinal
+      // 2 段用 sourceIds[0]，其中 1 段把 sourceIds[1] 记为并列来源
+      upsertCompilationParagraphs(c.id, [
+        { sourceId: sourceIds[0], sourceOrdinal: ordinalOf(sourceIds[0]), text: '甲段' },
+        { sourceId: sourceIds[0], alsoSourceIds: [sourceIds[1]], sourceOrdinal: ordinalOf(sourceIds[0]), text: '乙段' },
+        { sourceId: sourceIds[1], sourceOrdinal: ordinalOf(sourceIds[1]), text: '丙段' }
+      ])
+      const listed = listCompilationSources(c.id)
+      // 原先该字段恒为 0（ensure 在段落写入之前执行）→ 现在按关系表实时统计
+      expect(listed.find((s) => s.sourceId === sourceIds[0])!.citedCount).toBe(2)
+      // 并列来源也要计入（否则"删除来源影响多少段"会少算）
+      expect(listed.find((s) => s.sourceId === sourceIds[1])!.citedCount).toBe(2)
+    })
+
+    it('removes relations together with their paragraph (no orphan rows)', () => {
+      const { taskId, sourceIds } = seed()
+      const c = createCompilation({ taskId, title: '高中教育' })
+      const items = upsertCompilationParagraphs(c.id, [
+        { sourceId: sourceIds[0], alsoSourceIds: [sourceIds[1]], text: '甲段' },
+        { sourceId: sourceIds[1], text: '乙段' }
+      ])
+      const countRel = (): number =>
+        (db.prepare('SELECT COUNT(*) AS c FROM compilation_item_sources WHERE item_id = ?').get(items[0].id) as { c: number }).c
+      expect(countRel()).toBe(2)
+      // 目标集合里不再包含该段 → 段落与其关系行一起消失
+      upsertCompilationParagraphs(c.id, [{ id: items[1].id, sourceId: sourceIds[1], text: '乙段' }])
+      expect(countRel()).toBe(0)
+    })
+
+    it('deep-copies metadata, 编号表 and 并列来源 when importing into another task (Phase 7.12)', () => {
+      const { taskId, sourceIds } = seed()
+      const c = createCompilation({ taskId, title: '高中教育' })
+      const refs = ensureCompilationSources(c.id, [
+        { sourceId: sourceIds[0], title: '教育发展报告' },
+        { sourceId: sourceIds[1], title: '统计表' }
+      ])
+      const ord = (sid: string): number => refs.find((r) => r.sourceId === sid)!.ordinal
+      upsertCompilationParagraphs(c.id, [
+        {
+          sourceId: sourceIds[0],
+          alsoSourceIds: [sourceIds[1]],
+          sourceOrdinal: ord(sourceIds[0]),
+          text: '2020 年，全区普通中学 28 所。',
+          timeLabel: '2020 年',
+          year: 2020,
+          evidence: '普通中学 28 所',
+          revision: 3,
+          kind: 'paragraph'
+        }
+      ])
+      const targetTask = crypto.randomUUID()
+      db.prepare(`INSERT INTO writing_tasks (id, title, scope_json) VALUES (?, '撰写初稿任务', '{"all":true}')`).run(targetTask)
+
+      const imported = importCompilationIntoTask(targetTask, getCompilationById(c.id)!)
+      // 原实现只写 10 列 → 年份/编号/证据/origin/revision 全丢（导入后"年份标题消失、圆标不见"）
+      const it = imported.items[0]
+      expect(it.year).toBe(2020)
+      expect(it.ts).toBe('2020 年')
+      expect(it.sourceOrdinal).toBe(ord(sourceIds[0]))
+      expect(it.evidence).toBe('普通中学 28 所')
+      expect(it.revision).toBe(3)
+      expect(it.sourceTitle).toBe('教育发展报告')
+      // 并列来源一并深拷贝（否则导入后"另一处出处"就没了）
+      expect(it.alsoSourceIds).toEqual([sourceIds[1]])
+      expect(it.alsoSourceOrdinals).toEqual([ord(sourceIds[1])])
+      expect(it.alsoSourceTitles).toEqual(['统计表'])
+      // 编号表原样复制（编号是"本汇编内首次引用顺序"，深拷贝必须保持一致）
+      expect(listCompilationSources(imported.id).map((s) => [s.ordinal, s.title])).toEqual([
+        [1, '教育发展报告'],
+        [2, '统计表']
+      ])
+      // 关系行也写进去了（实时引用计数依赖它）
+      expect(listCompilationSources(imported.id).map((s) => s.citedCount)).toEqual([1, 1])
+      expect(imported.status).toBe('finalized')
+      expect(imported.taskId).toBe(targetTask)
     })
   })
 }

@@ -13,6 +13,7 @@ import { safeStorageCodec } from '../llm/secret'
 import { chatCompletion } from '../llm/chat'
 import { getSourceById } from '../db/sources'
 import {
+  dedupeSourceIds,
   getCompilationById,
   getLatestCompilationVersion,
   insertCompilationMessage,
@@ -78,7 +79,9 @@ export function buildDocEditRefs(compilationId: string): DocEditParagraphRef[] {
       text: it.excerpt,
       timeLabel: it.ts,
       sourceOrdinal: it.sourceOrdinal,
-      sourceTitle: it.sourceTitle
+      sourceTitle: it.sourceTitle,
+      alsoSourceOrdinals: it.alsoSourceOrdinals,
+      alsoSourceIds: it.alsoSourceIds
     }))
 }
 
@@ -225,6 +228,12 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
       return {
         id: p.id || undefined,
         sourceId: (p.sourceOrdinal != null ? ordinalToSourceId.get(p.sourceOrdinal) : undefined) ?? '',
+        /* Phase 7.12：并列来源要随对话编辑一起写回，否则**任何一次对话修改都会把"另一个出处"抹掉**。
+           优先用编号反查（文档层以编号为准），拿不到再用快照里带的 id 兜底。 */
+        alsoSourceIds: dedupeSourceIds([
+          ...(p.alsoSourceOrdinals ?? []).map((n) => ordinalToSourceId.get(n)),
+          ...(p.alsoSourceIds ?? [])
+        ]),
         sourceOrdinal: p.sourceOrdinal,
         text: p.text,
         timeLabel: p.timeLabel,

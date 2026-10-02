@@ -5,7 +5,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest'
 import Database from 'better-sqlite3'
 import { setDb, getDb } from '../src/main/db/connection'
 import { runMigrations } from '../src/main/db/migrate'
-import { createCompilation, insertCompilationItems, insertCompilationContradictions, updateCompilationContradictionStatus } from '../src/main/db/compilations'
+import { createCompilation, insertCompilationItems, insertCompilationContradictions, updateCompilationContradictionStatus, getCompilationById, upsertCompilationParagraphs } from '../src/main/db/compilations'
 import { pushUndo, undoCompilation, redoCompilation, getUndoCount, getRedoCount, clearUndoStacks } from '../src/main/writing/compilation-undo'
 
 let db: Database.Database
@@ -97,5 +97,37 @@ describe('compilation undo/redo (2026-08-28)', () => {
     clearUndoStacks(c.id)
     expect(getUndoCount(c.id)).toBe(0)
     expect(getRedoCount(c.id)).toBe(0)
+  })
+
+  it('keeps 并列来源 relations across undo/redo (Phase 7.12)', () => {
+    const { taskId, sourceId } = seed()
+    const other = crypto.randomUUID()
+    db.prepare('INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES (?, ?, ?, ?, ?)').run(other, 'file', '乙', '正文', 'ready')
+    const c = createCompilation({ taskId, title: '汇编' })
+    const items = upsertCompilationParagraphs(c.id, [
+      { sourceId, alsoSourceIds: [other], text: '2020 年，全区普通中学 28 所。' },
+      { sourceId: other, text: '2019 年，全区教职工 900 人。' }
+    ])
+    const relCount = (): number =>
+      (db.prepare('SELECT COUNT(*) c FROM compilation_item_sources WHERE item_id = ?').get(items[0].id) as { c: number }).c
+    expect(relCount()).toBe(2)
+
+    // 撤销是"先清空再重插"，且期间外键关闭（级联失效）——若快照不含关系表，
+    // 一次撤销就会把"另一个出处"静默抹掉（同类事故见 2026-09-10 的 year/source_ordinal 全丢）
+    pushUndo(c.id)
+    db.prepare('DELETE FROM compilation_item_sources WHERE item_id = ?').run(items[0].id)
+    expect(relCount()).toBe(0)
+
+    undoCompilation(c.id)
+    expect(relCount()).toBe(2)
+    // 且恢复后仍能正确透出并列来源
+    const loaded = getCompilationById(c.id)!
+    expect(loaded.items.find((i) => i.id === items[0].id)?.alsoSourceIds).toEqual([other])
+
+    // 恢复（重做）也不能丢
+    redoCompilation(c.id)
+    expect(relCount()).toBe(0)
+    undoCompilation(c.id)
+    expect(relCount()).toBe(2)
   })
 })

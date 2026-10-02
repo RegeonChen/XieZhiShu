@@ -1042,6 +1042,29 @@ UPDATE sources SET body_missing = 1,
 DELETE FROM chunk_embeddings WHERE source_id IN (SELECT id FROM sources WHERE body_missing = 1);
 DELETE FROM task_web_materials WHERE source_id IN (SELECT id FROM sources WHERE body_missing = 1);
 `
+  },
+  {
+    // 2026-10-02（Phase 7.12「多来源标注」，用户裁定 Q1=B / Q3=i / Q4=保留段落 / Q5=改实时查询）：
+    // 新增**并列来源**关系表——同一件事被多个来源分别收录、成文阶段合并为一段时，
+    // 记录"这一段由哪几个来源共同记载"（用户诉求：合并后要能看出有多个出处）。
+    //
+    // 设计要点：`compilation_items.source_id` 仍保留为**主来源／证据来源**（evidence 逐字校验、
+    // 矛盾归因、以及 Phase 7.2 裁定的「不得跨来源拼接」都以它为准）；本表只承载"并列记载"，
+    // 因此既有约束一条都不放宽。
+    //
+    // 纯新增：不改任何现有列、不删任何行。回填把现有每段的主来源写成一行（真实库实测 391 行）。
+    version: 42,
+    sql: `
+CREATE TABLE IF NOT EXISTS compilation_item_sources (
+  item_id TEXT NOT NULL REFERENCES compilation_items(id) ON DELETE CASCADE,
+  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (item_id, source_id)
+);
+CREATE INDEX IF NOT EXISTS idx_compilation_item_sources_source ON compilation_item_sources(source_id);
+INSERT OR IGNORE INTO compilation_item_sources (item_id, source_id, created_at)
+  SELECT id, source_id, created_at FROM compilation_items WHERE source_id IS NOT NULL AND source_id <> '';
+`
   }
 ]
 
