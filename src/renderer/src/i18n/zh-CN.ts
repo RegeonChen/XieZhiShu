@@ -126,7 +126,17 @@ export const zhCN = {
     back: '返回',
     // 大文档分批渲染（Phase 8 / S2）：还有 N 块未渲染时显示
     moreRemaining: '为加快打开速度，剩余 {n} 部分未展开',
-    revealAll: '全部展开'
+    revealAll: '全部展开',
+    // 文内搜索定位（Phase 8 / S1）
+    locateFound: '已定位到该句：第 {i} / {n} 处',
+    locatePrev: '上一处',
+    locateNext: '下一处',
+    locateNotFound: '未在正文中找到该句（原文可能已改版，或该句来自其它段落）',
+    locatePdfPending: 'PDF 的文内定位将在下一步支持；可先用工具栏的页码跳转',
+    locateNoText: '该文件没有可检索的文字层，无法定位',
+    openExternal: '用系统默认程序打开',
+    openExternalFailed: '打开失败：{message}',
+    close: '关闭'
   },
   sourceStatus: {
     ready: '已就绪',

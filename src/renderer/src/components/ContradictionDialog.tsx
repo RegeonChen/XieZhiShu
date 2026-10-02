@@ -14,7 +14,8 @@ interface ContradictionDialogProps {
   /** 采纳成功且正文已同步修订的回调（父组件刷新编辑器正文） */
   onApplied: (contradiction: Contradiction, draft: unknown) => void
   /** 打开来源文件（系统默认软件） */
-  onOpenSource: (sourceId: string) => void
+  /** 打开来源（Phase 8 / S1）：第二/三参数为定位锚与说明，见 WritingWorkspace.handleOpenSource */
+  onOpenSource: (sourceId: string, snippet?: string, label?: string) => void
 }
 
 function ContradictionDialog({
@@ -129,7 +130,8 @@ interface DetailProps {
   busy: boolean
   onAdopt: (variantId: string) => void
   onIgnore: () => void
-  onOpenSource: (sourceId: string) => void
+  /** 打开来源（Phase 8 / S1）：第二/三参数为定位锚与说明，见 WritingWorkspace.handleOpenSource */
+  onOpenSource: (sourceId: string, snippet?: string, label?: string) => void
 }
 
 function ContradictionDetail({ contradiction: c, t, warningMode = false, busy, onAdopt, onIgnore, onOpenSource }: DetailProps) {
@@ -168,7 +170,8 @@ function ContradictionDetail({ contradiction: c, t, warningMode = false, busy, o
                       type="button"
                       className="contradiction-dialog__source-link"
                       title={title}
-                      onClick={() => onOpenSource(v.sourceIds[idx] ?? '')}
+                      // Phase 8 / S1：带上该说法的原文（逐字来自来源）作为定位锚
+                      onClick={() => onOpenSource(v.sourceIds[idx] ?? '', v.variantText, title)}
                     >
                       {title}
                     </button>
