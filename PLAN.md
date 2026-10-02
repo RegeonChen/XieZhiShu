@@ -980,7 +980,7 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 
 ### 8.5 切片（按用户裁定 A 重排；**大文件性能**与**内置浏览器**的方案见 §8.9 / §8.10，待裁定后再定顺序）
 
-- **S1 右栏分栏查看器 + 文本类文内搜索定位（含外部打开）**：右栏分栏容器（可拖动/可关闭，**优先生成汇编**，再接入资料库）；按 kind 渲染（文本 / docx HTML / 图片 / PDF 占位 / 网页占位）；"文内搜索定位"通用件——把 `evidence`（或矛盾说法）当检索词，DOM 内查找 → 滚动到命中 + 高亮 + 上/下一个；工具条**恒有「用系统默认程序打开」**（Q2）。**不改库**。
+- **S1 右栏分栏查看器 + 文本类文内搜索定位（含外部打开）**：右栏分栏容器（可拖动/可关闭，**优先生成汇编**，再接入资料库）；按 kind 渲染（文本 / docx HTML / 图片 / PDF 占位 / 网页占位）；"文内搜索定位"通用件——把 `evidence`（或矛盾说法）当检索词，DOM 内查找 → 滚动到命中 + 高亮 + 上/下一个；工具条**恒有「用系统默认程序打开」**（Q2）。**不改库**。 —— **✅ 已完成（2026-10-02），详见 §8.14**
 - **S2 大文件性能改造**（若你一上手就用年鉴 PDF 验收，建议把它提到 S1 之前或与 S1 并行）：文件服务支持 **HTTP Range（206）+ 流式读取**；PDF 查看器改**虚拟化渲染**（只渲染可见页、滚出即释放、可取消）；超大文件走**降级守卫**（见 §8.9）。**不改库。** —— **✅ 已完成（2026-10-02），阈值降级按 Q7 不做，详见 §8.13**
 - **S3 PDF 文字层与文内搜索定位**：`PdfViewer` 增加文字层（可见页）；用锚在页内文本里搜索 → 滚到命中页并高亮；**图片型 PDF 只跳到页并明示「扫描件无文字层，无法高亮」**（§8.11）。
 - **S4 网页内置浏览器（§8.10 的 B1）+ 资料库右栏接入**：`WebContentsView` 加载线上页 + `findInPage` 定位高亮；入口同在「生成汇编」与「资料库」。
@@ -1111,8 +1111,26 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 **实测反馈与追加小改（2026-10-02）**：用户实测确认「**大文件的打开非常流畅，达成了预期效果**」；同时提出一项小改并已完成——**把 PDF 工具栏（页码跳转 / 上一页 / 下一页 / 缩小 / 放大 / 适应宽度）吸顶固定在栏顶，不随 PDF 滚动消失**。做法：`.pdf-viewer` **去掉 `overflow: auto`**（否则它自己会成为"最近滚动容器"，`position: sticky` 挂在它身上就永远不动——这是本改动的关键坑），工具栏改 `position: sticky; top: 0; z-index: 5` + **不透明底色**（否则页面内容从底下透出来）+ 下边框。链路上确认 `.pdf-viewer__toolbar → .pdf-viewer?（无 overflow）→ .source-viewer__body（无 overflow）→ .work-pane（`flex:1` + `overflow:auto`）` 之间**只有 `.work-pane` 是滚动容器**，因此吸顶挂在它上面；这条约束已写进 CSS 注释，供 S1 把查看器放进右栏时沿用（右栏若自带 `overflow`，吸顶要挂到右栏自己的滚动容器上）。验证：typecheck 零错误、**298/299 单测通过**、生产构建成功（CSS 127.14 kB / JS 4,204.54 kB）。
 
 
-## Last Phase（收尾阶段）: Acceptance & Packaging（待进行）
+### 8.14 S1 实施记录（2026-10-02，代码完成待用户实测）
 
+**做了什么**：
+
+| # | 改动 | 文件 | 说明 |
+|---|---|---|---|
+| 1 | 新增**文内定位纯逻辑** | [src/renderer/src/lib/locate.ts](src/renderer/src/lib/locate.ts) | `normalizeWithMap`（去排版空白 + **归一化下标→原文下标**映射，DOM 定位必需）、`buildNeedles`（引文→检索词；去空白后 <4 字**不发锚**，宁可不定位也不乱定位）、`findNeedle`（整段找不到时**二分找"最长且确实出现的前缀"**，比固定档位（40/24/12）精度高）、`stripTags`（含引号内 `>` 与常见实体）、`locateInBlocks`（先在**字符串层**定位到"哪一块"）、`toOriginalRange`。6 项单测 |
+| 2 | 分批渲染支持**定位优先** | [src/renderer/src/lib/incremental.ts](src/renderer/src/lib/incremental.ts)（不变）+ [IncrementalContent.tsx](src/renderer/src/components/IncrementalContent.tsx) | 传了锚时：**命中块必须先渲染出来**（否则"在 DOM 里找不到"是假象）；命中 → 首批渲染到"命中块 + 余量"；**未命中 → 展开全部**（这样"未找到"才是真的搜过全文）；每次追加回调 `onReveal` 触发重算高亮 |
+| 3 | `SourceViewer` 升级为**可定位的共享查看器** | [SourceViewer.tsx](src/renderer/src/components/SourceViewer.tsx) | 新增 `locate` 锚（定位于该句并高亮 + 「第 i / n 处」+ 上一处/下一处）、`dense`（分栏紧凑表头）、`onClose`；**高亮用覆盖层矩形**（`Range.getClientRects` → 绝对定位 span）而**不改写正文 DOM**——docx 是命令式分批追加的 DOM，改写文本节点会打乱分批逻辑；命中矩形做了等值短路，避免 ResizeObserver 与重渲染互相触发；`scrollIntoView` 直接作用在覆盖层上（比手工换算滚动位置更准） |
+| 4 | **两种打开方式**（Q2） | 同上 | 表头**恒有「用系统默认程序打开」**（`openSourcePath`），失败**就地提示**（`openExternalFailed`）不静默；因此**资料库与分栏两处、所有格式**都同时具备"内部查看 + 外部打开"。PDF/图片在锚存在时明确提示「PDF 的文内定位将在下一步支持」「没有可检索文字层」，**不谎报"未找到"** |
+| 5 | 「生成汇编」右栏分栏 | [WritingWorkspace.tsx](src/renderer/src/components/WritingWorkspace.tsx) + [main.css](src/renderer/src/assets/main.css) | `.writing-workspace__source`（可拖拽 `ResizeHandle`，向左拖变宽，320–900px，可关闭）；**同一来源切换锚点不重新加载文件**（`key` 只用 sourceId） |
+| 6 | 打开来源时带上**定位锚** | [CompilationStep.tsx](src/renderer/src/components/CompilationStep.tsx) / [ContradictionDialog.tsx](src/renderer/src/components/ContradictionDialog.tsx) | 来源小卡的「打开来源」→ 传该段 **`evidence`（逐字证据引文）** + 「本汇编第 N 段」；矛盾弹窗的来源链接 → 传该说法的 `variantText`。`CompilationItemView` 补 `evidence?`（主进程早已返回，此前渲染层类型未声明） |
+
+**验证**：typecheck 零错误；vitest **304/305 通过**（1 项既有 chokidar 环境项；新增 6 项定位单测）；生产构建成功（CSS 129.52 kB / JS 4,220.95 kB）。**不改数据库。**
+
+**待用户实测**：① 生成汇编里点某段来源 → 右栏打开并**停在那句、高亮**，可「上一处/下一处」；② 点「用系统默认程序打开」能唤起 WPS/Word/浏览器；③ docx 与 TXT 大文件的定位是否命中、找不到时提示是否清晰；④ 分栏宽度拖拽与关闭。
+
+**本轮未做**：PDF 的文字层定位（S3）、网页内置浏览器（S4）；资料库侧仍按"打开整篇资料"处理，未做锚定入口（S4 一并处理）。
+
+## Last Phase（收尾阶段）: Acceptance & Packaging（待进行）
 > **说明**：本阶段是**整个项目的收尾阶段**，在所有功能阶段（Phase 1–6.x）全部完成后才执行。此处保留「Phase 5」的旧编号仅为历史追溯，不代表其应在 Phase 6 之前完成；序号与执行顺序无关。
 
 **Overall Goal:** 产出 Windows 安装包、完成端到端演示与项目文档。
