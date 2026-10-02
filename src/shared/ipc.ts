@@ -562,7 +562,10 @@ export type CompilationListFinalizedForImportRes = { items: { taskId: string; ta
 export interface WorkspaceSourceRemovalPending {
   sourceId: string
   title: string
+  /** 该来源在汇编中涉及的段数（Phase 7.12 起按并列来源关系表统计） */
   cardCount: number
+  /** 其中还有其它来源共同记载的段数：这些段不会被删，主来源会改指剩余来源（Phase 7.12） */
+  sharedCount: number
   contradictionCount: number
   /** workspace = 检测到工作区文件被删除；manual = 用户在资料库中直接删除该资料 */
   origin: 'workspace' | 'manual'

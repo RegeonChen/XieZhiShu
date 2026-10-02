@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
+import type { WorkspaceSourceRemovalPending } from '../shared/ipc'
 import type { ApiResult } from '../shared/types'
 
 interface ImportResults {
@@ -219,14 +220,14 @@ const api = {
     return ipcRenderer.invoke(IPC.COMPILATION_LIST_FINALIZED_FOR_IMPORT)
   },
   // ---- 来源移除确认（2026-08-28：来源被删除且已被资料汇编引用；来源=工作区文件删除或资料库直接删除） ----
-  listSourceRemovals(): Promise<ApiResult<{ items: { sourceId: string; title: string; cardCount: number; contradictionCount: number; origin: 'workspace' | 'manual' }[] }>> {
+  listSourceRemovals(): Promise<ApiResult<{ items: WorkspaceSourceRemovalPending[] }>> {
     return ipcRenderer.invoke(IPC.WORKSPACE_SOURCE_REMOVAL_LIST)
   },
-  decideSourceRemoval(sourceId: string, action: 'delete' | 'keep'): Promise<ApiResult<{ deletedItems: number; deletedContradictions: number }>> {
+  decideSourceRemoval(sourceId: string, action: 'delete' | 'keep'): Promise<ApiResult<{ deletedItems: number; deletedContradictions: number; repointedItems: number }>> {
     return ipcRenderer.invoke(IPC.WORKSPACE_SOURCE_REMOVAL_DECIDE, { sourceId, action })
   },
-  onSourceRemoved(cb: (p: { sourceId: string; title: string; cardCount: number; contradictionCount: number; origin: 'workspace' | 'manual' }) => void): () => void {
-    const listener = (_e: unknown, p: { sourceId: string; title: string; cardCount: number; contradictionCount: number; origin: 'workspace' | 'manual' }) => cb(p)
+  onSourceRemoved(cb: (p: WorkspaceSourceRemovalPending) => void): () => void {
+    const listener = (_e: unknown, p: WorkspaceSourceRemovalPending) => cb(p)
     ipcRenderer.on(IPC_EVENTS.WORKSPACE_SOURCE_REMOVED, listener)
     return () => ipcRenderer.removeListener(IPC_EVENTS.WORKSPACE_SOURCE_REMOVED, listener)
   },
