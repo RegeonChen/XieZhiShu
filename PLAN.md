@@ -1096,8 +1096,7 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 | 4 | docx / 纯文本改**分批进 DOM** | 新增 [src/renderer/src/lib/incremental.ts](src/renderer/src/lib/incremental.ts) + [IncrementalContent.tsx](src/renderer/src/components/IncrementalContent.tsx)，接入 [SourceViewer.tsx](src/renderer/src/components/SourceViewer.tsx) | 原先 docx 整篇 HTML 一次性 `dangerouslySetInnerHTML`、文本整块 `<pre>`。现在按**顶层块**（HTML，自写深度扫描器，注释/script/属性内 `>`/空元素都处理）与**行**分批追加，滚动到末尾附近继续加载，并给「全部展开」按钮（便于用户自己滚到底或查找）；换文档时正确重置 |
 
 **验证**：
-- `npm run typecheck` 零错误；
-- `npx vitest run` **298 项通过 / 1 项失败**（既有 `watcher.ts` chokidar `unlink` 环境项，非回归；总 299 项）；新增 **15 项单测**（Range 各形态 8 项、PDF 分页与保留区间 2 项、HTML 分块与文本分批 5 项）；
+- `npm run typecheck` 零错误；- `npx vitest run` **298 项通过 / 1 项失败**（既有 `watcher.ts` chokidar `unlink` 环境项，非回归；总 299 项）；新增 **15 项单测**（Range 各形态 8 项、PDF 分页与保留区间 2 项、HTML 分块与文本分批 5 项）；
 - **真实 HTTP 端到端校验（临时脚本，已删）**：起一个复刻投递写法的本地服务，用真实请求验证 `bytes=100-199` 返回**逐字节一致**的 100 字节（`createReadStream` 的 `end` 含端点，差一字节 PDF 就静默损坏）、`bytes=-50` 后缀区间、`bytes=1000-` → 416、ETag → 304、无 Range → 200 全量；4 项全过；
 - `npm run build` 成功（CSS 126.54 kB / JS 4,204.54 kB，体积增加全部来自新增功能）。
 
@@ -1108,6 +1107,8 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 - **HTML 清洗**：`IncrementalHtml` 仍沿用原有信任级别（mammoth 输出直出），"外部资料显示前清洗"这条待 S1 接入分栏查看器时一并处理（已记入 §8.7 边界）。
 
 **待用户实测**：打开一本书级/年鉴级 PDF → 观察**首屏时间**与滚动流畅度；长 docx、长 TXT 的打开速度；页码跳转与「全部展开」是否符合预期。
+
+**实测反馈与追加小改（2026-10-02）**：用户实测确认「**大文件的打开非常流畅，达成了预期效果**」；同时提出一项小改并已完成——**把 PDF 工具栏（页码跳转 / 上一页 / 下一页 / 缩小 / 放大 / 适应宽度）吸顶固定在栏顶，不随 PDF 滚动消失**。做法：`.pdf-viewer` **去掉 `overflow: auto`**（否则它自己会成为"最近滚动容器"，`position: sticky` 挂在它身上就永远不动——这是本改动的关键坑），工具栏改 `position: sticky; top: 0; z-index: 5` + **不透明底色**（否则页面内容从底下透出来）+ 下边框。链路上确认 `.pdf-viewer__toolbar → .pdf-viewer?（无 overflow）→ .source-viewer__body（无 overflow）→ .work-pane（`flex:1` + `overflow:auto`）` 之间**只有 `.work-pane` 是滚动容器**，因此吸顶挂在它上面；这条约束已写进 CSS 注释，供 S1 把查看器放进右栏时沿用（右栏若自带 `overflow`，吸顶要挂到右栏自己的滚动容器上）。验证：typecheck 零错误、**298/299 单测通过**、生产构建成功（CSS 127.14 kB / JS 4,204.54 kB）。
 
 
 ## Last Phase（收尾阶段）: Acceptance & Packaging（待进行）
