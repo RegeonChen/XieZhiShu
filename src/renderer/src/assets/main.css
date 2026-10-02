@@ -1284,17 +1284,27 @@ body {
 /* ---------- PDF 查看器（pdf.js 渲染） ---------- */
 .pdf-viewer {
   min-height: 200px;
-  overflow: auto;
+  /* 不要在这里设 overflow：否则 .pdf-viewer 自身成为"最近滚动容器"，
+     下面工具栏的 position: sticky 就会以它（并不滚动）为参照而失效。
+     实际滚动发生在外层 .work-pane，工具栏吸顶挂在它上面。 */
 }
 
+/* 工具栏固定在栏顶（不随 PDF 滚动消失）：页码跳转 / 上一页 / 下一页 / 缩放 */
 .pdf-viewer__toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 12px;
+  flex-wrap: wrap;
+  padding: 8px 0 10px;
+  margin-bottom: 6px;
+  /* 必须给不透明底色，否则页面内容会从工具栏下面透出来 */
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border);
   font-size: 12px;
   color: var(--fg-soft);
-  flex-wrap: wrap;
 }
 
 .pdf-viewer__info {
