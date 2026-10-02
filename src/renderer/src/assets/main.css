@@ -1105,6 +1105,19 @@ body {
   /* 用浅阴影而不是 border：正文自带 border-top，加边框会出现两条线 */
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
 }
+/* 吸顶后"表头与栏顶之间"还有一条滚动容器的 padding 带（分栏 16px / 资料库 32px），
+   而 sticky 是相对内容盒定位的 —— 正文会从那条带子里漏出来（用户实测：滚动 PDF 时页面
+   在表头上方露出）。用伪元素把这条带子盖住（高度覆盖到 48px，够用且不依赖具体 padding 值）。 */
+.source-viewer__header::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  height: 48px;
+  background: inherit;
+  pointer-events: none;
+}
 /* 生成汇编的分栏背景是面板色，表头要跟着它，吸顶时才看不出色差 */
 .writing-workspace__source .source-viewer__header {
   background: var(--bg-panel);
@@ -1445,6 +1458,21 @@ body {
 }
 .pdf-viewer__page.is-rendered .pdf-viewer__page-note {
   display: none;
+}
+
+/* Phase 8 / S3：PDF 文内定位的命中高亮（覆盖层，按页面百分比定位 → 缩放/分栏变化无需重算） */
+.pdf-viewer__pdf-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+.pdf-viewer__pdf-hit {
+  position: absolute;
+  transform-origin: 0 0;
+  background: var(--hl-locate-current, rgba(255, 176, 32, 0.4));
+  box-shadow: 0 0 0 1px var(--hl-locate-current-edge, rgba(214, 130, 0, 0.75));
+  border-radius: 2px;
 }
 
 .pdf-viewer__jump {
