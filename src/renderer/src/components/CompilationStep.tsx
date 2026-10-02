@@ -81,6 +81,8 @@ export interface CompilationItemView {
    */
   alsoSourceOrdinals?: number[]
   alsoSourceTitles?: string[]
+  /** 该段的原文证据引文（Phase 8 / S1：打开来源时作为定位锚） */
+  evidence?: string
 }
 
 export interface CompilationVariantView {
@@ -120,7 +122,11 @@ interface Props {
   busy: boolean
   candidateChunks?: number
   onConfirm: () => void
-  onOpenSource: (sourceId: string) => void
+  /**
+   * 打开来源（Phase 8 / S1）：第二个参数是**定位锚**——通常是该段的 `evidence`（逐字证据引文），
+   * 查看器据此滚到原文那句并高亮；第三个参数是给用户看的说明（如「第 3 段」）。
+   */
+  onOpenSource: (sourceId: string, snippet?: string, label?: string) => void
   onResolve: (contradictionId: string, action: 'resolve' | 'ignore', chosenItemId?: string) => void
   onReorderItems: (direction: 'asc' | 'desc') => void
   onUndo: () => void
@@ -1056,7 +1062,8 @@ function CompilationStep({
                 onClick={() => {
                   const item = keptItems.find((x) => x.sourceOrdinal === sourceCardFor)
                   setSourceCardFor(null)
-                  if (item) onOpenSource(item.sourceId)
+                  // Phase 8 / S1：带上该段的证据引文作为定位锚（拿不到证据时退回段落正文）
+                  if (item) onOpenSource(item.sourceId, item.evidence || item.excerpt, item.position ? `本汇编第 ${item.position} 段` : undefined)
                 }}
               >
                 {t.openSource}

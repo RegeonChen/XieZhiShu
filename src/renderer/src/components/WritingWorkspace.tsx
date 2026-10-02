@@ -4,6 +4,7 @@ import DraftEditor, { type DraftEditorHandle } from './DraftEditor'
 import ConfirmDialog from './ConfirmDialog'
 import ContradictionDialog from './ContradictionDialog'
 import ResizeHandle from './ResizeHandle'
+import SourceViewer from './SourceViewer'
 import StyleGuideEditor from './StyleGuideEditor'
 import ChatPanel, { type ChatMessageItem, type SourceRefItem } from './ChatPanel'
 import CompilationStep, {
@@ -308,6 +309,14 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   const [chatWidth, setChatWidth] = useState(380)
   const handleChatResize = useCallback((delta: number) => {
     setChatWidth((prev) => Math.max(320, Math.min(820, prev + delta)))
+  }, [])
+
+  // ---- Phase 8 / S1：右侧「来源」分栏（点段落来源 → 就地打开并定位到原文那句） ----
+  const [sourcePane, setSourcePane] = useState<{ sourceId: string; snippet?: string; label?: string } | null>(null)
+  const [sourceWidth, setSourceWidth] = useState(480)
+  const handleSourceResize = useCallback((delta: number) => {
+    // 分栏在右侧：向左拖（delta < 0）应把分栏拉宽
+    setSourceWidth((prev) => Math.max(320, Math.min(900, prev - delta)))
   }, [])
 
   // 跨任务切换保留「生成中」临时状态（busy / busyText / progress / compilationProgress / streamText）：
@@ -1007,11 +1016,14 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   const inDraftContradictions = contradictions.filter((c) => c.inDraft !== false)
   const warningContradictions = contradictions.filter((c) => c.inDraft === false)
 
-  const handleOpenSource = async (sourceId: string): Promise<void> => {
-    const res = await window.api.openSourcePath(sourceId)
-    if (!res.ok) {
-      appendAssistant('打开来源文件失败：' + (res.error?.message ?? ''))
-    }
+  /**
+   * 打开来源（Phase 8 / S1 起）：默认在**右侧分栏**里打开，并带上定位锚（通常是该段的证据引文），
+   * 查看器会滚到那句并高亮。要用系统默认程序（WPS/Word/浏览器）打开时走 `handleOpenSourceExternal`
+   * —— 用户裁定 Q2：内部与外部两种打开方式都要有。
+   */
+  const handleOpenSource = (sourceId: string, snippet?: string, label?: string): void => {
+    if (!sourceId) return
+    setSourcePane({ sourceId, snippet, label })
   }
 
   const handleAskSource = async (selection: string): Promise<void> => {
@@ -1078,7 +1090,7 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           busy={busy !== null}
           candidateChunks={compilationMeta?.candidateChunks}
           onConfirm={() => void handleExportCompilation()}
-          onOpenSource={(sourceId) => void handleOpenSource(sourceId)}
+          onOpenSource={(sourceId, snippet, label) => handleOpenSource(sourceId, snippet, label)}
           onResolve={handleResolveContradiction}
           onReorderItems={(direction) => void handleReorderItems(direction)}
           onUndo={() => void handleUndo()}
@@ -1254,6 +1266,21 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           </>
         ) : null}
         <section className="writing-workspace__editor">{renderContent()}</section>
+        {/* Phase 8 / S1：右侧「来源」分栏——点段落来源 / 矛盾说法时在此就地打开并定位（优先保证本处效果） */}
+        {sourcePane ? (
+          <>
+            <ResizeHandle onResize={handleSourceResize} direction="horizontal" />
+            <section className="writing-workspace__source" style={{ width: sourceWidth }}>
+              <SourceViewer
+                key={sourcePane.sourceId}
+                sourceId={sourcePane.sourceId}
+                dense
+                locate={sourcePane.snippet ? { snippet: sourcePane.snippet, label: sourcePane.label } : null}
+                onClose={() => setSourcePane(null)}
+              />
+            </section>
+          </>
+        ) : null}
       </div>
 
       {/* 「生成汇编」导出格式选择 */}
@@ -1280,7 +1307,7 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           onClose={() => setDialogState(null)}
           onResolved={handleContradictionResolved}
           onApplied={handleContradictionApplied}
-          onOpenSource={(sourceId) => void handleOpenSource(sourceId)}
+          onOpenSource={(sourceId, snippet, label) => handleOpenSource(sourceId, snippet, label)}
         />
       ) : null}
 

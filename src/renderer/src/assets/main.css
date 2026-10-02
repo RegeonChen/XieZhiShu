@@ -1179,6 +1179,70 @@ body {
   padding-top: 16px;
 }
 
+/* ---- Phase 8 / S1：分栏查看器与文内定位 ---- */
+.source-viewer--dense .source-viewer__header {
+  margin-bottom: 12px;
+}
+.source-viewer--dense .source-viewer__title {
+  font-size: 15px;
+  margin-bottom: 6px;
+}
+/* 分栏较窄：来源元信息允许换行，标题最多两行 */
+.source-viewer--dense .source-viewer__meta {
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.source-viewer--dense .source-viewer__url {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 定位宿主：命中覆盖层以它为坐标系（position: relative），随内容一起滚动 */
+.source-viewer__locate-host {
+  position: relative;
+}
+
+/* 命中高亮：覆盖层，不改动正文 DOM（docx 是命令式分批追加的，改写文本节点会打乱它） */
+.source-viewer__hit {
+  position: absolute;
+  pointer-events: none;
+  background: var(--hl-locate, rgba(47, 111, 237, 0.22));
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px var(--hl-locate-edge, rgba(47, 111, 237, 0.45));
+}
+.source-viewer__hit.is-current {
+  background: var(--hl-locate-current, rgba(255, 176, 32, 0.35));
+  box-shadow: 0 0 0 1px var(--hl-locate-current-edge, rgba(214, 130, 0, 0.7));
+}
+
+/* 定位结果条（表头下方） */
+.source-viewer__locate {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-soft);
+  font-size: 12px;
+  color: var(--fg-soft);
+}
+.source-viewer__locate-text {
+  font-weight: 600;
+  color: var(--fg);
+}
+.source-viewer__locate-text--miss {
+  color: var(--fg-soft);
+}
+.source-viewer__locate-anchor {
+  margin-left: auto;
+  color: var(--fg-soft);
+}
+
 .source-viewer__content {
   font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
   font-size: 14px;
@@ -2070,6 +2134,26 @@ body {
   background: var(--bg-panel);
   box-shadow: var(--shadow-sm);
   overflow: hidden;
+}
+
+/* ---- Phase 8 / S1：右侧「来源」分栏（点段落来源 / 矛盾说法时在此打开） ---- */
+.writing-workspace__source {
+  flex-shrink: 0;
+  width: 480px;
+  min-width: 320px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-sm);
+  /* 这里是分栏自己的滚动容器：PDF 工具栏的 sticky 与"定位滚动"都挂在它上面 */
+  overflow: auto;
+  padding: 16px;
+}
+.writing-workspace__source .source-viewer {
+  min-width: 0;
 }
 
 /* 聊天面板 */
