@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import PdfViewer from './PdfViewer'
+import { IncrementalHtml, IncrementalText } from './IncrementalContent'
 import { zhCN } from '../i18n/zh-CN'
 
 interface SourceDetail {
@@ -178,7 +179,8 @@ function SourceViewer({ sourceId, onBack }: { sourceId: string; onBack: () => vo
         {isDocx && htmlLoading ? (
           <div className="source-viewer__status">正在渲染文档排版...</div>
         ) : isDocx && htmlContent ? (
-          <div className="source-viewer__docx" dangerouslySetInnerHTML={{ __html: htmlContent }} />
+          // Phase 8 / S2：docx 的整篇 HTML 按顶层块分批进 DOM（大 Word 不再一次性建巨量节点）
+          <IncrementalHtml html={htmlContent} className="source-viewer__docx" />
         ) : isPdf && fileUrl ? (
           <PdfViewer url={fileUrl} />
         ) : isImage && fileUrl ? (
@@ -186,7 +188,8 @@ function SourceViewer({ sourceId, onBack }: { sourceId: string; onBack: () => vo
         ) : isNativeView ? (
           <div className="source-viewer__status">正在加载文件...</div>
         ) : (
-          <pre className="source-viewer__content">{source.cleanedText}</pre>
+          // Phase 8 / S2：纯文本正文按行分批进 DOM
+          <IncrementalText text={source.cleanedText} className="source-viewer__content" />
         )}
       </div>
     </div>

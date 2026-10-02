@@ -78,7 +78,7 @@ import { listTags, createTag, updateTag, deleteTag, addTagToSource, removeTagFro
 import { importFiles, importUrl } from './import'
 import { setPdfCmapsDir } from './import/file-parser'
 import { addWebSite, getWebSiteByRootUrl, listWebSites, removeWebSite, updateWebSite } from './db/web-sites'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { createReadStream, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { safeStorageCodec } from './llm/secret'
 import { listProviders, saveProvider, deleteProvider } from './llm/provider-store'
 import { testProviderConnection } from './llm/test'
@@ -138,6 +138,7 @@ import { migrateLegacyToWorkspace } from './workspace/migrate'
 import { loadWindowState, trackWindowState } from './window-state'
 import type { WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceUpdateReq, WebSourceUpdateRes, AppGetPdfCmapsUrlRes, LogAppendReq, LogExportRes, StyleGuideListRes, StyleGuideSaveReq, StyleGuideSaveRes, StyleGuideSetDefaultReq, StyleGuideSetDefaultRes, StyleGuideDeleteReq, CompilationExportDocxReq, CompilationExportDocxRes, CompilationExportArchiveReq, CompilationExportArchiveRes, CompilationImportArchiveReq, CompilationImportArchiveRes, CompilationImportFromTaskReq, CompilationImportFromTaskRes, CompilationListFinalizedForImportReq, CompilationListFinalizedForImportRes } from '../shared/ipc'
 import { logMain, logIpc, logRenderer, exportLogsText } from './logger'
+import { resolveFileDelivery } from './file-range'
 
 /** 长任务保持唤醒：开启则 start，任务结束/异常在 finally 中 stop（引用计数，重叠任务不提前释放） */
 function keepAwakeEnabled(): boolean {
@@ -202,7 +203,6 @@ function startFileServer(): void {
         return
       }
 
-      const data = readFileSync(filePath)
       const ext = filePath.split('.').pop()?.toLowerCase()
       const mimeMap: Record<string, string> = {
         pdf: 'application/pdf',
@@ -215,8 +215,35 @@ function startFileServer(): void {
         md: 'text/markdown; charset=utf-8'
       }
       res.setHeader('content-type', mimeMap[ext ?? ''] ?? 'application/octet-stream')
-      res.setHeader('cache-control', 'no-store')
-      res.end(data)
+
+      /*
+       * Phase 8 / S2（2026-10-02）：**流式 + HTTP Range**，不再 `readFileSync` 整文件进内存。
+       * 原实现在打开年鉴这类大 PDF 时会同步读入整个文件（主进程被占、界面卡住）且每次重开重读；
+       * 现在按 Range 只读需要的字节段（pdf.js 可分段取），并用 ETag 支持 304 复用。
+       */
+      const stat = statSync(filePath)
+      const delivery = resolveFileDelivery({
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        rangeHeader: typeof req.headers.range === 'string' ? req.headers.range : undefined,
+        ifNoneMatch: typeof req.headers['if-none-match'] === 'string' ? req.headers['if-none-match'] : undefined
+      })
+      for (const [k, v] of Object.entries(delivery.headers)) res.setHeader(k, v)
+      res.statusCode = delivery.status
+      if (delivery.status === 304 || delivery.status === 416 || req.method === 'HEAD') {
+        res.end()
+        return
+      }
+      const stream =
+        delivery.start != null && delivery.end != null
+          ? createReadStream(filePath, { start: delivery.start, end: delivery.end })
+          : createReadStream(filePath)
+      stream.on('error', () => {
+        // 读取中途失败（文件被删/被占用）：尽力回 500，不能让请求悬着
+        if (!res.headersSent) res.statusCode = 500
+        res.end()
+      })
+      stream.pipe(res)
     } catch {
       res.statusCode = 500
       res.end()

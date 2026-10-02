@@ -1186,6 +1186,36 @@ body {
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--fg);
+  margin: 0;
+}
+
+/* 大文档分批渲染（Phase 8 / S2）：滚动到末尾后继续加载的提示条 + 追加入口 */
+.incremental__sentinel {
+  height: 1px;
+}
+.incremental__more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 16px 0;
+  padding: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--fg-soft);
+}
+.incremental__more-btn {
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  color: var(--fg);
+  font-size: 12px;
+  cursor: pointer;
+}
+.incremental__more-btn:hover {
+  background: var(--accent-soft);
 }
 
 /* docx HTML 渲染（mammoth 输出） */
@@ -1296,13 +1326,50 @@ body {
   gap: 14px;
 }
 
-.pdf-viewer__canvas {
+/* Phase 8 / S2：PDF 虚拟化——每页一个占位块（按真实比例预留高度，滚动条长度立即正确）。
+   初始用 A4 竖版比例估计，渲染完成后由 JS 覆盖为真实比例。 */
+.pdf-viewer__page {
+  position: relative;
   width: 100%;
-  height: auto;
+  aspect-ratio: 1 / 1.414;
   background: #fff;
   border: 1px solid var(--border);
   border-radius: 4px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+}
+.pdf-viewer__page > canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+/* 未渲染（或滚出视口已释放）时显示页码提示，渲染完成后隐藏 */
+.pdf-viewer__page-note {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-soft);
+  font-size: 12px;
+}
+.pdf-viewer__page.is-rendered .pdf-viewer__page-note {
+  display: none;
+}
+
+.pdf-viewer__jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.pdf-viewer__jump-input {
+  width: 56px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  color: var(--fg);
+  font-size: 12px;
 }
 
 /* ---------- 设置（LLM Provider 配置） ---------- */
