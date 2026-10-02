@@ -25,6 +25,15 @@ interface RowVariant {
 interface RowRecycle {
   id: string; compilation_id: string; contradiction_id: string; topic: string; kind: string; status: string; created_at: string
 }
+/**
+ * 并列来源关系行（Phase 7.12，Migration 042）。
+ * **必须随快照一起保存/恢复**：恢复是"先清空 5 张表再重插"，且期间外键关闭（级联失效），
+ * 若不带这一张表，一次撤销就会把"另一个出处"静默抹掉——与 2026-09-10 那次
+ * 「漏写 9 个段落列导致 year/source_ordinal 全丢」属同一类事故。
+ */
+interface RowItemSource {
+  item_id: string; source_id: string; created_at: string
+}
 interface RowComp {
   id: string; task_id: string; title: string; status: string; created_at: string; updated_at: string
 }
@@ -32,6 +41,8 @@ interface RowComp {
 export interface CompilationSnapshot {
   compilation: RowComp
   items: RowItem[]
+  /** 段落 ↔ 来源（含主来源与并列来源）：Phase 7.12 */
+  itemSources: RowItemSource[]
   contradictions: RowContra[]
   variants: RowVariant[]
   recycleBin: RowRecycle[]
@@ -44,22 +55,27 @@ function place(n: number): string {
   return new Array(n).fill('?').join(',')
 }
 
-/** 捕获某汇编的完整状态（5 张表 + compilations 行）。返回 null 表示汇编不存在。 */
+/** 捕获某汇编的完整状态（6 张表 + compilations 行）。返回 null 表示汇编不存在。 */
 export function captureCompilationSnapshot(compilationId: string): CompilationSnapshot | null {
   const db = getDb()
   const comp = db.prepare('SELECT * FROM compilations WHERE id = ?').get(compilationId) as RowComp | undefined
   if (!comp) return null
   const items = db.prepare('SELECT * FROM compilation_items WHERE compilation_id = ? ORDER BY position').all(compilationId) as RowItem[]
+  const itemSources = db
+    .prepare(
+      'SELECT r.item_id AS item_id, r.source_id AS source_id, r.created_at AS created_at FROM compilation_item_sources r WHERE r.item_id IN (SELECT id FROM compilation_items WHERE compilation_id = ?)'
+    )
+    .all(compilationId) as RowItemSource[]
   const contradictions = db.prepare('SELECT * FROM compilation_contradictions WHERE compilation_id = ?').all(compilationId) as RowContra[]
   const contraIds = contradictions.map((c) => c.id)
   const variants = contraIds.length > 0
     ? db.prepare('SELECT * FROM compilation_contradiction_variants WHERE contradiction_id IN (' + place(contraIds.length) + ')').all(...contraIds) as RowVariant[]
     : []
   const recycleBin = db.prepare('SELECT * FROM compilation_recycle_bin WHERE compilation_id = ?').all(compilationId) as RowRecycle[]
-  return { compilation: comp, items, contradictions, variants, recycleBin }
+  return { compilation: comp, items, itemSources, contradictions, variants, recycleBin }
 }
 
-/** 用快照替换某汇编的全部状态（先清空 5 张表中属于该汇编的行，再按原 ID 重插）。 */
+/** 用快照替换某汇编的全部状态（先清空 6 张表中属于该汇编的行，再按原 ID 重插）。 */
 export function restoreCompilationSnapshot(snapshot: CompilationSnapshot): void {
   const db = getDb()
   const cid = snapshot.compilation.id
@@ -70,6 +86,10 @@ export function restoreCompilationSnapshot(snapshot: CompilationSnapshot): void 
       db.prepare('DELETE FROM compilation_recycle_bin WHERE compilation_id = ?').run(cid)
       db.prepare('DELETE FROM compilation_contradiction_variants WHERE contradiction_id IN (SELECT id FROM compilation_contradictions WHERE compilation_id = ?)').run(cid)
       db.prepare('DELETE FROM compilation_contradictions WHERE compilation_id = ?').run(cid)
+      // 关系行必须先清（期间外键关闭，删除段落不会级联清理，会留下指向已删段落的孤儿行）
+      db.prepare(
+        'DELETE FROM compilation_item_sources WHERE item_id IN (SELECT id FROM compilation_items WHERE compilation_id = ?)'
+      ).run(cid)
       db.prepare('DELETE FROM compilation_items WHERE compilation_id = ?').run(cid)
 
       db.prepare('UPDATE compilations SET title = ?, status = ?, updated_at = ? WHERE id = ?')
@@ -88,6 +108,10 @@ export function restoreCompilationSnapshot(snapshot: CompilationSnapshot): void 
           r.evidence ?? null, r.origin ?? 'generate', r.revision ?? 1, r.kind ?? 'paragraph'
         )
       }
+
+      // 段落 ↔ 来源关系（含并列来源，Phase 7.12）：与段落行同一事务重插
+      const insItemSource = db.prepare('INSERT OR IGNORE INTO compilation_item_sources (item_id, source_id, created_at) VALUES (?,?,?)')
+      for (const r of snapshot.itemSources ?? []) insItemSource.run(r.item_id, r.source_id, r.created_at)
 
       const insContra = db.prepare('INSERT INTO compilation_contradictions (id, compilation_id, topic, kind, status, chosen_item_id, created_at) VALUES (?,?,?,?,?,?,?)')
       for (const r of snapshot.contradictions) insContra.run(r.id, r.compilation_id, r.topic, r.kind, r.status, r.chosen_item_id, r.created_at)

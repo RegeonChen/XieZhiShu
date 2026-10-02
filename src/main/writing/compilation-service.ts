@@ -1191,7 +1191,10 @@ function persistDocument(
   const titleBySourceId = new Map(refs.map((r) => [r.sourceId, r.title]))
   const sourceOrder: string[] = []
   for (const p of paragraphs) {
-    if (p.sourceId && !sourceOrder.includes(p.sourceId)) sourceOrder.push(p.sourceId)
+    // Phase 7.12：并列来源也要进编号表，否则被合并掉的出处拿不到编号、界面显示不出"两个出处"
+    for (const sid of [p.sourceId, ...(p.alsoSourceIds ?? [])]) {
+      if (sid && !sourceOrder.includes(sid)) sourceOrder.push(sid)
+    }
   }
   const sourceRefs = ensureCompilationSources(
     compilationId,
@@ -1202,6 +1205,7 @@ function persistDocument(
     compilationId,
     paragraphs.map((p) => ({
       sourceId: p.sourceId ?? '',
+      alsoSourceIds: p.alsoSourceIds,
       text: p.text,
       timeLabel: p.timeLabel,
       year: p.year,
@@ -1413,6 +1417,8 @@ async function runExtractPhase(
       timeUnsupported: agg.timeUnsupported,
       duplicatesDropped: assembled.duplicatesDropped,
       conflictsKept: assembled.conflictsKept,
+      crossSourceMerged: assembled.crossSourceMerged,
+      containmentMerged: assembled.containmentMerged,
       retried: agg.retried
     }
     if (incomplete) state.extractIncomplete = { message: incomplete }
@@ -1703,6 +1709,10 @@ function finalizeCompilationInto(
     passthrough?: number
     duplicatesDropped?: number
     conflictsKept?: number
+    /** 跨来源合并掉的段数（Phase 7.12：这些段的并列来源已同步标出） */
+    crossSourceMerged?: number
+    /** 由「包含关系」判定合并掉的段数（Phase 7.12 S1 新增规则） */
+    containmentMerged?: number
   }
 ): GenerateCompilationResult {
   const { itemIdByText } = persistDocument(compilationId, output.paragraphs, refs)
@@ -1785,7 +1795,9 @@ function localFallbackParagraphs(chunks: RetrievedChunk[]): AssembledParagraph[]
 function persistLocalFallback(compilationId: string, paragraphs: AssembledParagraph[]): void {
   const sourceOrder: string[] = []
   for (const p of paragraphs) {
-    if (p.sourceId && !sourceOrder.includes(p.sourceId)) sourceOrder.push(p.sourceId)
+    for (const sid of [p.sourceId, ...(p.alsoSourceIds ?? [])]) {
+      if (sid && !sourceOrder.includes(sid)) sourceOrder.push(sid)
+    }
   }
   const sourceRefs = ensureCompilationSources(
     compilationId,
@@ -1796,6 +1808,7 @@ function persistLocalFallback(compilationId: string, paragraphs: AssembledParagr
     compilationId,
     paragraphs.map((p) => ({
       sourceId: p.sourceId ?? '',
+      alsoSourceIds: p.alsoSourceIds,
       text: p.text,
       timeLabel: p.timeLabel,
       year: p.year,

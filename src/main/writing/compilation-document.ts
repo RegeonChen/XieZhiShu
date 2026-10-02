@@ -118,6 +118,8 @@ export function buildParagraphSnapshot(
       timeConfidence,
       sourceOrdinal: it.sourceOrdinal ?? ref?.ordinal,
       sourceId: it.sourceId || undefined,
+      alsoSourceIds: it.alsoSourceIds && it.alsoSourceIds.length > 0 ? it.alsoSourceIds : undefined,
+      alsoSourceOrdinals: it.alsoSourceOrdinals && it.alsoSourceOrdinals.length > 0 ? it.alsoSourceOrdinals : undefined,
       sourceTitle: it.sourceTitle,
       evidence: it.evidence,
       kind: (it.kind ?? 'paragraph') as CompilationParagraphKind,
@@ -509,6 +511,8 @@ export interface AssembleInputParagraph {
   /** 所属来源 id（调用方按 `#N` 解析后传入）；空串表示无来源 */
   sourceId: string
   sourceTitle?: string
+  /** 并列来源 id（Phase 7.12；通常由 `assembleDocument` 在合并重复段时补齐） */
+  alsoSourceIds?: string[]
   evidence?: string
   origin?: CompilationParagraphOrigin
   /** 该段来自本批的第几个候选（用于窗口级矛盾说法的映射与诊断） */
@@ -529,6 +533,8 @@ export interface AssembleResult {
   conflictsKept: number
   /** 其中**跨来源**合并掉的段数（网页转载 / 网站版与工作区同文档；2026-09-12 第二批） */
   crossSourceMerged: number
+  /** 其中由「包含关系」判定合并掉的段数（Phase 7.12 新增规则，诊断用） */
+  containmentMerged: number
 }
 
 /** 近似重复判定阈值（同来源、数字一致时才视为重复；略低以覆盖"改一两个字"的重复表述） */
@@ -536,21 +542,53 @@ export const NEAR_DUPLICATE_DICE = 0.85
 
 /**
  * 跨来源近似重复阈值（更严）：不同来源措辞接近，比同一来源更容易是"两件不同的事"，
- * 因此只在非常接近、且**数字完全一致**时才合并（合并后只保留一个来源，见 assembleDocument 注释）。
+ * 因此只在非常接近、且**数字完全一致**时才合并（合并后并列来源一并保留，见 assembleDocument）。
+ *
+ * ⚠ 2026-10-02（Phase 7.12 S1）实测后**刻意不降低本阈值**：曾计划降到 0.85 以覆盖
+ * 0.85–0.92 区间的 2 对真实重复，但同批实测发现该区间存在**误合并**风险——
+ * 「长乐七中教学综合楼项目投资1200万元新建教学综合楼。」vs「长乐三中…」Dice=0.905、
+ * 「长乐一中首占校区的学生宿舍楼工程已完工。」vs「长乐二中…」Dice=0.889（数字完全一致），
+ * 区别只在主体名一个字，降阈值会把不同学校的材料静默吞掉。**宁多勿漏**，故保持 0.92。
  */
 export const NEAR_DUPLICATE_DICE_CROSS = 0.92
 
 /**
+ * 「包含关系」判定的最短字数（归一化后）：一段的文字**逐字完整包含**另一段时，
+ * 短的那段至少要有这么多字才认定重复——避免把「XX中学」这类短语并进长段。
+ */
+export const CONTAINMENT_MIN_CHARS = 12
+
+/** 合并「并列来源」：保留主来源之外的其它出处，去重、去掉空值、且不含主来源自身（Phase 7.12） */
+export function mergeAlsoSourceIds(
+  mainSourceId: string | undefined,
+  ...lists: ((string | undefined)[] | undefined)[]
+): string[] {
+  const out: string[] = []
+  for (const list of lists) {
+    for (const id of list ?? []) {
+      if (!id || id === mainSourceId) continue
+      if (!out.includes(id)) out.push(id)
+    }
+  }
+  return out
+}
+
+/**
  * 把各批「整合提取」结果拼成一篇文档（纯函数）：
  * ① 完全重复（去空白标点后相同）→ 保留信息更全的一条（**跨来源也算重复**）；
- * ② 近似重复（Dice 相似）→ **数字一致**才算重复（保留更长的一条）；
+ * ② 包含关系（一段的文字**逐字完整包含**另一段，`CONTAINMENT_MIN_CHARS` 起）→ **数字一致**才算重复：
+ *    短句被长段完整包含时 Dice 天然偏低（真实数据实测 0.507 / 0.529 / 0.563 / 0.839 都被阈值漏掉），
+ *    而"一段是另一段的超集"在语义上不可能是两件事，属于**最安全**的合并判据；
+ * ③ 近似重复（Dice 相似）→ **数字一致**才算重复（保留更长的一条）；
+ *    跨来源（网页转载、网站版与工作区同文档）用更严格的阈值 `NEAR_DUPLICATE_DICE_CROSS`；
  *    **数字不一致则两段都保留** —— 这是"疑似矛盾的说法"，绝不能在这里被合并掉，交给矛盾扫描处理；
- *    跨来源（网页转载、网站版与工作区同文档）用更严格的阈值 `NEAR_DUPLICATE_DICE_CROSS`：
- *    同一件事被两个来源分别收录时只留一处（2026-09-12 用户立项的第二批），但阈值更保守，
- *    因为"不同来源措辞接近"比"同一来源措辞接近"更容易是两件不同的事；
- * ③ 按 `年 → 月 → 生成序` 稳定排序，并重写 ordinal（无年份的段落沉底）。
- * 来源编号（sourceOrdinal）不在这里分配：由仓储层按 `sourceOrder` 统一编号后回填，保证"只增不回收"。
- * 注：合并后只保留**一个**来源（段落模型是单一来源）；"合并后标注多个来源"属 Phase 7.12，尚未设计。
+ * ④ 按 `年 → 月 → 生成序` 稳定排序，并重写 ordinal（无年份的段落沉底）。
+ *
+ * Phase 7.12（2026-10-02，用户裁定 Q1=B/Q3=i）：**合并时把被合并那一段的来源记为"并列来源"**
+ * （`alsoSourceIds`），因此合并不再丢失"这件事还有另一个出处"。主来源仍是 `sourceId`，
+ * 所以 evidence 逐字校验、矛盾归因与「不得跨来源拼接」（Phase 7.2 裁定 D1）都不受影响。
+ *
+ * 来源编号（sourceOrdinal）不在这里分配：由仓储层按 `sourceOrder`（**含并列来源**）统一编号后回填。
  */
 export function assembleDocument(inputs: AssembleInputParagraph[]): AssembleResult {
   const kept: AssembledParagraph[] = []
@@ -558,6 +596,8 @@ export function assembleDocument(inputs: AssembleInputParagraph[]): AssembleResu
   let conflictsKept = 0
   /** 跨来源合并掉的段数（诊断用：说明"同一件事两个来源"确实发生了） */
   let crossSourceMerged = 0
+  /** 由「包含关系」判定合并掉的段数（Phase 7.12 新增规则，诊断用） */
+  let containmentMerged = 0
   for (const input of inputs) {
     const text = (input.text ?? '').trim()
     if (!text) continue
@@ -572,6 +612,7 @@ export function assembleDocument(inputs: AssembleInputParagraph[]): AssembleResu
       timeConfidence: input.timeConfidence ?? parsed.confidence,
       sourceId: input.sourceId || undefined,
       sourceTitle: input.sourceTitle,
+      alsoSourceIds: mergeAlsoSourceIds(input.sourceId || undefined, input.alsoSourceIds) ,
       evidence: input.evidence,
       kind: 'paragraph',
       revision: 1,
@@ -579,47 +620,95 @@ export function assembleDocument(inputs: AssembleInputParagraph[]): AssembleResu
       kept: true,
       parentIndex: input.parentIndex
     }
+    if (draft.alsoSourceIds && draft.alsoSourceIds.length === 0) draft.alsoSourceIds = undefined
     const norm = normalizeForCompare(text)
+
+    // ① 完全重复（去空白标点后相同，跨来源也算）→ 保留先出现者，另一处的来源记为并列来源
     const exactAt = kept.findIndex((p) => normalizeForCompare(p.text) === norm)
     if (exactAt >= 0) {
-      // 归一化后完全相同（差异只在空白/标点）→ 保留先出现者
+      const prev = kept[exactAt]
+      prev.alsoSourceIds = mergeAlsoSourceIds(prev.sourceId, prev.alsoSourceIds, draft.alsoSourceIds, [draft.sourceId])
       duplicatesDropped += 1
       continue
     }
-    // 先在同一来源里找近似重复（阈值较松），找不到再跨来源找（阈值更严）
-    const sameSourceAt = kept.findIndex(
-      (p) => p.sourceId && p.sourceId === draft.sourceId && textSimilarity(p.text, text) >= NEAR_DUPLICATE_DICE
-    )
-    const crossSourceAt =
-      sameSourceAt >= 0
-        ? -1
-        : kept.findIndex(
-            (p) => p.sourceId && p.sourceId !== draft.sourceId && textSimilarity(p.text, text) >= NEAR_DUPLICATE_DICE_CROSS
-          )
-    const nearAt = sameSourceAt >= 0 ? sameSourceAt : crossSourceAt
-    if (nearAt >= 0) {
-      const prev = kept[nearAt]
-      const sameNumbers = numbersCoveredBy(text, prev.text) && numbersCoveredBy(prev.text, text)
-      if (sameNumbers) {
-        // 数字一致 → 视为同一段的重复表述；仅当新文本真的**包含了**旧文本（信息更全）时才替换，否则保留先出现者
-        if (text.length > prev.text.length && stripSpaces(text).includes(stripSpaces(prev.text))) {
-          kept[nearAt] = { ...draft, ordinal: prev.ordinal }
+
+    // ② 包含关系（逐字包含 + 数字一致）→ 保留信息更全（更长）的一条，另一条记为并列来源
+    let decidedByContainment = false
+    if (norm.length >= CONTAINMENT_MIN_CHARS) {
+      const containAt = kept.findIndex((p) => {
+        const pn = normalizeForCompare(p.text)
+        return pn.length >= CONTAINMENT_MIN_CHARS && (pn.includes(norm) || norm.includes(pn))
+      })
+      if (containAt >= 0) {
+        const prev = kept[containAt]
+        const crossSource = (prev.sourceId ?? '') !== (draft.sourceId ?? '')
+        const sameNumbers = numbersCoveredBy(text, prev.text) && numbersCoveredBy(prev.text, text)
+        if (sameNumbers) {
+          const draftLonger = norm.length > normalizeForCompare(prev.text).length
+          if (draftLonger) {
+            kept[containAt] = {
+              ...draft,
+              ordinal: prev.ordinal,
+              alsoSourceIds: mergeAlsoSourceIds(draft.sourceId, draft.alsoSourceIds, prev.alsoSourceIds, [prev.sourceId])
+            }
+          } else {
+            prev.alsoSourceIds = mergeAlsoSourceIds(prev.sourceId, prev.alsoSourceIds, draft.alsoSourceIds, [draft.sourceId])
+          }
+          duplicatesDropped += 1
+          containmentMerged += 1
+          if (crossSource) crossSourceMerged += 1
+          continue
         }
-        duplicatesDropped += 1
-        if (crossSourceAt >= 0) crossSourceMerged += 1
-        continue
+        // 数字不一致 → 疑似矛盾，两段都留（下面照常 push）；同一对不再走 Dice，避免重复计数
+        conflictsKept += 1
+        decidedByContainment = true
       }
-      // 数字不一致 → 疑似矛盾，两段都留（下面照常 push）
-      conflictsKept += 1
+    }
+
+    // ③ 近似重复：先在同一来源里找（阈值较松），找不到再跨来源找（阈值更严）
+    if (!decidedByContainment) {
+      const sameSourceAt = kept.findIndex(
+        (p) => p.sourceId && p.sourceId === draft.sourceId && textSimilarity(p.text, text) >= NEAR_DUPLICATE_DICE
+      )
+      const crossSourceAt =
+        sameSourceAt >= 0
+          ? -1
+          : kept.findIndex(
+              (p) => p.sourceId && p.sourceId !== draft.sourceId && textSimilarity(p.text, text) >= NEAR_DUPLICATE_DICE_CROSS
+            )
+      const nearAt = sameSourceAt >= 0 ? sameSourceAt : crossSourceAt
+      if (nearAt >= 0) {
+        const prev = kept[nearAt]
+        const sameNumbers = numbersCoveredBy(text, prev.text) && numbersCoveredBy(prev.text, text)
+        if (sameNumbers) {
+          // 数字一致 → 视为同一段的重复表述；仅当新文本真的**包含了**旧文本（信息更全）时才替换，否则保留先出现者
+          if (text.length > prev.text.length && stripSpaces(text).includes(stripSpaces(prev.text))) {
+            kept[nearAt] = {
+              ...draft,
+              ordinal: prev.ordinal,
+              alsoSourceIds: mergeAlsoSourceIds(draft.sourceId, draft.alsoSourceIds, prev.alsoSourceIds, [prev.sourceId])
+            }
+          } else {
+            prev.alsoSourceIds = mergeAlsoSourceIds(prev.sourceId, prev.alsoSourceIds, draft.alsoSourceIds, [draft.sourceId])
+          }
+          duplicatesDropped += 1
+          if (crossSourceAt >= 0) crossSourceMerged += 1
+          continue
+        }
+        // 数字不一致 → 疑似矛盾，两段都留（下面照常 push）
+        conflictsKept += 1
+      }
     }
     kept.push({ ...draft, ordinal: kept.length })
   }
   const sorted = sortParagraphsByTime(kept)
   const sourceOrder: string[] = []
   for (const p of sorted) {
-    if (p.sourceId && !sourceOrder.includes(p.sourceId)) sourceOrder.push(p.sourceId)
+    for (const sid of [p.sourceId, ...(p.alsoSourceIds ?? [])]) {
+      if (sid && !sourceOrder.includes(sid)) sourceOrder.push(sid)
+    }
   }
-  return { paragraphs: sorted, sourceOrder, duplicatesDropped, conflictsKept, crossSourceMerged }
+  return { paragraphs: sorted, sourceOrder, duplicatesDropped, conflictsKept, crossSourceMerged, containmentMerged }
 }
 
 // ---- vitest inline test ----
@@ -889,7 +978,8 @@ if (import.meta.vitest) {
     it('merges the same fact across sources when the numbers match (2026-09-12 第二批)', () => {
       /*
        * 网页转载 / 网站版与工作区同文档：同一件事被两个来源分别收录。
-       * 跨来源阈值更严（0.92），且**数字必须完全一致**才合并——合并后只留一个来源。
+       * 跨来源阈值更严（0.92），且**数字必须完全一致**才合并。
+       * Phase 7.12 起：合并后主来源不变，另一处出处记入 `alsoSourceIds`（见下一个用例）。
        */
       const out = assembleDocument([
         { text: '2021 年，全区新增幼儿园 6 所，公办园占比 42%。', timeLabel: '2021 年', sourceId: 's1', parentIndex: 0 },
@@ -898,7 +988,8 @@ if (import.meta.vitest) {
       expect(out.paragraphs).toHaveLength(1)
       expect(out.duplicatesDropped).toBe(1)
       expect(out.crossSourceMerged).toBe(1)
-      expect(out.paragraphs[0].sourceId).toBe('s1') // 保留先出现者（本段单一来源）
+      expect(out.paragraphs[0].sourceId).toBe('s1') // 保留先出现者作为主来源
+      expect(out.paragraphs[0].alsoSourceIds).toEqual(['s2']) // 另一处出处被标注，而不是被丢掉
     })
 
     it('never merges across sources when the numbers differ — that is a contradiction', () => {
@@ -920,6 +1011,67 @@ if (import.meta.vitest) {
       // 措辞接近但讲的是不同的事（数字集合也不同）→ 不合并
       expect(out.paragraphs).toHaveLength(2)
       expect(out.crossSourceMerged).toBe(0)
+    })
+
+    it('合并后记录并列来源，另一处出处不再丢失（Phase 7.12 S1）', () => {
+      const out = assembleDocument([
+        { text: '2021 年，全区新增幼儿园 6 所，公办园占比 42%。', timeLabel: '2021 年', sourceId: 's1', parentIndex: 0 },
+        { text: '2021 年，全区新增幼儿园 6 所，公办园占比达 42%。', timeLabel: '2021 年', sourceId: 's2', parentIndex: 1 },
+        { text: '2021 年，全区新增幼儿园 6 所，公办园占比42%。', timeLabel: '2021 年', sourceId: 's3', parentIndex: 2 }
+      ])
+      expect(out.paragraphs).toHaveLength(1)
+      // 主来源仍是先出现者（evidence 逐字校验与矛盾归因都以它为准）
+      expect(out.paragraphs[0].sourceId).toBe('s1')
+      // 另外两个出处被记为并列来源，不再被静默丢掉
+      expect(out.paragraphs[0].alsoSourceIds).toEqual(['s2', 's3'])
+      // 并列来源也要进编号顺序，否则界面显示不出它们的编号
+      expect(out.sourceOrder).toEqual(['s1', 's2', 's3'])
+    })
+
+    it('包含关系（数字一致）→ 合并并保留信息更全的一条，另一条记为并列来源', () => {
+      const out = assembleDocument([
+        { text: '融侨国际双语学校奠基仪式举行。', timeLabel: '2019 年', sourceId: 's1', parentIndex: 0 },
+        { text: '融侨国际双语学校奠基仪式举行，市领导及相关部门负责人参加活动。', timeLabel: '2019 年', sourceId: 's2', parentIndex: 1 }
+      ])
+      // 短句被长句逐字包含时 Dice 只有约 0.6，旧口径判不出来 → 这是本规则补上的缺口
+      expect(out.paragraphs).toHaveLength(1)
+      expect(out.containmentMerged).toBe(1)
+      expect(out.paragraphs[0].text).toBe('融侨国际双语学校奠基仪式举行，市领导及相关部门负责人参加活动。')
+      expect(out.paragraphs[0].sourceId).toBe('s2')
+      expect(out.paragraphs[0].alsoSourceIds).toEqual(['s1'])
+    })
+
+    it('包含关系但数字不一致 → 两段都保留（「数字不一致一律保留」这条底线不动）', () => {
+      const out = assembleDocument([
+        { text: '2024 年，长乐区新增公办普高学位近 800 个。', timeLabel: '2024 年', sourceId: 's1', parentIndex: 0 },
+        { text: '2024 年，长乐区新增公办普高学位近 800 个，投入 2147 万元落实免学费政策。', timeLabel: '2024 年', sourceId: 's2', parentIndex: 1 }
+      ])
+      // 长句多出的 2147 万元是新信息 → 不能因为"短句被包含"就把它吞掉
+      expect(out.paragraphs).toHaveLength(2)
+      expect(out.containmentMerged).toBe(0)
+      expect(out.conflictsKept).toBe(1)
+    })
+
+    it('太短的包含关系不合并（避免把短语并进长段）', () => {
+      const out = assembleDocument([
+        { text: '长乐一中。', timeLabel: '2019 年', sourceId: 's1', parentIndex: 0 },
+        { text: '长乐一中新校区已于 2019 年投入使用。', timeLabel: '2019 年', sourceId: 's2', parentIndex: 1 }
+      ])
+      expect(out.paragraphs).toHaveLength(2)
+      expect(out.containmentMerged).toBe(0)
+    })
+
+    it('不同主体的同形句绝不合并（0.85–0.92 区间不降阈值的回归护栏，2026-10-02 实测）', () => {
+      const out = assembleDocument([
+        { text: '长乐七中教学综合楼项目投资1200万元新建教学综合楼。', timeLabel: '2020 年', sourceId: 's1', parentIndex: 0 },
+        { text: '长乐三中教学综合楼项目投资1200万元新建教学综合楼。', timeLabel: '2020 年', sourceId: 's2', parentIndex: 1 },
+        { text: '长乐一中首占校区的学生宿舍楼工程已完工。', timeLabel: '2021 年', sourceId: 's1', parentIndex: 2 },
+        { text: '长乐二中首占校区的学生宿舍楼工程已完工。', timeLabel: '2021 年', sourceId: 's2', parentIndex: 3 }
+      ])
+      // 实测这两对的 Dice 分别是 0.905 / 0.889、数字完全一致：
+      // 若把跨来源阈值降到 0.85，会把"三中"的材料并进"七中"、静默丢材料，因此阈值保持 0.92
+      expect(out.paragraphs).toHaveLength(4)
+      expect(out.duplicatesDropped).toBe(0)
     })
 
     it('detects title-only paragraphs and unsupported years (2026-09-12 用户实测回归)', () => {

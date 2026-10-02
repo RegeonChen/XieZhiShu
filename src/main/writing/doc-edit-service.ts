@@ -21,6 +21,13 @@ export interface DocEditParagraphRef {
   timeLabel?: string
   sourceOrdinal?: number
   sourceTitle?: string
+  /**
+   * 并列来源编号与 id（Phase 7.12）：同一件事的其它出处。
+   * **不进提示词**（大模型只按主来源判断数字有据），只用于落库时把并列来源原样写回，
+   * 否则任何一次对话修改都会把"另一个出处"抹掉。
+   */
+  alsoSourceOrdinals?: number[]
+  alsoSourceIds?: string[]
 }
 
 /** 大模型返回的一条操作 */

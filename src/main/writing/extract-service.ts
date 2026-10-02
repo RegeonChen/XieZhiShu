@@ -166,6 +166,10 @@ export interface ExtractScanStats {
   duplicatesDropped: number
   /** 「疑似同一事实但数字不一致」而特意保留的段数（矛盾候选） */
   conflictsKept: number
+  /** 其中**跨来源**合并掉的段数（Phase 7.12：这些段的并列来源已同步标出，圆标会显示两个编号） */
+  crossSourceMerged?: number
+  /** 其中由「包含关系」判定合并掉的段数（Phase 7.12 S1 新增规则） */
+  containmentMerged?: number
   retried: number
 }
 
