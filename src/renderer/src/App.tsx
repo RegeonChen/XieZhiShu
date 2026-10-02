@@ -441,7 +441,11 @@ export default function App() {
               .replace('{summary}', [
                 // Phase 7.6：汇编已是连续文档，"卡片"口径改为"段落"（count 本身就是该来源被引用的段数）
                 `${sourceRemoval.cardCount} 段`,
-                sourceRemoval.contradictionCount > 0 ? `${sourceRemoval.contradictionCount} 组矛盾` : null
+                sourceRemoval.contradictionCount > 0 ? `${sourceRemoval.contradictionCount} 组矛盾` : null,
+                // Phase 7.12：还有其它来源共同记载的段不会被删（主来源改指剩下的那个）
+                sourceRemoval.sharedCount > 0
+                  ? zhCN.sourceRemoval.sharedNote.replace('{count}', String(sourceRemoval.sharedCount))
+                  : null
               ].filter(Boolean).join('，'))
           }
           confirmText={zhCN.sourceRemoval.confirm}

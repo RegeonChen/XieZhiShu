@@ -54,9 +54,9 @@ export interface AppApi {
   importCompilationArchive(taskId: string, filePath: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
   importCompilationFromTask(taskId: string, sourceCompilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
   listFinalizedCompilationsForImport(): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
-  listSourceRemovals(): Promise<{ ok: boolean; data?: { items: { sourceId: string; title: string; cardCount: number; contradictionCount: number; origin: 'workspace' | 'manual' }[] }; error?: { code: string; message: string } }>
-  decideSourceRemoval(sourceId: string, action: 'delete' | 'keep'): Promise<{ ok: boolean; data?: { deletedItems: number; deletedContradictions: number }; error?: { code: string; message: string } }>
-  onSourceRemoved(cb: (p: { sourceId: string; title: string; cardCount: number; contradictionCount: number; origin: 'workspace' | 'manual' }) => void): () => void
+  listSourceRemovals(): Promise<{ ok: boolean; data?: { items: { sourceId: string; title: string; cardCount: number; sharedCount: number; contradictionCount: number; origin: 'workspace' | 'manual' }[] }; error?: { code: string; message: string } }>
+  decideSourceRemoval(sourceId: string, action: 'delete' | 'keep'): Promise<{ ok: boolean; data?: { deletedItems: number; deletedContradictions: number; repointedItems: number }; error?: { code: string; message: string } }>
+  onSourceRemoved(cb: (p: { sourceId: string; title: string; cardCount: number; sharedCount: number; contradictionCount: number; origin: 'workspace' | 'manual' }) => void): () => void
   listStyleGuides(): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   saveStyleGuide(input: { id?: string; name: string; content: string }): Promise<{ ok: boolean; data?: { styleGuide: unknown }; error?: { code: string; message: string } }>
   setDefaultStyleGuide(id: string): Promise<{ ok: boolean; data?: { styleGuide: unknown }; error?: { code: string; message: string } }>

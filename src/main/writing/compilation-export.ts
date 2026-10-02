@@ -14,8 +14,10 @@ const XZSC_MAGIC = 'XieZhiShuCompilation'
  * - v2（Phase 7.6）：显式分层——`document`（段落数组，含时间与来源标题）+ `sources`（编号表）
  *   + `versions`（版本摘要，**可裁剪**：只导摘要不导每版全文快照，正文即当前版本）
  *   + `messages`（对话历史）+ `contradictions`。
+ * - v3（Phase 7.12）：段落增加**并列来源**（`alsoSourceOrdinals`/`alsoSourceTitles`）——
+ *   同一件事被多个来源共同记载时，被合并掉的那一处出处不再丢失；解析端**兼容读 v1/v2**。
  */
-const XZSC_VERSION = 2
+const XZSC_VERSION = 3
 
 /** 段落数组里的一段（导出用；含时间与来源标题，便于外部工具直接阅读） */
 interface ArchiveParagraph {
@@ -26,6 +28,9 @@ interface ArchiveParagraph {
   text: string
   sourceOrdinal?: number
   sourceTitle?: string
+  /** 并列来源编号与标题（Phase 7.12 v3；与 `sourceOrdinal` 并列，不含主编号） */
+  alsoSourceOrdinals?: number[]
+  alsoSourceTitles?: string[]
   evidence?: string
 }
 
@@ -96,11 +101,19 @@ function sourceTitleOf(item: { sourceId: string; sourceTitle?: string }): string
  */
 export function compilationDocxXml(comp: Compilation): string {
   const items = (comp.items ?? []).filter((it) => it.kept !== false)
-  /** 来源编号 → 标题（与查看器「来源小卡」同口径：直接取段落上 JOIN 出来的标题） */
+  /**
+   * 来源编号 → 标题（与查看器「来源小卡」同口径：直接取段落上 JOIN 出来的标题）。
+   * Phase 7.12：**并列来源也要登记**——被合并掉的那一处出处往往只出现在 `alsoSourceOrdinals` 里，
+   * 不登记的话附录来源清单会漏掉它（"同一件事有两个出处"的信息就断了）。
+   */
   const sourceTitles = new Map<number, string>()
   for (const it of items) {
-    if (it.sourceOrdinal == null) continue
-    if (!sourceTitles.has(it.sourceOrdinal)) sourceTitles.set(it.sourceOrdinal, sourceTitleOf(it))
+    if (it.sourceOrdinal != null && !sourceTitles.has(it.sourceOrdinal)) {
+      sourceTitles.set(it.sourceOrdinal, sourceTitleOf(it))
+    }
+    ;(it.alsoSourceOrdinals ?? []).forEach((ord, i) => {
+      if (!sourceTitles.has(ord)) sourceTitles.set(ord, it.alsoSourceTitles?.[i] ?? String(ord))
+    })
   }
   /**
    * 矛盾分组编号（Phase 7.6，用户要求）：**按汇编内矛盾数组顺序 1..N**。
@@ -136,7 +149,11 @@ export function compilationDocxXml(comp: Compilation): string {
       // 段首时间（志书体例要求含年份；确无依据时明确标注「时间待核」，不编造）
       const time = it.ts && it.ts.trim() ? it.ts.trim() : '时间待核'
       const runs: DocxRun[] = [{ text: time + '　', bold: true }, { text: it.excerpt }]
-      if (it.sourceOrdinal != null) runs.push({ text: String(it.sourceOrdinal), superscript: true })
+      /* Phase 7.12：一段由多个来源共同记载时，上标写成 `1,4`（与查看器的并列圆标同口径） */
+      const ordinals = [
+        ...new Set([...(it.sourceOrdinal != null ? [it.sourceOrdinal] : []), ...(it.alsoSourceOrdinals ?? [])])
+      ].sort((a, b) => a - b)
+      if (ordinals.length > 0) runs.push({ text: ordinals.join(','), superscript: true })
       else runs.push({ text: '（来源待补）' })
       // 段尾注明属于第几组矛盾，便于与文末的矛盾汇总逐组对照审阅
       const nos = groupsByItem.get(it.id)
@@ -234,12 +251,17 @@ export function buildCompilationArchive(
     text: it.excerpt,
     sourceOrdinal: it.sourceOrdinal,
     sourceTitle: it.sourceTitle,
+    alsoSourceOrdinals: it.alsoSourceOrdinals,
+    alsoSourceTitles: it.alsoSourceTitles,
     evidence: it.evidence
   }))
   const sources = new Map<number, string>()
   for (const it of items) {
-    if (it.sourceOrdinal == null) continue
-    if (!sources.has(it.sourceOrdinal)) sources.set(it.sourceOrdinal, sourceTitleOf(it))
+    if (it.sourceOrdinal != null && !sources.has(it.sourceOrdinal)) sources.set(it.sourceOrdinal, sourceTitleOf(it))
+    // Phase 7.12：并列来源同样进编号表（否则导入后那一处出处会消失）
+    ;(it.alsoSourceOrdinals ?? []).forEach((ord, i) => {
+      if (!sources.has(ord)) sources.set(ord, it.alsoSourceTitles?.[i] ?? String(ord))
+    })
   }
   return {
     magic: XZSC_MAGIC,
@@ -271,7 +293,8 @@ function serializeCompilationArchiveV2(
 
 /**
  * 解析 .xzsc 内容，返回可用于导入的 `Compilation`；失败或格式不符返回 null。
- * **读取兼容**：v1（`{magic, version:1, compilation}`）直接取原对象；v2 由 `document.paragraphs` 还原段落。
+ * **读取兼容**：v1（`{magic, version:1, compilation}`）直接取原对象；v2/v3 由 `document.paragraphs` 还原段落
+ * （v3 才有并列来源字段，v2 没有 → 按无并列来源处理）。
  */
 export function parseCompilationArchive(data: string): Compilation | null {
   try {
@@ -295,6 +318,10 @@ export function parseCompilationArchive(data: string): Compilation | null {
     }
     const items = (doc.paragraphs as Partial<ArchiveParagraph>[]).map((p, i) => {
       const sourceOrdinal = typeof p.sourceOrdinal === 'number' ? p.sourceOrdinal : undefined
+      /* Phase 7.12（v3）：并列来源编号 → 标题；v2 归档没有这些字段，还原为无并列来源 */
+      const alsoSourceOrdinals = Array.isArray(p.alsoSourceOrdinals)
+        ? p.alsoSourceOrdinals.filter((n): n is number => typeof n === 'number')
+        : undefined
       return {
         id: 'imported-' + i,
         compilationId: '',
@@ -306,6 +333,11 @@ export function parseCompilationArchive(data: string): Compilation | null {
         month: typeof p.month === 'number' ? p.month : undefined,
         sourceOrdinal,
         sourceTitle: sourceOrdinal != null ? titleByOrdinal.get(sourceOrdinal) : undefined,
+        alsoSourceOrdinals: alsoSourceOrdinals && alsoSourceOrdinals.length > 0 ? alsoSourceOrdinals : undefined,
+        alsoSourceTitles:
+          alsoSourceOrdinals && alsoSourceOrdinals.length > 0
+            ? alsoSourceOrdinals.map((ord) => titleByOrdinal.get(ord) ?? String(ord))
+            : undefined,
         evidence: typeof p.evidence === 'string' ? p.evidence : undefined,
         extraTags: [],
         kept: true,
@@ -457,13 +489,14 @@ if (import.meta.vitest) {
       expect(xml).not.toContain('A & B <C>')
     })
 
-    it('writes a v2 archive with paragraphs, sources, version summaries and messages', () => {
+    it('writes a v3 archive with paragraphs, sources, version summaries and messages', () => {
       const payload = buildCompilationArchive(makeComp(), {
         versions: [{ versionNo: 1, origin: 'generate', createdAt: '2026-01-01', changeSummary: { added: 3 } }],
         messages: [{ role: 'user', content: '删掉幼儿园那段', createdAt: '2026-01-02' }]
       })
       expect(payload.magic).toBe('XieZhiShuCompilation')
-      expect(payload.version).toBe(2)
+      // Phase 7.12：v3 起段落带并列来源（v1/v2 仍可读，见下面的兼容用例）
+      expect(payload.version).toBe(3)
       // 段落数组：只含 kept 段，且带上时间与来源标题（外部工具可直接读）
       expect(payload.document.title).toBe('高中教育')
       expect(payload.document.paragraphs).toHaveLength(3)
@@ -494,6 +527,96 @@ if (import.meta.vitest) {
       // 非本软件格式 / 坏 JSON → null
       expect(parseCompilationArchive(JSON.stringify({ magic: 'other' }))).toBeNull()
       expect(parseCompilationArchive('{ not json')).toBeNull()
+    })
+
+    /* ---- Phase 7.12（多来源标注）---- */
+
+    it('writes multiple superscript ordinals for a co-cited paragraph (Phase 7.12)', () => {
+      const comp = makeComp({
+        items: [
+          {
+            id: 'm1',
+            compilationId: 'c1',
+            position: 0,
+            sourceId: 's1',
+            excerpt: '2021 年，全市共有幼儿园 212 所。',
+            ts: '2021 年',
+            sourceOrdinal: 1,
+            sourceTitle: '教育发展报告',
+            alsoSourceOrdinals: [2],
+            alsoSourceTitles: ['长乐年鉴2019'],
+            extraTags: [],
+            kept: true,
+            createdAt: '2026-01-01'
+          }
+        ],
+        contradictions: []
+      })
+      const xml = compilationDocxXml(comp)
+      // 上标写成 `1,2`（与查看器的并列圆标同口径），而不是只写主来源
+      expect(xml).toMatch(/幼儿园 212 所。<\/w:t><\/w:r><w:r><w:rPr><w:vertAlign w:val="superscript"\/><\/w:rPr><w:t xml:space="preserve">1,2<\/w:t>/)
+      // 并列来源也要进附录清单，否则"另一处出处"在导出件里就断了
+      expect(xml).toContain('二、附：来源清单（共 2 篇）')
+      expect(xml).toContain('来源 1：《教育发展报告》')
+      expect(xml).toContain('来源 2：《长乐年鉴2019》')
+    })
+
+    it('keeps 并列来源 across an xzsc v3 round-trip, and reads v2 archives without them', () => {
+      const comp = makeComp({
+        items: [
+          {
+            id: 'm1',
+            compilationId: 'c1',
+            position: 0,
+            sourceId: 's1',
+            excerpt: '2021 年，全市共有幼儿园 212 所。',
+            ts: '2021 年',
+            sourceOrdinal: 1,
+            sourceTitle: '教育发展报告',
+            alsoSourceOrdinals: [2],
+            alsoSourceTitles: ['长乐年鉴2019'],
+            extraTags: [],
+            kept: true,
+            createdAt: '2026-01-01'
+          }
+        ],
+        contradictions: []
+      })
+      const payload = buildCompilationArchive(comp)
+      expect(payload.version).toBe(3)
+      expect(payload.document.paragraphs[0]).toMatchObject({
+        sourceOrdinal: 1,
+        alsoSourceOrdinals: [2],
+        alsoSourceTitles: ['长乐年鉴2019']
+      })
+      // 并列来源也登记进来源编号表
+      expect(payload.sources).toEqual([
+        { ordinal: 1, title: '教育发展报告' },
+        { ordinal: 2, title: '长乐年鉴2019' }
+      ])
+      // 往返：编号与标题都要还原
+      const back = parseCompilationArchive(serializeCompilationArchive(comp))!
+      expect(back.items[0]).toMatchObject({
+        sourceOrdinal: 1,
+        alsoSourceOrdinals: [2],
+        alsoSourceTitles: ['长乐年鉴2019']
+      })
+      // v2 归档（没有并列来源字段）仍能读，且不会凭空造出并列来源
+      const v2 = JSON.stringify({
+        magic: 'XieZhiShuCompilation',
+        version: 2,
+        exportedAt: '2026-01-01',
+        document: { title: '旧归档', status: 'finalized', createdAt: '2026-01-01', updatedAt: '2026-01-01', paragraphs: [{ ordinal: 0, text: '甲段', sourceOrdinal: 1 }] },
+        sources: [{ ordinal: 1, title: '统计表' }],
+        versions: [],
+        messages: [],
+        contradictions: []
+      })
+      const old = parseCompilationArchive(v2)!
+      expect(old.items).toHaveLength(1)
+      expect(old.items[0].sourceOrdinal).toBe(1)
+      expect(old.items[0].alsoSourceOrdinals).toBeUndefined()
+      expect(old.items[0].alsoSourceTitles).toBeUndefined()
     })
   })
 }
