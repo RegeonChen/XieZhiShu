@@ -1081,6 +1081,33 @@ body {
   background: var(--accent-soft);
   color: var(--accent);
 }
+/* 中栏被隐藏时：恢复入口必须**一直看得见**。
+   原先按钮只在 hover 那 6px 边界线时才浮现，中栏一旦被隐藏，用户既看不到任务/资料列表、
+   也找不到把它找回来的地方 —— 观感就是"整个界面一片空白、无处可点"（2026-10-03 用户实测）。
+   故折叠态把边界条加宽到 20px 并让按钮常驻。 */
+.pane-edge--collapsed {
+  width: 20px;
+  cursor: pointer;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+.pane-edge--collapsed .pane-edge__btn {
+  opacity: 1;
+  pointer-events: auto;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.pane-edge--collapsed::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 12px;
+  bottom: 12px;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--border);
+}
 
 /* ---------- 资料查看器 ---------- */
 .source-viewer {
@@ -1260,12 +1287,6 @@ body {
 }
 .web-browser__status--err {
   color: #dc2626;
-}
-.web-browser__hint {
-  margin-bottom: 6px;
-  font-size: 11px;
-  line-height: 1.6;
-  color: var(--fg-soft);
 }
 /* 主进程的 WebContentsView 会盖住这里；保持可见以便"打开中/失败"时提示能被看到 */
 .web-browser__host {
