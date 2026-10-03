@@ -62,11 +62,10 @@ function buildGeneratedSummary(
       /** 2026-10-03：证据未逐字命中但事实逐句核验通过而接受 */
       evidenceLoose?: number
       degradedFromEvidence?: number
-      degradedPruned?: number
       droppedUnverifiable?: number
+      droppedUnparseable?: number
       droppedCards?: number
       omitted?: number
-      passthrough?: number
       duplicatesDropped?: number
       conflictsKept?: number
       /** C（2026-09-12）：因"只复述标题"被丢弃 / 因"年份无据"被标待核的段落数 */
@@ -100,7 +99,7 @@ function buildGeneratedSummary(
         .replace('{toChars}', String(ps.outputChars ?? 0))
         .replace('{kept}', String(keptPct))
     )
-    // 诊断细分：本地校验通过/降级（数字无据 · 证据非原文），以及降级粒度（evidence 片段 / 整卡原文）
+    // 诊断细分：本地校验通过/降级（数字无据），以及兜底粒度（只保留逐字证据片段）
     if (ps.accepted != null || ps.degraded != null) {
       parts.push(
         zhCN.compilation.extractDiagnostics
@@ -109,11 +108,13 @@ function buildGeneratedSummary(
           .replace('{degraded}', String(ps.degraded ?? 0))
           .replace('{numbers}', String(ps.invalidNumbers ?? 0))
           .replace('{fromEvidence}', String(ps.degradedFromEvidence ?? 0))
-          .replace('{pruned}', String(ps.degradedPruned ?? 0))
       )
     }
     if (ps.droppedUnverifiable) {
       parts.push(zhCN.compilation.extractDroppedUnverifiable.replace('{count}', String(ps.droppedUnverifiable)))
+      if (ps.droppedUnparseable) {
+        parts.push(zhCN.compilation.extractDroppedUnparseable.replace('{count}', String(ps.droppedUnparseable)))
+      }
     }
     if (ps.droppedCards) parts.push(zhCN.compilation.extractDropped.replace('{count}', String(ps.droppedCards)))
     // C：两条硬校验的结果如实告知（标题型段落被丢弃 / 年份无据被标待核）
@@ -638,11 +639,11 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
             invalidNumbers?: number
             invalidEvidence?: number
             degradedFromEvidence?: number
-            degradedPruned?: number
+            evidenceLoose?: number
             droppedUnverifiable?: number
+            droppedUnparseable?: number
             droppedCards?: number
             omitted?: number
-            passthrough?: number
             duplicatesDropped?: number
             conflictsKept?: number
             titleOnlyDropped?: number
