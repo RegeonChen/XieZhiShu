@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import PdfViewer, { type PdfLocateState } from './PdfViewer'
 import WebBrowserPane from './WebBrowserPane'
+import SourceSnapshotModal from './SourceSnapshotModal'
 import { IncrementalHtml, IncrementalText } from './IncrementalContent'
 import { buildNeedles, findNeedle, normalizeWithMap, toOriginalRange } from '../lib/locate'
 import { zhCN } from '../i18n/zh-CN'
@@ -98,6 +99,8 @@ function SourceViewer({
   const headerRef = useRef<HTMLDivElement | null>(null)
   /** 表头（操作行 + 定位行）吸顶后的实际高度：PDF 工具栏要挂在它下面，否则两者会在 top:0 重叠 */
   const [stickyTop, setStickyTop] = useState(0)
+  /** Phase 9 / S1：「查看本地快照」弹窗（原在"来源小卡"里，随中间层删除迁到本查看器） */
+  const [snapshotOpen, setSnapshotOpen] = useState(false)
   /** 上一次算出的命中矩形（等值短路：避免 ResizeObserver 与重渲染互相触发） */
   const locateRectsRef = useRef<LocateRect[]>([])
   const needles = useMemo(() => (locate?.snippet ? buildNeedles(locate.snippet) : []), [locate?.snippet])
@@ -409,6 +412,17 @@ function SourceViewer({
           >
             {zhCN.sourceViewer.openExternal}
           </button>
+          {/* Phase 9 / S1：网页来源另给"查看本地快照"（读库里抓取当时的正文，不联网核对"当时"的内容） */}
+          {isWebSource ? (
+            <button
+              type="button"
+              className="source-viewer__back"
+              onClick={() => setSnapshotOpen(true)}
+              title={zhCN.compilation.snapshotOpen}
+            >
+              {zhCN.compilation.snapshotOpen}
+            </button>
+          ) : null}
           {onClose ? (
             <button type="button" className="source-viewer__back" onClick={onClose} title={zhCN.sourceViewer.close}>
               {zhCN.sourceViewer.close}
@@ -467,6 +481,9 @@ function SourceViewer({
             </div>
           ) : null}
         </div>
+      ) : null}
+      {snapshotOpen ? (
+        <SourceSnapshotModal sourceId={sourceId} highlight={locate?.snippet} onClose={() => setSnapshotOpen(false)} />
       ) : null}
       <div className="source-viewer__body">
         {/* 定位覆盖层挂在内容坐标系里（position: relative），随内容一起滚动 */}

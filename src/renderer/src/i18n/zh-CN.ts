@@ -512,11 +512,12 @@ export const zhCN = {
     pendingTimeStat: '{count} 段时间待核',
     pendingTimeHint: '这些段落的时间标签里没有年份，无法按年份分节与排序',
     pendingYearSuffix: '（待补年份）',
-    sourceBadgeTitle: '来自本汇编第 {n} 篇来源（点击查看该来源的段落）',
+    /* Phase 9 / S1：定位锚点标签（打开来源时显示"这段话出自本汇编第 N 段"） */
+    sourceAnchorParagraph: '本汇编第 {n} 段',
+    snapshotFailed: '读取快照失败',
+    sourceBadgeTitle: '来自本汇编第 {n} 篇来源（点击直接打开该来源）',
     /* Phase 7.12 多来源标注：一段由多个来源共同记载时，除主来源外再标出并列来源 */
-    sourceBadgeAlsoTitle: '另一处出处：本汇编第 {n} 篇来源（点击查看该来源的段落）',
-    sourceMultiHint: '这段由 {count} 个来源共同记载：',
-    sourceMultiCurrent: '当前查看',
+    sourceBadgeAlsoTitle: '另一处出处：本汇编第 {n} 篇来源（点击直接打开该来源）',
     noTime: '无时间',
     pendingContradictions: '{count} 组矛盾待处理',
     noContradictions: '无未处理矛盾',
