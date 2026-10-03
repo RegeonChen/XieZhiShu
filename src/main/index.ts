@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { createServer } from 'node:http'
-import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, session, shell, WebContentsView } from 'electron'
 import {
   IPC,
   IPC_EVENTS,
@@ -139,6 +139,7 @@ import { loadWindowState, trackWindowState } from './window-state'
 import type { WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceUpdateReq, WebSourceUpdateRes, AppGetPdfCmapsUrlRes, LogAppendReq, LogExportRes, StyleGuideListRes, StyleGuideSaveReq, StyleGuideSaveRes, StyleGuideSetDefaultReq, StyleGuideSetDefaultRes, StyleGuideDeleteReq, CompilationExportDocxReq, CompilationExportDocxRes, CompilationExportArchiveReq, CompilationExportArchiveRes, CompilationImportArchiveReq, CompilationImportArchiveRes, CompilationImportFromTaskReq, CompilationImportFromTaskRes, CompilationListFinalizedForImportReq, CompilationListFinalizedForImportRes } from '../shared/ipc'
 import { logMain, logIpc, logRenderer, exportLogsText } from './logger'
 import { resolveFileDelivery } from './file-range'
+import type { WebBrowserOpenReq, WebBrowserSetBoundsReq, WebBrowserNavigateReq, WebBrowserActionReq, WebBrowserStateRes } from '../shared/ipc'
 
 /** 长任务保持唤醒：开启则 start，任务结束/异常在 finally 中 stop（引用计数，重叠任务不提前释放） */
 function keepAwakeEnabled(): boolean {
@@ -270,6 +271,106 @@ function resolvePdfCmapsDir(): string {
   return ''
 }
 
+/* ============================================================================
+ * 内嵌网页浏览器（Phase 8 / S4）
+ *
+ * 用户诉求：点网页来源时**直接看原网页长什么样**，而不是软件里存的抓取快照。
+ * 用 Electron 的 `WebContentsView`（现行推荐；`BrowserView` 已废弃）叠加在主窗口内容区上，
+ * 位置由渲染层量出分栏矩形后上报（窗口内容区坐标 DIP）。
+ *
+ * 安全约束（页面内容视为不可信输入，一项都不减）：
+ *  - **独立会话分区**（cookie/缓存与应用自身渲染进程隔离）；
+ *  - `nodeIntegration: false` + `contextIsolation: true` + `sandbox: true`，**不注入 preload**
+ *    ——页面拿不到任何软件能力，也没有任何 IPC 桥；
+ *  - `setWindowOpenHandler` 一律**拒绝弹窗**；
+ *  - `will-navigate` 只放行 **http/https**（地址栏可自由导航，但不能越到 file:// 等协议）；
+ *  - 权限请求（定位/摄像头/通知…）**全部拒绝**；下载**一律取消**；
+ *  - 只暴露"打开/挪位置/关闭/导航/前进后退刷新"五个动作，不提供脚本执行等额外能力。
+ * ========================================================================== */
+let mainWin: BrowserWindow | null = null
+let webBrowserView: WebContentsView | null = null
+/** 专用会话分区名：与应用自身渲染进程隔离 */
+const WEB_BROWSER_PARTITION = 'xz-webbrowser'
+
+function isHttpUrl(url: string): boolean {
+  return /^https?:\/\//i.test(url)
+}
+
+/** 把渲染层上报的矩形收敛成合法的整数边界（并夹到窗口内容区内） */
+function normalizeBrowserRect(
+  win: BrowserWindow,
+  rect: { x: number; y: number; width: number; height: number }
+): { x: number; y: number; width: number; height: number } {
+  const [cw, ch] = win.getContentSize()
+  const x = Math.max(0, Math.min(Math.round(rect.x), Math.max(0, cw - 1)))
+  const y = Math.max(0, Math.min(Math.round(rect.y), Math.max(0, ch - 1)))
+  return {
+    x,
+    y,
+    width: Math.max(1, Math.min(Math.round(rect.width), cw - x)),
+    height: Math.max(1, Math.min(Math.round(rect.height), ch - y))
+  }
+}
+
+function browserState(wc: Electron.WebContents): { url: string; title: string; canGoBack: boolean; canGoForward: boolean; loading: boolean } {
+  // navigationHistory 是较新的 API；取不到时如实回 false，不猜
+  const nav = (wc as unknown as { navigationHistory?: { canGoBack(): boolean; canGoForward(): boolean } }).navigationHistory
+  return {
+    url: wc.getURL(),
+    title: wc.getTitle(),
+    canGoBack: nav ? nav.canGoBack() : false,
+    canGoForward: nav ? nav.canGoForward() : false,
+    loading: wc.isLoading()
+  }
+}
+
+function ensureWebBrowserView(win: BrowserWindow): WebContentsView {
+  if (webBrowserView && !webBrowserView.webContents.isDestroyed()) return webBrowserView
+  const view = new WebContentsView({
+    webPreferences: {
+      partition: WEB_BROWSER_PARTITION,
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+      spellcheck: false
+    }
+  })
+  const wc = view.webContents
+  wc.setWindowOpenHandler(() => ({ action: 'deny' }))
+  wc.on('will-navigate', (event, url) => {
+    if (!isHttpUrl(url)) {
+      event.preventDefault()
+      logMain('web-browser', `已阻止非 http(s) 跳转：${url}`)
+    }
+  })
+  const ses = session.fromPartition(WEB_BROWSER_PARTITION)
+  ses.setPermissionRequestHandler((_wc, _permission, callback) => callback(false))
+  ses.setPermissionCheckHandler(() => false)
+  ses.on('will-download', (event) => event.preventDefault())
+  win.contentView.addChildView(view)
+  webBrowserView = view
+  return view
+}
+
+/** 关闭并销毁内嵌浏览器（分栏关闭 / 离开页面 / 窗口关闭时调用） */
+function closeWebBrowser(): void {
+  const view = webBrowserView
+  webBrowserView = null
+  if (!view) return
+  try {
+    mainWin?.contentView.removeChildView(view)
+  } catch {
+    /* 窗口可能已经关了，忽略 */
+  }
+  try {
+    view.webContents.close()
+  } catch {
+    /* 已销毁，忽略 */
+  }
+}
+
 function createWindow(): void {
   // 恢复上次关闭时的窗口尺寸/位置/最大化/全屏状态
   const saved = loadWindowState()
@@ -295,6 +396,13 @@ function createWindow(): void {
     if (saved?.isMaximized && !saved.isFullScreen) win.maximize()
     // 确保窗口获得 OS 输入焦点，避免"可见但未激活"导致点击输入框无光标/无法输入
     win.focus()
+  })
+
+  // 内嵌网页浏览器（Phase 8 / S4）挂在主窗口上；窗口关闭时必须一起销毁，否则会残留"幽灵视图"
+  mainWin = win
+  win.on('closed', () => {
+    closeWebBrowser()
+    mainWin = null
   })
 
   // 窗口重新聚焦到最顶层时自动触发一次工作区同步（Task 2.2.5，效果等同手动"同步工作区"）
@@ -1559,6 +1667,80 @@ handleLogged(IPC.DRAFT_APPLY_CONTRADICTION, async (_event, params: DraftApplyCon
   const result = await applyContradictionEdit(params.draftId, params.contradictionId, params.variantId)
   if (!result.ok) return { ok: false, error: result.error }
   return { ok: true, data: { draft: result.draft, contradiction: result.contradiction } }
+})
+
+// 内嵌网页浏览器（Phase 8 / S4）
+handleLogged(IPC.WEB_BROWSER_OPEN, async (_event, params: WebBrowserOpenReq): Promise<ApiResult<WebBrowserStateRes>> => {
+  const win = mainWin
+  if (!win || win.isDestroyed()) return { ok: false, error: { code: 'INTERNAL_ERROR', message: '窗口未就绪' } }
+  const source = getSourceById(params.sourceId)
+  if (!source || source.kind !== 'url' || !source.url) {
+    return { ok: false, error: { code: 'INVALID_PARAM', message: '该资料没有可浏览的网址' } }
+  }
+  if (!isHttpUrl(source.url)) {
+    return { ok: false, error: { code: 'INVALID_PARAM', message: '只支持 http/https 网址' } }
+  }
+  try {
+    const view = ensureWebBrowserView(win)
+    view.setBounds(normalizeBrowserRect(win, params.rect))
+    await view.webContents.loadURL(source.url)
+    return { ok: true, data: browserState(view.webContents) }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: `打开网页失败：${err instanceof Error ? err.message : String(err)}` } }
+  }
+})
+
+handleLogged(IPC.WEB_BROWSER_SET_BOUNDS, async (_event, params: WebBrowserSetBoundsReq): Promise<ApiResult<{ ok: true }>> => {
+  const win = mainWin
+  const view = webBrowserView
+  if (!win || win.isDestroyed() || !view || view.webContents.isDestroyed()) {
+    // 视图还没建（或已关闭）时静默成功：位置更新本来就不该报错打断界面
+    return { ok: true, data: { ok: true } }
+  }
+  view.setBounds(normalizeBrowserRect(win, params.rect))
+  return { ok: true, data: { ok: true } }
+})
+
+handleLogged(IPC.WEB_BROWSER_CLOSE, async (): Promise<ApiResult<{ ok: true }>> => {
+  closeWebBrowser()
+  return { ok: true, data: { ok: true } }
+})
+
+handleLogged(IPC.WEB_BROWSER_NAVIGATE, async (_event, params: WebBrowserNavigateReq): Promise<ApiResult<WebBrowserStateRes>> => {
+  const win = mainWin
+  const view = webBrowserView
+  if (!win || win.isDestroyed() || !view || view.webContents.isDestroyed()) {
+    return { ok: false, error: { code: 'INVALID_PARAM', message: '浏览器未打开' } }
+  }
+  const url = params.url.trim()
+  if (!isHttpUrl(url)) {
+    return { ok: false, error: { code: 'INVALID_PARAM', message: '只支持 http/https 网址' } }
+  }
+  try {
+    await view.webContents.loadURL(url)
+    return { ok: true, data: browserState(view.webContents) }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: `打开网址失败：${err instanceof Error ? err.message : String(err)}` } }
+  }
+})
+
+handleLogged(IPC.WEB_BROWSER_ACTION, async (_event, params: WebBrowserActionReq): Promise<ApiResult<WebBrowserStateRes>> => {
+  const view = webBrowserView
+  if (!view || view.webContents.isDestroyed()) {
+    return { ok: false, error: { code: 'INVALID_PARAM', message: '浏览器未打开' } }
+  }
+  const wc = view.webContents
+  const nav = (wc as unknown as {
+    navigationHistory?: { canGoBack(): boolean; canGoForward(): boolean; goBack(): void; goForward(): void }
+  }).navigationHistory
+  try {
+    if (params.action === 'reload') wc.reload()
+    else if (params.action === 'back' && nav?.canGoBack()) nav.goBack()
+    else if (params.action === 'forward' && nav?.canGoForward()) nav.goForward()
+    return { ok: true, data: browserState(wc) }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: `浏览器操作失败：${err instanceof Error ? err.message : String(err)}` } }
+  }
 })
 
 // 用系统默认软件打开资料源文件（Phase 3.7 Task 3.7.6；URL 资料走浏览器）

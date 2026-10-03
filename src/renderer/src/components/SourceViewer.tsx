@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import PdfViewer, { type PdfLocateState } from './PdfViewer'
+import WebBrowserPane from './WebBrowserPane'
 import { IncrementalHtml, IncrementalText } from './IncrementalContent'
 import { buildNeedles, findNeedle, normalizeWithMap, toOriginalRange } from '../lib/locate'
 import { zhCN } from '../i18n/zh-CN'
@@ -190,8 +191,14 @@ function SourceViewer({
       setLocateState('idle')
       return
     }
-    // 图片没有文字层（如实提示）；PDF 的文字在 PDF 内部，交给 PdfViewer 自己搜（见其 onLocate 回报）
+    // 图片没有文字层（如实提示）；PDF 的文字在 PDF 内部，交给 PdfViewer 自己搜（见其 onLocate 回报）；
+    // 网页来源由内嵌浏览器渲染（S4），页面内容在独立的 WebContentsView 里，不在本 DOM 中，故不在此定位
     const path = (data?.source.filePath ?? '').toLowerCase()
+    if (data?.source.kind === 'url') {
+      setLocateRects([])
+      setLocateState('unsupported')
+      return
+    }
     if (/\.(png|jpe?g|bmp)$/.test(path)) {
       setLocateRects([])
       setLocateState('unsupported')
@@ -311,6 +318,8 @@ function SourceViewer({
   const isPdf = ext.endsWith('.pdf')
   const isImage = ext.endsWith('.png') || ext.endsWith('.jpg') || ext.endsWith('.jpeg') || ext.endsWith('.bmp')
   const isNativeView = isPdf || isImage
+  /** 网页来源（Phase 8 / S4）：用内嵌浏览器加载原网页，而不是库里存的抓取快照 */
+  const isWebSource = source.kind === 'url' && !!source.url
 
   const hitCount = locateRects.length > 0 ? Math.max(...locateRects.map((r) => r.hitIndex)) + 1 : 0
 
@@ -340,7 +349,11 @@ function SourceViewer({
           )
         ) : locateState === 'unsupported' ? (
           <span className="source-viewer__locate-text">
-            {isPdf ? zhCN.sourceViewer.locatePdfNoText : zhCN.sourceViewer.locateNoText}
+            {isWebSource
+              ? zhCN.sourceViewer.locateWebPending
+              : isPdf
+                ? zhCN.sourceViewer.locatePdfNoText
+                : zhCN.sourceViewer.locateNoText}
           </span>
         ) : locateState === 'not-found' ? (
           <span className="source-viewer__locate-text source-viewer__locate-text--miss">
@@ -398,7 +411,8 @@ function SourceViewer({
           >
             {zhCN.sourceViewer.openExternal}
           </button>
-          {onClose ? (            <button type="button" className="source-viewer__back" onClick={onClose} title={zhCN.sourceViewer.close}>
+          {onClose ? (
+            <button type="button" className="source-viewer__back" onClick={onClose} title={zhCN.sourceViewer.close}>
               {zhCN.sourceViewer.close}
             </button>
           ) : null}
@@ -459,7 +473,10 @@ function SourceViewer({
       <div className="source-viewer__body">
         {/* 定位覆盖层挂在内容坐标系里（position: relative），随内容一起滚动 */}
         <div className="source-viewer__locate-host" ref={hostRef}>
-          {isDocx && htmlLoading ? (
+          {isWebSource ? (
+            // Phase 8 / S4：网页来源直接用内嵌浏览器加载**原网页**（不再是库里存的抓取快照）
+            <WebBrowserPane sourceId={sourceId} url={source.url as string} />
+          ) : isDocx && htmlLoading ? (
             <div className="source-viewer__status">正在渲染文档排版...</div>
           ) : isDocx && htmlContent ? (
             // Phase 8 / S2：docx 的整篇 HTML 按顶层块分批进 DOM（大 Word 不再一次性建巨量节点）
