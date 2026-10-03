@@ -38,6 +38,17 @@ function readRect(element: Element, padding: number): TargetRect {
   }
 }
 
+function isVisible(el: Element): boolean {
+  // "元素存在但看不见"（display:none / 0×0 / 被隐藏的父级）必须当作**没找到**：
+  // 否则它会一直满足 anyFound，教程就永远停在"正在定位界面…"，遮罩一直盖着整个软件。
+  const rect = el.getBoundingClientRect()
+  if (rect.width < 2 || rect.height < 2) return false
+  const cs = getComputedStyle(el)
+  if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) === 0) return false
+  if (el instanceof HTMLElement && cs.position !== 'fixed' && el.offsetParent === null) return false
+  return true
+}
+
 function rectsMatch(a: TargetRect | null, b: TargetRect | null): boolean {
   if (a === b) return true
   if (!a || !b) return false
@@ -114,7 +125,9 @@ export function useTargetRect(
       let firstEl: Element | null = null
       let firstTop = Infinity
       for (const sel of selectors) {
-        const el = document.querySelector(sel)
+        const found = document.querySelector(sel)
+        // 不可见的元素等同于"没找到"（见 isVisible 注释）
+        const el = found && isVisible(found) ? found : null
         const prev = observedElements.get(sel)
         if (el !== prev) {
           if (prev) resizeObserver?.unobserve(prev)
@@ -138,7 +151,11 @@ export function useTargetRect(
         if (missingTimer === null) {
           missingTimer = setTimeout(() => {
             missingTimer = null
-            if (!selectors.some((s) => document.querySelector(s))) onMissingRef.current()
+            const stillMissing = !selectors.some((s) => {
+              const el = document.querySelector(s)
+              return !!el && isVisible(el)
+            })
+            if (stillMissing) onMissingRef.current()
           }, 1500)
         }
         return

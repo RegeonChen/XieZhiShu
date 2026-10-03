@@ -45,6 +45,11 @@ function getCoachmarkPosition(
   return { left: clampLeft(target.left + (target.width - cardWidth) / 2), top: clampTop(target.top - gap - cardHeight), placement: 'top' }
 }
 
+/** 切换步骤时的过渡时长（与 CSS 动画一致） */
+const STEP_LOCATE_TIMEOUT_MS = 3000
+/** 连续这么多步都找不到目标 → 直接结束教程（避免遮罩长期占屏、界面被来回拉页） */
+const MAX_SKIPPED_STEPS = 3
+
 interface OnboardingOverlayProps {
   open: boolean
   onDismiss: (reason: 'completed' | 'skipped') => void
@@ -58,6 +63,12 @@ export default function OnboardingOverlay({ open, onDismiss, onStepChange }: Onb
   const [cardSize, setCardSize] = useState({ w: 380, h: 270 })
   const cardRef = useRef<HTMLDivElement>(null)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** 连续"找不到目标而跳步"的计数（找到目标即清零） */
+  const skipStreakRef = useRef(0)
+  /** 供定时器读取"当前是否已找到目标"（state 在闭包里会是旧值） */
+  const unionRef = useRef<TargetRect | null>(null)
+  /** 供定时器调用最新的 advanceMissingTarget（避免把函数放进依赖导致计时被重置） */
+  const advanceMissingTargetRef = useRef<() => void>(() => {})
 
   // 用卡片的真实尺寸做定位与越界钳制：文案较长时卡片高度会超过默认 270px，
   // 按硬编码高度定位会导致说明框超出视口。
@@ -106,11 +117,35 @@ export default function OnboardingOverlay({ open, onDismiss, onStepChange }: Onb
 
   const advanceMissingTarget = (): void => {
     if (!open) return
-    if (isLast) onDismiss('completed')
+    // 连续找不到目标的步数达到上限就直接结束教程：绝不允许"遮罩一直盖着、还把界面
+    // 在不同功能区之间来回拉"这种把软件拖成不可用的状态（用户 2026-10-03 实测反馈）。
+    skipStreakRef.current += 1
+    if (isLast || skipStreakRef.current >= MAX_SKIPPED_STEPS) onDismiss('completed')
     else moveToStep(stepIndex + 1)
   }
 
   const { rects, union } = useTargetRect(open ? step.targets : null, step.padding, advanceMissingTarget)
+  unionRef.current = union
+  advanceMissingTargetRef.current = advanceMissingTarget
+
+  /** 找到目标就把"连续跳步"计数清零 */
+  useEffect(() => {
+    if (union) skipStreakRef.current = 0
+  }, [union])
+
+  /**
+   * 每一步都给一个**总时限**：到点仍没找到可见目标就跳过这一步。
+   * 只靠 useTargetRect 内部"连续 1.5s 未找到"不够——目标时隐时现时那个计时会被反复重置，
+   * 教程就会一直停在"正在定位界面…"。
+   */
+  useEffect(() => {
+    if (!open) return
+    const timer = setTimeout(() => {
+      if (unionRef.current) return
+      advanceMissingTargetRef.current()
+    }, STEP_LOCATE_TIMEOUT_MS)
+    return () => clearTimeout(timer)
+  }, [open, stepIndex])
 
   const position = useMemo(
     () => getCoachmarkPosition(union, window.innerWidth, window.innerHeight, cardSize.w, cardSize.h),

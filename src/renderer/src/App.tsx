@@ -131,6 +131,9 @@ export default function App() {
     void (async () => {
       const res = await window.api.getSettings()
       if (res.ok && res.data) setDocScale((res.data as { docScale?: DocScale }).docScale ?? 'medium')
+      // 库里的"教程已完成"标记优先：dev(http) 与打包版(file://) 的 localStorage 是两份，
+      // 只看 localStorage 会让老用户换一种运行方式就被再弹一次教程（2026-10-03 用户实测反馈）
+      if (res.ok && res.data && (res.data as { onboardingDone?: boolean }).onboardingDone) setOnboardingOpen(false)
     })()
   }, [])
   useEffect(() => {
@@ -238,10 +241,12 @@ export default function App() {
     return () => { off() }
   }, [enqueueSourceRemoval])
 
-  // 新手引导：结束/跳过时写入完成标记并关闭
+  // 新手引导：结束/跳过时写入完成标记并关闭（localStorage 供即时生效，数据库供 dev 与打包版共用——
+  // 两者是不同源，只靠 localStorage 会出现"在一种运行方式里跳过、换一种又弹一次"，2026-10-03 修复）
   const handleOnboardingDismiss = useCallback((_reason: 'completed' | 'skipped') => {
     setOnboardingOpen(false)
     try { localStorage.setItem(LS_ONBOARDING_DONE, '1') } catch { /* 忽略 */ }
+    void window.api.updateSettings({ onboardingDone: true }).catch(() => { /* 落库失败不影响本次关闭 */ })
   }, [])
 
   // 新手引导：步骤切换时联动切换功能区页面，使目标元素渲染出来
