@@ -17,44 +17,6 @@ function renderInlineMarkdown(text: string): ReactNode[] {
   })
 }
 
-/** 快照抓取时间显示（YYYY-MM-DD HH:mm，本地时区；解析失败则原样返回） */
-function formatSnapshotTime(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  const pad = (n: number): string => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-}
-
-/**
- * 快照正文渲染（第三批 C）：把该段的引文在正文里高亮。
- * 段落的 excerpt 与库里快照可能只差空白/换行（提取时做了归一化），所以用**去空白比对**定位，
- * 再映射回原文下标——这是"这段确实出自原文"的可视化证据，必须尽量命中而不是靠精确匹配。
- */
-function renderSnapshotText(text: string, highlight: string): ReactNode[] {
-  const body = text ?? ''
-  const needle = (highlight ?? '').trim()
-  if (!needle) return [body]
-  // 去空白后的正文 + 到原下标的映射
-  const map: number[] = []
-  let stripped = ''
-  for (let i = 0; i < body.length; i++) {
-    if (/\s/.test(body[i])) continue
-    stripped += body[i]
-    map.push(i)
-  }
-  const needleStripped = needle.replace(/\s+/g, '')
-  if (!needleStripped) return [body]
-  const at = stripped.indexOf(needleStripped)
-  if (at < 0) return [body]
-  const start = map[at]
-  const end = map[Math.min(map.length - 1, at + needleStripped.length - 1)] + 1
-  return [
-    body.slice(0, start),
-    <mark key="hl" className="compilation-snapshot__hit">{body.slice(start, end)}</mark>,
-    body.slice(end)
-  ]
-}
-
 export interface CompilationItemView {
   id: string
   compilationId: string
@@ -81,6 +43,8 @@ export interface CompilationItemView {
    */
   alsoSourceOrdinals?: number[]
   alsoSourceTitles?: string[]
+  /** 与 `alsoSourceOrdinals` 一一对应的来源 id（Phase 9 / S1：并列圆标据此直接打开对应来源） */
+  alsoSourceIds?: string[]
   /** 该段的原文证据引文（Phase 8 / S1：打开来源时作为定位锚） */
   evidence?: string
 }
@@ -297,27 +261,6 @@ function CompilationStep({
   )
   /** 复核态（versionDiff 非空）下的「仅看改动」筛选 */
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
-  /** 当前打开「来源小卡」的来源编号（点击段尾圆标） */
-  const [sourceCardFor, setSourceCardFor] = useState<number | null>(null)
-  /** 本地快照弹窗（第三批 C）：离线核对抓取当时正文；highlight = 该段引文（在正文里高亮） */
-  const [snapshot, setSnapshot] = useState<{
-    id: string
-    kind: 'file' | 'url'
-    title: string
-    snapshotAt?: string
-    publishedAt?: string
-    text: string
-    totalChars: number
-    truncated: boolean
-    shortText: boolean
-  } | null>(null)
-  const [snapshotHighlight, setSnapshotHighlight] = useState('')
-  /** 点开来源小卡的那一段（Phase 7.12：用于在小卡里列出"本段共有哪几个出处"） */
-  const [sourceCardFromItemId, setSourceCardFromItemId] = useState<string | null>(null)
-  const [snapshotLoading, setSnapshotLoading] = useState(false)
-  const [snapshotError, setSnapshotError] = useState<string | null>(null)
-  /** 来源小卡头部的元信息（抓取时间 + 正文是否过短）：打开卡片时按需读取 */
-  const [cardMeta, setCardMeta] = useState<{ snapshotAt?: string; shortText: boolean } | null>(null)
   /** 矛盾窗口是否展开（默认展开，可收起） */
   const [contradictionsOpen, setContradictionsOpen] = useState(true)
   /** 刚被「定位到该段」命中的卡片（短暂高亮，便于用户在下方列表中找到） */
@@ -337,48 +280,6 @@ function CompilationStep({
   const showHint = (el: HTMLElement, text: string): void => {
     const r = el.getBoundingClientRect()
     setHint({ x: r.left + r.width / 2, y: r.top, text })
-  }
-
-  /** 来源小卡打开时读取元信息（抓取时间 / 正文过短提示），供卡片头部展示（第三批 C） */
-  useEffect(() => {
-    if (sourceCardFor == null) {
-      setCardMeta(null)
-      return
-    }
-    const item = (compilation?.items ?? []).find((x) => x.sourceOrdinal === sourceCardFor)
-    if (!item) return
-    let alive = true
-    void window.api
-      .getSourceSnapshot(item.sourceId)
-      .then((res) => {
-        if (alive && res.ok && res.data) setCardMeta({ snapshotAt: res.data.snapshotAt, shortText: res.data.shortText })
-      })
-      .catch(() => {
-        /* 元信息读不到不影响卡片本身 */
-      })
-    return () => {
-      alive = false
-    }
-  }, [sourceCardFor, compilation])
-
-  /** 打开本地快照（读库里已存正文，不联网）；失败时给出明确提示而不是静默无反应 */
-  const openSnapshot = async (sourceId: string, highlight: string): Promise<void> => {
-    setSnapshotError(null)
-    setSnapshotLoading(true)
-    try {
-      const res = await window.api.getSourceSnapshot(sourceId)
-      if (res.ok && res.data) {
-        setSnapshotHighlight(highlight)
-        setSnapshot(res.data)
-        setSourceCardFor(null)
-      } else {
-        setSnapshotError(res.error?.message ?? '读取快照失败')
-      }
-    } catch (e) {
-      setSnapshotError(String(e))
-    } finally {
-      setSnapshotLoading(false)
-    }
   }
 
   /* ---- Phase 7.5：悬浮对话框（人机协同编辑） ---- */
@@ -923,32 +824,41 @@ function CompilationStep({
                         )
                       : renderInlineMarkdown(it.excerpt)}
                   </span>
-                  {/* Phase 7.12 多来源标注：主来源圆标 + 并列来源圆标（并列来源用细描边区分）。
-                      点击任一个都打开该来源的小卡；「列出本段全部出处」在小卡里给出。 */}
+                  {/* Phase 9 / S1：点圆标**直接开右栏的来源文件**（原先弹"来源小卡"这一中间层，已删除）。
+                      锚点用该段自己的证据引文；标签标出它在本汇编的段号，便于对照。 */}
                   {it.sourceOrdinal != null ? (
                     <button
                       type="button"
                       className="compilation-src-badge"
                       aria-label={t.sourceBadgeTitle.replace('{n}', String(it.sourceOrdinal))}
-                      onClick={() => {
-                        setSourceCardFromItemId(it.id)
-                        setSourceCardFor(it.sourceOrdinal ?? null)
-                      }}
+                      onClick={() =>
+                        onOpenSource(
+                          it.sourceId,
+                          it.evidence || it.excerpt,
+                          it.position ? t.sourceAnchorParagraph.replace('{n}', String(it.position)) : undefined
+                        )
+                      }
                       onMouseEnter={(e) => showHint(e.currentTarget, t.sourceBadgeTitle.replace('{n}', String(it.sourceOrdinal)))}
                       onMouseLeave={() => setHint(null)}
                     >
                       {it.sourceOrdinal}
                     </button>
                   ) : null}
-                  {(it.alsoSourceOrdinals ?? []).map((ord) => (
+                  {(it.alsoSourceOrdinals ?? []).map((ord, i) => (
                     <button
                       key={'also-' + it.id + '-' + ord}
                       type="button"
                       className="compilation-src-badge is-also"
                       aria-label={t.sourceBadgeAlsoTitle.replace('{n}', String(ord))}
                       onClick={() => {
-                        setSourceCardFromItemId(it.id)
-                        setSourceCardFor(ord)
+                        // Q5：并列来源圆标**各开各的来源**（不再借主来源的引文、开主来源）
+                        const sid = it.alsoSourceIds?.[i]
+                        if (!sid) return
+                        onOpenSource(
+                          sid,
+                          it.evidence || it.excerpt,
+                          it.position ? t.sourceAnchorParagraph.replace('{n}', String(it.position)) : undefined
+                        )
                       }}
                       onMouseEnter={(e) => showHint(e.currentTarget, t.sourceBadgeAlsoTitle.replace('{n}', String(ord)))}
                       onMouseLeave={() => setHint(null)}
@@ -977,122 +887,6 @@ function CompilationStep({
         {versionDiff && removedSegments.length > 0 ? removedSegments.map(renderRemoved) : null}
       </div>
 
-      {/* 来源小卡：点段尾圆标弹出（来源标题 / 该来源在本汇编中的全部段落 / 打开原文） */}
-      {sourceCardFor != null ? (
-        <div className="skills-manager__modal-backdrop" onMouseDown={() => setSourceCardFor(null)}>
-          <div className="skills-manager__modal compilation-source-card" onMouseDown={(e) => e.stopPropagation()}>
-            <h4 className="skills-manager__modal-title">
-              {t.sourceCardTitle.replace('{n}', String(sourceCardFor))}
-              {(() => {
-                const title = keptItems.find((x) => x.sourceOrdinal === sourceCardFor)?.sourceTitle
-                return title ? ' 《' + title + '》' : ''
-              })()}
-            </h4>
-            {(() => {
-              /* Phase 7.12：列出"这一段共有哪几个出处"（主来源 + 并列来源），点编号可在小卡间切换 */
-              const cardItem = sourceCardFromItemId ? keptItems.find((x) => x.id === sourceCardFromItemId) : undefined
-              if (!cardItem) return null
-              const list: { ordinal: number; title?: string }[] = []
-              if (cardItem.sourceOrdinal != null) list.push({ ordinal: cardItem.sourceOrdinal, title: cardItem.sourceTitle })
-              ;(cardItem.alsoSourceOrdinals ?? []).forEach((ord, i) =>
-                list.push({ ordinal: ord, title: cardItem.alsoSourceTitles?.[i] })
-              )
-              if (list.length <= 1) return null
-              return (
-                <p className="settings__hint compilation-source-card__multi">
-                  {t.sourceMultiHint.replace('{count}', String(list.length))}
-                  {list.map((s) => (
-                    <button
-                      key={s.ordinal}
-                      type="button"
-                      className={cls('compilation-source-card__chip', s.ordinal === sourceCardFor ? 'is-current' : '')}
-                      onClick={() => setSourceCardFor(s.ordinal)}
-                      onMouseEnter={(e) => showHint(e.currentTarget, t.sourceBadgeTitle.replace('{n}', String(s.ordinal)))}
-                      onMouseLeave={() => setHint(null)}
-                    >
-                      {t.sourceCardTitle.replace('{n}', String(s.ordinal))}
-                      {s.title ? '《' + s.title + '》' : ''}
-                      {s.ordinal === sourceCardFor ? '（' + t.sourceMultiCurrent + '）' : ''}
-                    </button>
-                  ))}
-                </p>
-              )
-            })()}
-            {cardMeta?.snapshotAt ? (
-              <p className="settings__hint">
-                {t.snapshotAt.replace('{time}', formatSnapshotTime(cardMeta.snapshotAt))}
-                {cardMeta.shortText ? '　' + t.snapshotShortBadge : ''}
-              </p>
-            ) : null}
-            <div className="compilation-source-card__list">              {keptItems
-                .filter((x) => x.sourceOrdinal === sourceCardFor)
-                .map((x) => (
-                  <button
-                    key={x.id}
-                    type="button"
-                    className="compilation-source-card__item"
-                    onClick={() => {
-                      setSourceCardFor(null)
-                      locateItem(x.id)
-                    }}
-                  >
-                    <span className="compilation-doc__time">{x.ts ?? t.noTime}</span>
-                    <span>{x.excerpt.replace(/\s+/g, ' ').slice(0, 60)}</span>
-                  </button>
-                ))}
-            </div>
-            {snapshotError ? <p className="settings__hint settings__hint--err">{snapshotError}</p> : null}
-            <div className="skills-manager__modal-actions">
-              <button type="button" className="source-list__btn" onClick={() => setSourceCardFor(null)}>{t.cancel}</button>
-              {/* 第三批 C：网站会改版/撤稿 → 提供"查看本地快照"（读库里抓取当时的正文，不联网） */}
-              <button
-                type="button"
-                className="source-list__btn"
-                disabled={snapshotLoading}
-                onClick={() => {
-                  const item = keptItems.find((x) => x.sourceOrdinal === sourceCardFor)
-                  if (item) void openSnapshot(item.sourceId, item.excerpt)
-                }}
-              >
-                {snapshotLoading ? t.snapshotLoading : t.snapshotOpen}
-              </button>
-              <button
-                type="button"
-                className="source-list__btn source-list__btn--primary"
-                onClick={() => {
-                  const item = keptItems.find((x) => x.sourceOrdinal === sourceCardFor)
-                  setSourceCardFor(null)
-                  // Phase 8 / S1：带上该段的证据引文作为定位锚（拿不到证据时退回段落正文）
-                  if (item) onOpenSource(item.sourceId, item.evidence || item.excerpt, item.position ? `本汇编第 ${item.position} 段` : undefined)
-                }}
-              >
-                {t.openSource}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {/* 本地快照弹窗（第三批 C）：离线可核对的抓取当时正文，命中的段落引文高亮显示 */}
-      {snapshot ? (
-        <div className="skills-manager__modal-backdrop" onMouseDown={() => setSnapshot(null)}>
-          <div className="skills-manager__modal compilation-snapshot" onMouseDown={(e) => e.stopPropagation()}>
-            <h4 className="skills-manager__modal-title">{t.snapshotTitle}</h4>
-            <p className="settings__hint">
-              {snapshot.kind === 'url' ? t.snapshotUrlHint : t.snapshotFileHint}
-              {snapshot.snapshotAt ? '　' + t.snapshotAt.replace('{time}', formatSnapshotTime(snapshot.snapshotAt)) : ''}
-              {snapshot.truncated ? '　' + t.snapshotTruncated.replace('{chars}', String(snapshot.totalChars)) : ''}
-            </p>
-            {snapshot.shortText ? <p className="settings__hint settings__hint--err">{t.snapshotShort}</p> : null}
-            <div className="compilation-snapshot__body">
-              {renderSnapshotText(snapshot.text, snapshotHighlight)}
-            </div>
-            <div className="skills-manager__modal-actions">
-              <button type="button" className="source-list__btn" onClick={() => setSnapshot(null)}>{t.close}</button>
-            </div>
-          </div>
-        </div>
-      ) : null}
 
       {/* 自绘提示气泡：fixed 定位，不受卡片列表滚动容器裁剪（原生 title 在长滚动列表里不可靠） */}
       {hint ? (

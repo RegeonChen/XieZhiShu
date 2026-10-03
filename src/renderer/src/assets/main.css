@@ -4838,9 +4838,7 @@ textarea:focus-visible {
   white-space: pre-wrap;
   word-break: break-word;
 }
-.compilation-source-card {
-  max-width: 620px;
-}
+
 /* 本地快照弹窗（第三批 C）：离线核对抓取当时的正文，命中引文高亮 */
 .compilation-snapshot {
   width: min(860px, 92vw);
@@ -4869,32 +4867,9 @@ textarea:focus-visible {
   border-radius: 2px;
   padding: 0 1px;
 }
-.compilation-source-card__list {
-  max-height: 46vh;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 8px 0;
-}
-.compilation-source-card__item {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  text-align: left;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--bg-panel);
-  color: var(--fg);
-  font-size: 12.5px;
-  line-height: 1.7;
-  cursor: pointer;
-  font-family: inherit;
-}
-.compilation-source-card__item:hover {
-  border-color: var(--accent);
-}
+
+
+
 /* Phase 7.5：复核条的「仅看改动」开关（原版本下拉 `.compilation-version-select` 已随对比开关一并移除） */
 .compilation-stat.is-diff {
   color: var(--accent);
@@ -4968,34 +4943,10 @@ textarea:focus-visible {
   border-style: dashed;
   opacity: 0.85;
 }
-/* 来源小卡里的「本段共有 N 个出处」行：可点编号切换查看 */
-.compilation-source-card__multi {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-.compilation-source-card__chip {
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px dashed var(--border);
-  background: transparent;
-  color: var(--fg);
-  font-size: 12px;
-  font-family: inherit;
-  cursor: pointer;
-}
-.compilation-source-card__chip:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-.compilation-source-card__chip.is-current {
-  border-style: solid;
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-soft);
-  cursor: default;
-}
+
+
+
+
 .compilation-chip.is-pending {
   color: var(--warning);
   background: var(--bg-elevated);
