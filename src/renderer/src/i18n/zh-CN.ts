@@ -54,7 +54,7 @@ export const zhCN = {
   },
   paneEdge: {
     hideCenter: '隐藏中栏',
-    showCenter: '显示中栏（任务/资料列表）'
+    showCenter: '显示中栏'
   },
   topbar: {
     version: '版本',
