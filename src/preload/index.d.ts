@@ -79,6 +79,12 @@ export interface AppApi {
   reindexRag(): Promise<{ ok: boolean; data?: { queued: number; reset: number }; error?: { code: string; message: string } }>
   getSourceSnapshot(id: string): Promise<{ ok: boolean; data?: { id: string; kind: 'file' | 'url'; title: string; url?: string; snapshotAt?: string; publishedAt?: string; text: string; totalChars: number; truncated: boolean; shortText: boolean }; error?: { code: string; message: string } }>
   getWebMaterials(taskId: string): Promise<{ ok: boolean; data?: { pinned: number }; error?: { code: string; message: string } }>
+  /** 来源位置（锚点）统计（只读，Phase 9 / S4 补） */
+  getAnchorStats(compilationId: string): Promise<{
+    ok: boolean
+    data?: { total: number; anchored: number; withPage: number; ambiguous: number }
+    error?: { code: string; message: string }
+  }>
   getWorkspaceStatus(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   workspaceNavSync(): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   migrateLegacyWorkspace(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>

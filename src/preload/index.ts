@@ -284,6 +284,12 @@ const api = {
   getWebMaterials(taskId: string): Promise<ApiResult<{ pinned: number }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_WEB_MATERIALS, { taskId })
   },
+  /** 来源位置（锚点）统计（只读）：锚点是后台异步写的，界面据此显示"多少段已记录位置" */
+  getAnchorStats(
+    compilationId: string
+  ): Promise<ApiResult<{ total: number; anchored: number; withPage: number; ambiguous: number }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_ANCHOR_STATS, { compilationId })
+  },
   /** 工作区状态（目录 + 资料统计） */
   getWorkspaceStatus(): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.WORKSPACE_STATUS)

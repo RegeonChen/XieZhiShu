@@ -509,6 +509,17 @@ export const zhCN = {
     pendingYearSuffix: '（待补年份）',
     /* Phase 9 / S1：定位锚点标签（打开来源时显示"这段话出自本汇编第 N 段"） */
     sourceAnchorParagraph: '本汇编第 {n} 段',
+    /* Phase 9 / S4 补：来源位置覆盖情况（锚点是生成后异步写的，这里让它可见） */
+    anchorStats: '来源位置：{anchored}/{total} 段（{paged} 段有页码）',
+    anchorStatsMissing: '，{missing} 段未记录',
+    anchorStatsAmbiguous: '，{count} 段引文在来源里出现多处',
+    anchorStatsHint:
+      '来源位置在生成汇编时就地算出（卡片逐字取自来源的哪一块 → 这一块属于第几页），不做全文检索：\n' +
+      '· 有页码的段 = PDF 来源，点圆标会直接跳到那页；\n' +
+      '· 没有页码的段 = Word/WPS/网页等没有页概念的来源，界面报"第 N 段"；\n' +
+      '· 未记录的段 = 该段文字在来源里逐字找不到（被模型改写或卡片本身夹带了页眉等噪声），宁可不给位置；\n' +
+      '· 引文出现多处的段 = 同一句话在来源里出现两次以上，锚点取的是第一处（尚未消歧）。\n' +
+      '后续每次生成都会重算；老汇编（生成于本功能之前）整份都没有位置记录。',
     snapshotFailed: '读取快照失败',
     sourceBadgeTitle: '来自本汇编第 {n} 篇来源（点击直接打开该来源）',
     /* Phase 7.12 多来源标注：一段由多个来源共同记载时，除主来源外再标出并列来源 */

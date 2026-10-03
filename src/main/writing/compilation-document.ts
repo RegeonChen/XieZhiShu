@@ -520,7 +520,61 @@ export interface AssembleInputParagraph {
 }
 
 /** 成文输出的一段（尚无数据库 id：由仓储层 upsert 时分配/复用） */
-export type AssembledParagraph = Omit<CompilationParagraph, 'id'> & { parentIndex: number }
+export type AssembledParagraph = Omit<CompilationParagraph, 'id'> & {
+  parentIndex: number
+  /**
+   * 各来源**可用来定位的逐字候选文字**（Phase 9 / S3 修复，2026-10-03）：
+   * 主来源与每个并列来源各一份，落库时就地算锚点（`attachAnchors`）时按来源取用。
+   *
+   * 为什么不只留主来源：并列来源是"被合并掉的那一段"的出处，它的位置只能靠**那一段自己的**
+   * `evidence`/正文去找；用合并后的正文去别的来源里找是另一回事（会锚错）。
+   *
+   * ⚠ **只走内存**：不落库、不进版本快照、不进导出/归档，因此撤销、版本恢复、导入等链路一概不用改。
+   */
+  anchorCandidates?: SourceAnchorCandidate[]
+}
+
+/** 某个来源的定位候选（excerpt = 该段在该来源上的正文；evidence = 逐字证据引文，可能没有） */
+export interface SourceAnchorCandidate {
+  sourceId: string
+  evidence?: string
+  excerpt: string
+}
+
+/** 合并候选列表：按 sourceId 去重（先出现的优先），并丢掉空 sourceId */
+function mergeAnchorCandidates(...lists: (SourceAnchorCandidate[] | undefined)[]): SourceAnchorCandidate[] {
+  const out: SourceAnchorCandidate[] = []
+  const seen = new Set<string>()
+  for (const list of lists) {
+    for (const c of list ?? []) {
+      if (!c?.sourceId || seen.has(c.sourceId)) continue
+      seen.add(c.sourceId)
+      out.push(c)
+    }
+  }
+  return out
+}
+
+/** 某一段自身的候选（主来源） */
+function ownAnchorCandidate(p: { sourceId?: string; evidence?: string; text: string }): SourceAnchorCandidate[] {
+  return p.sourceId ? [{ sourceId: p.sourceId, evidence: p.evidence, excerpt: p.text }] : []
+}
+
+/**
+ * 把所有"参与过这段"的来源都补进候选列表（Phase 9 / S3 修复）。
+ * 合并路径有多条（完全重复 / 包含关系两个方向 / 近似重复两个方向），漏一条就会静默丢掉某个来源的位置，
+ * 因此这里集中成一个函数，并在单测里用"候选来源集合 ⊇ {主来源} ∪ 并列来源"的不变量钉住。
+ */
+export function absorbAnchorCandidates(
+  target: { sourceId?: string; evidence?: string; text: string; anchorCandidates?: SourceAnchorCandidate[] },
+  ...absorbed: { sourceId?: string; evidence?: string; text: string; anchorCandidates?: SourceAnchorCandidate[] }[]
+): SourceAnchorCandidate[] {
+  return mergeAnchorCandidates(
+    target.anchorCandidates ?? [],
+    ownAnchorCandidate(target),
+    ...absorbed.flatMap((p) => [p.anchorCandidates ?? [], ownAnchorCandidate(p)])
+  )
+}
 
 export interface AssembleResult {
   /** 已去重、已按时间稳定排序、ordinal 已重写 */
@@ -618,7 +672,8 @@ export function assembleDocument(inputs: AssembleInputParagraph[]): AssembleResu
       revision: 1,
       origin: input.origin ?? 'generate',
       kept: true,
-      parentIndex: input.parentIndex
+      parentIndex: input.parentIndex,
+      anchorCandidates: ownAnchorCandidate({ sourceId: input.sourceId || undefined, evidence: input.evidence, text })
     }
     if (draft.alsoSourceIds && draft.alsoSourceIds.length === 0) draft.alsoSourceIds = undefined
     const norm = normalizeForCompare(text)
@@ -628,6 +683,7 @@ export function assembleDocument(inputs: AssembleInputParagraph[]): AssembleResu
     if (exactAt >= 0) {
       const prev = kept[exactAt]
       prev.alsoSourceIds = mergeAlsoSourceIds(prev.sourceId, prev.alsoSourceIds, draft.alsoSourceIds, [draft.sourceId])
+      prev.anchorCandidates = absorbAnchorCandidates(prev, draft)
       duplicatesDropped += 1
       continue
     }
@@ -649,10 +705,12 @@ export function assembleDocument(inputs: AssembleInputParagraph[]): AssembleResu
             kept[containAt] = {
               ...draft,
               ordinal: prev.ordinal,
-              alsoSourceIds: mergeAlsoSourceIds(draft.sourceId, draft.alsoSourceIds, prev.alsoSourceIds, [prev.sourceId])
+              alsoSourceIds: mergeAlsoSourceIds(draft.sourceId, draft.alsoSourceIds, prev.alsoSourceIds, [prev.sourceId]),
+              anchorCandidates: absorbAnchorCandidates(draft, prev)
             }
           } else {
             prev.alsoSourceIds = mergeAlsoSourceIds(prev.sourceId, prev.alsoSourceIds, draft.alsoSourceIds, [draft.sourceId])
+            prev.anchorCandidates = absorbAnchorCandidates(prev, draft)
           }
           duplicatesDropped += 1
           containmentMerged += 1
@@ -686,10 +744,12 @@ export function assembleDocument(inputs: AssembleInputParagraph[]): AssembleResu
             kept[nearAt] = {
               ...draft,
               ordinal: prev.ordinal,
-              alsoSourceIds: mergeAlsoSourceIds(draft.sourceId, draft.alsoSourceIds, prev.alsoSourceIds, [prev.sourceId])
+              alsoSourceIds: mergeAlsoSourceIds(draft.sourceId, draft.alsoSourceIds, prev.alsoSourceIds, [prev.sourceId]),
+              anchorCandidates: absorbAnchorCandidates(draft, prev)
             }
           } else {
             prev.alsoSourceIds = mergeAlsoSourceIds(prev.sourceId, prev.alsoSourceIds, draft.alsoSourceIds, [draft.sourceId])
+            prev.anchorCandidates = absorbAnchorCandidates(prev, draft)
           }
           duplicatesDropped += 1
           if (crossSourceAt >= 0) crossSourceMerged += 1
@@ -1072,6 +1132,56 @@ if (import.meta.vitest) {
       // 若把跨来源阈值降到 0.85，会把"三中"的材料并进"七中"、静默丢材料，因此阈值保持 0.92
       expect(out.paragraphs).toHaveLength(4)
       expect(out.duplicatesDropped).toBe(0)
+    })
+
+    it('定位候选：每条合并路径都要把"被合并来源自己的文字"带上（Phase 9 / S3 修复）', () => {
+      // 不变量：候选来源集合 ⊇ {主来源} ∪ 并列来源 —— 漏一条合并路径就会在这里失败
+      const invariant = (ps: ReturnType<typeof assembleDocument>['paragraphs']): void => {
+        for (const p of ps) {
+          const have = new Set((p.anchorCandidates ?? []).map((c) => c.sourceId))
+          for (const sid of [p.sourceId, ...(p.alsoSourceIds ?? [])]) expect(have.has(sid as string)).toBe(true)
+          // 并列来源的候选文字必须是**它自己**那一段的文字，而不是合并后的正文
+          for (const c of p.anchorCandidates ?? []) expect(c.excerpt.length).toBeGreaterThan(0)
+        }
+      }
+      // ① 完全重复
+      const exact = assembleDocument([
+        { text: '长乐一中新校区投入使用。', timeLabel: '2019 年', sourceId: 's1', evidence: '长乐一中新校区投入使用', parentIndex: 0 },
+        { text: '长乐一中新校区投入使用。', timeLabel: '2019 年', sourceId: 's2', evidence: '新校区投入使用', parentIndex: 1 }
+      ])
+      invariant(exact.paragraphs)
+      expect(exact.paragraphs[0].anchorCandidates?.map((c) => c.sourceId)).toEqual(['s1', 's2'])
+      expect(exact.paragraphs[0].anchorCandidates?.[1].evidence).toBe('新校区投入使用')
+      // ② 包含关系（替换 / 吸收两个方向）
+      invariant(
+        assembleDocument([
+          { text: '融侨国际双语学校奠基仪式举行。', timeLabel: '2019 年', sourceId: 's1', parentIndex: 0 },
+          { text: '融侨国际双语学校奠基仪式举行，市领导及相关部门负责人参加活动。', timeLabel: '2019 年', sourceId: 's2', parentIndex: 1 }
+        ]).paragraphs
+      )
+      invariant(
+        assembleDocument([
+          { text: '融侨国际双语学校奠基仪式举行，市领导及相关部门负责人参加活动。', timeLabel: '2019 年', sourceId: 's1', parentIndex: 0 },
+          { text: '融侨国际双语学校奠基仪式举行。', timeLabel: '2019 年', sourceId: 's2', parentIndex: 1 }
+        ]).paragraphs
+      )
+      // ③ 近似重复（Dice ≥ 0.92、数字一致）：替换 / 吸收两个方向
+      invariant(
+        assembleDocument([
+          { text: '2020 年，全区新增幼儿园 3 所，投入 100 万元。', timeLabel: '2020 年', sourceId: 's1', parentIndex: 0 },
+          { text: '2020 年，全区新增幼儿园 3 所，共计投入 100 万元。', timeLabel: '2020 年', sourceId: 's2', parentIndex: 1 }
+        ]).paragraphs
+      )
+      invariant(
+        assembleDocument([
+          { text: '2020 年，全区新增幼儿园 3 所，共计投入 100 万元。', timeLabel: '2020 年', sourceId: 's1', parentIndex: 0 },
+          { text: '2020 年，全区新增幼儿园 3 所，投入 100 万元。', timeLabel: '2020 年', sourceId: 's2', parentIndex: 1 }
+        ]).paragraphs
+      )
+      // 未合并的段也要带自己的候选
+      const plain = assembleDocument([{ text: '甲。', sourceId: 's9', evidence: '甲', parentIndex: 0 }])
+      invariant(plain.paragraphs)
+      expect(plain.paragraphs[0].anchorCandidates).toEqual([{ sourceId: 's9', evidence: '甲', excerpt: '甲。' }])
     })
 
     it('detects title-only paragraphs and unsupported years (2026-09-12 用户实测回归)', () => {

@@ -413,6 +413,31 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
 
   useEffect(() => { void loadPinnedWebCount() }, [loadPinnedWebCount, reloadKey])
 
+  /**
+   * 加载「来源位置」覆盖情况（Phase 9 / S4 补）：锚点是生成后台**异步**算的，
+   * 不查一次就完全看不见（用户只能一条条点圆标才发现"有的段没位置"）。
+   * 汇编切换 / 生成完成 / 重新生成后刷新；锚点是断点式写入，界面顺手延迟一拍再取。
+   */
+  const [anchorStats, setAnchorStats] = useState<{ total: number; anchored: number; withPage: number; ambiguous: number } | null>(null)
+  useEffect(() => {
+    if (!compilation?.id) {
+      setAnchorStats(null)
+      return
+    }
+    let alive = true
+    const id = compilation.id
+    const load = async (): Promise<void> => {
+      const res = await window.api.getAnchorStats(id)
+      if (alive && res.ok && res.data) setAnchorStats(res.data)
+    }
+    void load()
+    const timer = window.setTimeout(() => void load(), 4000) // 生成刚结束后台还在写锚点 → 再取一次
+    return () => {
+      alive = false
+      window.clearTimeout(timer)
+    }
+  }, [compilation?.id, busy, reloadKey])
+
   useEffect(() => {
     const off = window.api.onDraftGenerateProgress?.((p) => {
       if (p.taskId === taskId) {
@@ -1122,6 +1147,7 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           onGenerate={(instruction) => void handleGenerateCompilation(instruction)}
           webScan={lastWebScan}
           pinnedWebCount={pinnedWebCount}
+          anchorStats={anchorStats}
           onRegenerateCompilation={() => setRegenConfirmOpen(true)}
           sourceRefs={sourceRefs}
         />

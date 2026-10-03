@@ -35,6 +35,13 @@ export interface AnchorCandidate {
   sourceId: string
   excerpt: string
   evidence?: string
+  /**
+   * 该段**每个来源各自的**定位候选文字（Phase 9 / S3 修复，2026-10-03）：
+   * 并列来源是"被合并掉的那一段"的出处，只能靠**那一段自己的**文字去找它的位置
+   * （用合并后的正文去别的来源里找是另一回事，会锚错）。缺省时退化为"只有主来源"。
+   * 只走内存，不落库。
+   */
+  candidates?: { sourceId: string; evidence?: string; excerpt: string }[]
 }
 
 export interface AnchorAttachStats {
@@ -44,6 +51,8 @@ export interface AnchorAttachStats {
   skipped: number
   /** 参与处理的来源数 */
   sources: number
+  /** 其中写入了**并列来源**锚点的段数（诊断用） */
+  alsoAnchored: number
 }
 
 /**
@@ -67,19 +76,58 @@ async function pageTextsForSource(sourceId: string, _text: string): Promise<stri
 /**
  * 真正干活的部分（可 await，供单测直接调用）。逐来源串行：块表是懒生成的，
  * 串行可避免一次生成同时解析几十份 PDF 把主进程 CPU 打满。
+ *
+ * 三段式：① 按"要定位的来源"分组（一段可能同时属于主来源与并列来源）；
+ * ② 逐来源解块表、逐（段 × 来源）算块号；③ **按段一次性写入全部锚点**
+ * ——`replaceItemAnchors` 是"先删后插"的覆盖写，所以必须攒齐再写，否则并列来源的锚点会把主来源的抹掉。
  */
 export async function attachAnchors(items: AnchorCandidate[]): Promise<AnchorAttachStats> {
-  const stats: AnchorAttachStats = { anchored: 0, skipped: 0, sources: 0 }
+  const stats: AnchorAttachStats = { anchored: 0, skipped: 0, sources: 0, alsoAnchored: 0 }
   const db = getDb()
-  const bySource = new Map<string, AnchorCandidate[]>()
+  /** 待定位的任务：一段 × 一个来源 × 该来源的候选文字 */
+  interface Target {
+    itemId: string
+    mainSourceId: string
+    sourceId: string
+    evidence?: string
+    excerpt: string
+  }
+  const bySource = new Map<string, Target[]>()
   for (const it of items) {
     if (!it?.id || !it.sourceId) {
       stats.skipped += 1
       continue
     }
-    const list = bySource.get(it.sourceId) ?? []
-    list.push(it)
-    bySource.set(it.sourceId, list)
+    // 候选列表缺省 / 不全时，至少保证主来源这一条（候选来自 assembleDocument，只走内存）
+    const raw =
+      it.candidates && it.candidates.length > 0
+        ? it.candidates.filter((c) => c?.sourceId)
+        : [{ sourceId: it.sourceId, evidence: it.evidence, excerpt: it.excerpt }]
+    const seen = new Set<string>()
+    const list = raw.filter((c) => (seen.has(c.sourceId) ? false : (seen.add(c.sourceId), true)))
+    for (const c of list) {
+      const target: Target = {
+        itemId: it.id,
+        mainSourceId: it.sourceId,
+        sourceId: c.sourceId,
+        evidence: c.evidence,
+        excerpt: c.excerpt
+      }
+      const group = bySource.get(c.sourceId) ?? []
+      group.push(target)
+      bySource.set(c.sourceId, group)
+    }
+  }
+
+  /** 攒齐后按段写入（先删后插，一次写全） */
+  const anchorsByItem = new Map<string, { sourceId: string; blockIndex: number; confidence: 'exact' | 'weak' }[]>()
+  const add = (t: Target, blockIndex: number, confidence: 'exact' | 'weak'): void => {
+    const list = anchorsByItem.get(t.itemId) ?? []
+    if (!list.some((a) => a.sourceId === t.sourceId && a.blockIndex === blockIndex)) {
+      list.push({ sourceId: t.sourceId, blockIndex, confidence })
+      anchorsByItem.set(t.itemId, list)
+      if (t.sourceId !== t.mainSourceId) stats.alsoAnchored += 1
+    }
   }
 
   for (const [sourceId, group] of bySource) {
@@ -102,19 +150,21 @@ export async function attachAnchors(items: AnchorCandidate[]): Promise<AnchorAtt
       end: b.charEnd,
       page: b.page
     }))
-    for (const it of group) {
-      const evidence = it.evidence ? findVerbatimRange(text, it.evidence) : null
-      const excerpt = it.excerpt ? findVerbatimRange(text, it.excerpt) : null
+    for (const t of group) {
+      const evidence = t.evidence ? findVerbatimRange(text, t.evidence) : null
+      const excerpt = t.excerpt ? findVerbatimRange(text, t.excerpt) : null
       const anchor = resolveAnchor(blocks, { evidence, excerpt })
       if (!anchor) {
         stats.skipped += 1
         continue
       }
-      replaceItemAnchors(db, it.id, [
-        { sourceId, blockIndex: anchor.blockIndex, confidence: anchor.confidence }
-      ])
-      stats.anchored += 1
+      add(t, anchor.blockIndex, anchor.confidence)
     }
+  }
+
+  for (const [itemId, anchors] of anchorsByItem) {
+    replaceItemAnchors(db, itemId, anchors)
+    stats.anchored += 1
   }
   return stats
 }
@@ -128,7 +178,8 @@ export async function attachAnchorsQuietly(items: AnchorCandidate[]): Promise<vo
     const stats = await attachAnchors(items)
     logMain(
       'anchor',
-      `来源锚点：处理 ${stats.sources} 个来源 / ${items.length} 段，写入 ${stats.anchored} 段，未定位 ${stats.skipped} 段`,
+      `来源锚点：处理 ${stats.sources} 个来源 / ${items.length} 段，写入 ${stats.anchored} 段` +
+        `（含并列来源锚点 ${stats.alsoAnchored} 个），未定位 ${stats.skipped} 处`,
       'INFO'
     )
   } catch (err) {
@@ -203,6 +254,54 @@ if (import.meta.vitest) {
       ])
       expect(stats.anchored).toBe(0)
       expect(stats.skipped).toBe(2)
+    })
+
+    it('并列来源用**它自己的**候选文字定位，且不会覆盖主来源的锚点（Phase 9 / S3 修复）', async () => {
+      db.prepare(
+        "INSERT INTO sources (id, kind, title, file_path, cleaned_text, status) VALUES ('s9','file','另一来源','另一个.docx','后记。某区新增高中一所，招生 300 人。','ready')"
+      ).run()
+      const stats = await attachAnchors([
+        {
+          id: 'i2',
+          sourceId: 's1',
+          excerpt: '改写过的正文',
+          evidence: '全区普通高中招生录取 4123 人',
+          candidates: [
+            { sourceId: 's1', evidence: '全区普通高中招生录取 4123 人', excerpt: '改写过的正文' },
+            { sourceId: 's9', evidence: '某区新增高中一所，招生 300 人', excerpt: '另一段正文' }
+          ]
+        }
+      ])
+      expect(stats.anchored).toBe(1)
+      expect(stats.alsoAnchored).toBe(1)
+      const anchors = listItemAnchorsWithPage('i2', db)
+      // 主来源与并列来源**各有一条**（覆盖写必须攒齐再写，否则后写的会把先写的删掉）
+      expect(anchors.map((a) => a.sourceId)).toEqual(['s1', 's9'])
+      expect(anchors.every((a) => a.page == null)).toBe(true)
+
+      // 并列来源没有可用文字 → 只留主来源那一条，不猜
+      const second = await attachAnchors([
+        {
+          id: 'i3',
+          sourceId: 's1',
+          excerpt: '另一段正文',
+          candidates: [
+            { sourceId: 's1', excerpt: '比上学年增加 120 人' },
+            { sourceId: 's9', excerpt: '这段在并列来源里根本没有' }
+          ]
+        }
+      ])
+      expect(second.alsoAnchored).toBe(0)
+      expect(listItemAnchorsWithPage('i3', db).map((a) => a.sourceId)).toEqual(['s1'])
+    })
+
+    it('候选列表只给主来源时照旧工作（缺省退化路径）', async () => {
+      const stats = await attachAnchors([
+        { id: 'i1', sourceId: 's1', excerpt: '全区普通高中招生录取 4123 人，比上学年增加 120 人。' }
+      ])
+      expect(stats.anchored).toBe(1)
+      expect(stats.alsoAnchored).toBe(0)
+      expect(listItemAnchorsWithPage('i1', db).map((a) => a.sourceId)).toEqual(['s1'])
     })
   })
 }
