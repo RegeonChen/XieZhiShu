@@ -89,65 +89,65 @@ export function looksLikeLeakRequest(text: string): boolean {
   return LEAK_REQUEST_HINTS.some((h) => t.includes(h))
 }
 
-/** 目录/标题式噪声：整块就等于来源标题（归一化后是标题的子串且很短）→ 不作为候选 */
-function isTitleNoise(text: string, sourceTitle: string): boolean {
-  const t = normalizeForMatch(text).text
-  const title = normalizeForMatch(sourceTitle).text
-  if (t.length === 0) return true
-  if (title.length > 0 && (title.includes(t) || t.includes(title)) && t.length <= title.length + 8) return true
-  return t.length < 20
+/**
+ * 「需要回资料库找答案」的意图（2026-10-03 用户裁定：细节追问也要查资料库）。
+ *
+ * 旧闸门只认"漏了/补充"这类措辞，于是「2022 年…具体是哪 2 所？」这种**细节追问**完全不触发检索，
+ * 模型只能拿已生成的汇编作答（用户实测反馈的正是这件事）。
+ * 现在把"问句 / 要求细化"一并纳入；纯编辑指令（"把第 3 段改短"）仍然不触发，以免每条指令都等检索。
+ *
+ * 命中后走的是**大模型自主导航**（`source-navigator.ts`：目录 → 模型挑资料/挑章节 → 读正文），
+ * 不做任何本地的词法/向量相关性判断。
+ */
+export const DETAIL_REQUEST_HINTS = [
+  '哪几',
+  '哪一',
+  '哪些',
+  '是哪',
+  '具体是',
+  '具体有',
+  '分别',
+  '各自',
+  '名单',
+  '列出',
+  '列一下',
+  '有哪',
+  '叫什么',
+  '几所',
+  '几个',
+  '几人',
+  '多少',
+  '是否',
+  '有没有',
+  '是不是',
+  '查一下',
+  '查查',
+  '找一下',
+  '找找',
+  '确认一下',
+  '具体',
+  '细化',
+  '详细说明',
+  '展开说',
+  '展开讲',
+  '详述',
+  '出处',
+  '依据',
+  '来源是'
+]
+
+export function needsLibraryLookup(text: string): boolean {
+  const t = (text ?? '').trim()
+  if (!t) return false
+  if (looksLikeLeakRequest(t)) return true
+  // 问句本身就值得查（含问号，或"请/帮我 + 查/找/确认"）
+  if (/[?？]/.test(t) && t.length >= 6) return true
+  return DETAIL_REQUEST_HINTS.some((h) => t.includes(h))
 }
 
 /**
- * 候选排序与截断：得分降序 → 来源/位置稳定；同来源最多 3 条、总共最多 12 条、总字符 ≤ 14000。
- * 只做"挑哪几段给模型看"，不做相关性取舍（取舍交给闸门 + 模型 + 本地校验）。
+ * 归一化后 `evidence` 是否是 `text` 的连续片段，且长度达标（新增段落"逐字有据"的判定）
  */
-export function rankLeakCandidates(
-  chunks: RetrievedChunk[],
-  opts: {
-    maxItems?: number
-    maxChars?: number
-    maxPerSource?: number
-    maxItemChars?: number
-  } = {}
-): LeakCandidate[] {
-  const maxItems = opts.maxItems ?? CANDIDATE_MAX_ITEMS
-  const maxChars = opts.maxChars ?? CANDIDATE_TOTAL_CHARS
-  const maxPerSource = opts.maxPerSource ?? CANDIDATE_MAX_PER_SOURCE
-  const maxItemChars = opts.maxItemChars ?? CANDIDATE_MAX_CHARS
-
-  const sorted = [...chunks].sort(
-    (a, b) => b.score - a.score || a.sourceId.localeCompare(b.sourceId) || a.position.localeCompare(b.position)
-  )
-  const out: LeakCandidate[] = []
-  const seen = new Set<string>()
-  const perSource = new Map<string, number>()
-  let used = 0
-  for (const c of sorted) {
-    if (out.length >= maxItems) break
-    if (isTitleNoise(c.text, c.sourceTitle)) continue
-    const norm = normalizeForMatch(c.text).text
-    if (seen.has(norm)) continue
-    const n = perSource.get(c.sourceId) ?? 0
-    if (n >= maxPerSource) continue
-    const text = c.text.length > maxItemChars ? c.text.slice(0, maxItemChars) + '…' : c.text
-    if (used + text.length > maxChars && out.length > 0) break
-    seen.add(norm)
-    perSource.set(c.sourceId, n + 1)
-    used += text.length
-    out.push({
-      key: 'c' + (out.length + 1),
-      sourceId: c.sourceId,
-      sourceTitle: c.sourceTitle,
-      position: c.position,
-      text,
-      score: c.score
-    })
-  }
-  return out
-}
-
-/** 归一化后 `evidence` 是否是 `text` 的连续片段，且长度达标 */
 export function evidenceInText(evidence: string, text: string): boolean {
   const e = normalizeForMatch(evidence ?? '').text
   if (e.length < EVIDENCE_MIN_CHARS) return false
@@ -203,12 +203,12 @@ export function checkInsertEvidence(
   return '新增段落的 evidence 在汇编段落与该来源原文里都找不到（不得凭空新增）'
 }
 
-/** 提示词片段：候选原文清单 */
+/** 提示词片段：候选原文清单（由 `source-navigator` 的**大模型导航**产出，不是本地检索排序） */
 export function buildCandidateSection(candidates: LeakCandidate[]): string {
   if (candidates.length === 0) {
     return [
-      '【资料库候选原文】',
-      '（本轮没有可用的候选原文：要么本条要求不需要检索资料库，要么检索后没找到相关原文。）',
+      '【资料库原文】',
+      '（本轮没有资料库原文：要么这条要求不需要查资料库，要么导航后没有选出可读的小节。）',
       '因此**不要新增段落**——除非依据是当前汇编已有段落或该来源原文（此时必须给出 evidence）。'
     ].join('\n')
   }
@@ -219,10 +219,11 @@ export function buildCandidateSection(candidates: LeakCandidate[]): string {
     )
     .join('\n\n')
   return [
-    '【资料库候选原文（本地检索结果，是**新增段落的唯一依据**）】',
+    '【资料库原文（已按来源与年份口径标出；是**新增段落的唯一依据**）】',
     list,
-    '新增段落只能来自上面这些原文片段：必须给出 `candidateKey` 与逐字 `evidence`，正文里的数字也必须能在该候选原文中找到。',
-    '候选里没有你需要的原文时，**不要新增**，只在 reply 里说明"资料库里没有检索到相关内容"。'
+    '用法：① **先用这些原文回答用户的问题**，回答里要写清"哪一年口径、来自哪份资料"；',
+    '② 若答案里有值得写进汇编的具体事实，**同时**用 `insertAfter` 新增一段（必须给 `candidateKey` 与逐字 `evidence`，',
+    '   正文数字也必须能在该候选原文里找到）；③ 这些原文里没有答案时，如实回答"资料库里没有检索到"，**不要新增**。'
   ].join('\n')
 }
 
@@ -249,35 +250,32 @@ if (import.meta.vitest) {
       expect(looksLikeLeakRequest('把时间标签都改成 2018 年')).toBe(false)
     })
 
-    it('按得分排序取候选：同来源最多 3 条、跳过标题式噪声、去重', () => {
-      const cands = rankLeakCandidates([
-        chunk({ sourceId: 's1', score: 3, position: '第1段' }),
-        chunk({ sourceId: 's1', score: 2, position: '第2段', text: '另一段关于五中申报省级达标校的原文，涉及教学楼与实验室改造。' }),
-        chunk({ sourceId: 's1', score: 1, position: '第3段', text: '第三段关于长乐三中恢复高中办学的原文，涉及招生规模与师资配置。' }),
-        chunk({ sourceId: 's1', score: 0.9, position: '第4段', text: '第四段关于长乐一中首占校区建设的原文，涉及投资与班级数。' }),
-        // 与来源标题相同 → 噪声
-        chunk({ sourceId: 's2', sourceTitle: '长乐年鉴2023', score: 9, text: '长乐年鉴2023' }),
-        // 与第 1 条重复（归一化后同文）→ 去重（分数低于 s1 第 1 条，故先取到 s1 那条）
-        chunk({ sourceId: 's3', score: 0.5, text: '某校新建教学综合楼项目，总投资约1200万元，建筑面积8000平方米，2021年9月开工。' })
-      ])
-      expect(cands.map((c) => c.key)).toEqual(['c1', 'c2', 'c3'])
-      expect(cands.every((c) => c.sourceId === 's1')).toBe(true)
-      expect(cands.map((c) => c.score)).toEqual([3, 2, 1])
+    it('细节追问闸门（2026-10-03 用户裁定）：问句/要求细化也要回资料库找', () => {
+      // 用户实测那条：旧闸门不认，导致只拿汇编作答
+      expect(needsLibraryLookup('2022年，全区有省一级达标高中2所，具体是哪2所？')).toBe(true)
+      expect(needsLibraryLookup('长乐区有哪些高中？')).toBe(true)
+      expect(needsLibraryLookup('这几所学校的出处是什么？')).toBe(true)
+      expect(needsLibraryLookup('我记得资料库里有五中的材料')).toBe(true) // 老闸门也命中
+      // 纯编辑指令仍然走快路径（不检索）
+      expect(needsLibraryLookup('把第 3 段改短一点')).toBe(false)
+      expect(needsLibraryLookup('删掉幼儿园相关内容')).toBe(false)
+      expect(needsLibraryLookup('把时间标签都改成 2018 年')).toBe(false)
     })
 
-    it('候选原文进提示词（带编号/来源/原文），没有候选时明确"不要新增"', () => {
-      const cands = rankLeakCandidates([chunk({ score: 2 })])
+    it('资料库原文进提示词（带编号/来源/年份口径），没有原文时明确"不要新增"', () => {
+      const cands: LeakCandidate[] = [{ ...chunk({ score: 2 }), key: 'c1' }]
       const section = buildCandidateSection(cands)
       expect(section).toContain('[c1] 来源《长乐年鉴2023》')
       expect(section).toContain('1200 万元')
       expect(section).toContain('新增段落的唯一依据')
+      expect(section).toContain('先用这些原文回答用户的问题')
       const empty = buildCandidateSection([])
-      expect(empty).toContain('本轮没有可用的候选原文')
+      expect(empty).toContain('本轮没有资料库原文')
       expect(empty).toContain('不要新增段落')
     })
 
     it('逐字校验：evidence 必须≥12 字且是候选原文的连续片段', () => {
-      const cands = rankLeakCandidates([chunk({ score: 2 })])
+      const cands: LeakCandidate[] = [{ ...chunk({ score: 2 }), key: 'c1' }]
       const doc = ['2018 年，全区普通中学 30 所。']
       const sources = new Map<number, string>()
       // 通过：evidence 逐字来自候选（允许空白差异，且 ≥12 字），数字也在候选里

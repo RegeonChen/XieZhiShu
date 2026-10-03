@@ -11,7 +11,7 @@ import { getSettings } from '../db/settings'
 import { getProviderSecret } from '../llm/provider-store'
 import { safeStorageCodec } from '../llm/secret'
 import { chatCompletion } from '../llm/chat'
-import { getSourceById } from '../db/sources'
+import { getSourceById, getSourcesByIds } from '../db/sources'
 import {
   dedupeSourceIds,
   ensureCompilationSources,
@@ -30,15 +30,10 @@ import { diffParagraphVersions, summarizeParagraphDiff, type ParagraphDiffSegmen
 import { getTaskById, resolveScopeSourceIds, getAllSourceIds } from '../db/tasks'
 import { getSourceIdsByTag } from '../db/tags'
 import { listPinnedWebMaterials } from '../db/web-materials'
-import { embedTexts } from '../rag/embed'
-import { recallCompilationCandidates } from './compilation-service'
-import {
-  looksLikeLeakRequest,
-  rankLeakCandidates,
-  type LeakCandidate,
-  type LeakSearchOutcome,
-  type LeakSearchState
-} from './leak-candidates'
+import { attachAnchorsQuietly } from './source-anchors'
+import type { CatalogSource } from './catalog'
+import { navigateSources, type NavOutcome } from './source-navigator'
+import { needsLibraryLookup, type LeakCandidate, type LeakSearchOutcome, type LeakSearchState } from './leak-candidates'
 import {
   applyDocOps,
   buildDocEditMessages,
@@ -77,44 +72,35 @@ export type DocEditResult =
   | { ok: false; error: { code: string; message: string } }
 
 /**
- * 补漏（B 方案）：在**该任务能看到的全部资料**里做本地检索，挑出候选原文。
- * 复用生成管线的召回口径（词法 bigram + 向量语义 + 保守闸门），不另写一套，
- * 否则"对话里找得到、生成时找不到"会变成新的困惑源。
- *
- * 检索范围 = 三者的并集（2026-10-03 实测修正）：
+ * 导航范围：**该任务能看到的全部资料**（2026-10-03 实测修正，仍是三者的并集）：
  *  ① 任务范围（`resolveScopeSourceIds` → 全部**长期资料**，`sources.task_id IS NULL`）；
- *  ② **本汇编已引用的来源**——"漏了"最常见的形态是"你用过这份年鉴、但这一段没提取"；
+ *  ② **本汇编已引用的来源**；
  *  ③ **本任务锁定的网页材料**——生成时锁定 300 篇、实际只用了 30 篇是常态。
- * 只查 ① 会漏掉 ②③（实测该任务 ① 只有 5 份年鉴，而汇编用了 38 个来源）。
  *
- * 本地宽召回在大库上是十几秒到几十秒的 CPU 工作（实测 5 份年鉴 1.6 万块 ≈ 11 秒），
- * 因此只由意图闸门 `looksLikeLeakRequest` 触发，普通编辑指令走快路径。
+ * 注意：这里**不做任何相关性筛选**（2026-10-03 用户裁定：完全由大模型决策看哪里）——
+ * 只是把范围里的来源连同标题/年份/正文交给 `navigateSources`，由模型自己挑。
  */
-export async function searchLeakCandidates(taskId: string, compilationId: string, query: string): Promise<LeakSearchOutcome> {
-  try {
-    const task = getTaskById(taskId)
-    if (!task) return { candidates: [], state: 'failed', scanned: 0 }
-    const scopeIds = resolveScopeSourceIds(task, { getSourceIdsByTag, getAllSourceIds })
-    const compSourceIds = listCompilationSources(compilationId)
-      .map((s) => s.sourceId)
-      .filter((id): id is string => !!id)
-    const pinnedIds = listPinnedWebMaterials(taskId).map((m) => m.sourceId)
-    const all = Array.from(new Set([...scopeIds, ...compSourceIds, ...pinnedIds]))
-    if (all.length === 0) return { candidates: [], state: 'empty', scanned: 0 }
-    const vectors = await embedTexts([query]).catch(() => null)
-    const recall = recallCompilationCandidates(all, query, vectors ? vectors[0] : undefined)
-    const candidates = rankLeakCandidates(recall.chunks)
-    logMain(
-      'compilation',
-      '补漏检索 任务=' + taskId +
-        ' 来源=' + all.length + '（长期=' + scopeIds.length + ' 汇编内=' + compSourceIds.length + ' 网页锁定=' + pinnedIds.length + '）' +
-        ' 扫描块=' + recall.chunks.length + ' 候选=' + candidates.length
-    )
-    return { candidates, state: candidates.length > 0 ? 'ok' : 'empty', scanned: recall.chunks.length }
-  } catch (e) {
-    logMain('compilation', '补漏检索失败：' + String(e))
-    return { candidates: [], state: 'failed', scanned: 0 }
+export function listNavigableSources(taskId: string, compilationId: string): CatalogSource[] {
+  const task = getTaskById(taskId)
+  if (!task) return []
+  const scopeIds = resolveScopeSourceIds(task, { getSourceIdsByTag, getAllSourceIds })
+  const compSourceIds = listCompilationSources(compilationId)
+    .map((s) => s.sourceId)
+    .filter((id): id is string => !!id)
+  const pinnedIds = listPinnedWebMaterials(taskId).map((m) => m.sourceId)
+  const ids = Array.from(new Set([...scopeIds, ...compSourceIds, ...pinnedIds]))
+  if (ids.length === 0) return []
+  const out: CatalogSource[] = []
+  for (const s of getSourcesByIds(ids)) {
+    // 正文缺失（老文章失效/模板页，Migration 041 已标记）→ 不进目录：它没有可用正文
+    if (s.bodyMissing) continue
+    if (!s.cleanedText || !s.cleanedText.trim()) continue
+    out.push({ id: s.id, title: s.title, kind: s.kind, publishedAt: s.publishedAt, cleanedText: s.cleanedText })
   }
+  // 文件类（年鉴等权威资料）排前，方便模型先看它们
+  out.sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'file' ? -1 : 1))
+  logMain('compilation', '资料导航范围：' + out.length + ' 个来源（长期=' + scopeIds.length + ' 汇编内=' + compSourceIds.length + ' 网页锁定=' + pinnedIds.length + '）')
+  return out
 }
 
 function resolveProvider(): { ok: true; provider: { apiBase: string; model: string; apiKey: string } } | { ok: false; error: { code: string; message: string } } {
@@ -177,22 +163,30 @@ function readParagraphSnapshot(compilationId: string): CompilationParagraph[] {
 }
 
 /**
- * 补漏（B 方案）：把"检索到了什么"如实写进回复——用户看得到检索确实跑了、跑到了什么结果，
- * 而不是只看到一句"做不到"。
+ * 把"这次去资料库做了什么"如实写进回复（**检索路径透明化**，2026-10-03 用户裁定）：
+ * 用户看得到模型挑了哪几份资料、哪几节、读了多少原文，而不是只看到一句结论或"做不到"。
  */
-function leakNote(leak: LeakSearchOutcome, addedFromCandidates: number): string {
-  if (leak.state === 'ok') {
-    return (
-      '（已在资料库中检索到 ' +
-      leak.candidates.length +
-      ' 段候选原文' +
-      (addedFromCandidates > 0 ? '，新增 ' + addedFromCandidates + ' 段内容逐字取自候选原文' : '，本次没有需要新增的内容') +
-      '）'
-    )
+function navNote(nav: NavOutcome, addedFromCandidates: number): string {
+  if (nav.state === 'failed') return '\n（本轮资料库导航未完成：' + (nav.message ?? '未知原因') + '，未附资料库原文）'
+  if (nav.candidates.length === 0) {
+    return nav.pickedSources.length > 0
+      ? '\n（资料库导航：模型选了 ' + nav.pickedSources.length + ' 份资料，但没有挑出可读的小节，因此未附原文）'
+      : '\n（资料库导航：模型没有选出资料，因此未附原文）'
   }
-  if (leak.state === 'empty') return '（已在资料库中检索，但没有找到与你描述相关的原文，因此未新增段落）'
-  if (leak.state === 'failed') return '（本地检索未完成，本轮没有附候选原文）'
-  return ''
+  const srcList = nav.pickedSources.slice(0, 6).join('、') + (nav.pickedSources.length > 6 ? ' 等' : '')
+  return (
+    '\n（资料库导航：先看全部来源清单 → 选中 ' +
+    nav.pickedSources.length +
+    ' 份（' +
+    srcList +
+    '）；再按小节标题挑了 ' +
+    nav.candidates.length +
+    ' 节，读入原文 ' +
+    nav.readChars +
+    ' 字' +
+    (addedFromCandidates > 0 ? '；新增 ' + addedFromCandidates + ' 段内容逐字取自这些原文' : '') +
+    '）'
+  )
 }
 
 export async function runDocEdit(compilationId: string, instruction: string, baseVersionNo?: number): Promise<DocEditResult> {
@@ -215,14 +209,22 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
   const sources = listCompilationSources(compilationId).map((s) => ({ ordinal: s.ordinal, title: s.title }))
 
   /*
-   * 补漏（B 方案，2026-10-03 用户裁定）：用户说"资料库里有……你好像漏了"时，
-   * 先在任务范围内做本地检索，把命中的原文片段作为**新增段落的唯一依据**附给模型；
-   * 模型只能照抄候选（带 candidateKey + 逐字 evidence），本地逐字校验后才落库。
-   * 只有意图闸门命中才检索——本地宽召回在大库上是几十秒级 CPU 工作，不能给每条编辑指令都加上。
+   * 资料库导航（2026-10-03 用户裁定：**完全依赖大模型自主决策**）：
+   * 旧链路只在"漏了/补充"这类措辞下检索，且用的是本地词法+向量块召回——实测那次 12 条候选里
+   * **0 条**含答案句（用户实测反馈："只基于已生成的资料汇编回复"）。
+   * 现在：闸门扩展到"问句/要求细化"，命中后走 `navigateSources`（R1 挑资料 → R2/R3 挑章节 → 读正文），
+   * 全程由大模型决定看哪里，本地只搬目录与正文，不做任何相关性判断。
    */
-  const leak: LeakSearchOutcome = looksLikeLeakRequest(text)
-    ? await searchLeakCandidates(comp.taskId, compilationId, text)
-    : { candidates: [], state: 'skipped', scanned: 0 }
+  const nav: NavOutcome = needsLibraryLookup(text)
+    ? await navigateSources({
+        provider: prov.provider,
+        taskId: comp.taskId,
+        question: text,
+        requirement: comp.title,
+        sources: listNavigableSources(comp.taskId, compilationId)
+      })
+    : { candidates: [], rounds: [], pickedSources: [], pickedSections: [], readChars: 0, state: 'empty' }
+  const leak: LeakSearchOutcome = { candidates: nav.candidates, state: nav.candidates.length > 0 ? 'ok' : nav.state === 'failed' ? 'failed' : 'empty', scanned: nav.readChars }
 
   // 用户消息先落库（无论成功失败都留痕）
   insertCompilationMessage({ compilationId, role: 'user', content: text })
@@ -249,7 +251,7 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
   if (accepted.length === 0) {
     // 一条都没应用 → 文档不变，把原因如实回给用户
     const why = rejected.length > 0 ? '（' + rejected.map((r) => r.op + '：' + r.reason).join('；') + '）' : ''
-    const reply = (parsed.reply || '没有需要修改的内容。') + leakNote(leak, 0) + (why ? '\n未做任何改动：' + why : '')
+    const reply = (parsed.reply || '没有需要修改的内容。') + navNote(nav, 0) + (why ? '\n未做任何改动：' + why : '')
     insertCompilationMessage({ compilationId, role: 'assistant', content: reply, rejected })
     return {
       ok: true,
@@ -338,7 +340,7 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
   const changedIds = new Set(change.changedIds)
   /** 未被本次改动触及的段落要**保留原有 origin/revision**，否则一次对话会把全篇都标成"对话修改" */
   const metaById = new Map(comp.items.map((it) => [it.id, { origin: it.origin, revision: it.revision }]))
-  upsertCompilationParagraphs(
+  const persisted = upsertCompilationParagraphs(
     compilationId,
     nextRefs.map((p) => {
       const time = resolveTimeForEdit(p.timeLabel, p.sourceTitle, metaOf(p.sourceOrdinal))
@@ -368,6 +370,21 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
       }
     })
   )
+  /*
+   * 来源锚点（Phase 9 / S3）在**生成期**算，对话编辑这里原来没有补——于是**对话新增的卡片没有页码锚点**，
+   * 点圆标会提示"未记录来源位置"（与 9.15 那个"刚生成完点不到页"是同一类缺口）。
+   * 这里等它完成（实测整份汇编约 2 秒；锚点失败绝不影响本次编辑，`attachAnchorsQuietly` 内吞异常）。
+   */
+  if (change.added > 0 || changedIds.size > 0) {
+    await attachAnchorsQuietly(
+      persisted.map((it) => ({
+        id: it.id,
+        sourceId: it.sourceId,
+        excerpt: it.excerpt,
+        evidence: it.evidence
+      }))
+    )
+  }
 
   const version = snapshotCompilationVersion(compilationId, 'llm-edit', {
     instruction: text,
@@ -387,7 +404,7 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
     ' 段 / 删除 ' +
     change.removed +
     ' 段）' +
-    leakNote(leak, addedFromCandidates) +
+    navNote(nav, addedFromCandidates) +
     (rejected.length > 0 ? '\n有 ' + rejected.length + ' 项未执行：' + rejected.map((r) => r.reason).join('；') : '')
   insertCompilationMessage({
     compilationId,
