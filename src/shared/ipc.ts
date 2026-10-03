@@ -604,6 +604,12 @@ export type CompilationDocEditRes = {
     segments: CompilationVersionDiffSegment[]
     summary: { added: number; removed: number; modified: number; unchanged: number }
   }
+  /** 补漏（B 方案）：本地检索到的候选原文条数 */
+  candidates: number
+  /** 补漏检索状态：ok 有候选 · empty 没找到 · failed 检索不可用 · skipped 本条要求未触发检索 */
+  leakState: 'ok' | 'empty' | 'failed' | 'skipped'
+  /** 本次新增段落里"逐字取自候选原文"的条数 */
+  addedFromCandidates: number
 }
 export interface CompilationMessagesReq {
   compilationId: string

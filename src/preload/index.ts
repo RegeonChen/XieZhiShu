@@ -171,7 +171,22 @@ const api = {
     compilationId: string,
     instruction: string,
     baseVersionNo?: number
-  ): Promise<ApiResult<{ compilation: unknown; reply: string; applied: number; rejected: { op: string; reason: string }[]; versionNo?: number; changedIds: string[]; changeSummary: { added: number; modified: number; removed: number }; diff: unknown }>> {
+  ): Promise<
+    ApiResult<{
+      compilation: unknown
+      reply: string
+      applied: number
+      rejected: { op: string; reason: string }[]
+      versionNo?: number
+      changedIds: string[]
+      changeSummary: { added: number; modified: number; removed: number }
+      diff: unknown
+      /* 补漏（B 方案）：候选原文条数 / 检索状态 / 其中逐字取自候选的新增段数 */
+      candidates: number
+      leakState: 'ok' | 'empty' | 'failed' | 'skipped'
+      addedFromCandidates: number
+    }>
+  > {
     return ipcRenderer.invoke(IPC.COMPILATION_DOC_EDIT, { compilationId, instruction, baseVersionNo })
   },
   /** 读取某汇编的对话历史（含大模型修改记录） */
