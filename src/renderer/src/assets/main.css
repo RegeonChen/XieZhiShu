@@ -4661,6 +4661,61 @@ textarea:focus-visible {
   background: var(--danger-soft);
   color: var(--danger);
 }
+/* 疑似超出范围的复核条（Phase 9 补充）：用"提示"而非"警告"的观感——它只是一份待人工判断的清单 */
+.compilation-scope {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 16px 0;
+}
+.compilation-scope .compilation-collapse-btn--bar {
+  background: var(--bg-soft);
+  color: var(--fg);
+}
+.compilation-scope__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+}
+.compilation-scope__hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--fg-soft);
+}
+.compilation-scope__item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.compilation-scope__text {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--fg);
+}
+.compilation-scope__meta {
+  font-size: 11px;
+  color: var(--fg-soft);
+}
+.compilation-scope__actions {
+  display: flex;
+  gap: 6px;
+}
+.compilation-scope__footer {
+  display: flex;
+  gap: 6px;
+  padding-top: 2px;
+}
 .compilation-variant {
   display: flex;
   align-items: center;

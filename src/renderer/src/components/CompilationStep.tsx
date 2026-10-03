@@ -157,6 +157,19 @@ interface Props {
    * 这一行让"多少段有位置、多少段没有"可见（此前只能一条条点圆标才发现）。
    */
   anchorStats?: { total: number; anchored: number; withPage: number; ambiguous: number } | null
+  /**
+   * 「疑似超出范围」复核清单（Phase 9 补充，用户裁定「界面兜底」）：生成汇编后按撰写要求里的
+   * 范围线索（本地地名 / 是否排除上级）挑出"命中全省/省级/国家标记、且通篇不提本地地名"的段落，
+   * 由用户自己判断是否移出（移出 = kept=false，可撤销）。
+   */
+  scopeCheck?: {
+    flagged: { id: string; position: number; text: string; sourceTitle?: string; markers: string[] }[]
+    checked: number
+    available: boolean
+    localities: string[]
+  } | null
+  /** 移出指定段落（主进程侧 kept=false） */
+  onExcludeItems?: (itemIds: string[]) => void
   /** 重新生成汇编（按当前撰写要求重跑一遍生成管线；A1 会复用已锁定材料） */
   onRegenerateCompilation?: () => void
   /** 来源引用清单（消息内 #N 渲染为可点击来源） */
@@ -225,6 +238,8 @@ function CompilationStep({
   webScan,
   pinnedWebCount,
   anchorStats,
+  scopeCheck,
+  onExcludeItems,
   onRegenerateCompilation,
   generatingText,
   generateProgress,
@@ -278,6 +293,8 @@ function CompilationStep({
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
   /** 矛盾窗口是否展开（默认展开，可收起） */
   const [contradictionsOpen, setContradictionsOpen] = useState(true)
+  /** 「疑似超出范围」复核条展开状态（Phase 9 补充） */
+  const [scopeOpen, setScopeOpen] = useState(false)
   /** 刚被「定位到该段」命中的卡片（短暂高亮，便于用户在下方列表中找到） */
   const [locatedId, setLocatedId] = useState<string | null>(null)
   /** 定位失败提示（该说法对应的卡片已不在当前列表中） */
@@ -314,6 +331,9 @@ function CompilationStep({
    * 生成完成后面板切到"与汇编对话"，这里把它作为**只读前段**显示，避免最初那次问答消失。
    */
   const taskHistory = taskMessages ?? []
+  /** 疑似超出范围的段落（Phase 9 补充：由 `WritingWorkspace` 按撰写要求算好传进来） */
+  const scopeFlags = scopeCheck?.flagged ?? []
+  const scopeLocalities = scopeCheck?.localities ?? []
   const canSend = chatInput.trim().length > 0 && docEditing !== true
   /** 复核态：对话修改完成后由父组件自动置上差异，用户「采纳 / 回退」后才退出 */
   const reviewing = versionDiff != null
@@ -738,6 +758,68 @@ function CompilationStep({
           </button>
         </div>
       </div>
+
+      {/*
+        Phase 9 补充（用户裁定「界面兜底」）：疑似超出范围的段落复核条。
+        只做**确定性提示**（命中全省/省级/国家标记、且通篇不提撰写要求里点名的本地地名），
+        由用户判断是否移出（移出 = kept=false：不删数据、可撤销、有版本记录）。
+        撰写要求里没有范围线索（既没点名地名、也没写"排除上级"）→ 界面不出现这条，不添噪声。
+      */}
+      {scopeFlags.length > 0 ? (
+        <div className="compilation-scope">
+          <button
+            type="button"
+            className="compilation-collapse-btn compilation-collapse-btn--bar"
+            onClick={() => setScopeOpen((o) => !o)}
+          >
+            <span>{t.scopeTitle.replace('{count}', String(scopeFlags.length))}</span>
+            <span aria-hidden="true">{scopeOpen ? '▲' : '▼'}</span>
+          </button>
+          {scopeOpen ? (
+            <div className="compilation-scope__list">
+              <p className="compilation-scope__hint">
+                {t.scopeHint.replace('{scope}', scopeLocalities.length > 0 ? scopeLocalities.join('、') : t.scopeHigherLevel)}
+              </p>
+              {scopeFlags.map((f) => (
+                <div key={f.id} className="compilation-scope__item">
+                  <div className="compilation-scope__text">{f.text.slice(0, 80)}</div>
+                  <div className="compilation-scope__meta">
+                    {t.scopeParagraph.replace('{n}', String(f.position + 1))}
+                    {t.scopeMarkers.replace('{markers}', f.markers.join('、'))}
+                    {f.sourceTitle ? t.scopeFrom.replace('{title}', f.sourceTitle) : ''}
+                  </div>
+                  <div className="compilation-scope__actions">
+                    <button type="button" className="source-list__btn" onClick={() => locateItem(f.id)}>
+                      {t.locate}
+                    </button>
+                    <button
+                      type="button"
+                      className="source-list__btn"
+                      disabled={busy}
+                      onClick={() => onExcludeItems?.([f.id])}
+                    >
+                      {t.scopeExclude}
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <div className="compilation-scope__footer">
+                <button
+                  type="button"
+                  className="source-list__btn source-list__btn--primary"
+                  disabled={busy}
+                  onClick={() => onExcludeItems?.(scopeFlags.map((f) => f.id))}
+                >
+                  {t.scopeExcludeAll.replace('{count}', String(scopeFlags.length))}
+                </button>
+                <button type="button" className="source-list__btn" onClick={() => setScopeOpen(false)}>
+                  {t.collapse}
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {/* 复核条（用户 2026-09-10 裁定）：每次对话修改后**自动**进入对比模式，
           用户只需点「采纳」或「回退」二选一，选完即退出对比模式。 */}

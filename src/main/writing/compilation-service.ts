@@ -178,7 +178,10 @@ export interface CompilationInterrupt {
 interface CompilationResumeState {
   taskId: string
   compilationId: string
+  /** 用户撰写要求**全文**（汇编标题存的就是它；也是各阶段提示词的首要依据） */
   title: string
+  /** 从要求里提取出的短标题（仅用于提示词里《》里的"题目"）；缺省时退回 `title` */
+  shortTitle?: string
   provider: ProviderInfo
   phase: 'window' | 'extract' | 'contradiction'
   chunks: RetrievedChunk[]
@@ -454,17 +457,24 @@ function refText(refs: SourceRefEntry[]): string {
   return refs.map((r) => r.index + '. 《' + r.title + '》').join('\n')
 }
 
-function buildSystemPrompt(instruction: string): string {
+/** 窗口细读的系统提示词（导出供单测断言"用户要求全文必须完整入提示词"） */
+export function buildSystemPrompt(instruction: string): string {
   return [
     '你是一名地方志资料整理专家。你将收到一批【候选材料】与【文件清单】，材料来自用户本地资料库，不能引入任何外部知识。',
     '你的任务是**筛选**：逐块阅读候选材料，挑出与撰写主题可能相关的条目，交给后续环节加工成志书素材。',
     '',
-    '【本次撰写主题与范围】',
+    /*
+     * 2026-10-03（用户裁定）：用户那条撰写要求**原文**就是筛选的首要依据，必须完整给出，
+     * 且其中的范围限定（地域/层级/时间跨度/对象）与「不必纳入」的排除项都是硬判据——
+     * 实测只把要求当"主题名"用是挡不住省级/国家层面综述的（38 个来源里 9 个省级/国家层面全部进了汇编）。
+     */
+    '【用户的撰写要求（原文，必须逐条遵守，是本次筛选的首要依据）】',
     instruction,
     '',
-    '【筛选口径：宁多勿漏】**这里只做筛选，不做裁剪**。只要某条材料可能含有与主题相关的内容（哪怕整段里只有一两句相关），就把它整段输出；',
+    '【筛选口径】**这里只做筛选，不做裁剪**：只要某条材料可能含有与主题相关的内容（哪怕整段里只有一两句相关），就把它整段输出；',
     '真正的裁剪、合并、补全交给下一步的「整合提取」环节，由它把相关句段整理成可直接写进志稿的段落。',
-    '因此：不确定是否相关时，**一律保留**；只有明确与主题无关（例如讲的是其它行业、其它部门、其它工作）或纯属排版噪声时才跳过。',
+    '因此：不在用户要求所限定范围内的条目，**直接跳过**——包括**地域/层级**（如要求只写某区，则全省、全国层面的政策解读、工作部署、其它市县的同类做法与统计数据）、**时间跨度**、**对象范围**不符的内容，以及要求里点明「不必纳入」的内容；',
+    '只有明确与主题无关（例如讲的是其它行业、其它部门、其它工作）或纯属排版噪声时才跳过。**在范围之内**拿不准是否相关时，一律保留（宁多勿漏）。',
     '',
     '每条候选材料是一个【完整条目/整段】。相关时请把【该条目的完整原文】作为一张卡片输出，不要按时间/事实再做更细切分；',
     '也不要在这里删减条目中的无关内容（那是下一步的事）。若多条候选材料是同一句子的延续，请合并成一张卡片后输出。',
@@ -483,7 +493,8 @@ function buildSystemPrompt(instruction: string): string {
   ].join('\n')
 }
 
-function buildUserPrompt(chunks: RetrievedChunk[], refs: SourceRefEntry[], instruction: string): string {
+/** 窗口细读的用户提示词（导出供单测断言"用户要求全文必须完整入提示词"） */
+export function buildUserPrompt(chunks: RetrievedChunk[], refs: SourceRefEntry[], instruction: string): string {
   const bySource = new Map(refs.map((r) => [r.sourceId, r.index]))
   const materials = chunks
     .map((c, i) => {
@@ -491,7 +502,19 @@ function buildUserPrompt(chunks: RetrievedChunk[], refs: SourceRefEntry[], instr
       return '[' + (i + 1) + ']（来源编号: #' + ref + '，标题：《' + c.sourceTitle + '》）\n' + c.text
     })
     .join('\n\n')
-  return ['【文件清单】', refText(refs), '本次撰写主题与范围：' + instruction, '', '【候选材料】', materials, '', '请按上述 JSON 格式输出：可能相关的条目一律整段保留（宁多勿漏，不要在这里裁剪），跳过页码/目录/索引等排版噪声。'].join('\n')
+  return [
+    '【文件清单】',
+    refText(refs),
+    '',
+    '【用户的撰写要求（原文，必须逐条遵守）】',
+    instruction,
+    '',
+    '【候选材料】',
+    materials,
+    '',
+    '请按上述 JSON 格式输出：**在用户要求所限定的范围之内**，可能相关的条目一律整段保留（宁多勿漏，不要在这里裁剪）；',
+    '范围之外的内容（地域/层级/时间跨度/对象不符、或要求里点明「不必纳入」的）直接跳过，另跳过页码/目录/索引等排版噪声。'
+  ].join('\n')
 }
 
 export interface CompilationOutputItem {
@@ -998,6 +1021,7 @@ export async function generateCompilation(
     taskId,
     compilationId: comp.id,
     title: t,
+    shortTitle: extracted?.title ?? t,
     provider: prov.provider,
     phase: 'window',
     chunks,
@@ -1511,7 +1535,14 @@ async function runExtractPhase(
         etaSeconds: Math.max(1, Math.ceil(remaining / Math.max(1, state.concurrency))) * EXTRACT_ETA_PER_CALL_S
       })
       const batchCards = batches[bi].map((i) => candidates[i]).filter((c): c is ExtractCandidate => !!c)
-      const res = await extractBatch(state.provider, batchCards, state.title, state.taskId).catch((e) => ({
+      const res = await extractBatch(
+        state.provider,
+        batchCards,
+        // 《题目》用短标题；用户撰写要求**全文**另作首要依据传下去（2026-10-03 用户裁定）
+        state.shortTitle ?? state.title,
+        state.taskId,
+        state.title
+      ).catch((e) => ({
         ok: false,
         drafts: [] as ExtractedDraft[],
         stats: emptyExtractStats(batchCards.length, 0),
@@ -1910,4 +1941,35 @@ export async function continueCompilation(compilationId: string, onProgress?: (p
       ...(state.extractStats ?? {})
     }
   )
+}
+
+/* ------------------------------ 单测 ------------------------------ */
+
+if (import.meta.vitest) {
+  const { describe, expect, it } = import.meta.vitest
+
+  describe('compilation prompts carry the full user requirement (2026-10-03 用户裁定)', () => {
+    const REQUIREMENT =
+      '标题为“高中学校设置”，包括学校的新建、扩建、改建、合并、规模、招生人数、地理分布等等，注意，这只能包含长乐区的内容，哪些全省性的综述不必纳入资料汇编中'
+
+    it('窗口细读：系统提示词与用户提示词都完整带上用户要求原文，并把它当硬判据', () => {
+      const sys = buildSystemPrompt(REQUIREMENT)
+      expect(sys).toContain(REQUIREMENT)
+      expect(sys).toContain('【用户的撰写要求（原文，必须逐条遵守，是本次筛选的首要依据）】')
+      // 范围外直接跳过（而不是"不确定一律保留"）
+      expect(sys).toContain('不在用户要求所限定范围内的条目，**直接跳过**')
+      expect(sys).toContain('全省、全国层面的政策解读')
+      // 范围之内仍然宁多勿漏
+      expect(sys).toContain('**在范围之内**拿不准是否相关时，一律保留')
+
+      const user = buildUserPrompt(
+        [{ sourceId: 's1', sourceTitle: '长乐年鉴2021', position: '', text: '甲段', score: 1 }],
+        [{ index: 1, sourceId: 's1', title: '长乐年鉴2021' }],
+        REQUIREMENT
+      )
+      expect(user).toContain(REQUIREMENT)
+      expect(user).toContain('【用户的撰写要求（原文，必须逐条遵守）】')
+      expect(user).toContain('范围之外的内容')
+    })
+  })
 }

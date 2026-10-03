@@ -85,6 +85,22 @@ export interface AppApi {
     data?: { total: number; anchored: number; withPage: number; ambiguous: number }
     error?: { code: string; message: string }
   }>
+  /** 「疑似超出范围」复核（只读，Phase 9 补充：界面兜底） */
+  scopeCheck(compilationId: string): Promise<{
+    ok: boolean
+    data?: {
+      flagged: { id: string; position: number; text: string; sourceTitle?: string; markers: string[] }[]
+      checked: number
+      available: boolean
+      localities: string[]
+    }
+    error?: { code: string; message: string }
+  }>
+  /** 把"疑似超出范围"的段落移出汇编（kept=false：可撤销、不删数据） */
+  excludeCompilationItems(
+    compilationId: string,
+    itemIds: string[]
+  ): Promise<{ ok: boolean; data?: { compilation: unknown; excluded: number; message: string }; error?: { code: string; message: string } }>
   getWorkspaceStatus(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   workspaceNavSync(): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   migrateLegacyWorkspace(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>

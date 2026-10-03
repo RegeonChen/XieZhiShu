@@ -232,14 +232,29 @@ export function parseExtractOutput(
   return paragraphs.length > 0 || dropped.length > 0 ? { paragraphs, dropped } : null
 }
 
-/** 提示词：自由整合 + 三道校验对应的硬性要求 */
-export function buildExtractMessages(batch: ExtractCandidate[], topic: string): ChatMessage[] {
+/**
+ * 提示词：自由整合 + 三道校验对应的硬性要求。
+ *
+ * 2026-10-03（用户裁定）：用户那条撰写要求**原文**必须完整交给模型，并作为**细筛 / 整合 / 提取的关键依据**。
+ * 此前只把它当《标题》用（`topic`），范围限定（地域 / 层级 / 时间跨度 / 对象）与"不必纳入"的排除项
+ * 没成为硬判据——实测一份 38 个来源的汇编里 9 个省级/国家层面来源全部进了汇编。
+ * 现在：`topic` 仍是短标题（用于《》），`requirement` 是用户要求全文（独立成块 + 单列一条判据）。
+ */
+export function buildExtractMessages(batch: ExtractCandidate[], topic: string, requirement?: string): ChatMessage[] {
+  const req = (requirement ?? '').trim()
   const cardList = batch
     .map((c) => '[' + c.sourceRef + ']（引用号 ' + c.key + '） 来源：《' + (c.sourceTitle || c.sourceRef) + '》 时间：' + (c.ts ?? '无') + '\n原文：\n' + c.excerpt)
     .join('\n\n')
   const sys = [
     '你是一名地方志资料编辑，正在为一部题为《' + topic + '》的志稿整理素材。',
     '',
+    ...(req
+      ? [
+          '【用户的撰写要求（原文，必须逐条遵守，是本次筛选与整合的首要依据）】',
+          req,
+          ''
+        ]
+      : []),
     '下面每张【资料卡片】都是从来源文献中整段摘出的，其中只有一部分内容与本次主题有关。',
     '请把它们**加工成可以直接写进志稿的段落**：删掉与主题无关的内容，把同一张卡片里相关的表述整合成通顺、完整、自包含的段落。',
     '',
@@ -247,6 +262,12 @@ export function buildExtractMessages(batch: ExtractCandidate[], topic: string): 
     '- 保留：直接记述本主题下的对象、时间、地点、数量、事件、措施、结果等事实；',
     '- 删除：虽与主题同属一个大领域，但对象、学段或业务不是本次主题所要求的（例如主题限定某一学段时，卡片讲的却是同一领域下的其它学段、其它业务、其它对象）；',
     '- 删除：本地其它行业、其它部门、其它工作的内容。',
+    /*
+     * 用户要求是首要依据：范围限定（地域/层级/时间跨度/对象）与"不必纳入"的排除项都算硬判据。
+     * 这条不能只写在《标题》里——实测那样挡不住省级/国家层面的综述。
+     */
+    '- **删除：超出用户撰写要求所限定范围的内容**——包括地域、层级、时间跨度、对象范围。例如用户写明「只能包含某区的内容、全省性的综述不必纳入」时，全省/全国层面的政策解读、工作部署、其它市县的同类做法与统计数据**一律删除**；用户点明「不必纳入」的内容同样删除。',
+    '当「与主题同属一个大领域」和「用户要求」冲突时，**以用户要求为准**。',
     '判断依据是「志稿正文会不会用到它」，而不是「它与主题有没有一点点关系」。',
     '',
     '【硬性要求】',
@@ -481,11 +502,12 @@ async function callExtract(
   batch: ExtractCandidate[],
   topic: string,
   taskId: string,
-  temperature: number
+  temperature: number,
+  requirement?: string
 ): Promise<{ ok: boolean; text: string; message?: string; rateLimited?: boolean }> {
   const result = await chatCompletion(
     provider,
-    buildExtractMessages(batch, topic),
+    buildExtractMessages(batch, topic, requirement),
     EXTRACT_CALL_TIMEOUT_MS,
     { kind: 'compilation-extract', taskId },
     { maxRetries: 0, temperature, seed: temperature === 0 ? 42 : undefined }
@@ -512,18 +534,20 @@ export async function extractBatch(
   provider: ExtractProvider,
   batch: ExtractCandidate[],
   topic: string,
-  taskId: string
+  taskId: string,
+  /** 用户撰写要求全文（作为筛选与整合的首要依据，见 `buildExtractMessages`） */
+  requirement?: string
 ): Promise<ExtractBatchOutcome> {
   const stats = emptyExtractStats(batch.length, batch.reduce((n, c) => n + c.excerpt.length, 0))
   if (batch.length === 0) return { ok: true, drafts: [], stats }
 
-  const first = await callExtract(provider, batch, topic, taskId, 0)
+  const first = await callExtract(provider, batch, topic, taskId, 0, requirement)
   if (!first.ok) return { ok: false, drafts: [], stats, message: first.message, rateLimited: first.rateLimited }
   const knownRefs = new Set(batch.map((c) => c.sourceRef))
   let parsed = parseExtractOutput(first.text)
   if (!parsed || ![...parsed.paragraphs, ...parsed.dropped].some((e) => knownRefs.has(e.sourceRef))) {
     stats.retried += 1
-    const again = await callExtract(provider, batch, topic, taskId, 0.3)
+    const again = await callExtract(provider, batch, topic, taskId, 0.3, requirement)
     const reparsed = again.ok ? parseExtractOutput(again.text) : null
     if (reparsed && [...reparsed.paragraphs, ...reparsed.dropped].some((e) => knownRefs.has(e.sourceRef))) {
       parsed = reparsed
@@ -542,7 +566,7 @@ export async function extractBatch(
   const missing = batch.filter((c) => !answered.has(c.sourceRef))
   if (missing.length > 0) {
     stats.retried += 1
-    const retry = await callExtract(provider, missing, topic, taskId, 0.3)
+    const retry = await callExtract(provider, missing, topic, taskId, 0.3, requirement)
     const retryParsed = retry.ok ? parseExtractOutput(retry.text) : null
     if (retryParsed) {
       const again = collectExtractResults(missing, retryParsed, stats)
@@ -606,6 +630,24 @@ if (import.meta.vitest) {
       // 输出格式
       expect(sys).toContain('"paragraphs"')
       expect(sys).toContain('"dropped"')
+    })
+
+    it('把用户的撰写要求**全文**作为首要依据给模型，并单列"超出范围"判据（2026-10-03 用户裁定）', () => {
+      const requirement =
+        '标题为“高中学校设置”，包括学校的新建、扩建、改建、合并、规模、招生人数、地理分布等等，注意，这只能包含长乐区的内容，哪些全省性的综述不必纳入资料汇编中'
+      const sys = buildExtractMessages(batch, '高中学校设置', requirement)[0].content
+      // 要求原文完整出现（不截断、不改写）
+      expect(sys).toContain(requirement)
+      expect(sys).toContain('【用户的撰写要求（原文，必须逐条遵守，是本次筛选与整合的首要依据）】')
+      // 范围/层级被写进判定标准，且明确"以用户要求为准"
+      expect(sys).toContain('超出用户撰写要求所限定范围的内容')
+      expect(sys).toContain('以用户要求为准')
+      // 《》里用短标题，不再塞整段要求
+      expect(sys).toContain('《高中学校设置》')
+      expect(sys).not.toContain('《' + requirement + '》')
+      // 没传要求时保持旧行为（不出现该区块）
+      const legacy = buildExtractMessages(batch, '高中教育')[0].content
+      expect(legacy).not.toContain('【用户的撰写要求')
     })
 
     it('accepts a valid rewrite, attributing it to the card holding the evidence', () => {

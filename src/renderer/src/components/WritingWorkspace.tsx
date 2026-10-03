@@ -419,6 +419,13 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
    * 汇编切换 / 生成完成 / 重新生成后刷新；锚点是断点式写入，界面顺手延迟一拍再取。
    */
   const [anchorStats, setAnchorStats] = useState<{ total: number; anchored: number; withPage: number; ambiguous: number } | null>(null)
+  /** 「疑似超出范围」复核清单（Phase 9 补充：界面兜底）；null = 还没查/不适用 */
+  const [scopeCheck, setScopeCheck] = useState<{
+    flagged: { id: string; position: number; text: string; sourceTitle?: string; markers: string[] }[]
+    checked: number
+    available: boolean
+    localities: string[]
+  } | null>(null)
   useEffect(() => {
     if (!compilation?.id) {
       setAnchorStats(null)
@@ -437,6 +444,49 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
       window.clearTimeout(timer)
     }
   }, [compilation?.id, busy, reloadKey])
+
+  /** 复核清单刷新（撤销/恢复/移出后都要重算，否则计数会停在旧值） */
+  const refreshScopeCheck = useCallback(async (compilationId: string): Promise<void> => {
+    const res = await window.api.scopeCheck(compilationId)
+    if (res.ok && res.data) setScopeCheck(res.data)
+  }, [])
+
+  useEffect(() => {
+    if (!compilation?.id) {
+      setScopeCheck(null)
+      return
+    }
+    let alive = true
+    void (async () => {
+      const res = await window.api.scopeCheck(compilation.id)
+      if (alive && res.ok && res.data) setScopeCheck(res.data)
+    })()
+    return () => {
+      alive = false
+    }
+  }, [compilation?.id, reloadKey])
+
+  /**
+   * 把"疑似超出范围"的段落**移出汇编**（Phase 9 补充：界面兜底）。
+   * 主进程侧是 `kept=false`：不删数据、可撤销、有版本记录；移出后刷新汇编与复核清单。
+   */
+  const handleExcludeItems = async (itemIds: string[]): Promise<void> => {
+    if (!compilation || itemIds.length === 0) return
+    try {
+      const res = await window.api.excludeCompilationItems(compilation.id, itemIds)
+      if (res.ok && res.data) {
+        setCompilation(res.data.compilation as CompilationView)
+        setMessages((prev) => [...prev, { role: 'assistant', content: res.data!.message }])
+        await refreshScopeCheck(compilation.id)
+        void refreshUndoState(compilation.id)
+        void window.api.addTaskMessage(taskId, 'assistant', res.data.message, 'notice')
+      } else {
+        appendAssistant('移出失败：' + (res.error?.message ?? ''))
+      }
+    } catch {
+      appendAssistant('移出失败：请确认应用已完整重启')
+    }
+  }
 
   useEffect(() => {
     const off = window.api.onDraftGenerateProgress?.((p) => {
@@ -515,6 +565,7 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
         setCompilation(res.data.compilation as CompilationView)
         setUndoAvailable(res.data.undoAvailable)
         setRedoAvailable(res.data.redoAvailable)
+        await refreshScopeCheck(compilation.id)
       } else {
         appendAssistant('撤销失败：' + (res.error?.message ?? ''))
       }
@@ -531,6 +582,7 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
         setCompilation(res.data.compilation as CompilationView)
         setUndoAvailable(res.data.undoAvailable)
         setRedoAvailable(res.data.redoAvailable)
+        await refreshScopeCheck(compilation.id)
       } else {
         appendAssistant('恢复失败：' + (res.error?.message ?? ''))
       }
@@ -1148,6 +1200,8 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           webScan={lastWebScan}
           pinnedWebCount={pinnedWebCount}
           anchorStats={anchorStats}
+          scopeCheck={scopeCheck}
+          onExcludeItems={(ids) => void handleExcludeItems(ids)}
           onRegenerateCompilation={() => setRegenConfirmOpen(true)}
           sourceRefs={sourceRefs}
         />
