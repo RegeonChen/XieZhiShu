@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { zhCN } from '../i18n/zh-CN'
 import { copyPlainText } from '../utils/clipboard'
 import { splitRefTokens } from '../utils/ref-text'
+import MarkdownText from './MarkdownText'
 
 export interface ChatMessageItem {
   role: 'user' | 'assistant'
@@ -223,28 +224,34 @@ function ChatPanel({
     else onGenerate(v)
   }
 
-  /** 渲染 assistant 消息：来源编号 #N 渲染为可点击链接（来源引用），其余为纯文本 */
-  const renderAssistantContent = (content: string): React.ReactNode => {
+  /**
+   * 渲染 assistant 消息（2026-10-03 起支持 Markdown）：
+   * 标题/列表/代码/引用/表格由 `MarkdownText` 建元素渲染；**行内文字**走 `splitRefTokens`，
+   * 于是"Markdown 里的 `#N` 来源引用"照样是可点链接。
+   */
+  const renderAssistantContent = (content: string, trailing?: React.ReactNode): React.ReactNode => {
     const valid = new Set((refs ?? []).map((r) => r.index))
     const sourceByIndex = new Map((refs ?? []).map((r) => [r.index, r]))
-    return splitRefTokens(content, valid).map((tok, i) =>
-      tok.type === 'ref' ? (
-        <button
-          key={i}
-          type="button"
-          className="chat-panel__ref-link"
-          title={zhCN.writingChat.openSourceHint.replace('{title}', sourceByIndex.get(tok.index)?.title ?? '')}
-          onClick={() => {
-            const s = sourceByIndex.get(tok.index)
-            if (s) onOpenSource?.(s.sourceId)
-          }}
-        >
-          {tok.text}
-        </button>
-      ) : (
-        <span key={i}>{tok.text}</span>
+    const renderText = (text: string): React.ReactNode =>
+      splitRefTokens(text, valid).map((tok, i) =>
+        tok.type === 'ref' ? (
+          <button
+            key={i}
+            type="button"
+            className="chat-panel__ref-link"
+            title={zhCN.writingChat.openSourceHint.replace('{title}', sourceByIndex.get(tok.index)?.title ?? '')}
+            onClick={() => {
+              const s = sourceByIndex.get(tok.index)
+              if (s) onOpenSource?.(s.sourceId)
+            }}
+          >
+            {tok.text}
+          </button>
+        ) : (
+          <span key={i}>{tok.text}</span>
+        )
       )
-    )
+    return <MarkdownText text={content} renderText={renderText} trailing={trailing} />
   }
 
   return (
@@ -322,8 +329,7 @@ function ChatPanel({
           <div className="chat-panel__msg chat-panel__msg--assistant">
             <div className="chat-panel__assistant-block">
               <span className="chat-panel__bubble chat-panel__bubble--streaming">
-                {streamText}
-                <span className="stream-cursor" aria-hidden="true" />
+                {renderAssistantContent(streamText, <span className="stream-cursor" aria-hidden="true" />)}
               </span>
               {progress ? (
                 <div className="chat-panel__progress">
