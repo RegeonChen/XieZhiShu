@@ -500,10 +500,12 @@ export type CompilationExtractScan = CompilationStageScan & {
   invalidNumbers?: number
   /** 降级原因细分：证据引文不是来源原文 */
   invalidEvidence?: number
-  /** 降级粒度细分：只保留了 evidence 片段（粒度细） */
+  /** 降级处理细分：只保留了 evidence 片段（粒度最细） */
   degradedFromEvidence?: number
-  /** 降级粒度细分：退回整张卡片原文（无法定位） */
-  degradedWholeCard?: number
+  /** 降级处理细分：按句保留可核验内容（取代原来的"退回整卡原文"） */
+  degradedPruned?: number
+  /** 因"没有一句内容能在来源里核验"而丢弃的卡片数 */
+  droppedUnverifiable?: number
   /** 模型判定与主题无关而整卡丢弃 */
   droppedCards?: number
   /** 模型始终未回答、按原文保留的卡片数 */

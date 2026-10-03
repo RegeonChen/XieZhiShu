@@ -1450,7 +1450,8 @@ async function runExtractPhase(
       invalidNumbers: agg.invalidNumbers,
       invalidEvidence: agg.invalidEvidence,
       degradedFromEvidence: agg.degradedFromEvidence,
-      degradedWholeCard: agg.degradedWholeCard,
+      degradedPruned: agg.degradedPruned,
+      droppedUnverifiable: agg.droppedUnverifiable,
       droppedCards: agg.droppedCards,
       omitted: agg.omitted,
       passthrough: agg.passthrough,
@@ -1568,7 +1569,8 @@ async function runExtractPhase(
       agg.invalidEvidence += res.stats.invalidEvidence
       agg.emptyText += res.stats.emptyText
       agg.degradedFromEvidence += res.stats.degradedFromEvidence
-      agg.degradedWholeCard += res.stats.degradedWholeCard
+      agg.degradedPruned += res.stats.degradedPruned
+      agg.droppedUnverifiable += res.stats.droppedUnverifiable
       agg.droppedCards += res.stats.droppedCards
       agg.omitted += res.stats.omitted
       agg.passthrough += res.stats.passthrough
@@ -1751,7 +1753,8 @@ function finalizeCompilationInto(
     invalidNumbers?: number
     invalidEvidence?: number
     degradedFromEvidence?: number
-    degradedWholeCard?: number
+    degradedPruned?: number
+    droppedUnverifiable?: number
     droppedCards?: number
     omitted?: number
     passthrough?: number
