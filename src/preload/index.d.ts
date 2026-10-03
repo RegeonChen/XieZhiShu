@@ -43,7 +43,7 @@ export interface AppApi {
   /* Phase 7.4：版本列表（对话编辑的乐观锁基线；两版差异 / 版本恢复通道已随 Phase 7.7 删除） */
   listCompilationVersions(compilationId: string): Promise<{ ok: boolean; data?: { versions: unknown[] }; error?: { code: string; message: string } }>
   /* Phase 7.5：对话框内让大模型按段落 id 修改汇编正文 */
-  editCompilationDoc(compilationId: string, instruction: string, baseVersionNo?: number): Promise<{ ok: boolean; data?: { compilation: unknown; reply: string; applied: number; rejected: { op: string; reason: string }[]; versionNo?: number; changedIds: string[]; changeSummary: { added: number; modified: number; removed: number }; diff: unknown }; error?: { code: string; message: string } }>
+  editCompilationDoc(compilationId: string, instruction: string, baseVersionNo?: number): Promise<{ ok: boolean; data?: { compilation: unknown; reply: string; applied: number; rejected: { op: string; reason: string }[]; versionNo?: number; changedIds: string[]; changeSummary: { added: number; modified: number; removed: number }; diff: unknown; candidates: number; leakState: 'ok' | 'empty' | 'failed' | 'skipped'; addedFromCandidates: number }; error?: { code: string; message: string } }>
   listCompilationMessages(compilationId: string): Promise<{ ok: boolean; data?: { messages: unknown[] }; error?: { code: string; message: string } }>
   resolveCompilationContradiction(contradictionId: string, action: 'resolve' | 'ignore', chosenItemId?: string): Promise<{ ok: boolean; data?: { contradiction: unknown }; error?: { code: string; message: string } }>
   confirmCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>

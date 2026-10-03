@@ -623,7 +623,7 @@ export const zhCN = {
     generatePanelTitle: '生成资料汇编',
     docChatOpen: '与汇编对话（让大模型修改）',
     docChatTitle: '与汇编对话',
-    docChatHint: '用一句话告诉大模型要怎么改（如「把校区建设相关的内容都删掉」），它会直接修改右侧汇编。',
+    docChatHint: '用一句话告诉大模型要怎么改（如「把校区建设相关的内容都删掉」），它会直接修改右侧汇编；说「资料库里还有……你漏了」它会先去资料库里检索原文，再照原文补段。',
     docChatPlaceholder: '例如：校区建设不属于这方面的内容，请把相关内容都删掉',
     docChatSend: '发送',
     docChatEmpty: '还没有对话记录。提出修改要求后，这里会显示大模型对每处改动的说明。',

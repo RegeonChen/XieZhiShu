@@ -14,6 +14,7 @@ import { chatCompletion } from '../llm/chat'
 import { getSourceById } from '../db/sources'
 import {
   dedupeSourceIds,
+  ensureCompilationSources,
   getCompilationById,
   getLatestCompilationVersion,
   insertCompilationMessage,
@@ -26,6 +27,18 @@ import { logMain } from '../logger'
 import { pushUndo } from './compilation-undo'
 import { buildParagraphSnapshot, sortParagraphsByTime } from './compilation-document'
 import { diffParagraphVersions, summarizeParagraphDiff, type ParagraphDiffSegment } from './compilation-diff'
+import { getTaskById, resolveScopeSourceIds, getAllSourceIds } from '../db/tasks'
+import { getSourceIdsByTag } from '../db/tags'
+import { listPinnedWebMaterials } from '../db/web-materials'
+import { embedTexts } from '../rag/embed'
+import { recallCompilationCandidates } from './compilation-service'
+import {
+  looksLikeLeakRequest,
+  rankLeakCandidates,
+  type LeakCandidate,
+  type LeakSearchOutcome,
+  type LeakSearchState
+} from './leak-candidates'
 import {
   applyDocOps,
   buildDocEditMessages,
@@ -51,11 +64,58 @@ export interface DocEditSummary {
   changeSummary: { added: number; modified: number; removed: number }
   /** 本次修改前后的差异（前端据此自动进入对比模式，让用户「采纳 / 回退」） */
   diff: { segments: ParagraphDiffSegment[]; summary: { added: number; removed: number; modified: number; unchanged: number } }
+  /** 补漏（B 方案）：本地检索到的候选原文条数 */
+  candidates: number
+  /** 补漏检索状态（skipped = 本条要求不需要检索） */
+  leakState: LeakSearchState
+  /** 本次新增段落里"逐字取自候选原文"的条数 */
+  addedFromCandidates: number
 }
 
 export type DocEditResult =
   | { ok: true; summary: DocEditSummary }
   | { ok: false; error: { code: string; message: string } }
+
+/**
+ * 补漏（B 方案）：在**该任务能看到的全部资料**里做本地检索，挑出候选原文。
+ * 复用生成管线的召回口径（词法 bigram + 向量语义 + 保守闸门），不另写一套，
+ * 否则"对话里找得到、生成时找不到"会变成新的困惑源。
+ *
+ * 检索范围 = 三者的并集（2026-10-03 实测修正）：
+ *  ① 任务范围（`resolveScopeSourceIds` → 全部**长期资料**，`sources.task_id IS NULL`）；
+ *  ② **本汇编已引用的来源**——"漏了"最常见的形态是"你用过这份年鉴、但这一段没提取"；
+ *  ③ **本任务锁定的网页材料**——生成时锁定 300 篇、实际只用了 30 篇是常态。
+ * 只查 ① 会漏掉 ②③（实测该任务 ① 只有 5 份年鉴，而汇编用了 38 个来源）。
+ *
+ * 本地宽召回在大库上是十几秒到几十秒的 CPU 工作（实测 5 份年鉴 1.6 万块 ≈ 11 秒），
+ * 因此只由意图闸门 `looksLikeLeakRequest` 触发，普通编辑指令走快路径。
+ */
+export async function searchLeakCandidates(taskId: string, compilationId: string, query: string): Promise<LeakSearchOutcome> {
+  try {
+    const task = getTaskById(taskId)
+    if (!task) return { candidates: [], state: 'failed', scanned: 0 }
+    const scopeIds = resolveScopeSourceIds(task, { getSourceIdsByTag, getAllSourceIds })
+    const compSourceIds = listCompilationSources(compilationId)
+      .map((s) => s.sourceId)
+      .filter((id): id is string => !!id)
+    const pinnedIds = listPinnedWebMaterials(taskId).map((m) => m.sourceId)
+    const all = Array.from(new Set([...scopeIds, ...compSourceIds, ...pinnedIds]))
+    if (all.length === 0) return { candidates: [], state: 'empty', scanned: 0 }
+    const vectors = await embedTexts([query]).catch(() => null)
+    const recall = recallCompilationCandidates(all, query, vectors ? vectors[0] : undefined)
+    const candidates = rankLeakCandidates(recall.chunks)
+    logMain(
+      'compilation',
+      '补漏检索 任务=' + taskId +
+        ' 来源=' + all.length + '（长期=' + scopeIds.length + ' 汇编内=' + compSourceIds.length + ' 网页锁定=' + pinnedIds.length + '）' +
+        ' 扫描块=' + recall.chunks.length + ' 候选=' + candidates.length
+    )
+    return { candidates, state: candidates.length > 0 ? 'ok' : 'empty', scanned: recall.chunks.length }
+  } catch (e) {
+    logMain('compilation', '补漏检索失败：' + String(e))
+    return { candidates: [], state: 'failed', scanned: 0 }
+  }
+}
 
 function resolveProvider(): { ok: true; provider: { apiBase: string; model: string; apiKey: string } } | { ok: false; error: { code: string; message: string } } {
   const settings = getSettings()
@@ -80,6 +140,8 @@ export function buildDocEditRefs(compilationId: string): DocEditParagraphRef[] {
       timeLabel: it.ts,
       sourceOrdinal: it.sourceOrdinal,
       sourceTitle: it.sourceTitle,
+      /* Phase 9 来源定位：证据引文必须随编辑写回（漏掉它会让全篇 evidence 变 NULL） */
+      evidence: it.evidence,
       alsoSourceOrdinals: it.alsoSourceOrdinals,
       alsoSourceIds: it.alsoSourceIds
     }))
@@ -114,6 +176,25 @@ function readParagraphSnapshot(compilationId: string): CompilationParagraph[] {
   )
 }
 
+/**
+ * 补漏（B 方案）：把"检索到了什么"如实写进回复——用户看得到检索确实跑了、跑到了什么结果，
+ * 而不是只看到一句"做不到"。
+ */
+function leakNote(leak: LeakSearchOutcome, addedFromCandidates: number): string {
+  if (leak.state === 'ok') {
+    return (
+      '（已在资料库中检索到 ' +
+      leak.candidates.length +
+      ' 段候选原文' +
+      (addedFromCandidates > 0 ? '，新增 ' + addedFromCandidates + ' 段内容逐字取自候选原文' : '，本次没有需要新增的内容') +
+      '）'
+    )
+  }
+  if (leak.state === 'empty') return '（已在资料库中检索，但没有找到与你描述相关的原文，因此未新增段落）'
+  if (leak.state === 'failed') return '（本地检索未完成，本轮没有附候选原文）'
+  return ''
+}
+
 export async function runDocEdit(compilationId: string, instruction: string, baseVersionNo?: number): Promise<DocEditResult> {
   const text = (instruction ?? '').trim()
   if (!text) return { ok: false, error: { code: ErrorCodes.INVALID_PARAM, message: '请输入修改要求' } }
@@ -133,12 +214,22 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
   if (refs.length === 0) return { ok: false, error: { code: ErrorCodes.INVALID_PARAM, message: '当前汇编没有可修改的段落' } }
   const sources = listCompilationSources(compilationId).map((s) => ({ ordinal: s.ordinal, title: s.title }))
 
+  /*
+   * 补漏（B 方案，2026-10-03 用户裁定）：用户说"资料库里有……你好像漏了"时，
+   * 先在任务范围内做本地检索，把命中的原文片段作为**新增段落的唯一依据**附给模型；
+   * 模型只能照抄候选（带 candidateKey + 逐字 evidence），本地逐字校验后才落库。
+   * 只有意图闸门命中才检索——本地宽召回在大库上是几十秒级 CPU 工作，不能给每条编辑指令都加上。
+   */
+  const leak: LeakSearchOutcome = looksLikeLeakRequest(text)
+    ? await searchLeakCandidates(comp.taskId, compilationId, text)
+    : { candidates: [], state: 'skipped', scanned: 0 }
+
   // 用户消息先落库（无论成功失败都留痕）
   insertCompilationMessage({ compilationId, role: 'user', content: text })
 
   const result = await chatCompletion(
     prov.provider,
-    buildDocEditMessages(refs, text, sources),
+    buildDocEditMessages(refs, text, sources, { requirement: comp.title, candidates: leak.candidates }),
     DOC_EDIT_TIMEOUT_MS,
     { kind: 'compilation-doc-edit', taskId: comp.taskId },
     { maxRetries: 0, temperature: 0 }
@@ -158,7 +249,7 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
   if (accepted.length === 0) {
     // 一条都没应用 → 文档不变，把原因如实回给用户
     const why = rejected.length > 0 ? '（' + rejected.map((r) => r.op + '：' + r.reason).join('；') + '）' : ''
-    const reply = (parsed.reply || '没有需要修改的内容。') + (why ? '\n未做任何改动：' + why : '')
+    const reply = (parsed.reply || '没有需要修改的内容。') + leakNote(leak, 0) + (why ? '\n未做任何改动：' + why : '')
     insertCompilationMessage({ compilationId, role: 'assistant', content: reply, rejected })
     return {
       ok: true,
@@ -169,8 +260,36 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
         rejected,
         changedIds: [],
         changeSummary: { added: 0, modified: 0, removed: 0 },
-        diff: { segments: [], summary: { added: 0, removed: 0, modified: 0, unchanged: 0 } }
+        diff: { segments: [], summary: { added: 0, removed: 0, modified: 0, unchanged: 0 } },
+        candidates: leak.candidates.length,
+        leakState: leak.state,
+        addedFromCandidates: 0
       }
+    }
+  }
+
+  /*
+   * 补漏候选的来源可能**还不在本汇编的编号表里**（这正是"漏了"的典型形态）：
+   * 先登记拿到编号（编号表只增不回收），再让 applyDocOps 用这个编号落库。
+   * 必须在 `ordinalToSourceId` 之前做，否则并列来源/圆标编号会对不上。
+   */
+  const candByKey = new Map(leak.candidates.map((c) => [c.key, c]))
+  const usedCandidates = accepted
+    .filter((o) => o.op === 'insertAfter' && !!o.candidateKey)
+    .map((o) => candByKey.get(o.candidateKey as string))
+    .filter((c): c is LeakCandidate => !!c)
+  if (usedCandidates.length > 0) {
+    const ordered: { sourceId: string; title: string }[] = []
+    for (const c of usedCandidates) {
+      if (!ordered.some((o) => o.sourceId === c.sourceId)) ordered.push({ sourceId: c.sourceId, title: c.sourceTitle })
+    }
+    const refsAfter = ensureCompilationSources(compilationId, ordered)
+    const ordinalBySourceId = new Map(refsAfter.filter((s) => s.sourceId).map((s) => [s.sourceId as string, s.ordinal]))
+    for (const op of accepted) {
+      if (op.op !== 'insertAfter' || !op.candidateKey) continue
+      const c = candByKey.get(op.candidateKey)
+      const ordinal = c ? ordinalBySourceId.get(c.sourceId) : undefined
+      if (ordinal != null) op.sourceOrdinal = ordinal
     }
   }
 
@@ -237,6 +356,8 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
         sourceOrdinal: p.sourceOrdinal,
         text: p.text,
         timeLabel: p.timeLabel,
+        /* Phase 9：证据引文随编辑写回（`applyDocOps` 已按"正文是否改动"决定保留/清空） */
+        evidence: p.evidence,
         year: time.year,
         month: time.month,
         day: time.day,
@@ -254,6 +375,7 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
     baseVersionNo: latest?.versionNo
   })
   const applied = accepted.length
+  const addedFromCandidates = accepted.filter((o) => o.op === 'insertAfter' && !!o.candidateKey).length
   const replyText =
     (parsed.reply || '已按要求修改。') +
     '\n（已修改 ' +
@@ -265,6 +387,7 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
     ' 段 / 删除 ' +
     change.removed +
     ' 段）' +
+    leakNote(leak, addedFromCandidates) +
     (rejected.length > 0 ? '\n有 ' + rejected.length + ' 项未执行：' + rejected.map((r) => r.reason).join('；') : '')
   insertCompilationMessage({
     compilationId,
@@ -288,7 +411,10 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
       versionNo: version?.versionNo,
       changedIds: change.changedIds,
       changeSummary: { added: change.added, modified: change.modified, removed: change.removed },
-      diff: { segments, summary: summarizeParagraphDiff(segments) }
+      diff: { segments, summary: summarizeParagraphDiff(segments) },
+      candidates: leak.candidates.length,
+      leakState: leak.state,
+      addedFromCandidates
     }
   }
 }

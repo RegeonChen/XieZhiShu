@@ -12,6 +12,7 @@
  */
 import type { ChatMessage } from '../llm/chat'
 import { numbersCoveredBy, parseTimeLabel, withFallbackYear } from './compilation-document'
+import { buildCandidateSection, checkInsertEvidence, type LeakCandidate } from './leak-candidates'
 
 /** 提交给大模型的段落视图（`key` = 提示词里的稳定短标识 p12；`id` = 数据库段 id） */
 export interface DocEditParagraphRef {
@@ -21,6 +22,14 @@ export interface DocEditParagraphRef {
   timeLabel?: string
   sourceOrdinal?: number
   sourceTitle?: string
+  /**
+   * 该段的**逐字证据引文**（Phase 9 来源定位的首选依据）。
+   * ⚠ 必须随对话编辑一起写回：落库函数 `upsertCompilationParagraphs` 写的是
+   * `evidence = it.evidence ?? null`，2026-10-03 实测（真实库副本）发现**一次对话编辑会把全篇
+   * evidence 从 121 段清成 0 段**——因为这条链路原本没带这个字段。正文被改写过的段落证据不再成立，
+   * 这里按 `applyDocOps` 的规则清空（见该函数注释），未改动段落原样保留。
+   */
+  evidence?: string
   /**
    * 并列来源编号与 id（Phase 7.12）：同一件事的其它出处。
    * **不进提示词**（大模型只按主来源判断数字有据），只用于落库时把并列来源原样写回，
@@ -45,6 +54,13 @@ export interface DocEditOp {
   sourceOrdinal?: number
   /** split：按字符偏移切分 */
   at?: number
+  /**
+   * 补漏（B 方案）：新增段落的**唯一依据**——资料库检索候选的编号（如 c3）。
+   * 给了它就必须同时给 `evidence`，本地会校验 evidence 逐字出自该候选原文。
+   */
+  candidateKey?: string
+  /** 给 insertAfter 的逐字原文（≥12 字）：来自候选原文，或来自当前文档/该来源原文 */
+  evidence?: string
   /**
    * 用户**明确要求**修改某个数字/数值时置 true → 跳过"数字必须来自来源"的本地校验。
    * 用户裁定（2026-09-10）："如果用户明确要求修改某个数字，那么不应该再进行校验，大模型和软件都照做即可。"
@@ -123,7 +139,9 @@ export interface DocEditValidation {
 export function validateDocOps(
   ops: DocEditOp[],
   paragraphs: DocEditParagraphRef[],
-  sourceTextByOrdinal: Map<number, string>
+  sourceTextByOrdinal: Map<number, string>,
+  /** 补漏候选（B 方案）：带 `candidateKey` 的新增段落必须逐字出自候选原文 */
+  candidates: LeakCandidate[] = []
 ): DocEditValidation {
   const byKey = new Map(paragraphs.map((p) => [p.key, p]))
   const maxOrdinal = paragraphs.reduce((max, p) => Math.max(max, p.sourceOrdinal ?? 0), 0)
@@ -199,8 +217,24 @@ export function validateDocOps(
           reject(op, '新增内容为空')
           break
         }
-        if (!ordinalOk(op.sourceOrdinal)) {
+        // 带候选编号时来源由候选决定（软件自动归属），无需模型给 sourceOrdinal
+        if (!op.candidateKey && !ordinalOk(op.sourceOrdinal)) {
           reject(op, '来源编号超出范围')
+          break
+        }
+        /*
+         * B 方案（2026-10-03）：新增段落必须"有据"——
+         * 依据要么是本地检索出的候选原文（带 candidateKey），要么是当前汇编段落／该来源原文；
+         * evidence 必须逐字命中（≥12 字），数字也必须在依据原文里。凭空写的会被这条拦下。
+         */
+        const evidenceReason = checkInsertEvidence(
+          op,
+          candidates,
+          paragraphs.map((p) => p.text),
+          sourceTextByOrdinal
+        )
+        if (evidenceReason) {
+          reject(op, evidenceReason)
           break
         }
         if (!numbersOk(op.text, op.sourceOrdinal, op.allowNewNumbers)) {
@@ -266,7 +300,12 @@ export function validateDocOps(
 export function applyDocOps(paragraphs: DocEditParagraphRef[], ops: DocEditOp[]): DocEditParagraphRef[] {
   let list = paragraphs.map((p) => ({ ...p }))
   let nextKeyNo = list.length + 1
-  const newRef = (text: string, timeLabel: string | undefined, sourceOrdinal: number | undefined): DocEditParagraphRef => {
+  const newRef = (
+    text: string,
+    timeLabel: string | undefined,
+    sourceOrdinal: number | undefined,
+    evidence?: string
+  ): DocEditParagraphRef => {
     const ordinal = sourceOrdinal ?? list[list.length - 1]?.sourceOrdinal
     const template = list.find((p) => p.sourceOrdinal === ordinal)
     const key = 'p' + nextKeyNo++
@@ -277,9 +316,17 @@ export function applyDocOps(paragraphs: DocEditParagraphRef[], ops: DocEditOp[])
       text,
       timeLabel,
       sourceOrdinal: ordinal,
-      sourceTitle: template?.sourceTitle
+      sourceTitle: template?.sourceTitle,
+      evidence
     }
   }
+  /**
+   * 证据引文的去留（2026-10-03 修）：它是来源定位的首选依据，只有**正文未被改动**时才继续成立。
+   * - `setTime` / `move`：正文没变 → 原样保留（spread 天然保留）；
+   * - `replace`：正文被改写 → 旧证据不再描述这段文字，清空（有 `evidence` 则用新的）；
+   * - `merge` / `split`：文字被重新组合/切开 → 旧证据只覆盖其中一部分，清空；
+   * - `insertAfter`：新段 → 用 op 给的 evidence（补漏时必须逐字来自候选原文，见 validateDocOps）。
+   */
   for (const op of ops) {
     switch (op.op) {
       case 'delete': {
@@ -288,7 +335,11 @@ export function applyDocOps(paragraphs: DocEditParagraphRef[], ops: DocEditOp[])
         break
       }
       case 'replace': {
-        list = list.map((p) => (p.key === op.id && typeof op.text === 'string' ? { ...p, text: op.text, timeLabel: op.timeLabel ?? p.timeLabel } : p))
+        list = list.map((p) =>
+          p.key === op.id && typeof op.text === 'string'
+            ? { ...p, text: op.text, timeLabel: op.timeLabel ?? p.timeLabel, evidence: op.evidence }
+            : p
+        )
         break
       }
       case 'setTime': {
@@ -298,7 +349,7 @@ export function applyDocOps(paragraphs: DocEditParagraphRef[], ops: DocEditOp[])
       case 'insertAfter': {
         const at = list.findIndex((p) => p.key === op.afterId)
         if (at < 0 || !op.text) break
-        list.splice(at + 1, 0, newRef(op.text, op.timeLabel, op.sourceOrdinal))
+        list.splice(at + 1, 0, newRef(op.text, op.timeLabel, op.sourceOrdinal, op.evidence))
         break
       }
       case 'move': {
@@ -317,7 +368,8 @@ export function applyDocOps(paragraphs: DocEditParagraphRef[], ops: DocEditOp[])
         const merged: DocEditParagraphRef = {
           ...targets[0],
           text: targets.map((t) => t.text).join(''),
-          timeLabel: targets[0].timeLabel
+          timeLabel: targets[0].timeLabel,
+          evidence: undefined
         }
         list = list.filter((p) => !ids.includes(p.key))
         const at = Math.min(first, list.length)
@@ -327,8 +379,8 @@ export function applyDocOps(paragraphs: DocEditParagraphRef[], ops: DocEditOp[])
       case 'split': {
         const idx = list.findIndex((p) => p.key === op.id)
         if (idx < 0 || !op.text || typeof op.at !== 'number') break
-        const left: DocEditParagraphRef = { ...list[idx], text: op.text.slice(0, op.at) }
-        const right: DocEditParagraphRef = { ...list[idx], key: 'p' + nextKeyNo++, text: op.text.slice(op.at) }
+        const left: DocEditParagraphRef = { ...list[idx], text: op.text.slice(0, op.at), evidence: undefined }
+        const right: DocEditParagraphRef = { ...list[idx], key: 'p' + nextKeyNo++, text: op.text.slice(op.at), evidence: undefined }
         list.splice(idx, 1, left, right)
         break
       }
@@ -339,7 +391,8 @@ export function applyDocOps(paragraphs: DocEditParagraphRef[], ops: DocEditOp[])
           text: p.text,
           timeLabel: p.timeLabel,
           sourceOrdinal: p.sourceOrdinal ?? list[i]?.sourceOrdinal,
-          sourceTitle: list[i]?.sourceTitle
+          sourceTitle: list[i]?.sourceTitle,
+          evidence: undefined
         }))
         break
       }
@@ -354,8 +407,16 @@ export function applyDocOps(paragraphs: DocEditParagraphRef[], ops: DocEditOp[])
 export function buildDocEditMessages(
   paragraphs: DocEditParagraphRef[],
   instruction: string,
-  sources: { ordinal: number; title: string }[]
+  sources: { ordinal: number; title: string }[],
+  /**
+   * 补漏（B 方案）上下文：
+   * - `requirement`：用户那条撰写要求全文（判断取舍的参照，避免改稿时偏离主题）；
+   * - `candidates`：本地检索出的候选原文（新增段落的唯一依据，见 `leak-candidates.ts`）。
+   */
+  context: { requirement?: string; candidates?: LeakCandidate[] } = {}
 ): ChatMessage[] {
+  const requirement = (context.requirement ?? '').trim()
+  const candidates = context.candidates ?? []
   const doc = paragraphs
     .map((p) => '[' + p.key + '] ' + (p.timeLabel ?? '（无时间）') + ' | 来源' + (p.sourceOrdinal ?? '?') + ' | ' + p.text)
     .join('\n')
@@ -368,24 +429,31 @@ export function buildDocEditMessages(
     '【可引用的来源编号】',
     sources.map((s) => '来源' + s.ordinal + '：《' + s.title + '》').join('\n') || '（无）',
     '',
+    ...(requirement ? ['【用户的撰写要求（原文，改稿要与它一致）】', requirement, ''] : []),
+    buildCandidateSection(candidates),
+    '',
     '【规则】',
     '1. 只输出一个 JSON 对象：{"reply":"给用户看的回答","ops":[…] }，不要输出解释性文字或代码块围栏。',
     '2. 修改必须通过 ops 表达，**用段号引用段落**（如 p12）：',
     '   · {"op":"delete","ids":["p3"]} 删除段落；',
     '   · {"op":"replace","id":"p3","text":"新正文","timeLabel":"2018 年"} 改写某段；',
-    '   · {"op":"insertAfter","afterId":"p3","text":"新段正文","timeLabel":"2019 年","sourceOrdinal":2} 在某段后插入（**必须给 sourceOrdinal**）；',
+    '   · {"op":"insertAfter","afterId":"p3","text":"新段正文","timeLabel":"2019 年","sourceOrdinal":2,"evidence":"依据原文里逐字摘出的片段","candidateKey":"c3"} 在某段后插入（**必须给 evidence**；补漏时必须给 candidateKey，此时 sourceOrdinal 可省略，软件按候选自动归属来源）；',
     '   · {"op":"move","ids":["p5"],"afterId":"p9"} 移动段落；',
     '   · {"op":"merge","ids":["p5","p6"]} 合并（**仅限同一来源**）；',
     '   · {"op":"split","id":"p5","at":30,"text":"该段完整正文"} 按字符位置拆分；',
     '   · {"op":"setTime","id":"p5","timeLabel":"2019 年"} 只改段首时间。',
     '3. **不得编造事实**：正文里的数字、日期、人名、地名必须来自该段所属来源；不得凭空增加数据。',
     '   **唯一例外**：用户**明确要求**把某个数字/数值改成指定值时（如"把在校生数改成 5000 人"），',
-    '   **照做即可**，不要因为来源里没有这个数字就拒绝或改成别的值；此时必须在该 op 上加 `"allowNewNumbers":true`，',
+    '   照做即可，不要因为来源里没有这个数字就拒绝或改成别的值；此时必须在该 op 上加 `"allowNewNumbers":true`，',
     '   软件会据此跳过数字校验。**只有用户点名具体数值时才能加这个字段**，其它任何情况一律不加，',
     '   绝不可用它给自己的推测、估算、补齐数据开口子。',
-    '4. 时间标签必须含 4 位年份（如「2018 年」「2018 年 5 月」）。',
-    '5. 不要删除用户没有要求删除的内容；改动尽量小、贴合用户要求。',
-    '6. 若用户的要求无法用上述 ops 表达，则不要输出任何 op，只在 reply 里说明原因。'
+    '4. **新增段落必须"有据"**（本地会逐字校验，编造的一律被拒）：',
+    '   · 用户的意思是"资料库里还有材料、你漏了"这类**补漏**时：只能从上面的候选原文里取，并给出 `candidateKey` 与逐字 `evidence`（≥12 字）；',
+    '     **候选里没有需要的原文时不要新增**，只在 reply 里说明"资料库检索结果里没有相关内容"。',
+    '   · 只是搬运/重排已有内容时：`evidence` 必须逐字出自当前汇编的某个段落或该段所属来源的原文。',
+    '5. 时间标签必须含 4 位年份（如「2018 年」「2018 年 5 月」）。',
+    '6. 不要删除用户没有要求删除的内容；改动尽量小、贴合用户要求。',
+    '7. 若用户的要求无法用上述 ops 表达，则不要输出任何 op，只在 reply 里说明原因。'
   ].join('\n')
   return [
     { role: 'system', content: sys },
@@ -506,9 +574,22 @@ if (import.meta.vitest) {
       )
       expect(asked.accepted).toHaveLength(1)
       expect(asked.rejected).toHaveLength(0)
-      // 插入同样支持；整篇重写按段落各自判断
+      // 插入同样支持；整篇重写按段落各自判断（插入还要给 evidence，见下一条规则）
       expect(
-        validateDocOps([{ op: 'insertAfter', afterId: 'p1', text: '新增 32 所。', sourceOrdinal: 1, allowNewNumbers: true }], paras, sourceText).accepted
+        validateDocOps(
+          [
+            {
+              op: 'insertAfter',
+              afterId: 'p1',
+              text: '2018 年，全区普通中学 32 所。',
+              sourceOrdinal: 1,
+              allowNewNumbers: true,
+              evidence: '2018 年，全区普通中学 30 所'
+            }
+          ],
+          paras,
+          sourceText
+        ).accepted
       ).toHaveLength(1)
       const all = validateDocOps(
         [{ op: 'replaceAll', paragraphs: [{ text: '全区 999 所。', sourceOrdinal: 1, allowNewNumbers: true }, { text: '甲。', sourceOrdinal: 1 }] }],
@@ -566,7 +647,7 @@ if (import.meta.vitest) {
       expect(sys).toContain('"op":"delete"')
       expect(sys).toContain('不得编造事实')
       expect(sys).toContain('allowNewNumbers')
-      expect(sys).toContain('必须给 sourceOrdinal')
+      expect(sys).toContain('必须给 evidence')
       expect(buildDocEditMessages(paras, 'x', [])[1].content).toBe('x')
     })
 
@@ -598,6 +679,29 @@ if (import.meta.vitest) {
       const r4 = collectDocEditChange(paras, moved, [{ op: 'move', ids: ['p3'], afterId: 'p1' }])
       expect(r4.changedIds).toEqual(['id3'])
       expect(r4.removed).toBe(0)
+    })
+
+    it('keeps evidence only where the text is untouched (Phase 9 来源定位，2026-10-03 修)', () => {
+      const withEvidence: DocEditParagraphRef[] = paras.map((p, i) => ({ ...p, evidence: '证据' + (i + 1) }))
+      // setTime / move：正文没变 → 证据保留（否则一次改时间就把来源定位抹掉）
+      const timed = applyDocOps(withEvidence, [{ op: 'setTime', id: 'p1', timeLabel: '2022 年' }])
+      expect(timed.find((p) => p.key === 'p1')!.evidence).toBe('证据1')
+      const moved = applyDocOps(withEvidence, [{ op: 'move', ids: ['p1'], afterId: 'p2' }])
+      expect(moved.find((p) => p.key === 'p1')!.evidence).toBe('证据1')
+      // replace：正文被改写 → 旧证据不再成立，清空；给了新证据则用新的
+      const replaced = applyDocOps(withEvidence, [{ op: 'replace', id: 'p1', text: '改写后的正文' }])
+      expect(replaced.find((p) => p.key === 'p1')!.evidence).toBeUndefined()
+      const replacedWithEv = applyDocOps(withEvidence, [
+        { op: 'replace', id: 'p1', text: '改写后的正文', evidence: '候选原文片段' }
+      ])
+      expect(replacedWithEv.find((p) => p.key === 'p1')!.evidence).toBe('候选原文片段')
+      // merge / split：文字被重新组合或切开 → 清空（合并段沿用 targets[0] 的 key）
+      const merged = applyDocOps(withEvidence, [{ op: 'merge', ids: ['p1', 'p2'] }])
+      expect(merged.find((p) => p.key === 'p1')!.evidence).toBeUndefined()
+      const split = applyDocOps(withEvidence, [{ op: 'split', id: 'p1', at: 3, text: '2018 年全区' }])
+      expect(split.filter((p) => p.text.startsWith('2018')).every((p) => p.evidence === undefined)).toBe(true)
+      // 未被任何 op 触及的段落，证据必须原样保留（这是"全篇被清空"那个缺陷的回归护栏）
+      expect(replacedWithEv.find((p) => p.key === 'p3')!.evidence).toBe('证据3')
     })
   })
 }

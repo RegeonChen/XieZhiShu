@@ -920,7 +920,10 @@ handleLogged(IPC.COMPILATION_DOC_EDIT, async (_event, params: CompilationDocEdit
           versionNo: res.summary.versionNo,
           changedIds: res.summary.changedIds,
           changeSummary: res.summary.changeSummary,
-          diff: res.summary.diff
+          diff: res.summary.diff,
+          candidates: res.summary.candidates,
+          leakState: res.summary.leakState,
+          addedFromCandidates: res.summary.addedFromCandidates
         }
       }
     } catch (err) {
