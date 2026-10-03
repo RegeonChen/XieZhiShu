@@ -142,6 +142,9 @@ export const IPC = {
   COMPILATION_WEB_MATERIALS: 'compilation:webMaterials',
   // 来源位置（锚点）统计（只读，Phase 9 / S4 补）
   COMPILATION_ANCHOR_STATS: 'compilation:anchorStats',
+  // 疑似超出范围的段落复核（Phase 9 补充：界面兜底）
+  COMPILATION_SCOPE_CHECK: 'compilation:scopeCheck',
+  COMPILATION_EXCLUDE_ITEMS: 'compilation:excludeItems',
 
   /* 工作区（Phase 2.2） */
   WORKSPACE_STATUS: 'workspace:status',
@@ -367,6 +370,40 @@ export type CompilationWebMaterialsRes = {
  * 来源位置（锚点）的统计（只读，Phase 9 / S4 补：锚点是生成后台异步写的，此前完全看不见）。
  * `ambiguous` = 该段的证据/正文在来源里出现**多处**（主来源按此检查），说明位置可能不是唯一那处。
  */
+/**
+ * 「疑似超出范围」复核（Phase 9 补充，2026-10-03 用户裁定「界面兜底」）：
+ * 只做确定性提示（命中"全省/省级/国家"标记且通篇不提要求里点名的本地地名），由用户决定移出。
+ */
+export interface CompilationScopeCheckReq {
+  compilationId: string
+}
+export interface CompilationScopeFlagDto {
+  id: string
+  position: number
+  text: string
+  sourceTitle?: string
+  /** 命中的上级/全省/国家标记词 */
+  markers: string[]
+}
+export type CompilationScopeCheckRes = {
+  flagged: CompilationScopeFlagDto[]
+  /** 被检查的段落数 */
+  checked: number
+  /** false = 撰写要求里没有可依据的范围线索（没点名本地地名、也没写排除上级）→ 本次不做提示 */
+  available: boolean
+  /** 从要求里解析出的本地地名（界面如实说明"按什么在查"） */
+  localities: string[]
+}
+/** 移出汇编 = 标记 `kept=false`（不删数据、可撤销、有版本记录） */
+export interface CompilationExcludeItemsReq {
+  compilationId: string
+  itemIds: string[]
+}
+export type CompilationExcludeItemsRes = {
+  compilation: Compilation
+  excluded: number
+  message: string
+}
 export interface CompilationAnchorStatsReq {
   compilationId: string
 }
@@ -996,6 +1033,8 @@ export interface IpcMapping {
   // 纳入新网页材料
   [IPC.COMPILATION_WEB_MATERIALS]: { _req: CompilationWebMaterialsReq; _res: ApiResult<CompilationWebMaterialsRes> }
   [IPC.COMPILATION_ANCHOR_STATS]: { _req: CompilationAnchorStatsReq; _res: ApiResult<CompilationAnchorStatsRes> }
+  [IPC.COMPILATION_SCOPE_CHECK]: { _req: CompilationScopeCheckReq; _res: ApiResult<CompilationScopeCheckRes> }
+  [IPC.COMPILATION_EXCLUDE_ITEMS]: { _req: CompilationExcludeItemsReq; _res: ApiResult<CompilationExcludeItemsRes> }
   // 工作区
   [IPC.WORKSPACE_STATUS]: { _req: void; _res: ApiResult<WorkspaceStatusRes> }
   [IPC.WORKSPACE_MIGRATE]: { _req: void; _res: ApiResult<WorkspaceMigrateRes> }

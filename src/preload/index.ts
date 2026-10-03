@@ -290,6 +290,24 @@ const api = {
   ): Promise<ApiResult<{ total: number; anchored: number; withPage: number; ambiguous: number }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_ANCHOR_STATS, { compilationId })
   },
+  /** 「疑似超出范围」复核（只读）：命中"全省/省级/国家"标记且不提要求里点名地名的段落 */
+  scopeCheck(compilationId: string): Promise<
+    ApiResult<{
+      flagged: { id: string; position: number; text: string; sourceTitle?: string; markers: string[] }[]
+      checked: number
+      available: boolean
+      localities: string[]
+    }>
+  > {
+    return ipcRenderer.invoke(IPC.COMPILATION_SCOPE_CHECK, { compilationId })
+  },
+  /** 把"疑似超出范围"的段落移出汇编（kept=false：可撤销、不删数据） */
+  excludeCompilationItems(
+    compilationId: string,
+    itemIds: string[]
+  ): Promise<ApiResult<{ compilation: unknown; excluded: number; message: string }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_EXCLUDE_ITEMS, { compilationId, itemIds })
+  },
   /** 工作区状态（目录 + 资料统计） */
   getWorkspaceStatus(): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.WORKSPACE_STATUS)

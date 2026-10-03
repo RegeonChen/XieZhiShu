@@ -297,3 +297,59 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
 export function listDocMessages(compilationId: string): ReturnType<typeof listCompilationMessages> {
   return listCompilationMessages(compilationId)
 }
+
+export interface ExcludeItemsResult {
+  ok: boolean
+  /** 实际移出的段数 */
+  excluded: number
+  /** 说明（界面直接显示） */
+  message: string
+  error?: { code: string; message: string }
+}
+
+/**
+ * 「疑似超出范围」的**移出汇编**（Phase 9 补充，2026-10-03 用户裁定「界面兜底」）。
+ *
+ * 移出 = 把段落标记为 `kept = false`（**不删数据**）：文档视图、导出、版本快照、对话编辑的提交物
+ * 全都按 `kept` 过滤，所以效果与删除一致，但
+ * ① 可撤销（登记撤销栈，与对话编辑同一套）、② 有版本记录（origin='user-edit'）、
+ * ③ **不会级联删掉矛盾说法**（`compilation_contradiction_variants.item_id` 是 ON DELETE CASCADE，
+ * 真删段落会把"这个说法的出处"整行带走）。
+ */
+export function excludeCompilationItems(compilationId: string, itemIds: string[]): ExcludeItemsResult {
+  const comp = getCompilationById(compilationId)
+  if (!comp) return { ok: false, excluded: 0, message: '', error: { code: 'TASK_NOT_FOUND', message: '资料汇编不存在' } }
+  const target = new Set(itemIds.filter(Boolean))
+  if (target.size === 0) return { ok: false, excluded: 0, message: '', error: { code: ErrorCodes.INVALID_PARAM, message: '没有指定要移出的段落' } }
+  const hit = comp.items.filter((it) => it.kept && target.has(it.id))
+  if (hit.length === 0) {
+    return { ok: false, excluded: 0, message: '', error: { code: ErrorCodes.INVALID_PARAM, message: '要移出的段落已不在汇编中' } }
+  }
+
+  // 与对话编辑同一套：先登记撤销栈，再整体覆盖写入（`upsertCompilationParagraphs` 会删掉"不在入参里"的段，
+  // 因此必须把**全部**段落的现有字段原样带上，只改目标段的 kept）
+  pushUndo(compilationId)
+  upsertCompilationParagraphs(
+    compilationId,
+    comp.items.map((it) => ({
+      id: it.id,
+      sourceId: it.sourceId,
+      alsoSourceIds: it.alsoSourceIds,
+      text: it.excerpt,
+      timeLabel: it.ts,
+      year: it.year,
+      month: it.month,
+      day: it.day,
+      timeConfidence: it.timeConfidence,
+      sourceOrdinal: it.sourceOrdinal,
+      evidence: it.evidence,
+      origin: it.origin,
+      revision: it.revision,
+      kind: it.kind,
+      kept: target.has(it.id) ? false : it.kept
+    }))
+  )
+  const version = snapshotCompilationVersion(compilationId, 'user-edit', { instruction: '按范围复核移出 ' + hit.length + ' 段' })
+  logMain('compilation', '关系复核移出 汇编=' + compilationId + ' 段数=' + hit.length + ' 版本=' + (version?.versionNo ?? '-'))
+  return { ok: true, excluded: hit.length, message: '已移出 ' + hit.length + ' 段（可撤销）' }
+}

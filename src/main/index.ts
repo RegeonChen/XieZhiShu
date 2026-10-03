@@ -70,6 +70,10 @@ import {
   type CompilationWebMaterialsRes,
   type CompilationAnchorStatsReq,
   type CompilationAnchorStatsRes,
+  type CompilationScopeCheckReq,
+  type CompilationScopeCheckRes,
+  type CompilationExcludeItemsReq,
+  type CompilationExcludeItemsRes,
   type SourceDeleteRes,
   type SourceDeleteManyRes
 } from '../shared/ipc'
@@ -102,7 +106,7 @@ import {
   listCompilationVersions,
   listCompilationMessages
 } from './db/compilations'
-import { runDocEdit, listDocMessages } from './writing/doc-edit-runner'
+import { runDocEdit, listDocMessages, excludeCompilationItems } from './writing/doc-edit-runner'
 import {
   listStyleGuides,
   saveStyleGuide,
@@ -128,6 +132,7 @@ import { generateDraft, regenerateDraft, retrieveForTask, chatWithTask } from '.
 import { applyContradictionEdit } from './writing/contradiction-apply'
 import { askSourceForTask } from './writing/source-query'
 import { collectAnchorStats } from './writing/anchor-stats'
+import { flagOutOfScope } from './writing/scope-check'
 import { configureEmbedModel, getEmbedEngineStats, stopEmbedWorker } from './rag/embed'
 import { enqueueIndex, getIndexStatus, getQueueSize, getRebuildProgress, initIndexingState, requeuePendingIndexes } from './rag/indexer'
 import { listPinnedWebMaterials } from './db/web-materials'
@@ -1360,6 +1365,47 @@ handleLogged(IPC.COMPILATION_ANCHOR_STATS, (_event, params: CompilationAnchorSta
     if (!params.compilationId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
     const stats = collectAnchorStats(params.compilationId)
     return { ok: true, data: { total: stats.total, anchored: stats.anchored, withPage: stats.withPage, ambiguous: stats.ambiguous } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 「疑似超出范围」复核（Phase 9 补充：界面兜底）。只做确定性提示——命中"全省/省级/国家"标记、
+// 且通篇不提撰写要求里点名的本地地名 → 列出交用户判断（不做自动删除）。
+handleLogged(IPC.COMPILATION_SCOPE_CHECK, (_event, params: CompilationScopeCheckReq): ApiResult<CompilationScopeCheckRes> => {
+  try {
+    const comp = getCompilationById(params.compilationId)
+    if (!comp) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料汇编不存在' } }
+    const flagged = flagOutOfScope(
+      comp.items
+        .filter((it) => it.kept)
+        .map((it) => ({ id: it.id, position: it.position, text: it.excerpt, sourceTitle: it.sourceTitle })),
+      // 汇编标题存的就是用户那条撰写要求全文（见 compilation-service：createCompilation({ title: t })）
+      comp.title
+    )
+    return {
+      ok: true,
+      data: {
+        flagged: flagged.flagged.map((f) => ({ id: f.id, position: f.position, text: f.text, sourceTitle: f.sourceTitle, markers: f.markers })),
+        checked: flagged.checked,
+        available: flagged.available,
+        localities: flagged.scope.localities
+      }
+    }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 把"疑似超出范围"的段落移出汇编（kept=false：不删数据、可撤销、有版本记录）
+handleLogged(IPC.COMPILATION_EXCLUDE_ITEMS, (_event, params: CompilationExcludeItemsReq): ApiResult<CompilationExcludeItemsRes> => {
+  try {
+    if (!params.compilationId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
+    const res = excludeCompilationItems(params.compilationId, Array.isArray(params.itemIds) ? params.itemIds : [])
+    if (!res.ok) return { ok: false, error: res.error ?? { code: 'INTERNAL_ERROR', message: '移出失败' } }
+    const comp = getCompilationById(params.compilationId)
+    if (!comp) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料汇编不存在' } }
+    return { ok: true, data: { compilation: comp, excluded: res.excluded, message: res.message } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
