@@ -13,9 +13,8 @@ interface ContradictionDialogProps {
   onResolved: (contradiction: Contradiction) => void
   /** 采纳成功且正文已同步修订的回调（父组件刷新编辑器正文） */
   onApplied: (contradiction: Contradiction, draft: unknown) => void
-  /** 打开来源文件（系统默认软件） */
-  /** 打开来源（Phase 8 / S1）：第二/三参数为定位锚与说明，见 WritingWorkspace.handleOpenSource */
-  onOpenSource: (sourceId: string, snippet?: string, label?: string) => void
+  /** 打开来源文件（Phase 9 / S4：初稿矛盾不带汇编锚点，只用该说法的原文给「查看本地快照」做高亮） */
+  onOpenSource: (sourceId: string, highlight?: string) => void
 }
 
 function ContradictionDialog({
@@ -130,8 +129,8 @@ interface DetailProps {
   busy: boolean
   onAdopt: (variantId: string) => void
   onIgnore: () => void
-  /** 打开来源（Phase 8 / S1）：第二/三参数为定位锚与说明，见 WritingWorkspace.handleOpenSource */
-  onOpenSource: (sourceId: string, snippet?: string, label?: string) => void
+  /** 打开来源文件（Phase 9 / S4：初稿矛盾不带汇编锚点，只用该说法的原文给「查看本地快照」做高亮） */
+  onOpenSource: (sourceId: string, highlight?: string) => void
 }
 
 function ContradictionDetail({ contradiction: c, t, warningMode = false, busy, onAdopt, onIgnore, onOpenSource }: DetailProps) {
@@ -170,8 +169,8 @@ function ContradictionDetail({ contradiction: c, t, warningMode = false, busy, o
                       type="button"
                       className="contradiction-dialog__source-link"
                       title={title}
-                      // Phase 8 / S1：带上该说法的原文（逐字来自来源）作为定位锚
-                      onClick={() => onOpenSource(v.sourceIds[idx] ?? '', v.variantText, title)}
+                      // Phase 9 / S4：初稿矛盾没有汇编锚点；该说法原文只用于「查看本地快照」高亮
+                      onClick={() => onOpenSource(v.sourceIds[idx] ?? '', v.variantText)}
                     >
                       {title}
                     </button>

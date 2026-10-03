@@ -1210,7 +1210,7 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 - **S3 生成期锚点（Migration 044）**：新增 `compilation_item_anchors(item_id, source_id, block_index, confidence, created_at)`。细读/整合提取阶段把来源正文按块编号送模型，要求每张卡片回报取自哪些块；本地校验块号合法（属本次输入集合）＋与既有 `evidence` 交叉校验（引文落在所引块内→高置信，落不进→标"位置存疑"）；非法/缺失→该卡标"来源位置待定"。`compilation_items` 不动；撤销/版本快照按 Migration 042 的"关系行先删后插"体例写。**不增加模型调用次数。**
 - **S4 收敛界面与文档**：删除句子级高亮与「第 i/n 处、上一处/下一处」（`pdf-hit.ts` 与高亮覆盖层一并删，代码留在 git 历史）；定位条改为「已定位到第 P 页」/「已定位到第 N 段（Word/WPS）」/「该卡片未记录来源位置（重新生成汇编可获得页级定位）」；更新文档与基线。
 
-**执行顺序**：S1 → S2 → S3 → S4。
+**执行顺序**：S1 → S2 → S3 → S4。**状态（2026-10-03）**：S1/S2/S3/S4 均已实现并各自验证；S3 的设计变更见 **9.6**、实施记录见 **9.7**，S4 实施记录见 **9.8**。技术上尚未完成的只有"用户在真实环境重新生成一次汇编并人工抽检页码"这一步（见 9.3 验收 2/3）。
 
 ### 9.3 验收标准
 
@@ -1254,7 +1254,55 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 
 **验证**：typecheck 零错误；vitest **331/332 通过**（唯一失败仍是既有 watcher chokidar 环境项）；生产构建成功。
 
-**下一步（S3 收尾 + S4）**：① 切片/候选构造处记录 `charStart/charEnd` 并随 `ExtractCandidate` 传到整合提取；② 段落落库时算 `block_index` 与 `confidence` → `replaceItemAnchors`；③ S4：定位条改报「已定位到第 P 页」/「已定位到第 N 段」/「未记录来源位置」，删句子高亮与上一处/下一处。
+### 9.7 S3 收尾实施记录（2026-10-03，完成）
+
+**挂钩点（唯一）**：[compilation-service.ts](src/main/writing/compilation-service.ts) 的 `persistDocument` → `upsertCompilationParagraphs(...)` 之后，`void attachAnchorsQuietly(items)`
+（该函数是同步的，故 fire-and-forget，不改签名；这一处是唯一能一次拿到全部刚写库段落 `{id, sourceId, excerpt, evidence}` 的地方）。
+
+**新增** [src/main/writing/source-anchors.ts](src/main/writing/source-anchors.ts)：
+- `attachAnchors(items)`（可 await，供演练/单测）：按 `sourceId` 分组、**逐来源串行**（块表懒生成，避免同时解析几十份 PDF）→ 取 `cleaned_text` → `ensureSourceBlocks(sourceId, pageTextsForSource)` → 每段 `findVerbatimRange(evidence)` 优先、`(excerpt)` 兜底 → `resolveAnchor` → `replaceItemAnchors`；
+- **找不到就留空**（不写锚点行），界面按 Q4 如实说"未记录来源位置"；
+- `attachAnchorsQuietly`：吞掉一切异常，只写 `logMain('anchor', …, 'WARN')`；
+- **依赖隔离**：`../workspace/sync`（Electron）与 `../parse/pdf-pages`（pdfjs）走**动态 import**，因此本模块被 `compilation-service` 静态引入也不影响内联单测（实测单测可跑）；
+- `pageTextsForSource` **只对 PDF** 取逐页文字，且用 `getPdfCmapsDir()`（新增 getter，见 `file-parser.ts`）——中文 CID 字体 PDF 没有 cmaps 提不出文字。
+
+**⚠ 与任务简报不符的一处事实（我核对真实库后发现并更正）**：简报称"迁移已到 044、`source_blocks`/`compilation_item_anchors` 已存在但为空"。**实测真实库停在 42**（`schema_migrations` 最大 42，两张表都不存在；`settings.workspace_dir` 才是键名，简报里那个键名不存在）——因为 043/044 提交后**软件还没启动过**。本次界面自检启动应用时，迁移已按设计在真实库上跑到 **44**。
+
+**验证**：
+- typecheck 零错误；vitest **337/338 通过**（新增 3 项 `source-anchors` 单测；唯一失败仍是既有 watcher chokidar 环境项）；生产构建成功。
+- **Migration 42 → 44 真实库副本演练**：`source_blocks`/`compilation_item_anchors` 各 0 行、`integrity_check=ok`、外键违规 0、**其它表行数零变化**（`schema_migrations` 自身多 2 行除外）、重复执行幂等。
+- **真实年鉴端到端（同一副本，走生产同一条链路 `attachAnchors → pageTextsForSource → resolveSourceFilePath → pdfjs+cmaps`）**：《长乐年鉴2023（完整版）》614,116 字 → 块表 **1603 块全部有页码**；某真实汇编中该来源的 **24 段全部定位成功（0 段留空）**，含「2022 年，长乐区普通高中招生录取 4123 人。」的一段 = **第 216 页**（与 9.5 的独立实测一致）。
+- 另一份真实汇编（119 段）整体跑一遍：**118/119 段有锚点**（唯一没有的那段是模型改写、原文里找不到逐字段）。
+- **页码独立核对**：对《长乐年鉴2021》的 16 个已定位段，直接用 pdfjs 逐页文字（**不经过块表**）检查，**16/16 段的引文确实出现在所报页里**。
+
+### 9.8 S4 实施记录（2026-10-03，完成）
+
+**数据通路（不加 IPC）**：`getItemsByCompilation` 里 JOIN `listAnchorsForItems`，把 `anchors`（`sourceId` / `blockIndex` / `page` / `charStart` / `confidence`）随段落一起给渲染层（`CompilationItem.anchors`，[shared/types.ts](src/shared/types.ts)）；`listItemAnchorsWithPage`/`listAnchorsForItems` 的 SELECT 增加 `b.char_start`。
+
+**界面**：
+- 圆标（含并列来源圆标）点击时**按被点的那条来源挑锚点**（`anchorForItem`，Q5），把 `{kind:'page'|'paragraph'|'unknown'}` + 段号说明 + 快照高亮引文交给右栏；
+- 定位条只报三件事（[source-locate.ts](src/renderer/src/lib/source-locate.ts) 的纯函数 `locateBarState` 判定，界面只套文案）：**「已定位到第 P 页」**（PDF，含扫描件）/ **「已定位到第 N 段」**（Word/WPS 等无页来源）/ **「该卡片未记录来源位置（重新生成汇编可获得页级定位）」**（老汇编，Q4）；网页来源仍不显示定位条（原网页实时加载，库里的段落位置对它没意义）；
+- **PDF 定位改为按页跳转**：`PdfViewer` 新增 `targetPage`，越界夹取；**删掉**文内检索、命中高亮与进度回报（`PdfLocateState`/`onLocate`）；
+- **删除句子级高亮与「第 i/n 处、上一处/下一处」**：[pdf-hit.ts](src/renderer/src/lib/pdf-hit.ts) 与 [locate.ts](src/renderer/src/lib/locate.ts) 整个删除（连内联单测）、`.source-viewer__hit*` / `.pdf-viewer__pdf-hit` / `.pdf-viewer__pdf-layer` / `.source-viewer__locate-host` 样式与 9 条旧 i18n 文案一并清理；`IncrementalContent` 去掉"定位优先"的 `needles`/`onReveal`；
+- **保留**：表头「用系统默认程序打开」（Q2）、网页来源「查看本地快照」（其引文高亮仍在，改由段落证据/说法原文喂入）。
+
+**两处实现中发现并当场修正的问题（都属"给错位置"这一类，必须记下）**：
+1. **无页来源的"第 N 段"原本会报错段**：块表对 Word/WPS 也是"每 ~500 字一块"，同一块里的第 2、3 段都会被报成"第 1 段"（实测演示资料 5 段被压成 1 块）。现改为：**没有页概念的来源按段落切块**（新增 `splitByParagraphs`：块 = [本段起点, 下段起点)，超长段落再按句读细分），于是"块起点是第几段"**就等于**"这一块是第几段"（实测演示汇编 4 个已定位段 = 第 1/2/3/4 段，准确）。PDF 仍走"~500 字块 + 按页切开"（页级精度由"块不跨页"保证，不受影响）。
+2. **`confidence` 不再当"位置存疑"显示**：确定性锚定下 `exact`/`weak` 只是"用证据引文定的位 / 用段落正文定的位"，两者都是**逐字命中**，可靠性没有差别（旧的"模型回报块号 + 引文交叉校验"路线已废弃）。若沿用旧口径，演示汇编会满屏"位置存疑"——**误报**。故 `confidence` 继续落库（记录用的是哪种文字），界面不再警示；连带删掉已成死代码的 `evidenceHitsBlock`。
+   **顺带修掉一个既有 off-by-one**：定位条右侧的「本汇编第 N 段」原先直接用 0 起的 `position`，第 1 段显示成"第 0 段"、第 10 段显示成"第 9 段"；现 `position + 1`。
+3. **PDF 没算出页码时不拿"第 N 段"糊弄**：有页的来源若页表对不上（`alignPageTexts` 返回 null），定位条报「未能确定页码（该 PDF 的逐页文字与正文对不上…）」，而不是把 PDF 的行当成"段"。
+
+**验证**：typecheck 零错误；vitest **335/336 通过**（唯一失败仍是既有 watcher chokidar 环境项）；生产构建成功（CSS 130.22 kB / JS 4,216.55 kB；比改造前更小，因为删掉了高亮相关代码与样式）。测试数变化：新增 `source-anchors` 3 + `source-locate` 6 + page-map 3 + source-blocks 1，删除 `locate.ts` 6 + `pdf-hit.ts` 5 + `evidenceHitsBlock` 1 → 净 +1。
+**真机自检（CDP：DOM + 截图，`--remote-debugging-port=9222`）**：
+- 老汇编（119 段，真实数据、无锚点）+ PDF 来源 → 定位条「该卡片未记录来源位置（重新生成汇编可获得页级定位）｜本汇编第 10 段」，PDF **停在第 1 页不跳**、无任何高亮层（验收 4：绝不跳错页）；
+- 临时写入锚点后同一段 → 「已定位到第 275 页」且 PDF 工具栏显示 **第 275 / 338 页**（`targetPage` 生效）；
+- 无页来源（演示资料）→ 「已定位到第 2 段」「已定位到第 4 段」；并列来源圆标（该来源没有锚点）→ 如实「未记录来源位置」；
+- 网页来源 → 不显示定位条；表头「用系统默认程序打开」「查看本地快照」都在。
+- **演练痕迹已清理**：临时写入的锚点/块表行全部删除（两表恢复为 0 行，`integrity_check=ok`、外键违规 0、迁移版本仍是 44），临时用例与 CDP 脚本、截图均已删除。
+
+**风险与遗留（须知）**：
+- 现有 4 份真实汇编（含演示汇编）**仍无锚点**，必须**重新生成汇编**才有页级定位（Q4 已裁定，界面文案也这么写）；并列来源圆标**没有自己的锚点**（合并时被合并段只保留了文字，没保留它自己的区间），点它一律如实说"未记录来源位置"。
+- `attachAnchorsQuietly` 是 fire-and-forget：生成完成后它在后台懒生成块表（首次每份年鉴约 2–4s），**生成汇总里看不到它的成败**，只有 `logMain('anchor', …)` 诊断日志。
 
 ## Last Phase（收尾阶段）: Acceptance & Packaging（待进行）
 > **说明**：本阶段是**整个项目的收尾阶段**，在所有功能阶段（Phase 1–6.x）全部完成后才执行。此处保留「Phase 5」的旧编号仅为历史追溯，不代表其应在 Phase 6 之前完成；序号与执行顺序无关。

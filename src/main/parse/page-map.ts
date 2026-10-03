@@ -77,6 +77,42 @@ export function splitIntoBlocks(text: string, maxChars = 500): BlockRange[] {
 }
 
 /**
+ * 按**段落**切块（Phase 9 / S4）：用于**没有页概念**的来源（Word/WPS/网页/图片）。
+ *
+ * 为什么不能沿用 `splitIntoBlocks` 的"每 ~500 字一块"：那样"这一块"会横跨好几段，
+ * 而 Q3 裁定 Word/WPS 要"定位到段/标题"——若块首落在第 1 段、卡片其实取自同一块里的第 3 段，
+ * 界面报"第 1 段"就是**给错位置**（正是 Phase 9 要消灭的东西）。
+ * 这里让块边界与段落边界一致：块 = [本段起点, 下段起点)，段间换行归前一段（与页区间同一体例），
+ * 于是"块起点是第几段"就等于"这一块是第几段"。超长段落再按 `splitIntoBlocks` 细分（句读吸附）。
+ */
+export function splitByParagraphs(text: string, maxChars = 500): BlockRange[] {
+  const out: BlockRange[] = []
+  const total = text.length
+  if (total === 0) return out
+  const starts: number[] = [0]
+  const re = /\n+/g
+  let m = re.exec(text)
+  while (m) {
+    const at = m.index + m[0].length
+    if (at < total) starts.push(at) // 末尾换行不算新段
+    m = re.exec(text)
+  }
+  for (let i = 0; i < starts.length; i++) {
+    const from = starts[i]
+    const to = i + 1 < starts.length ? starts[i + 1] : total
+    if (to - from <= maxChars) {
+      out.push({ blockIndex: out.length, start: from, end: to, page: null })
+      continue
+    }
+    // 超长段落：按句读细分成首尾相接的子块（都落在同一段里）
+    for (const b of splitIntoBlocks(text.slice(from, to), maxChars)) {
+      out.push({ blockIndex: out.length, start: from + b.start, end: from + b.end, page: null })
+    }
+  }
+  return out
+}
+
+/**
  * 给块标页：把与页区间相交的块**切开**，使每块只属于一页。
  * `pages` 需按 start 升序且互不重叠；块与页都不覆盖的文字（如页间分隔符）会落到"前一页"，
  * 保证不会凭空丢字、也不会把分隔符算成新块。
@@ -187,6 +223,38 @@ if (import.meta.vitest) {
 
     it('空文本返回空数组', () => {
       expect(splitIntoBlocks('', 500)).toEqual([])
+    })
+  })
+
+  describe('page-map: splitByParagraphs', () => {
+    it('块边界与段落边界一致：块起点就是该段起点', () => {
+      const text = '第一段。\n\n第二段。\n第三段。'
+      const blocks = splitByParagraphs(text)
+      expect(blocks.map((b) => b.start)).toEqual([0, text.indexOf('第二段'), text.indexOf('第三段')])
+      // 首尾相接、覆盖全文（与 splitIntoBlocks 同一不变量）
+      expect(blocks[0].start).toBe(0)
+      expect(blocks[blocks.length - 1].end).toBe(text.length)
+      for (let i = 1; i < blocks.length; i++) expect(blocks[i].start).toBe(blocks[i - 1].end)
+      expect(blocks.every((b) => b.page === null)).toBe(true)
+    })
+
+    it('超长段落按句读细分成首尾相接的子块', () => {
+      const text = '甲'.repeat(480) + '第一句结束。' + '乙'.repeat(400) + '\n短段。'
+      const blocks = splitByParagraphs(text, 500)
+      expect(blocks.length).toBeGreaterThan(2)
+      expect(blocks[0].start).toBe(0)
+      expect(blocks[blocks.length - 1].end).toBe(text.length)
+      for (let i = 1; i < blocks.length; i++) expect(blocks[i].start).toBe(blocks[i - 1].end)
+      // 细分点仍吸附在句末标点之后
+      expect(text.slice(blocks[0].end - 1, blocks[0].end)).toBe('。')
+    })
+
+    it('空文本 / 只有换行 / 末尾换行', () => {
+      expect(splitByParagraphs('')).toEqual([])
+      expect(splitByParagraphs('\n\n\n').length).toBe(1)
+      const blocks = splitByParagraphs('甲\n')
+      expect(blocks.length).toBe(1)
+      expect(blocks[0].end).toBe(2)
     })
   })
 

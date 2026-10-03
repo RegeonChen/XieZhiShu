@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3'
 import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
-import { splitIntoBlocks, assignPages, alignPageTexts, type BlockRange } from '../parse/page-map'
+import { splitIntoBlocks, splitByParagraphs, assignPages, alignPageTexts, type BlockRange } from '../parse/page-map'
 
 /**
  * Phase 9 / S2：来源「块表」——把来源正文切块并记下每块属于第几页（Migration 043）。
@@ -111,6 +111,10 @@ export async function ensureSourceBlocks(
       if (blocks.some((b) => b.page == null)) return { ok: false, reason: '块表生成异常：有块没有落到任何页' }
     }
     // ranges === null：逐页文字与正文对不上 → **不写页码**（blocks 保持 page=null），如实降级
+  } else {
+    // 没有页概念（Word/WPS/网页/图片）：**按段落切块**，这样"块起点是第几段"就等于"这一块是第几段"，
+    // 界面报的「第 N 段」才是准的（Q3；用 ~500 字块会让同一块里的第 2、3 段都被报成第 1 段）
+    blocks = splitByParagraphs(text, 500)
   }
 
   replaceSourceBlocks(db, sourceId, blocks)
@@ -163,6 +167,16 @@ if (import.meta.vitest) {
       const res = await ensureSourceBlocks('s3', async () => null, db)
       expect(res.ok).toBe(true)
       if (res.ok) expect(res.blocks.every((b) => b.page == null)).toBe(true)
+    })
+
+    it('无页概念的来源按**段落**切块（"第 N 段"才是准的，Q3）', async () => {
+      const text = '甲段内容。\n乙段内容。\n丙段内容。'
+      db.prepare("INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('s4','file','Word2',?,'ready')").run(text)
+      const res = await ensureSourceBlocks('s4', async () => null, db)
+      expect(res.ok).toBe(true)
+      const rows = listSourceBlocks('s4', db)
+      expect(rows.map((r) => r.charStart)).toEqual([0, text.indexOf('乙段'), text.indexOf('丙段')])
+      expect(rows.every((r) => r.page == null)).toBe(true)
     })
 
     it('块表覆盖全文且首尾相接（同一来源内）', async () => {
