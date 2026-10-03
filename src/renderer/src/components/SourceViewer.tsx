@@ -323,8 +323,10 @@ function SourceViewer({
 
   const hitCount = locateRects.length > 0 ? Math.max(...locateRects.map((r) => r.hitIndex)) + 1 : 0
 
+  // 网页来源不显示定位条：页面是原网站实时加载的，句子在独立的 WebContentsView 里、不在本 DOM 中，
+  // 显示"未找到/暂不做文内定位"只会让人以为功能坏了（2026-10-03 用户要求删去）
   const locateBar =
-    needles.length > 0 ? (
+    needles.length > 0 && !isWebSource ? (
       <div className="source-viewer__locate">
         {isPdf ? (
           /* PDF：文字在 PDF 内部，由 PdfViewer 搜索并回报进展（S3） */
@@ -349,11 +351,7 @@ function SourceViewer({
           )
         ) : locateState === 'unsupported' ? (
           <span className="source-viewer__locate-text">
-            {isWebSource
-              ? zhCN.sourceViewer.locateWebPending
-              : isPdf
-                ? zhCN.sourceViewer.locatePdfNoText
-                : zhCN.sourceViewer.locateNoText}
+            {isPdf ? zhCN.sourceViewer.locatePdfNoText : zhCN.sourceViewer.locateNoText}
           </span>
         ) : locateState === 'not-found' ? (
           <span className="source-viewer__locate-text source-viewer__locate-text--miss">
