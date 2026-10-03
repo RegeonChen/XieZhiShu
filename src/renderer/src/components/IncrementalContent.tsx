@@ -23,18 +23,21 @@ const LOAD_MARGIN = '800px 0px'
 
 function useBatchReveal(
   total: number,
-  batch: number
+  batch: number,
+  /** 必须**至少**渲染到第几块（"高亮块优先渲染"：否则高亮落在还没进 DOM 的文本上就看不见） */
+  atLeast = 0
 ): {
   shown: number
   sentinelRef: React.MutableRefObject<HTMLDivElement | null>
   revealAll: () => void
 } {
-  const [shown, setShown] = useState(() => Math.min(total, batch))
+  const floor = Math.max(Math.min(total, batch), Math.min(total, atLeast))
+  const [shown, setShown] = useState(() => floor)
   const sentinelRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
-    setShown(Math.min(total, batch))
-  }, [total, batch])
+    setShown((n) => Math.max(n, floor))
+  }, [floor])
 
   useEffect(() => {
     const el = sentinelRef.current
@@ -111,14 +114,67 @@ export function IncrementalHtml({
   )
 }
 
-/** 纯文本正文：按行分批追加 */
-export function IncrementalText({ text, className }: { text: string; className?: string }): React.JSX.Element {
+/** 纯文本正文：按行分批追加；可对某段字符区间做一次性高亮（1.6 秒后自动消失） */
+export function IncrementalText({
+  text,
+  className,
+  flash
+}: {
+  text: string
+  className?: string
+  /**
+   * 高亮区间（2026-10-03 用户裁定新增）：**来源正文**里的字符区间，必定包含目标。
+   * 纯文本是我们自己渲染的，所以这里能精确到字符；PDF 走画布覆盖层（见 PdfViewer）。
+   */
+  flash?: { start: number; end: number; nonce: number } | null
+}): React.JSX.Element {
   const chunks = useMemo(() => splitTextIntoChunks(text, TEXT_BATCH), [text])
-  const { shown, sentinelRef, revealAll } = useBatchReveal(chunks.length, 4)
+  /** 高亮所在的分块（分批渲染时它必须先渲染出来，否则高亮"看不见"） */
+  const flashChunk = useMemo(() => {
+    if (!flash) return -1
+    let offset = 0
+    for (let i = 0; i < chunks.length; i++) {
+      const next = offset + chunks[i].length
+      if (flash.start < next) return i
+      offset = next
+    }
+    return chunks.length - 1
+  }, [chunks, flash])
+  const { shown, sentinelRef, revealAll } = useBatchReveal(chunks.length, 4, flashChunk >= 0 ? flashChunk + 1 : 0)
+  const flashRef = useRef<HTMLSpanElement | null>(null)
+
+  useEffect(() => {
+    if (!flash) return
+    const el = flashRef.current
+    if (el) el.scrollIntoView({ block: 'center' })
+  }, [flash])
+
+  const head = chunks.slice(0, shown).join('')
+  // 只有高亮起点落在已渲染范围内才切分（否则整块照旧渲染，等高亮出现时再补）
+  const marked =
+    flash && flash.start < head.length
+      ? {
+          before: head.slice(0, flash.start),
+          mid: head.slice(flash.start, Math.min(flash.end, head.length)),
+          after: head.slice(Math.min(flash.end, head.length))
+        }
+      : null
 
   return (
     <>
-      <pre className={className}>{chunks.slice(0, shown).join('')}</pre>
+      <pre className={className}>
+        {marked ? (
+          <>
+            {marked.before}
+            <span className="incremental__flash" key={flash!.nonce} ref={flashRef}>
+              {marked.mid}
+            </span>
+            {marked.after}
+          </>
+        ) : (
+          head
+        )}
+      </pre>
       <div ref={sentinelRef} className="incremental__sentinel" aria-hidden="true" />
       <LoadMoreBar remaining={chunks.length - shown} onRevealAll={revealAll} />
     </>

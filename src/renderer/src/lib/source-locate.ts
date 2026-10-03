@@ -29,9 +29,116 @@ export interface ItemAnchorView {
 
 /** 定位锚：查看器据此显示定位条（`label` 是右侧的说明，如「本汇编第 48 段」） */
 export type SourceLocateAnchor =
-  | { kind: 'page'; page: number; confidence: 'exact' | 'weak'; label?: string }
+  | { kind: 'page'; page: number; blockIndex: number; confidence: 'exact' | 'weak'; label?: string }
   | { kind: 'paragraph'; charStart: number; blockIndex: number; confidence: 'exact' | 'weak'; label?: string }
   | { kind: 'unknown'; label?: string }
+
+/* ------------------------------ 高亮（2026-10-03 用户裁定新增） ------------------------------ */
+
+/** 来源块表的一行（由只读 IPC `sources:blocks` 提供） */
+export interface SourceBlockView {
+  blockIndex: number
+  charStart: number
+  charEnd: number
+  page: number | null
+}
+
+/**
+ * 高亮区间（纯数据，查看器自己决定怎么画）：
+ * - `docStart/docEnd`：**来源正文**里的字符区间（纯文本查看器用）；
+ * - `page`/`localStart`/`localEnd`：该区间在目标页内的偏移（PDF 查看器用，块不跨页）；
+ * - `pageStart/pageEnd`：该页在正文里的字符区间（PDF 端做夹取时用得上）。
+ */
+export interface FlashRange {
+  docStart: number
+  docEnd: number
+  page: number | null
+  localStart: number
+  localEnd: number
+  /** 该高亮是"用证据引文收窄"得来的（更准）还是退化为"整块" */
+  narrowed: boolean
+}
+
+/** 归一化（去空白）后做子串查找，返回**原文**里的区间；找不到返回 null */
+export function findVerbatimRange(text: string, needle: string): { start: number; end: number } | null {
+  const n = (needle ?? '').trim()
+  if (!n) return null
+  const compact = (s: string): string => s.replace(/\s+/g, '')
+  const target = compact(n)
+  if (target.length < 2) return null
+  // 建立"紧凑下标 → 原文下标"的映射
+  const map: number[] = []
+  let built = ''
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (/\s/.test(ch)) continue
+    built += ch
+    map.push(i)
+  }
+  const at = built.indexOf(target)
+  if (at < 0) return null
+  const start = map[at]
+  const last = map[at + target.length - 1]
+  return { start, end: last + 1 }
+}
+
+/**
+ * 把"锚点 + 块表 + 证据引文"换算成**保证包含目标**的高亮区间（纯函数）。
+ *
+ * 保证来自锚点的定义：`attachAnchors` 是把**证据引文（或卡片正文）逐字命中**到某个块上才写的锚点，
+ * 所以"锚点那一块的区间"必然包含目标。这里再用证据引文把区间**收窄**（通常只有一两句话、跨几行），
+ * 收窄结果若不与锚点块相交（理论上不该发生）就退回整块 —— 退一步也仍然"目标一定在内"。
+ */
+export function flashRangeFor(
+  anchor: { kind: string; blockIndex?: number; page?: number | null },
+  blocks: SourceBlockView[],
+  evidence?: string,
+  sourceText?: string
+): FlashRange | null {
+  if (typeof anchor.blockIndex !== 'number') return null
+  const block = blocks.find((b) => b.blockIndex === anchor.blockIndex)
+  if (!block) return null
+  const blockStart = Math.min(block.charStart, block.charEnd)
+  const blockEnd = Math.max(block.charStart, block.charEnd)
+
+  // 该页在正文里的字符区间（块不跨页，故取该页所有块的并集）
+  const page = block.page ?? (typeof anchor.page === 'number' ? anchor.page : null)
+  let pageStart = blockStart
+  let pageEnd = blockEnd
+  if (page != null) {
+    const same = blocks.filter((b) => b.page === page)
+    if (same.length > 0) {
+      pageStart = Math.min(...same.map((b) => Math.min(b.charStart, b.charEnd)))
+      pageEnd = Math.max(...same.map((b) => Math.max(b.charStart, b.charEnd)))
+    }
+  }
+
+  let docStart = blockStart
+  let docEnd = blockEnd
+  let narrowed = false
+  if (evidence && sourceText) {
+    const hit = findVerbatimRange(sourceText, evidence)
+    if (hit && hit.start < blockEnd && hit.end > blockStart) {
+      // 收窄，但**不能越出锚点块**（否则可能把目标切掉）
+      docStart = Math.max(blockStart, hit.start)
+      docEnd = Math.min(blockEnd, hit.end)
+      narrowed = true
+    }
+  }
+  if (page != null) {
+    docStart = Math.max(pageStart, docStart)
+    docEnd = Math.min(pageEnd, docEnd)
+  }
+  if (docEnd <= docStart) return null
+  return {
+    docStart,
+    docEnd,
+    page,
+    localStart: page != null ? docStart - pageStart : docStart,
+    localEnd: page != null ? docEnd - pageStart : docEnd,
+    narrowed
+  }
+}
 
 /** 取某一段在**指定来源**上的锚点（并列来源各开各的，所以必须按 sourceId 挑，不能只看第一行） */
 export function anchorForItem(item: { anchors?: ItemAnchorView[] }, sourceId: string): ItemAnchorView | null {
@@ -51,7 +158,7 @@ export function locateAnchorForItem(
 ): SourceLocateAnchor {
   const anchor = anchorForItem(item, sourceId)
   if (!anchor) return { kind: 'unknown', label }
-  if (anchor.page != null) return { kind: 'page', page: anchor.page, confidence: anchor.confidence, label }
+  if (anchor.page != null) return { kind: 'page', page: anchor.page, blockIndex: anchor.blockIndex, confidence: anchor.confidence, label }
   if (anchor.charStart != null) {
     return {
       kind: 'paragraph',
@@ -124,7 +231,7 @@ if (import.meta.vitest) {
   describe('source locate anchors (Phase 9 / S4)', () => {
     it('页码优先：有页就报页（PDF / 扫描件）', () => {
       const a = locateAnchorForItem({ anchors: [paged] }, 's1', '本汇编第 48 段')
-      expect(a).toEqual({ kind: 'page', page: 216, confidence: 'exact', label: '本汇编第 48 段' })
+      expect(a).toEqual({ kind: 'page', page: 216, blockIndex: 7, confidence: 'exact', label: '本汇编第 48 段' })
     })
 
     it('无页码来源报"第 N 段"（Word/WPS，Q3）', () => {
@@ -161,10 +268,57 @@ if (import.meta.vitest) {
       expect(paragraphNumberAt('', 0)).toBeNull()
     })
 
+    it('高亮区间：证据引文把区间收窄，且**永不越出锚点块**（目标一定在内）', () => {
+      const text = '开头一段无关内容。' + '2022 年，全区有省一级达标高中 2 所，具体名单见下文。' + '后面还有很多别的文字，用来撑开长度。'.repeat(20)
+      const evidence = '省一级达标高中 2 所'
+      const block0 = { blockIndex: 0, charStart: 0, charEnd: 300, page: 3 }
+      const block1 = { blockIndex: 1, charStart: 300, charEnd: 900, page: 3 }
+      const blocks = [block0, block1]
+      const hit = findVerbatimRange(text, evidence)!
+      expect(hit.start).toBeGreaterThan(0)
+      // 锚点在块 0 上 → 收窄到证据区间（在块 0 内）
+      const narrow = flashRangeFor({ kind: 'page', blockIndex: 0 }, blocks, evidence, text)!
+      expect(narrow.narrowed).toBe(true)
+      expect(narrow.docStart).toBe(hit.start)
+      expect(narrow.docEnd).toBe(hit.end)
+      expect(narrow.page).toBe(3)
+      expect(narrow.localStart).toBe(hit.start) // 该页起点 = 块 0 起点 = 0
+      // 锚点在块 1 上、而证据落在块 0 内 → 不能收窄（否则把目标切掉），退回整块 1
+      const fallback = flashRangeFor({ kind: 'page', blockIndex: 1 }, blocks, evidence, text)!
+      expect(fallback.narrowed).toBe(false)
+      expect(fallback.docStart).toBe(300)
+      expect(fallback.docEnd).toBe(900)
+      // 没有证据 → 整块；没有块表 → null（宁可不画，也不乱画）
+      expect(flashRangeFor({ kind: 'page', blockIndex: 0 }, blocks)!.docEnd).toBe(300)
+      expect(flashRangeFor({ kind: 'page', blockIndex: 9 }, blocks, evidence, text)).toBeNull()
+      expect(flashRangeFor({ kind: 'unknown' }, blocks, evidence, text)).toBeNull()
+    })
+
+    it('高亮区间按页夹取：块不跨页，页码不同则局内偏移从该页起点算起', () => {
+      const text = 'A'.repeat(500) + '目标句子在这里。' + 'B'.repeat(500)
+      const at = text.indexOf('目标句子')
+      const blocks = [
+        { blockIndex: 0, charStart: 0, charEnd: 500, page: 1 },
+        { blockIndex: 1, charStart: 500, charEnd: 1000, page: 2 }
+      ]
+      const r = flashRangeFor({ kind: 'page', blockIndex: 1 }, blocks, '目标句子在这里', text)!
+      expect(r.page).toBe(2)
+      expect(r.docStart).toBe(at)
+      expect(r.localStart).toBe(at - 500) // 页 2 的正文起点是 500
+      expect(r.localEnd).toBeLessThanOrEqual(500) // 不越出该页
+    })
+
+    it('归一化查找：允许排版空白差异，找不到返回 null', () => {
+      const text = '2022 年，全区有省一级达标高中 2 所。'
+      expect(findVerbatimRange(text, '省一级达标高中2所')).toEqual({ start: text.indexOf('省一级达标高中'), end: text.indexOf('省一级达标高中') + '省一级达标高中 2 所'.length })
+      expect(findVerbatimRange(text, '并不存在的内容')).toBeNull()
+      expect(findVerbatimRange(text, '')).toBeNull()
+    })
+
     it('定位条状态：页 / 段 / 未记录位置三分支', () => {
       const text = '第一段。\n第二段。'
       expect(locateBarState(null, text)).toBeNull()
-      expect(locateBarState({ kind: 'page', page: 216, confidence: 'exact' }, text)).toEqual({
+      expect(locateBarState({ kind: 'page', page: 216, blockIndex: 7, confidence: 'exact' }, text)).toEqual({
         kind: 'page',
         page: 216,
         label: undefined

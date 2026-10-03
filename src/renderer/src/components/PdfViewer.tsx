@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { getDocument } from 'pdfjs-dist'
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
 import { keepRange, parsePageInput, shouldRelease } from '../lib/pdf-pages'
+import { flashRectsForRange, type PdfTextItemLike } from '../lib/pdf-flash'
 // 在主线程加载 worker 模块：其末尾会执行 globalThis.pdfjsWorker = { WorkerMessageHandler }。
 // pdf.js 检测到该全局对象后，使用 LoopbackPort 在主线程运行 worker —— 无需真实 Worker 构造，
 // 也无需动态 import，dev(http) 与生产(file://) 环境下均稳定。
@@ -21,6 +22,8 @@ const KEEP_PAGES = 2
 const PRELOAD_MARGIN = '600px 0px'
 /** 同时渲染的页数上限（主线程 LoopbackPort 模式下，避免一口气排队几百页把界面堵住） */
 const MAX_CONCURRENT_RENDERS = 2
+/** 高亮框显示时长（用户裁定：显示一秒后自动消失，不影响阅览）——给一点余量便于看清 */
+const FLASH_MS = 1600
 
 // pdf.js cMaps 基址（中文/CID 字体 PDF 需要 cMapUrl+cMapPacked 才能正确渲染/显示文字）
 let pdfCmapsUrlPromise: Promise<string> | null = null
@@ -45,6 +48,11 @@ interface PdfViewerProps {
    * 因此扫描件（没有文字层）同样能定位到页。值变化时滚到该页。
    */
   targetPage?: number | null
+  /**
+   * 高亮框（2026-10-03 用户裁定新增）：页内字符区间 → 几条高亮横带，**显示约 1 秒后自动消失**。
+   * 区间来自生成期锚点（`source-locate.flashRangeFor`），因此一定包含目标；没有文字层时自然画不出来。
+   */
+  flash?: { page: number; start: number; end: number; nonce: number } | null
 }
 
 /**
@@ -61,7 +69,7 @@ interface PdfViewerProps {
  * 说明：pdf.js 仍以**主线程 LoopbackPort** 运行 worker（本项目在 dev/http 与生产 file:// 下都验证过的方式，
  * 见下方 import 注释）；切到真实 Worker 会改变构建与协议行为，留待单独评估。
  */
-export default function PdfViewer({ url, targetPage }: PdfViewerProps): React.JSX.Element {
+export default function PdfViewer({ url, targetPage, flash }: PdfViewerProps): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const loadingTaskRef = useRef<PDFDocumentLoadingTask | null>(null)
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null)
@@ -317,6 +325,68 @@ export default function PdfViewer({ url, targetPage }: PdfViewerProps): React.JS
     jumpToPage(page)
     requestPage(page)
   }, [doc, targetPage, jumpToPage, requestPage])
+
+  /**
+   * 高亮框（2026-10-03 用户裁定新增）：范围来自生成期锚点（页内字符区间），
+   * 这里取该页的文字项做**几何换算**（`lib/pdf-flash.ts`）→ 几条高亮横带，**1.6 秒后自动移除**。
+   *
+   * 为什么要画：S4 之后只跳页、页面上没有任何指示，"第 216 页"里找一句话并不好找；
+   * 高亮不必精确到句（可以覆盖好几行），但**一定包含目标**——因为区间就是锚点那一块（再用证据引文收窄）。
+   * 画不出来（扫描件没有文字层 / 文字项对不上）时静默放弃：只跳页，不假装高亮。
+   */
+  const flashSeqRef = useRef(0)
+  /** 只在"打开序号"变化时重跑（否则父组件每次重渲染都会重放动画、并留下旧图层） */
+  const flashRef = useRef(flash)
+  flashRef.current = flash
+  useEffect(() => {
+    const d = doc
+    const flush = flashRef.current
+    if (!d || !flush) return
+    const page = Math.min(d.numPages, Math.max(1, flush.page))
+    const el = pageElsRef.current[page - 1]
+    if (!el) return
+    const seq = ++flashSeqRef.current
+    let layer: HTMLDivElement | null = null
+    let timer: number | null = null
+    const removeLayer = (): void => {
+      if (layer && layer.parentElement) layer.parentElement.removeChild(layer)
+      layer = null
+    }
+    void (async () => {
+      try {
+        const pageProxy = await d.getPage(page)
+        const viewport = pageProxy.getViewport({ scale: RENDER_SCALE })
+        const content = await pageProxy.getTextContent()
+        if (seq !== flashSeqRef.current) return
+        const rects = flashRectsForRange(viewport, content.items as PdfTextItemLike[], flush.start, flush.end)
+        if (rects.length === 0) return
+        // 同一页上的旧图层先清掉（重复打开/重渲染都不能累积）
+        el.querySelectorAll('.pdf-viewer__flash-layer').forEach((n) => n.remove())
+        const box = document.createElement('div')
+        box.className = 'pdf-viewer__flash-layer'
+        for (const r of rects) {
+          const band = document.createElement('div')
+          band.className = 'pdf-viewer__flash'
+          band.style.left = r.left + '%'
+          band.style.top = r.top + '%'
+          band.style.width = r.width + '%'
+          band.style.height = r.height + '%'
+          if (r.angle) band.style.transform = 'rotate(' + r.angle + 'rad)'
+          box.appendChild(band)
+        }
+        el.appendChild(box)
+        layer = box
+        timer = window.setTimeout(removeLayer, FLASH_MS)
+      } catch {
+        // 取文字失败（扫描件/坏页）→ 不画高亮，页面照常显示
+      }
+    })()
+    return () => {
+      if (timer != null) window.clearTimeout(timer)
+      // 卸载/重跑时也要把图层带走，否则会一层层堆在页面上
+      removeLayer()
+    }
+  }, [doc, flash?.nonce])
 
   return (
     <div className="pdf-viewer">

@@ -1306,6 +1306,51 @@ body {
   margin: 0;
 }
 
+/* 一次性高亮（2026-10-03 用户裁定）：显示约 1.6 秒后自动消失，不打断阅览 */
+.incremental__flash {
+  border-radius: 3px;
+  background: rgba(250, 204, 21, 0.42);
+  box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.22);
+  animation: incremental-flash 1.6s ease-out forwards;
+}
+@keyframes incremental-flash {
+  0% {
+    background: rgba(250, 204, 21, 0.62);
+  }
+  60% {
+    background: rgba(250, 204, 21, 0.42);
+  }
+  100% {
+    background: transparent;
+    box-shadow: none;
+  }
+}
+
+/* PDF 页内高亮层（Phase 9 高亮补充）：覆盖在画布之上，用百分比定位（缩放/拖宽无需重算） */
+.pdf-viewer__flash-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.pdf-viewer__flash {
+  position: absolute;
+  border-radius: 3px;
+  background: rgba(250, 204, 21, 0.38);
+  box-shadow: 0 0 0 1px rgba(250, 204, 21, 0.55) inset;
+  animation: pdf-flash 1.6s ease-out forwards;
+}
+@keyframes pdf-flash {
+  0% {
+    opacity: 1;
+  }
+  55% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
 /* 大文档分批渲染（Phase 8 / S2）：滚动到末尾后继续加载的提示条 + 追加入口 */
 .incremental__sentinel {
   height: 1px;

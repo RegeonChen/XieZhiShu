@@ -1,9 +1,9 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import PdfViewer from './PdfViewer'
 import WebBrowserPane from './WebBrowserPane'
 import SourceSnapshotModal from './SourceSnapshotModal'
 import { IncrementalHtml, IncrementalText } from './IncrementalContent'
-import { locateBarState, type SourceLocateAnchor } from '../lib/source-locate'
+import { locateBarState, flashRangeFor, type SourceBlockView, type SourceLocateAnchor } from '../lib/source-locate'
 import { zhCN } from '../i18n/zh-CN'
 
 interface SourceDetail {
@@ -65,6 +65,20 @@ function SourceViewer({
   const [stickyTop, setStickyTop] = useState(0)
   /** Phase 9 / S1：「查看本地快照」弹窗（原在"来源小卡"里，随中间层删除迁到本查看器） */
   const [snapshotOpen, setSnapshotOpen] = useState(false)
+  /**
+   * 一次性高亮（2026-10-03 用户裁定新增）：由"锚点块号 + 块表 + 证据引文"算出，
+   * **一定包含目标**（区块收窄而来），显示约 1.6 秒后自动消失。
+   * 数据链路：只读 IPC `sources:blocks` 拿块表 → `flashRangeFor` 换算 → 交给 PdfViewer / IncrementalText。
+   */
+  const [blocks, setBlocks] = useState<SourceBlockView[] | null>(null)
+  /** 每次打开来源递增（配合 `locate` 变化的 useMemo 生成高亮 nonce） */
+  const openSeqRef = useRef(0)
+  /**
+   * 每次"打开来源"给一个新的 nonce（`locate` 是新对象）→ 高亮动画与"定位优先渲染"会重新触发；
+   * 同一份锚点因别的原因重渲染时不会重复闪。
+   * ⚠ 必须在下面那些**提前 return 之前**调用：否则 Hooks 调用顺序会变（React error #310）。
+   */
+  const flashNonce = useMemo(() => ++openSeqRef.current, [locate])
 
   /**
    * 用系统默认程序打开（用户裁定 Q2：**所有格式**都要同时具备"内部分栏查看"与"外部打开"）。
@@ -96,6 +110,28 @@ function SourceViewer({
   useEffect(() => {
     void load()
   }, [load])
+
+  /**
+   * 取块表（只读）：只有需要画高亮（有定位锚）时才拉；块表是懒生成的，没生成就返回空数组，
+   * 这时不画高亮（只保留定位条），绝不在用户点开来源时顺带触发重解析。
+   */
+  useEffect(() => {
+    setBlocks(null)
+    if (!locate || locate.kind === 'unknown') return
+    let cancelled = false
+    window.api
+      .getSourceBlocks(sourceId)
+      .then((res) => {
+        if (cancelled) return
+        setBlocks(res.ok && res.data ? res.data.blocks : [])
+      })
+      .catch(() => {
+        if (!cancelled) setBlocks([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [sourceId, locate])
 
   // 加载 LLM 摘要（整理资料库后生成）
   useEffect(() => {
@@ -218,6 +254,14 @@ function SourceViewer({
    */
   const t = zhCN.sourceViewer
   const barState = locateBarState(locate, source.cleanedText, isPdf)
+  /**
+   * 高亮区间（PDF 用页内偏移，纯文本用全文偏移）：由锚点块号 + 块表 + 证据引文算出，
+   * **一定包含目标**；算不出来（块表缺失/老汇编没有锚点）就不画，只保留定位条。
+   */
+  const flashRange =
+    locate && locate.kind !== 'unknown' && blocks
+      ? flashRangeFor(locate, blocks, snapshotHighlight, source.cleanedText)
+      : null
   const locateText =
     barState?.kind === 'page'
       ? t.locatePage.replace('{page}', String(barState.page))
@@ -363,15 +407,24 @@ function SourceViewer({
           // Phase 8 / S2：docx 的整篇 HTML 按顶层块分批进 DOM（大 Word 不再一次性建巨量节点）
           <IncrementalHtml html={htmlContent} className="source-viewer__docx" />
         ) : isPdf && fileUrl ? (
-          // Phase 9 / S4：定位改为**按页跳转**（页码来自生成期锚点 × 页表，不做任何文字检索）
-          <PdfViewer url={fileUrl} targetPage={locate?.kind === 'page' ? locate.page : null} />
+          // Phase 9 / S4：定位改为**按页跳转**（页码来自生成期锚点 × 页表，不做任何文字检索）；
+          // 2026-10-03 补：定位到页后给一个**几行范围的高亮框**，约 1.6 秒后自动消失。
+          <PdfViewer
+            url={fileUrl}
+            targetPage={locate?.kind === 'page' ? locate.page : null}
+            flash={flashRange && flashRange.page != null ? { page: flashRange.page, start: flashRange.localStart, end: flashRange.localEnd, nonce: flashNonce } : null}
+          />
         ) : isImage && fileUrl ? (
           <img className="source-viewer__image" src={fileUrl} alt={source.title} />
         ) : isNativeView ? (
           <div className="source-viewer__status">正在加载文件...</div>
         ) : (
-          // Phase 8 / S2：纯文本正文按行分批进 DOM
-          <IncrementalText text={source.cleanedText} className="source-viewer__content" />
+          // Phase 8 / S2：纯文本正文按行分批进 DOM；2026-10-03 补：命中区间做一次性高亮
+          <IncrementalText
+            text={source.cleanedText}
+            className="source-viewer__content"
+            flash={flashRange ? { start: flashRange.docStart, end: flashRange.docEnd, nonce: flashNonce } : null}
+          />
         )}
       </div>
     </div>
