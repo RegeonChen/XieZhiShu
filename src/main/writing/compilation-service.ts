@@ -13,6 +13,9 @@
  */
 import type { RetrievedChunk } from '../../shared/types'
 import { ErrorCodes } from '../../shared/types'
+import Database from 'better-sqlite3'
+import { setDb } from '../db/connection'
+import { runMigrations } from '../db/migrate'
 import { getTaskById, resolveScopeSourceIds, getAllSourceIds, renameTask } from '../db/tasks'
 import { getSourceIdsByTag } from '../db/tags'
 import { getSourcesByIds } from '../db/sources'
@@ -1089,9 +1092,9 @@ export async function generateCompilation(
     return interruptedResult(state)
   }
 
-  // 全部完成：清除断点，落库（段落 + 来源编号 + 矛盾 + v1 版本）
+  // 全部完成：清除断点，落库（段落 + 来源编号 + 矛盾 + v1 版本 + 来源锚点）
   resumeStore.delete(state.compilationId)
-  return finalizeCompilationInto(
+  return await finalizeCompilationInto(
     state.compilationId,
     { paragraphs, contradictions: mergeContradictionGroups(windowGroups, state.scanGroups) },
     refs,
@@ -1101,7 +1104,8 @@ export async function generateCompilation(
       ok: !state.extractIncomplete,
       message: state.extractIncomplete?.message,
       ...(state.extractStats ?? {})
-    }
+    },
+    onProgress
   )
 }
 
@@ -1212,7 +1216,7 @@ function persistDocument(
   compilationId: string,
   paragraphs: AssembledParagraph[],
   refs: SourceRefEntry[]
-): { itemIdByText: Map<string, string>; inserted: number } {
+): { itemIdByText: Map<string, string>; inserted: number; anchors: Promise<void> } {
   const titleBySourceId = new Map(refs.map((r) => [r.sourceId, r.title]))
   const sourceOrder: string[] = []
   for (const p of paragraphs) {
@@ -1249,12 +1253,16 @@ function persistDocument(
   for (const it of items) {
     if (!itemIdByText.has(it.excerpt)) itemIdByText.set(it.excerpt, it.id)
   }
-  // Phase 9 / S3 收尾：就地算来源锚点（块号 → 页码）。**唯一**能一次拿到全部刚写库段落的位置；
-  // 本函数是同步的，故 fire-and-forget —— 锚点失败绝不影响汇编生成（attachAnchorsQuietly 内吞异常）。
+  // Phase 9 / S3 收尾：就地算来源锚点（块号 → 页码）。**唯一**能一次拿到全部刚写库段落的位置。
+  //
+  // ⚠ 2026-10-03 用户实测反馈的缺陷（PLAN 9.15）：这里原来是纯 fire-and-forget，于是**生成完成时
+  // 前端立刻取到的汇编还没有锚点** → 刚生成完点小圆标一律"未记录来源位置"，切走再切回来（重新取数）
+  // 才正常。现在改为**把 promise 交给调用方**：正常完成路径（`finalizeCompilationInto`）会 await 它，
+  // 使"生成完成"这个信号发出时锚点已落库；中断/续跑的**部分落库**仍 fire-and-forget（那时还在生成中）。
   //
   // `upsertCompilationParagraphs` 返回的是按 `position`（= 入参下标）排序的段落，因此可与 `paragraphs`
   // 一一对应——这样并列来源的候选文字（`anchorCandidates`，只走内存）才能带到锚点阶段。
-  void attachAnchorsQuietly(
+  const anchors = attachAnchorsQuietly(
     items.length === paragraphs.length
       ? items.map((it, i) => ({
           id: it.id,
@@ -1265,7 +1273,7 @@ function persistDocument(
         }))
       : items.map((it) => ({ id: it.id, sourceId: it.sourceId, excerpt: it.excerpt, evidence: it.evidence }))
   )
-  return { itemIdByText, inserted: items.length }
+  return { itemIdByText, inserted: items.length, anchors }
 }
 
 /** 把「已完成阶段」的部分结果落库，供中断时展示并可续跑（已跑过整合提取就用提取后的段落） */
@@ -1750,7 +1758,7 @@ export function mapWindowGroupsThroughExtract(
 }
 
 /** 使用已创建的汇编写入最终段落 + 来源编号 + 矛盾 + v1 版本（供正常完成 / 续跑完成调用） */
-function finalizeCompilationInto(
+export async function finalizeCompilationInto(
   compilationId: string,
   output: { paragraphs: AssembledParagraph[]; contradictions: CompilationOutputGroup[] },
   refs: SourceRefEntry[],
@@ -1779,9 +1787,11 @@ function finalizeCompilationInto(
     crossSourceMerged?: number
     /** 由「包含关系」判定合并掉的段数（Phase 7.12 S1 新增规则） */
     containmentMerged?: number
-  }
-): GenerateCompilationResult {
-  const { itemIdByText } = persistDocument(compilationId, output.paragraphs, refs)
+  },
+  /** 生成进度回调：锚点阶段会推一条「正在记录来源位置…」（用户实测反馈的修复，见 9.15） */
+  onProgress?: (p: CompilationProgress) => void
+): Promise<GenerateCompilationResult> {
+  const { itemIdByText, anchors } = persistDocument(compilationId, output.paragraphs, refs)
 
   // 矛盾分组：把 variant 的 excerpt 精确匹配到刚写入的段落（映射阶段已把说法改写成段落文本）
   const groups: CompilationContradictionInput[] = []
@@ -1806,6 +1816,20 @@ function finalizeCompilationInto(
   snapshotCompilationVersion(compilationId, 'generate')
   // 整合提取诊断落库（便于事后复盘：通过校验/降级原因/降级粒度各占多少）
   setCompilationExtractScan(compilationId, extractScan ?? null)
+
+  /*
+   * 等锚点落库（PLAN 9.15，用户实测反馈的修复）：
+   * 生成完成的信号一旦发出，前端会立刻取一次汇编数据——若锚点还没写完，刚生成完点小圆标就是
+   * "未记录来源位置"，必须切走再切回来（重新取数）才正常。这里同步等它（实测：冷启动解块表 4.6s、
+   * 热路径 2.2s、整份汇编 1.9s），并推一条进度；超时保险丝只防"卡死"，超时也不再阻塞生成。
+   */
+  onProgress?.({ stage: '正在记录来源位置（点击来源圆标可直达页码）…', percent: 99, etaSeconds: 2 })
+  await Promise.race([
+    // 锚点只是"锦上添花"：任何异常都不能影响汇编生成（attachAnchorsQuietly 内已吞异常，这里再兜一层）
+    anchors.catch(() => undefined),
+    new Promise<void>((resolve) => setTimeout(resolve, ANCHOR_ATTACH_TIMEOUT_MS))
+  ])
+
   return {
     ok: true,
     compilationId,
@@ -1816,10 +1840,18 @@ function finalizeCompilationInto(
   }
 }
 
+/** 收尾等锚点的时间上限（保险丝；实测冷启动 4.6s / 热路径 2.2s） */
+const ANCHOR_ATTACH_TIMEOUT_MS = 120_000
+
 /** 无 Provider / AI 无产出时的本地降级（替换到已创建的汇编） */
-function finalizeCompilationLocalInto(compilationId: string, chunks: RetrievedChunk[]): GenerateCompilationResult {
+async function finalizeCompilationLocalInto(
+  compilationId: string,
+  chunks: RetrievedChunk[],
+  onProgress?: (p: CompilationProgress) => void
+): Promise<GenerateCompilationResult> {
   const paragraphs = localFallbackParagraphs(chunks)
-  persistLocalFallback(compilationId, paragraphs)
+  onProgress?.({ stage: '正在记录来源位置（点击来源圆标可直达页码）…', percent: 99, etaSeconds: 2 })
+  await persistLocalFallback(compilationId, paragraphs)
   return { ok: true, compilationId, candidateChunks: chunks.length, contradictions: 0 }
 }
 
@@ -1858,7 +1890,7 @@ function localFallbackParagraphs(chunks: RetrievedChunk[]): AssembledParagraph[]
  * 本地降级落库：刻意走**与 AI 管线相同的段落模型**（来源编号 + 结构化时间 + v1 版本），
  * 否则降级生成出的汇编没有年份分节、没有来源圆标、也没有版本基线，界面看起来像功能坏了。
  */
-function persistLocalFallback(compilationId: string, paragraphs: AssembledParagraph[]): void {
+function persistLocalFallback(compilationId: string, paragraphs: AssembledParagraph[]): Promise<void> {
   const sourceOrder: string[] = []
   for (const p of paragraphs) {
     for (const sid of [p.sourceId, ...(p.alsoSourceIds ?? [])]) {
@@ -1870,7 +1902,7 @@ function persistLocalFallback(compilationId: string, paragraphs: AssembledParagr
     sourceOrder.map((sourceId) => ({ sourceId, title: getSourcesByIds([sourceId])[0]?.title ?? sourceId }))
   )
   const ordinalBySourceId = new Map(sourceRefs.filter((s) => s.sourceId).map((s) => [s.sourceId as string, s.ordinal]))
-  upsertCompilationParagraphs(
+  const items = upsertCompilationParagraphs(
     compilationId,
     paragraphs.map((p) => ({
       sourceId: p.sourceId ?? '',
@@ -1889,6 +1921,18 @@ function persistLocalFallback(compilationId: string, paragraphs: AssembledParagr
     }))
   )
   snapshotCompilationVersion(compilationId, 'generate')
+  // 本地降级路径同样记锚点（PLAN 9.15：否则"生成完成即可点到页"在无大模型时也不成立）
+  return attachAnchorsQuietly(
+    items.length === paragraphs.length
+      ? items.map((it, i) => ({
+          id: it.id,
+          sourceId: it.sourceId,
+          excerpt: it.excerpt,
+          evidence: it.evidence,
+          candidates: paragraphs[i].anchorCandidates
+        }))
+      : items.map((it) => ({ id: it.id, sourceId: it.sourceId, excerpt: it.excerpt, evidence: it.evidence }))
+  )
 }
 
 /**
@@ -1947,7 +1991,7 @@ export async function continueCompilation(compilationId: string, onProgress?: (p
     return interruptedResult(state)
   }
   resumeStore.delete(compilationId)
-  return finalizeCompilationInto(
+  return await finalizeCompilationInto(
     state.compilationId,
     { paragraphs, contradictions: mergeContradictionGroups(windowGroups, state.scanGroups) },
     state.refs,
@@ -1957,14 +2001,15 @@ export async function continueCompilation(compilationId: string, onProgress?: (p
       ok: !state.extractIncomplete,
       message: state.extractIncomplete?.message,
       ...(state.extractStats ?? {})
-    }
+    },
+    onProgress
   )
 }
 
 /* ------------------------------ 单测 ------------------------------ */
 
 if (import.meta.vitest) {
-  const { describe, expect, it } = import.meta.vitest
+  const { describe, expect, it, beforeAll, afterAll } = import.meta.vitest
 
   describe('compilation prompts carry the full user requirement (2026-10-03 用户裁定)', () => {
     const REQUIREMENT =
@@ -1988,6 +2033,65 @@ if (import.meta.vitest) {
       expect(user).toContain(REQUIREMENT)
       expect(user).toContain('【用户的撰写要求（原文，必须逐条遵守）】')
       expect(user).toContain('范围之外的内容')
+    })
+  })
+
+  /*
+   * PLAN 9.15（2026-10-03 用户实测反馈）：**「生成完成」返回时锚点必须已经落库**。
+   * 缺陷原状：`persistDocument` 里是 `void attachAnchorsQuietly(...)`（纯 fire-and-forget），
+   * 于是刚生成完前端立刻取到的汇编还没有锚点 → 点小圆标一律"未记录来源位置"，
+   * 必须切走再切回来（重新取数）才正常。这条测试用内存库把"返回即查"钉住。
+   */
+  describe('anchors are persisted before generation completes (PLAN 9.15)', () => {
+    let db: Database.Database
+    beforeAll(() => {
+      db = new Database(':memory:')
+      setDb(db)
+      runMigrations(db)
+      db.prepare("INSERT INTO writing_tasks (id, title, scope_json) VALUES ('t1','任务','{\"all\":true}')").run()
+      db.prepare(
+        "INSERT INTO compilations (id, task_id, title, status, created_at, updated_at) VALUES ('c1','t1','汇编','drafting','2026-10-03','2026-10-03')"
+      ).run()
+      db.prepare(
+        "INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('s1','file','长乐年鉴2023','2022 年，长乐区普通高中招生录取 4123 人。','ready')"
+      ).run()
+      // 块表：整段正文属于第 216 页
+      db.prepare(
+        "INSERT INTO source_blocks (source_id, block_index, char_start, char_end, page, label, created_at) VALUES ('s1',0,0,40,216,NULL,'2026-10-03')"
+      ).run()
+    })
+    afterAll(() => db.close())
+
+    it('finalizeCompilationInto 返回时，锚点行已存在且能说出页码', async () => {
+      const paragraphs: AssembledParagraph[] = [
+        {
+          text: '2022 年，长乐区普通高中招生录取 4123 人。',
+          sourceId: 's1',
+          ordinal: 1,
+          evidence: '长乐区普通高中招生录取 4123 人',
+          timeLabel: '2022 年',
+          timeConfidence: 'exact',
+          origin: 'generate',
+          revision: 0,
+          kind: 'paragraph',
+          kept: true,
+          parentIndex: 0
+        }
+      ]
+      const refs: SourceRefEntry[] = [{ index: 1, sourceId: 's1', title: '长乐年鉴2023' }]
+      await finalizeCompilationInto('c1', { paragraphs, contradictions: [] }, refs, 0, { ok: true })
+
+      const rows = db
+        .prepare(
+          `SELECT a.block_index AS blockIndex, b.page AS page
+             FROM compilation_item_anchors a
+             JOIN compilation_items i ON i.id = a.item_id
+             LEFT JOIN source_blocks b ON b.source_id = a.source_id AND b.block_index = a.block_index
+            WHERE i.compilation_id = 'c1'`
+        )
+        .all() as { blockIndex: number; page: number | null }[]
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toEqual({ blockIndex: 0, page: 216 })
     })
   })
 }
