@@ -1460,11 +1460,10 @@ async function runExtractPhase(
       invalidEvidence: agg.invalidEvidence,
       evidenceLoose: agg.evidenceLoose,
       degradedFromEvidence: agg.degradedFromEvidence,
-      degradedPruned: agg.degradedPruned,
       droppedUnverifiable: agg.droppedUnverifiable,
+      droppedUnparseable: agg.droppedUnparseable,
       droppedCards: agg.droppedCards,
       omitted: agg.omitted,
-      passthrough: agg.passthrough,
       titleOnlyDropped: agg.titleOnlyDropped,
       timeUnsupported: agg.timeUnsupported,
       duplicatesDropped: assembled.duplicatesDropped,
@@ -1582,11 +1581,11 @@ async function runExtractPhase(
       agg.evidenceLoose += res.stats.evidenceLoose
       agg.emptyText += res.stats.emptyText
       agg.degradedFromEvidence += res.stats.degradedFromEvidence
-      agg.degradedPruned += res.stats.degradedPruned
       agg.droppedUnverifiable += res.stats.droppedUnverifiable
+      agg.droppedUnparseable += res.stats.droppedUnparseable
       agg.droppedCards += res.stats.droppedCards
       agg.omitted += res.stats.omitted
-      agg.passthrough += res.stats.passthrough
+      agg.droppedUnparseable += res.stats.droppedUnparseable
       agg.retainedChars += res.stats.retainedChars
       agg.retried += res.stats.retried
       agg.titleOnlyDropped += res.stats.titleOnlyDropped
@@ -1600,18 +1599,21 @@ async function runExtractPhase(
 
   const completed = done.size
   if (budgetHit) {
-    // 剩余批次按原文整段保留（不丢材料），并标记为未完成
+    // 超出时间预算：未处理的卡片**不再原样整段保留**（A1，2026-10-03 用户裁定）——
+    // 卡片原文会把与主题无关的内容（年鉴概况段、项目表、其它领域数据）直接搬进汇编，实测就是这样出问题的。
+    // 现在如实丢弃并由用户在汇总里看到，可重新生成或走对话里的"查漏补缺"。
+    let droppedByBudget = 0
     for (let k = 0; k < batches.length; k++) {
       if (done.has(k)) continue
-      for (const idx of batches[k]) {
-        const c = candidates[idx]
-        if (c) drafts.push({ parentIndex: c.index, text: c.excerpt, timeLabel: c.ts, degraded: true })
-      }
-      agg.passthrough += batches[k].length
+      droppedByBudget += batches[k].length
       done.add(k)
     }
-    finish('整合提取超出时间预算，已完成 ' + completed + '/' + batches.length + ' 批；其余卡片按原文整段保留。')
-    onProgress?.({ stage: '整合提取超出时间预算，未处理的卡片已按原文保留', percent: 87, etaSeconds: 0 })
+    agg.droppedUnverifiable += droppedByBudget
+    agg.droppedUnparseable += droppedByBudget
+    finish(
+      '整合提取超出时间预算，已完成 ' + completed + '/' + batches.length + ' 批；其余 ' + droppedByBudget + ' 张卡片已丢弃（不再原样搬运卡片原文）。'
+    )
+    onProgress?.({ stage: '整合提取超出时间预算，未处理的卡片已丢弃', percent: 87, etaSeconds: 0 })
     return 'done'
   }
   const result = finish()

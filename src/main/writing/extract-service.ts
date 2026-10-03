@@ -6,13 +6,19 @@
  * 旧管线为了保住文本整体性而禁止模型裁剪/组织，导致每段掺入大量与主题无关的内容；
  * 现在放宽限制，允许模型主动**裁剪 + 补全 + 整合**，产出可直接写进志稿的段落。
  *
- * 自由度换来的是幻觉风险，因此本阶段配本地校验（见 compilation-document）：
- * ① `evidence` 必须是某张卡片原文中**逐字连续**的一段（证明段落确实出自该来源）；
- * ② 正文里的**数字必须都能在该来源原文中找到**（整 token 比较，不允许编造/推算）；
- * ③ 每段**单一来源**（evidence 落在同一张来源的卡片内，禁止跨来源拼接）。
- * 任一条不过 → **降级只保留可核验的内容**（evidence 片段 → 按句修剪 → 丢弃；见
- * `degradeKeepingVerifiedContent`），**绝不退回整张卡片原文**（2026-10-03 用户裁定：
- * 兜底粒度不该由上游卡片粒度决定，否则"整页 = 一张卡"时会把整页原文灌进汇编），并计入诊断。
+ * 自由度换来的是幻觉风险，因此本阶段配本地校验（见 compilation-document 与 PLAN 9.13）：
+ * ① 正文非空；
+ * ② **逐句事实核验**：每个"带数字或《引用》"的句子都要能在来源里找到依据（数字支持亿/万折算、
+ *    中文数字、量级舍入容差；比对范围是**该来源完整正文**）。`evidence` 能逐字命中就带上，
+ *    命中不了**不再判失败**（`evidenceLoose`）——这一步的任务就是压缩重写，证据只是充分度之一；
+ * ③ 每段**单一来源**（禁止跨来源拼接）。
+ *
+ * 任一条不过 → **只保留逐字证据片段，没有就丢弃**（`degradeToEvidenceOnly`，2026-10-03 用户裁定 A1）：
+ * 实测教训是"可核验 ≠ 相关"——按句保留卡片原文会把年鉴的概况段/项目表/其它领域数据搬进汇编
+ * （一次生成里 69 段有 25 段是来源逐字原文、11 段含跑题词）。**绝不原样搬运卡片原文。**
+ *
+ * 模型输出异常时（2026-10-03 用户裁定 B）：换温度重试 → **对半递归重试** → 单卡仍失败才丢弃；
+ * 并把模型可能写出的引用形式（`c12` / `12` / `来源3`）映射回 `#N`，避免"整批被判解析失败"。
  *
  * 另外两条硬约束（写进提示词 + 由结构保证）：
  * - **不得合并互相矛盾的说法**：冲突必须保留为不同段落，交给随后的矛盾扫描（否则"自由整合"会把矛盾抹平）；
@@ -26,8 +32,6 @@ import {
   isTitleOnlyParagraph,
   isYearSupportedBySource,
   locateVerbatim,
-  sentenceFactsVerified,
-  splitSentences,
   validateExtractedParagraph,
   withFallbackYear,
   type ExtractedParagraphDraft,
@@ -97,18 +101,16 @@ export interface ExtractBatchStats {
   /** 2026-10-03：evidence 不是逐字命中但**事实逐句核验通过**而接受的段数（证据已从门槛降为充分度） */
   evidenceLoose: number
   emptyText: number
-  /** 降级时只保留 evidence 片段（粒度最细）的段数 */
+  /** 兜底时只保留 evidence 片段（粒度最细）的段数 */
   degradedFromEvidence: number
-  /** 降级时按句保留"可核验句子"的段数（2026-10-03 新增：取代原来的"退回整卡原文"） */
-  degradedPruned: number
-  /** 一句都留不下而**丢弃**的卡片数（2026-10-03：宁可如实丢弃，也不把整页原文灌进汇编） */
+  /** 因"没有可用的逐字证据"（含模型未作答、整批输出无法解析）而**丢弃**的卡片数 */
   droppedUnverifiable: number
+  /** 因"输出无法解析/模型未作答且无法再拆分重试"而丢弃的卡片数（B：对半重试之后的残余） */
+  droppedUnparseable: number
   /** 模型判定"该卡片与主题无关"而整体丢弃的卡片数 */
   droppedCards: number
   /** 模型始终未回答的卡片数（重问后仍未答） */
   omitted: number
-  /** 最终按原文保留的卡片数（漏答 / 解析失败整批降级） */
-  passthrough: number
   retainedChars: number
   retried: number
   /** 因"段落只是复述来源标题"而丢弃的段落数（2026-09-12：绝不能只看文章标题） */
@@ -129,11 +131,10 @@ export function emptyExtractStats(input = 0, inputChars = 0): ExtractBatchStats 
     evidenceLoose: 0,
     emptyText: 0,
     degradedFromEvidence: 0,
-    degradedPruned: 0,
     droppedUnverifiable: 0,
+    droppedUnparseable: 0,
     droppedCards: 0,
     omitted: 0,
-    passthrough: 0,
     retainedChars: 0,
     retried: 0,
     titleOnlyDropped: 0,
@@ -165,17 +166,16 @@ export interface ExtractScanStats {
   invalidEvidence: number
   /** 2026-10-03：证据未逐字命中、但事实逐句核验通过而接受 */
   evidenceLoose?: number
-  /** 降级粒度细分：只保留 evidence 片段 */
+  /** 兜底粒度细分：只保留 evidence 片段 */
   degradedFromEvidence?: number
-  /** 降级粒度细分：按句保留可核验句子（取代原来的"退回整卡原文"） */
-  degradedPruned?: number
-  /** 因"一句可核验的都没有"而丢弃的卡片数（如实告知，不再灌整页原文） */
+  /** 因"没有可用的逐字证据"而丢弃的卡片数（不再灌卡片原文） */
   droppedUnverifiable?: number
+  /** 因"输出无法解析/模型未作答且无法再拆分重试"而丢弃的卡片数 */
+  droppedUnparseable?: number
   /** 模型判定与主题无关而整卡丢弃 */
   droppedCards: number
-  /** 模型始终未回答、按原文保留的卡片数 */
+  /** 模型始终未回答的卡片数（重问后仍未答） */
   omitted: number
-  passthrough: number
   /** 因"段落只是复述来源标题、没有正文信息"而丢弃的段落数（2026-09-12：绝不能只看文章标题） */
   titleOnlyDropped?: number
   /** 因"年份在来源里查不到、也推不出"而降级为「时间待核」的段落数 */
@@ -248,6 +248,48 @@ export function parseExtractOutput(
     }
   }
   return paragraphs.length > 0 || dropped.length > 0 ? { paragraphs, dropped } : null
+}
+
+/**
+ * B2（2026-10-03 用户裁定）：**把模型写出的引用形式映射回 `#N`**。
+ * 卡片在提示词里同时给了 `[#3]` 与 `（引用号 c12）`，模型经常写成 `c12`、`12`、`#12`、`来源3`。
+ * 旧实现只认真实的 `#N`：一旦写成别的形式，整批就被判"解析失败"→ 全部卡片走兜底（实测一次丢了 30 张）。
+ * 这里做纯文本归一：命中卡片 `key`（c12）或数字编号即改写为其 `sourceRef`；对不上的原样保留（后续按幻觉忽略）。
+ */
+export function normalizeExtractRefs<P extends { sourceRef: string }, D extends { sourceRef: string }>(
+  parsed: { paragraphs: P[]; dropped: D[] },
+  cards: ExtractCandidate[]
+): void {
+  const byKey = new Map(cards.map((c) => [c.key.toLowerCase(), c.sourceRef]))
+  const byRefNumber = new Map(cards.map((c) => [c.sourceRef.replace(/^#/, ''), c.sourceRef]))
+  const fix = (raw: string): string => {
+    const s = (raw ?? '').trim().replace(/\s+/g, '')
+    if (!s) return raw
+    if (byKey.has(s.toLowerCase())) return byKey.get(s.toLowerCase())!
+    const bare = s.replace(/^[#＃]/, '').replace(/^(来源|卡片|引用号?)/, '')
+    if (byRefNumber.has(bare)) return byRefNumber.get(bare)!
+    if (byKey.has('c' + bare)) return byKey.get('c' + bare)!
+    return raw
+  }
+  for (const p of parsed.paragraphs) p.sourceRef = fix(p.sourceRef)
+  for (const d of parsed.dropped) d.sourceRef = fix(d.sourceRef)
+}
+/**
+ * B3：解析失败的**结构化诊断**（只记结构与编号，不记正文——遵守"日志不写资料正文"的约定）。
+ * 用来区分"输出被截断"与"引用号写错"这两类完全不同的故障。
+ */
+export function describeExtractOutput(
+  text: string,
+  cards: ExtractCandidate[]
+): { chars: number; hasJson: boolean; refsSeen: string[]; expected: string } {
+  const raw = String(text ?? '')
+  const refs = [...raw.matchAll(/["']?(?:sourceRef|source)["']?\s*:\s*["']([^"']{1,20})["']/g)].map((m) => m[1])
+  return {
+    chars: raw.length,
+    hasJson: raw.includes('{'),
+    refsSeen: [...new Set(refs)].slice(0, 12),
+    expected: cards.length > 0 ? cards[0].sourceRef + '…' + cards[cards.length - 1].sourceRef + '（' + cards.length + ' 张）' : '（空批）'
+  }
 }
 
 /**
@@ -337,13 +379,17 @@ export function logExtractBatchStats(batchNo: number, total: number, stats: Extr
       stats.invalidNumbers +
       '／证据 ' +
       stats.invalidEvidence +
-      '），整卡丢弃 ' +
+      '），保留证据片段 ' +
+      stats.degradedFromEvidence +
+      ' 段，整卡丢弃 ' +
       stats.droppedCards +
       '，漏答 ' +
       stats.omitted +
-      '，原样保留 ' +
-      stats.passthrough +
-      '，重试 ' +
+      '，因无依据丢弃 ' +
+      stats.droppedUnverifiable +
+      ' 张（其中输出无法解析 ' +
+      stats.droppedUnparseable +
+      ' 张），重试 ' +
       stats.retried
   )
 }
@@ -351,48 +397,27 @@ export function logExtractBatchStats(batchNo: number, total: number, stats: Extr
 // ---------------------------------------------------------------- 批次处理（核心，可测试）
 
 /**
- * 降级（2026-09-10 收窄粒度 → 2026-10-03 用户裁定再改）：
+ * 兜底（2026-09-10 收窄粒度 → 2026-10-03 用户裁定 A1）：
  *
- * **永不退回整张卡片原文**。原因（真实案例）：某网页正文没有换行结构（整页 3546 字只有 2 个换行），
- * 细读把它当**一张卡**；整合提取重写后因 `evidence` 给不出逐字片段而校验失败 → 旧逻辑"退回整卡"
- * → **整页原文**（3512 字，且没有 evidence、定位失效）进了汇编。兜底粒度取决于上游卡片粒度的设计，
- * 等于"越忠于原文的重写，惩罚越重"，必须去掉。
+ * **只保留"逐字证据片段"，没有就丢弃——绝不原样搬运卡片原文。**
  *
- * 新顺序（每一档都是**有界**的）：
- *  ① `evidence` 能在**证据真正所属的那张卡**里逐字定位 → 只保留该片段（修掉旧实现写死 `cards[0]`，
- *     同一来源多张卡时会去错卡片里找、进而退回错误原文的缺陷）；
- *  ② 否则**按句核验模型自己写的那段**（`modelText`）：逐句检查，只保留"句中的数字与《标题》
- *     都能在来源原文里找到"的句子——这样模型做好的整合/压缩被保住，只删掉无据的句子；
- *  ③ 没有模型文本时（解析失败 / 漏答）→ 按句核验**卡片原文**，同样只留可核验的句子；
- *  ④ 一句都留不下 → **丢弃该卡**（计入 `droppedUnverifiable`）。
- *  ②③ 的总长上限 `DEGRADED_MAX_CHARS`（1200 字），因此**不可能再把整页原文灌进汇编**。
+ * 为什么再改（真实数据）：某次生成有 **30 张卡（21%）** 因"整批输出无法解析 / 模型漏答"落入兜底，
+ * 而当时的按句保留**只检查"句子里的数字能在来源里找到"、完全不看主题**，于是年鉴的
+ * 「【概况】各类学校 217 所…」「项目表（含幼儿园/小学）」「【老区扶贫建设】…」被原样搬进汇编
+ * （实测 69 段里 25 段是来源逐字原文、其中 11 段含跑题词）。**可核验 ≠ 相关**，这条路径必须收死。
  *
- * 各档统一做另外两道硬校验（标题型丢弃 / 年份无据标待核）。
+ * 现在的行为：
+ *  ① `evidence` 能在**证据真正所属的那张卡**里逐字定位 → 只保留该片段（并写回 `evidence` 供来源定位）；
+ *  ② 定位不到（含模型没给 evidence、或整批解析失败/漏答而无模型输出）→ **丢弃该卡**
+ *     （计入 `droppedUnverifiable`），材料仍在库里，由"重新生成"或对话里的查漏补缺再取。
+ * 保留的片段仍要过另外两道硬校验（标题型丢弃 / 年份无据标待核）。
  */
-export const DEGRADED_MAX_CHARS = 1200
-
-/** 逐句保留可核验的句子，返回保留结果（受 `DEGRADED_MAX_CHARS` 约束） */
-function keepVerifiedSentences(text: string, sourceText: string): string[] {
-  const kept: string[] = []
-  let chars = 0
-  for (const s of splitSentences(text)) {
-    if (!sentenceFactsVerified(s, sourceText)) continue
-    if (chars + s.length > DEGRADED_MAX_CHARS && kept.length > 0) break
-    kept.push(s)
-    chars += s.length
-  }
-  return kept
-}
-
-function degradeKeepingVerifiedContent(
+function degradeToEvidenceOnly(
   cards: ExtractCandidate[],
   evidence: string | undefined,
-  modelText: string,
-  sourceText: string,
   stats: ExtractBatchStats
 ): ExtractedDraft | null {
   const ev = (evidence ?? '').trim()
-  // ① 证据片段：在**证据所属的卡片**里定位（不再固定第一张）
   if (ev) {
     const owner = cards.find((c) => locateVerbatim(c.excerpt, ev) !== null)
     if (owner) {
@@ -407,45 +432,12 @@ function degradeKeepingVerifiedContent(
       return null // 标题型内容 → degradedChecked 已计 titleOnlyDropped
     }
   }
-  // ② 优先按句修剪**模型自己写的那段**（保住它做好的整合/压缩，只删无据句子）
-  const base = cards.find((c) => c.excerpt) ?? cards[0]
-  const modelKept = keepVerifiedSentences(modelText, sourceText)
-  if (base && modelKept.length > 0) {
-    const d = degradedChecked(base, modelKept.join(''), stats)
-    if (d) {
-      stats.degradedPruned += 1
-      return { ...d, degradedPrunedFromModel: true, degradedKeptSentences: modelKept.length, evidence: pickEvidence(modelKept) }
-    }
-    return null
-  }
-  // ③ 没有可用的模型文本（解析失败 / 漏答）→ 按句核验卡片原文（有界保留）
-  if (base) {
-    const cardKept = keepVerifiedSentences(base.excerpt, sourceText || base.excerpt)
-    if (cardKept.length > 0) {
-      const d = degradedChecked(base, cardKept.join(''), stats)
-      if (d) {
-        stats.degradedPruned += 1
-        return { ...d, degradedKeptSentences: cardKept.length, evidence: pickEvidence(cardKept) }
-      }
-      return null
-    }
-  }
-  // ④ 一句可核验的都没有 → 丢弃（不再退回整卡原文）
   stats.droppedUnverifiable += 1
   return null
 }
 
 /**
- * 用**最长的一句**作 evidence：它确实是卡片里的逐字连续片段，且 ≥12 字，
- * 于是降级段落仍能拿到来源定位（Phase 9 的锚点走 evidence 优先）。
- */
-function pickEvidence(sentences: string[]): string | undefined {
-  const longest = sentences.reduce((a, b) => (b.length > a.length ? b : a), sentences[0] ?? '')
-  return longest.length >= 12 ? longest : undefined
-}
-
-/**
- * 降级保留（evidence 片段 / 按句修剪结果）**并做同样的两道硬校验**（纯函数）：
+ * 降级保留（evidence 片段）**并做同样的两道硬校验**（纯函数）：
  * 标题型段落无新信息 → 直接丢弃；年份无据 → 标「时间待核」。返回 null 表示该卡片被丢掉。
  * 文本已由 `degradeKeepingVerifiedContent` 定位好，这里只负责组稿、段首时间兜底与这两道校验。
  */
@@ -521,15 +513,9 @@ export function collectExtractResults(
       if (reason === 'number-not-in-source') stats.invalidNumbers += 1
       else if (reason === 'evidence-not-found') stats.invalidEvidence += 1
       else stats.emptyText += 1
-      // 降级（2026-10-03 用户裁定）：只保留**可核验**的内容——evidence 片段 → 按句修剪模型输出 →
-      // 按句修剪卡片原文 → 丢弃；永不退回整张卡片原文（否则"整页 = 一张卡"时会把整页灌进汇编）。
-      const fallback = degradeKeepingVerifiedContent(
-        group,
-        (draft.evidence ?? '').trim() || undefined,
-        (draft.text ?? '').trim(),
-        sourceText,
-        stats
-      )
+      // 兜底（2026-10-03 用户裁定 A1）：**只保留逐字证据片段，没有就丢弃**——
+      // 绝不原样搬运卡片原文（"可核验 ≠ 相关"，实测正是这条把年鉴的概况/项目表/扶贫段搬进了汇编）。
+      const fallback = degradeToEvidenceOnly(group, (draft.evidence ?? '').trim() || undefined, stats)
       if (fallback) drafts.push(fallback)
       continue
     }
@@ -637,12 +623,40 @@ async function callExtract(
   return { ok: true, text: result.text }
 }
 
+/** 单次调用的形状（可注入，供单测/演练模拟"解析失败""漏答"等故障） */
+export type ExtractCall = typeof callExtract
+
+/** 拆分重试：少于这么多张就不再拆（单卡仍失败就丢弃） */
+const EXTRACT_SPLIT_MIN_CARDS = 4
+/** 拆分重试：每个批次最多额外消耗多少次"拆分调用"（成本保险丝） */
+const EXTRACT_SPLIT_MAX_CALLS = 4
+
+interface ExtractCtx {
+  provider: ExtractProvider
+  topic: string
+  taskId: string
+  requirement?: string
+  fullSourceTextByRef?: Map<string, string>
+  stats: ExtractBatchStats
+  call: ExtractCall
+  /** 本批次已消耗的拆分调用数 */
+  splitCalls: number
+}
+
+type ExtractStepResult = { ok: true; drafts: ExtractedDraft[] } | { ok: false; drafts: ExtractedDraft[]; message: string; rateLimited: boolean }
+
 /**
- * 对一批候选执行整合提取：
- * - 首次调用失败（异常/限流）→ ok:false（由管线中断并可续跑）；
- * - 输出无法解析 → 换温度重试一次；仍无法解析 → 按"可核验内容"兜底保留（按句修剪，不灌整卡）；
- * - 模型漏答的卡片 → 单独小批重问一次；仍漏答 → 同上兜底并计入诊断；
- * - 单段校验失败（事实无据）→ 按句修剪（保留模型写的有据句子 / 卡片原文有据句子），并计入诊断。
+ * 对一批候选执行整合提取。
+ *
+ * **B（2026-10-03 用户裁定）：解析失败/漏答时不再"整批兜底"，而是对半递归重试。**
+ * 真实数据：某次生成有 30 张卡（21%）因"整批输出无法解析 / 模型漏答"落入兜底，
+ * 而兜底会把**卡片原文**搬进汇编（跑题内容随之进入）——一次性丢 30 张的代价太大。
+ * 现在的策略：
+ * - 首次调用失败（异常/限流）→ `ok:false`（由管线中断并可续跑，语义不变）；
+ * - 输出无法解析或引用号全对不上 → 换温度重试一次 → 仍不行则**对半切开分别重试**（递归，最多 4 次拆分调用）；
+ * - 模型漏答的卡片 → 先整批重问一次 → 仍漏答则同样对半拆分重试；
+ * - 单卡仍失败 → **丢弃该卡**（计入 `droppedUnparseable`），绝不把卡片原文搬进来；
+ * - 单段校验失败（事实无据）→ 只保留逐字证据片段，没有则丢弃（见 `degradeToEvidenceOnly`）。
  */
 export async function extractBatch(
   provider: ExtractProvider,
@@ -652,60 +666,99 @@ export async function extractBatch(
   /** 用户撰写要求全文（作为筛选与整合的首要依据，见 `buildExtractMessages`） */
   requirement?: string,
   /** 来源编号 → 该来源完整正文：③ 的比对范围（缺省回退为卡片拼接） */
-  fullSourceTextByRef?: Map<string, string>
+  fullSourceTextByRef?: Map<string, string>,
+  /** 仅供单测/演练注入假的调用实现 */
+  deps?: { call?: ExtractCall }
 ): Promise<ExtractBatchOutcome> {
   const stats = emptyExtractStats(batch.length, batch.reduce((n, c) => n + c.excerpt.length, 0))
   if (batch.length === 0) return { ok: true, drafts: [], stats }
+  const ctx: ExtractCtx = {
+    provider,
+    topic,
+    taskId,
+    requirement,
+    fullSourceTextByRef,
+    stats,
+    call: deps?.call ?? callExtract,
+    splitCalls: 0
+  }
+  const res = await extractCards(ctx, batch, 0)
+  if (!res.ok) return { ok: false, drafts: [], stats, message: res.message, rateLimited: res.rateLimited }
+  return { ok: true, drafts: res.drafts, stats }
+}
 
-  const first = await callExtract(provider, batch, topic, taskId, 0, requirement)
-  if (!first.ok) return { ok: false, drafts: [], stats, message: first.message, rateLimited: first.rateLimited }
-  const knownRefs = new Set(batch.map((c) => c.sourceRef))
-  let parsed = parseExtractOutput(first.text)
-  if (!parsed || ![...parsed.paragraphs, ...parsed.dropped].some((e) => knownRefs.has(e.sourceRef))) {
-    stats.retried += 1
-    const again = await callExtract(provider, batch, topic, taskId, 0.3, requirement)
-    const reparsed = again.ok ? parseExtractOutput(again.text) : null
-    if (reparsed && [...reparsed.paragraphs, ...reparsed.dropped].some((e) => knownRefs.has(e.sourceRef))) {
-      parsed = reparsed
-      logMain('extract', '解析失败后重试成功（' + batch.length + ' 张卡片）')
-    } else {
-      stats.passthrough = batch.length
-      stats.omitted = batch.length
-      logMain('extract', '整批 ' + batch.length + ' 张卡片的输出无法解析，已按"可核验内容"兜底保留（按句修剪，不再灌整卡原文）')
-      return {
-        ok: true,
-        drafts: batch
-          // 没有模型文本 → 走第 ③ 档：按句核验卡片原文（有界保留）
-          .map((c) => degradeKeepingVerifiedContent([c], undefined, '', c.excerpt, stats))
-          .filter((d): d is ExtractedDraft => d !== null),
-        stats
+/** 对半拆分（含预算与最小张数判定）；返回 null 表示不再拆 */
+function splitHalf(ctx: ExtractCtx, cards: ExtractCandidate[]): [ExtractCandidate[], ExtractCandidate[]] | null {
+  if (cards.length < EXTRACT_SPLIT_MIN_CARDS) return null
+  if (ctx.splitCalls + 2 > EXTRACT_SPLIT_MAX_CALLS) return null
+  ctx.splitCalls += 2
+  const mid = Math.floor(cards.length / 2)
+  return [cards.slice(0, mid), cards.slice(mid)]
+}
+
+async function extractCards(ctx: ExtractCtx, cards: ExtractCandidate[], attempt: 0 | 1): Promise<ExtractStepResult> {
+  const knownRefs = new Set(cards.map((c) => c.sourceRef))
+  const res = await ctx.call(ctx.provider, cards, ctx.topic, ctx.taskId, attempt === 0 ? 0 : 0.3, ctx.requirement)
+  if (!res.ok) return { ok: false, drafts: [], message: res.message ?? '大模型调用异常中断', rateLimited: res.rateLimited === true }
+
+  let parsed = parseExtractOutput(res.text)
+  // B2：把模型可能写出的引用形式（c12 / 12 / 来源3）映射回 #N，避免"整批被判解析失败"
+  if (parsed) normalizeExtractRefs(parsed, cards)
+  const usable = !!parsed && [...parsed.paragraphs, ...parsed.dropped].some((e) => knownRefs.has(e.sourceRef))
+  if (!usable) {
+    if (attempt === 0) {
+      ctx.stats.retried += 1
+      const d = describeExtractOutput(res.text, cards)
+      logMain('extract', '解析失败（换温度重试）：输出 ' + d.chars + ' 字，含 JSON=' + d.hasJson + '，检出编号 ' + JSON.stringify(d.refsSeen) + '，期望 ' + d.expected)
+      return extractCards(ctx, cards, 1)
+    }
+    const halves = splitHalf(ctx, cards)
+    if (halves) {
+      logMain('extract', '重试仍无法解析，拆成 ' + halves[0].length + '+' + halves[1].length + ' 张分别重试')
+      const a = await extractCards(ctx, halves[0], 1)
+      if (!a.ok) return a
+      const b = await extractCards(ctx, halves[1], 1)
+      if (!b.ok) return b
+      return { ok: true, drafts: [...a.drafts, ...b.drafts] }
+    }
+    ctx.stats.omitted += cards.length
+    ctx.stats.droppedUnparseable += cards.length
+    logMain('extract', '输出无法解析且无法再拆分，丢弃 ' + cards.length + ' 张卡片（不再把卡片原文搬进汇编）')
+    return { ok: true, drafts: [] }
+  }
+
+  const { drafts, answered } = collectExtractResults(cards, parsed!, ctx.stats, ctx.fullSourceTextByRef)
+  const missing = cards.filter((c) => !answered.has(c.sourceRef))
+  if (missing.length === 0) return { ok: true, drafts }
+
+  // 漏答 → 整批重问一次；仍漏答 → 对半拆分重试；单卡仍漏答 → 丢弃
+  ctx.stats.retried += 1
+  const retry = await ctx.call(ctx.provider, missing, ctx.topic, ctx.taskId, 0.3, ctx.requirement)
+  if (!retry.ok) return { ok: false, drafts, message: retry.message ?? '大模型调用异常中断', rateLimited: retry.rateLimited === true }
+  let retryParsed = parseExtractOutput(retry.text)
+  if (retryParsed) normalizeExtractRefs(retryParsed, missing)
+  if (retryParsed && [...retryParsed.paragraphs, ...retryParsed.dropped].some((e) => knownRefs.has(e.sourceRef))) {
+    const again = collectExtractResults(missing, retryParsed, ctx.stats, ctx.fullSourceTextByRef)
+    drafts.push(...again.drafts)
+    for (const ref of again.answered) answered.add(ref)
+  }
+  const stillMissing = missing.filter((c) => !answered.has(c.sourceRef))
+  if (stillMissing.length > 0) {
+    const halves = splitHalf(ctx, stillMissing)
+    if (halves) {
+      logMain('extract', '重问后仍漏答 ' + stillMissing.length + ' 张，拆成 ' + halves[0].length + '+' + halves[1].length + ' 张分别重试')
+      for (const half of halves) {
+        const r = await extractCards(ctx, half, 1)
+        if (!r.ok) return { ok: false, drafts, message: r.message, rateLimited: r.rateLimited }
+        drafts.push(...r.drafts)
       }
+    } else {
+      ctx.stats.omitted += stillMissing.length
+      ctx.stats.droppedUnparseable += stillMissing.length
+      logMain('extract', '模型未作答且无法再拆分，丢弃 ' + stillMissing.length + ' 张卡片（不再把卡片原文搬进汇编）')
     }
   }
-
-  const { drafts, answered } = collectExtractResults(batch, parsed, stats, fullSourceTextByRef)
-
-  // 漏答的卡片：单独小批重问一次（仍漏答则按原文整段保留）
-  const missing = batch.filter((c) => !answered.has(c.sourceRef))
-  if (missing.length > 0) {
-    stats.retried += 1
-    const retry = await callExtract(provider, missing, topic, taskId, 0.3, requirement)
-    const retryParsed = retry.ok ? parseExtractOutput(retry.text) : null
-    if (retryParsed) {
-      const again = collectExtractResults(missing, retryParsed, stats, fullSourceTextByRef)
-      drafts.push(...again.drafts)
-      for (const ref of again.answered) answered.add(ref)
-    }
-  }
-  for (const c of missing) {
-    if (answered.has(c.sourceRef)) continue
-    stats.omitted += 1
-    stats.passthrough += 1
-    // 漏答的卡片同样只做"可核验内容"兜底（按句修剪卡片原文 / 丢弃），不灌整卡原文
-    const d = degradeKeepingVerifiedContent([c], undefined, '', c.excerpt, stats)
-    if (d) drafts.push(d)
-  }
-  return { ok: true, drafts, stats }
+  return { ok: true, drafts }
 }
 
 // ---- vitest inline test ----
@@ -825,7 +878,6 @@ if (import.meta.vitest) {
       expect(drafts[1].degradedFromEvidence).toBe(true)
       expect(drafts[1].text).toBe('全区幼儿园 212 所')
       expect(stats.degradedFromEvidence).toBe(1)
-      expect(stats.degradedPruned).toBe(0)
       expect(stats.droppedUnverifiable).toBe(0)
     })
 
@@ -866,10 +918,9 @@ if (import.meta.vitest) {
       )
       expect(stats2.accepted).toBe(0)
       expect(stats2.invalidNumbers).toBe(1)
-      // 证据不在卡片里（只在完整来源里）→ 兜底按句修剪卡片原文（有界），这也是预期行为
-      expect(res2.drafts[0].degraded).toBe(true)
-      expect(res2.drafts[0].text).toContain('普通中学 30 所')
-      expect(res2.drafts[0].text.length).toBeLessThanOrEqual(DEGRADED_MAX_CHARS)
+      // A1（2026-10-03）：证据在卡片里定位不到 → **丢弃该卡**，不再把卡片原文搬进来
+      expect(res2.drafts).toHaveLength(0)
+      expect(stats2.droppedUnverifiable).toBe(1)
     })
 
     it('同一来源多张卡时，降级在**证据所属的那张卡**里定位（修掉写死 group[0] 的缺陷）', () => {
@@ -891,73 +942,92 @@ if (import.meta.vitest) {
       expect(drafts[0].text).not.toContain('普通中学')
     })
 
-    it('超长整页卡片不会再被整卡灌入：兜底文本长度受限，且无一句可核验时直接丢弃', () => {
-      // 真实案例：网页正文没有换行结构（整页 = 一张卡，3512 字）
+    it('A1：兜底只保留逐字证据片段，没有就丢弃（绝不搬卡片原文）', () => {
+      /*
+       * 真实案例（2026-10-03）：某次生成 30 张卡（21%）因"整批输出无法解析 / 模型漏答"落入兜底，
+       * 旧实现把卡片原文（年鉴概况段、项目表、扶贫段）搬进汇编 → 跑题内容成片进入。
+       * 现在：没有可定位的逐字证据 → 丢弃该卡。
+       */
       const page = Array.from({ length: 60 }, (_, i) => `第${i + 1}项工作要求，各地各校要认真落实到位。`).join('')
       const big: ExtractCandidate[] = [
         { index: 0, key: 'c1', sourceRef: '#9', sourceTitle: '福建省2020年普通中小学招生入学政策解读', excerpt: page, ts: '2020 年' }
       ]
-      // 模型写的段落含来源里没有的数字 → 无据 → 走兜底：先剔掉无据句子，再按句核验卡片原文（有界）
+      // 模型写的段落含来源里没有的数字（无据）且没给 evidence → 丢弃，不搬卡片原文
       const stats = emptyExtractStats(1, page.length)
       const { drafts } = collectExtractResults(
         big,
-        {
-          paragraphs: [{ sourceRef: '#9', text: '全省共 99999 名学生受益。', timeLabel: '2020 年', evidence: '' }],
-          dropped: []
-        },
+        { paragraphs: [{ sourceRef: '#9', text: '全省共 99999 名学生受益。', timeLabel: '2020 年', evidence: '' }], dropped: [] },
         stats
       )
-      expect(drafts).toHaveLength(1)
-      expect(drafts[0].degraded).toBe(true)
-      expect(drafts[0].text.length).toBeLessThanOrEqual(DEGRADED_MAX_CHARS)
-      expect(drafts[0].text.length).toBeLessThan(page.length)
-      expect(drafts[0].text).not.toContain('99999')
+      expect(drafts).toHaveLength(0)
+      expect(stats.droppedUnverifiable).toBe(1)
+      expect(drafts.every((d) => !d.text.includes('项工作要求'))).toBe(true)
+    })
 
-      /*
-       * 模型那段一句都核验不了（引用了来源里不存在的《文件》与数字）→ **删掉它**，
-       * 落回卡片里有据的句子（而不是把无据内容留下、也不是退回整卡）。
-       */
-      const cardOnly: ExtractCandidate[] = [
-        { index: 0, key: 'c1', sourceRef: '#9', sourceTitle: '某网页', excerpt: '正文里有一句可核验的内容。', ts: '2020 年' }
-      ]
-      const stats2 = emptyExtractStats(1, 0)
-      const res2 = collectExtractResults(
-        cardOnly,
-        {
-          paragraphs: [
-            {
-              sourceRef: '#9',
-              text: '依据《并不存在的文件》第 99 号要求，共 9999 人。',
-              timeLabel: '2020 年',
-              evidence: ''
-            }
-          ],
-          dropped: []
-        },
-        stats2
-      )
-      expect(res2.drafts).toHaveLength(1)
-      expect(res2.drafts[0].text).toBe('正文里有一句可核验的内容。')
-      expect(res2.drafts[0].degradedPrunedFromModel).toBeFalsy()
-      expect(stats2.degradedPruned).toBe(1)
+    it('B2：模型写出的引用形式（c12 / 12 / 来源3）会被映射回 #N', () => {
+      const parsed = parseExtractOutput(
+        '{"paragraphs":[{"sourceRef":"c2","text":"甲","evidence":"甲"},{"sourceRef":"2","text":"乙","evidence":"乙"},{"sourceRef":"#1","text":"丙","evidence":"丙"}],"dropped":[{"sourceRef":"来源3","why":"无关"}]}'
+      )!
+      normalizeExtractRefs(parsed, batch)
+      // c2 → c2 所在卡片（#1）；裸数字 2 → 编号 #2；#1 原样；"来源3" → c3 所在卡片（#2）
+      expect(parsed.paragraphs.map((p) => p.sourceRef)).toEqual(['#1', '#2', '#1'])
+      expect(parsed.dropped[0].sourceRef).toBe('#2')
+      // 对不上的原样保留（后续按幻觉忽略）
+      const weird = parseExtractOutput('{"paragraphs":[{"sourceRef":"#99","text":"甲"}]}')!
+      normalizeExtractRefs(weird, batch)
+      expect(weird.paragraphs[0].sourceRef).toBe('#99')
+    })
 
-      // 防御性兜底：模型那段与卡片都没有任何可核验句子 → 丢弃并如实计数
-      const emptyCard: ExtractCandidate[] = [
-        { index: 0, key: 'c1', sourceRef: '#9', sourceTitle: '某网页', excerpt: ' ', ts: '2020 年' }
-      ]
-      const stats3 = emptyExtractStats(1, 0)
-      const res3 = collectExtractResults(
-        emptyCard,
-        {
-          paragraphs: [
-            { sourceRef: '#9', text: '依据《并不存在的文件》共 9999 人。', timeLabel: '2020 年', evidence: '' }
-          ],
-          dropped: []
-        },
-        stats3
+    it('B3：解析失败的诊断只记结构与编号（不记正文）', () => {
+      const d = describeExtractOutput('模型的解释性文字…… {"paragraphs":[{"sourceRef":"c5","text":"x"}]}', batch)
+      expect(d.chars).toBeGreaterThan(0)
+      expect(d.hasJson).toBe(true)
+      expect(d.refsSeen).toContain('c5')
+      expect(d.expected).toContain('#1')
+      expect(JSON.stringify(d)).not.toContain('模型的解释性文字')
+    })
+
+    it('B1：整批输出无法解析时对半重试，最终只丢弃仍失败的那几张卡（不再整批搬运）', async () => {
+      const cards: ExtractCandidate[] = Array.from({ length: 8 }, (_, i) => ({
+        index: i,
+        key: 'c' + (i + 1),
+        sourceRef: '#' + (i + 1),
+        sourceTitle: '长乐年鉴2023',
+        excerpt: '2022 年，长乐区第' + (i + 1) + '项工作完成，投资 ' + (i + 1) + ' 万元。',
+        ts: '2022 年'
+      }))
+      // 假调用：整批（8 张）返回不可解析文本；拆到 4 张及以下正常作答
+      const calls: number[] = []
+      const fake = (async (_p: unknown, b: ExtractCandidate[]) => {
+        calls.push(b.length)
+        if (b.length >= 8) return { ok: true, text: '这不是 JSON' }
+        return {
+          ok: true,
+          text:
+            '{"paragraphs":[' +
+            b
+              .map(
+                (c) =>
+                  '{"sourceRef":"' + c.sourceRef + '","text":"' + c.excerpt + '","timeLabel":"2022 年","evidence":"' + c.excerpt + '"}'
+              )
+              .join(',') +
+            ']}'
+        }
+      }) as unknown as ExtractCall
+      const res = await extractBatch(
+        { apiBase: 'x', model: 'm', apiKey: 'k' },
+        cards,
+        '高中学校设置',
+        't1',
+        '要求',
+        undefined,
+        { call: fake }
       )
-      expect(res3.drafts).toHaveLength(0)
-      expect(stats3.droppedUnverifiable).toBe(1)
+      expect(res.ok).toBe(true)
+      // 8 张 → 尝试整批(8) 失败 → 温度重试(8) 失败 → 拆成 4+4 各一次 → 全部找回
+      expect(calls.slice(0, 4)).toEqual([8, 8, 4, 4])
+      expect(res.drafts).toHaveLength(8)
+      expect(res.stats.droppedUnparseable).toBe(0)
     })
 
     it('ignores hallucinated source refs and leaves unanswered cards for the caller', () => {

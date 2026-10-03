@@ -502,17 +502,16 @@ export type CompilationExtractScan = CompilationStageScan & {
   invalidEvidence?: number
   /** 2026-10-03：证据未逐字命中、但事实逐句核验通过而接受（证据从门槛降为充分度） */
   evidenceLoose?: number
-  /** 降级处理细分：只保留了 evidence 片段（粒度最细） */
+  /** 兜底粒度细分：只保留了 evidence 片段（粒度最细） */
   degradedFromEvidence?: number
-  /** 降级处理细分：按句保留可核验内容（取代原来的"退回整卡原文"） */
-  degradedPruned?: number
-  /** 因"没有一句内容能在来源里核验"而丢弃的卡片数 */
+  /** 因"没有可用的逐字证据"（含模型未作答、整批输出无法解析）而丢弃的卡片数（A1，2026-10-03） */
   droppedUnverifiable?: number
+  /** 其中因"输出无法解析/无法再拆分重试"而丢弃的卡片数（B：对半重试之后的残余） */
+  droppedUnparseable?: number
   /** 模型判定与主题无关而整卡丢弃 */
   droppedCards?: number
-  /** 模型始终未回答、按原文保留的卡片数 */
+  /** 模型始终未回答的卡片数（重问后仍未答，且已按 A1 丢弃） */
   omitted?: number
-  passthrough?: number
   /** 因"段落只是复述来源标题、没有正文信息"而丢弃的段落数（2026-09-12：绝不能只看文章标题） */
   titleOnlyDropped?: number
   /** 因"年份在来源里查不到、也推不出"而降级为「时间待核」的段落数 */
