@@ -5107,6 +5107,25 @@ textarea:focus-visible {
   color: var(--fg);
   border: 1px solid var(--border);
 }
+/* 分区标题（生成阶段记录 / 汇编修改记录）：让"只读的历史"与"可改的对话"一眼可分 */
+.compilation-docchat__section {
+  align-self: stretch;
+  margin: 2px 0 0;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--fg-soft);
+}
+.compilation-docchat__section:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+/* 任务级记录是**只读的历史**：比可对话的气泡更淡，避免看起来还能回复 */
+.compilation-docchat__msg.is-task {
+  opacity: 0.86;
+}
 .compilation-docchat__ver {
   display: block;
   margin-top: 2px;

@@ -618,6 +618,9 @@ export const zhCN = {
     docChatPlaceholder: '例如：校区建设不属于这方面的内容，请把相关内容都删掉',
     docChatSend: '发送',
     docChatEmpty: '还没有对话记录。提出修改要求后，这里会显示大模型对每处改动的说明。',
+    /* 生成完成后，最初那次问答（撰写要求 + 生成结果）仍要看得见（只读前段） */
+    docChatTaskSection: '生成阶段 · 撰写要求与生成结果（只读）',
+    docChatEditSection: '汇编修改记录（下方输入框只改汇编，不会重跑生成）',
     docChatEditing: '正在修改汇编…',
     docChatMinimize: '最小化',
     docChatDragHint: '可拖动'

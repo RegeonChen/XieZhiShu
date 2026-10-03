@@ -305,8 +305,15 @@ function CompilationStep({
   const paneRef = useRef<HTMLDivElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
   const chatListRef = useRef<HTMLDivElement | null>(null)
+  /** 「生成阶段」分区标题：刚生成完时从这一段开头显示（用户最先要看自己那句要求） */
+  const taskSectionRef = useRef<HTMLDivElement | null>(null)
   const dragRef = useRef<{ dx: number; dy: number } | null>(null)
   const messages = docMessages ?? []
+  /**
+   * 任务级记录（`task_messages`：撰写要求 / 生成结果 / 生成阶段提示）。
+   * 生成完成后面板切到"与汇编对话"，这里把它作为**只读前段**显示，避免最初那次问答消失。
+   */
+  const taskHistory = taskMessages ?? []
   const canSend = chatInput.trim().length > 0 && docEditing !== true
   /** 复核态：对话修改完成后由父组件自动置上差异，用户「采纳 / 回退」后才退出 */
   const reviewing = versionDiff != null
@@ -412,11 +419,17 @@ function CompilationStep({
     if (prev && generating !== true && generateInterrupt == null && compilation) setChatOpen(false)
   }, [generating, generateInterrupt, compilation])
 
-  // 新消息/编辑中 → 对话列表滚到底部
+  // 新消息/编辑中 → 对话列表滚到底部；**还没有汇编修改记录时**（刚生成完）改为停在这一段的开头，
+  // 让「生成阶段 · 撰写要求与生成结果」整段从顶部开始显示（用户最先要看到的就是自己那句要求）。
   useEffect(() => {
     const el = chatListRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [messages.length, docEditing, chatOpen])
+    if (!el) return
+    if (messages.length === 0 && taskSectionRef.current) {
+      el.scrollTop = 0
+      return
+    }
+    el.scrollTop = el.scrollHeight
+  }, [messages.length, docEditing, chatOpen, taskHistory.length])
 
   // 本次改动 → 滚动到首个改动段
   useEffect(() => {
@@ -539,8 +552,33 @@ function CompilationStep({
     <>
       {webInfo}
       <div className="compilation-docchat__list" ref={chatListRef}>
+        {/*
+          2026-10-03 修复（用户实测反馈）：**生成阶段的问答要在生成完成后仍然看得见**。
+          最初那条「本次撰写要求」与「已生成资料汇编：…」属于**任务级**记录（`task_messages`），
+          而汇编生成完后面板从"生成模式"切成"与汇编对话"，只渲染**汇编级**记录
+          （`compilation_messages`）→ 用户再也翻不到自己最初那句要求与生成结果。
+          这里把任务级记录作为**只读前段**接在汇编对话之前（写入入口仍是下方输入框，只改汇编）。
+        */}
+        {taskHistory.length > 0 ? (
+          <>
+            <div className="compilation-docchat__section" ref={taskSectionRef}>
+              {t.docChatTaskSection}
+            </div>
+            {taskHistory.map((m, i) => (
+              <div
+                key={`task-${i}`}
+                className={cls('compilation-docchat__msg', 'is-task', m.role === 'user' ? 'is-user' : 'is-assistant')}
+              >
+                {m.content}
+              </div>
+            ))}
+            <div className="compilation-docchat__section">{t.docChatEditSection}</div>
+          </>
+        ) : null}
         {messages.length === 0 ? (
-          <p className="compilation-docchat__empty">{t.docChatEmpty}</p>
+          // 有生成阶段记录时不再重复"还没有对话记录"（分区标题已经说明下方输入框只改汇编），
+          // 也让「撰写要求 + 生成结果」更容易一次看全
+          taskHistory.length === 0 ? <p className="compilation-docchat__empty">{t.docChatEmpty}</p> : null
         ) : (
           messages.map((m, i) => (
             <div key={i} className={cls('compilation-docchat__msg', m.role === 'user' ? 'is-user' : 'is-assistant')}>
