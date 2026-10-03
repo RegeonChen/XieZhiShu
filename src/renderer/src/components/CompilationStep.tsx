@@ -874,30 +874,36 @@ function CompilationStep({
                   <div key={v.id} className="compilation-variant">
                     <div className="compilation-variant-text">{v.variantText}</div>
                     {/*
-                      第三批 D：把两个说法的**时间**并排显示，便于判断"是不是同一时点的事"——
-                      实测多数"矛盾"其实是规划/在建/投用等不同阶段的正常差异。
+                      2026-10-03 用户裁定：来源/时间/操作改为**正文下方的右对齐底栏**。
+                      此前是与正文并列的一行 flex，面板一窄正文就被压成"每两个字换一行"。
                     */}
-                    <div className="compilation-variant-src">
-                      来源：《{v.sourceTitle ?? v.sourceId}》
-                      {itemTimeById.get(v.itemId) ? `　时间：${itemTimeById.get(v.itemId)}` : ''}
-                    </div>
-                    <div className="compilation-variant-actions">
-                      <button
-                        type="button"
-                        className="source-list__btn compilation-variant-locate"
-                        title={t.locateHint}
-                        onClick={() => locateItem(v.itemId)}
-                      >
-                        {t.locate}
-                      </button>
-                      <button
-                        type="button"
-                        className="source-list__btn source-list__btn--primary"
-                        disabled={busy}
-                        onClick={() => onResolve(g.id, 'resolve', v.itemId)}
-                      >
-                        {t.resolve}
-                      </button>
+                    <div className="compilation-variant-foot">
+                      {/*
+                        第三批 D：把两个说法的**时间**并排显示，便于判断"是不是同一时点的事"——
+                        实测多数"矛盾"其实是规划/在建/投用等不同阶段的正常差异。
+                      */}
+                      <div className="compilation-variant-src">
+                        来源：《{v.sourceTitle ?? v.sourceId}》
+                        {itemTimeById.get(v.itemId) ? `　时间：${itemTimeById.get(v.itemId)}` : ''}
+                      </div>
+                      <div className="compilation-variant-actions">
+                        <button
+                          type="button"
+                          className="source-list__btn compilation-variant-locate"
+                          title={t.locateHint}
+                          onClick={() => locateItem(v.itemId)}
+                        >
+                          {t.locate}
+                        </button>
+                        <button
+                          type="button"
+                          className="source-list__btn source-list__btn--primary"
+                          disabled={busy}
+                          onClick={() => onResolve(g.id, 'resolve', v.itemId)}
+                        >
+                          {t.resolve}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}
