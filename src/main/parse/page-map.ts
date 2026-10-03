@@ -127,30 +127,37 @@ export function normalizeForMatch(text: string): { text: string; map: number[] }
  */
 export function alignPageTexts(storedText: string, pageTexts: string[]): PageRange[] | null {
   const stored = normalizeForMatch(storedText)
-  const ranges: PageRange[] = []
+  const starts: number[] = []
   let from = 0
   for (let i = 0; i < pageTexts.length; i++) {
-    const pageNo = i + 1
     const page = normalizeForMatch(pageTexts[i] ?? '')
     if (page.text.length === 0) {
-      // 空页：给一个零长度区间（位置取当前游标），页码照记
-      const at = from < stored.map.length ? stored.map[from] : storedText.length
-      ranges.push({ page: pageNo, start: at, end: at })
+      // 空页（扫描页没有文字层）：位置取当前游标，页码照记——扫描件因此也能定位到页
+      starts.push(from < stored.map.length ? stored.map[from] : storedText.length)
       continue
     }
-    // 先用整页匹配；匹配不到时退一步：只要求该页**开头 30 字**能对上（页眉页脚/表格重排会让整页对不上，
-    // 但开头一段通常稳定），仍对不上则整体失败。
+    // 先用整页匹配；匹配不到时退一步：只要求该页**开头 30 字**能对上
+    // （页眉页脚/表格重排会让整页对不上，但开头一段通常稳定），仍对不上则整体失败。
     let at = stored.text.indexOf(page.text, from)
     if (at < 0) {
-      const head = page.text.slice(0, 30)
-      at = stored.text.indexOf(head, from)
+      at = stored.text.indexOf(page.text.slice(0, 30), from)
       if (at < 0) return null
     }
-    const startOrig = stored.map[at]
-    const endIdx = Math.min(stored.map.length - 1, at + page.text.length - 1)
-    const endOrig = stored.map[endIdx] + 1
-    ranges.push({ page: pageNo, start: startOrig, end: endOrig })
+    starts.push(stored.map[at])
     from = at + page.text.length
+  }
+
+  /**
+   * 区间口径：**页 N = [页 N 起点, 页 N+1 起点)**，末页到正文末尾。
+   * 为什么不用"起点 + 整页长度"：一旦某页靠"开头 30 字"匹配上，那个长度会**越过后面若干页**，
+   * 使区间相互重叠，块就会被标成更小的页码（真实年鉴实测出现过 351 → 11 的倒退）。
+   * 用"下一票起点"兜底后，区间天然有序、不重叠、无洞，页间分隔符自然归到前一页。
+   */
+  const ranges: PageRange[] = []
+  for (let i = 0; i < starts.length; i++) {
+    const start = i === 0 ? starts[0] : Math.max(starts[i], starts[i - 1])
+    const end = i + 1 < starts.length ? Math.max(start, starts[i + 1]) : storedText.length
+    ranges.push({ page: i + 1, start, end })
   }
   return ranges
 }
@@ -215,8 +222,24 @@ if (import.meta.vitest) {
       expect(ranges).not.toBeNull()
       const r = ranges as PageRange[]
       expect(r).toHaveLength(2)
-      expect(storedText.slice(r[0].start, r[0].end)).toBe('第一页正文。')
+      // 区间口径 = [本页起点, 下一页起点)：页 1 含页间分隔符，页 2 到正文末尾
+      expect(r[0].start).toBe(0)
+      expect(storedText.slice(r[0].start, r[0].end).startsWith('第一页正文。')).toBe(true)
       expect(storedText.slice(r[1].start, r[1].end)).toBe('第二页正文。')
+    })
+
+    it('区间不重叠且严格有序（页 N 的终点 = 页 N+1 的起点）', () => {
+      const storedText = '甲甲甲。乙乙乙。丙丙丙。'
+      // 第 2 页整页对不上（模拟页眉页脚/重排），只有开头 2 字能对上：
+      // 旧口径会把它"整页长度"的终点算到第 3 页之外，导致区间重叠、块被标成更小的页码
+      const r = alignPageTexts(storedText, ['甲甲甲。', '乙乙', '丙丙丙。']) as PageRange[]
+      expect(r).not.toBeNull()
+      expect(r.map((x) => x.page)).toEqual([1, 2, 3])
+      for (let i = 1; i < r.length; i++) {
+        expect(r[i].start).toBeGreaterThanOrEqual(r[i - 1].start)
+        expect(r[i - 1].end).toBe(r[i].start)
+      }
+      expect(r[r.length - 1].end).toBe(storedText.length)
     })
 
     it('空页（扫描页无文字层）保留页码但区间为零长度', () => {
