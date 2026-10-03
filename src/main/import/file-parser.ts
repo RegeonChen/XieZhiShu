@@ -56,6 +56,9 @@ export async function parseFile(filePath: string): Promise<ParseResult> {
 let _pdfCmapsDir = ''
 export function setPdfCmapsDir(dir: string): void { _pdfCmapsDir = dir }
 
+/** 取当前注入的 cmaps 目录（Phase 9 / S3：逐页取文的 pdfjs 解析要用**同一份** cmaps，否则中文 PDF 提不出文字） */
+export function getPdfCmapsDir(): string { return _pdfCmapsDir }
+
 async function parsePdf(buffer: Buffer, _path: string): Promise<ParseResult> {
   try {
     // pdf-parse v11 ESM: PDFParse is a class; call load() then getText()

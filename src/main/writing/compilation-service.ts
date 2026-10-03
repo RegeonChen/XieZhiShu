@@ -50,6 +50,7 @@ import {
   type CompilationContradictionInput
 } from '../db/compilations'
 import { listPinnedWebMaterials, pinWebMaterials } from '../db/web-materials'
+import { attachAnchorsQuietly } from './source-anchors'
 
 const COMPILATION_TIMEOUT_MS = 600000
 const WINDOW_MAX_CHARS = 30000
@@ -1224,6 +1225,9 @@ function persistDocument(
   for (const it of items) {
     if (!itemIdByText.has(it.excerpt)) itemIdByText.set(it.excerpt, it.id)
   }
+  // Phase 9 / S3 收尾：就地算来源锚点（块号 → 页码）。**唯一**能一次拿到全部刚写库段落的位置；
+  // 本函数是同步的，故 fire-and-forget —— 锚点失败绝不影响汇编生成（attachAnchorsQuietly 内吞异常）。
+  void attachAnchorsQuietly(items)
   return { itemIdByText, inserted: items.length }
 }
 
