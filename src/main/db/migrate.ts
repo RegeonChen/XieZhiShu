@@ -1065,6 +1065,29 @@ CREATE INDEX IF NOT EXISTS idx_compilation_item_sources_source ON compilation_it
 INSERT OR IGNORE INTO compilation_item_sources (item_id, source_id, created_at)
   SELECT id, source_id, created_at FROM compilation_items WHERE source_id IS NOT NULL AND source_id <> '';
 `
+  },
+  {
+    // 2026-10-03（Phase 9 S2「来源块表」，用户裁定 Q1/Q6）
+    // 定位到页的**后半截**：把来源正文切成"块"，并记下每块属于第几页。
+    // 前半截（块号）由生成期的大模型给出（S3），两者相乘即页码——全程不做文本匹配。
+    //
+    // 设计要点：① 块**绝不跨页**（页级精度的硬保证）；② `page` 允许 NULL——Word/WPS 没有固定页码，
+    // 网页没有页，这类来源只能定位到"块/段"；③ 懒生成（第一次需要定位某来源时才解析落库，Q6），
+    // 因此本表**不回填存量**；④ 纯新增，不改任何现有列。
+    version: 43,
+    sql: `
+CREATE TABLE IF NOT EXISTS source_blocks (
+  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  block_index INTEGER NOT NULL,
+  char_start INTEGER NOT NULL,
+  char_end INTEGER NOT NULL,
+  page INTEGER,
+  label TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (source_id, block_index)
+);
+CREATE INDEX IF NOT EXISTS idx_source_blocks_page ON source_blocks(source_id, page);
+`
   }
 ]
 
