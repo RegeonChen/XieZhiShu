@@ -26,8 +26,8 @@ import {
   isTitleOnlyParagraph,
   isYearSupportedBySource,
   locateVerbatim,
-  numbersCoveredBy,
-  stripSpaces,
+  sentenceFactsVerified,
+  splitSentences,
   validateExtractedParagraph,
   withFallbackYear,
   type ExtractedParagraphDraft,
@@ -94,6 +94,8 @@ export interface ExtractBatchStats {
   invalidNumbers: number
   /** 其中因"证据引文不是原文"降级 */
   invalidEvidence: number
+  /** 2026-10-03：evidence 不是逐字命中但**事实逐句核验通过**而接受的段数（证据已从门槛降为充分度） */
+  evidenceLoose: number
   emptyText: number
   /** 降级时只保留 evidence 片段（粒度最细）的段数 */
   degradedFromEvidence: number
@@ -124,6 +126,7 @@ export function emptyExtractStats(input = 0, inputChars = 0): ExtractBatchStats 
     unverified: 0,
     invalidNumbers: 0,
     invalidEvidence: 0,
+    evidenceLoose: 0,
     emptyText: 0,
     degradedFromEvidence: 0,
     degradedPruned: 0,
@@ -158,8 +161,10 @@ export interface ExtractScanStats {
   degraded: number
   /** 降级原因细分：数字在来源中找不到（幻觉嫌疑） */
   invalidNumbers: number
-  /** 降级原因细分：证据引文不是原文 */
+  /** 降级原因细分：证据引文不是原文（2026-10-03 起不再是失败原因，恒为 0；见 evidenceLoose） */
   invalidEvidence: number
+  /** 2026-10-03：证据未逐字命中、但事实逐句核验通过而接受 */
+  evidenceLoose?: number
   /** 降级粒度细分：只保留 evidence 片段 */
   degradedFromEvidence?: number
   /** 降级粒度细分：按句保留可核验句子（取代原来的"退回整卡原文"） */
@@ -291,6 +296,11 @@ export function buildExtractMessages(batch: ExtractCandidate[], topic: string, r
     '4. **不得合并互相矛盾的说法**：若两张卡片（或同一卡片内两处）对同一事实给出不同数字、时间或说法，必须**分别保留为不同段落**，不要取其中一种，也不要折中。',
     '5. 每段必须给出 `timeLabel`（段首时间，**必须含 4 位年份**，如「2018 年」「2018 年 5 月」「2018 年 5 月 19 日」；不要写「5 月 19 日」这种缺年份的写法）：依据正文、卡片时间与来源文献年份推断（**年鉴惯例**：来源为《长乐年鉴2019》时，其正文通常记述 2018 年，即年鉴年份减 1）。确实推断不出年份时也必须给出一个含年份的时间（按上述惯例推定），不要留空。**年份必须有依据**：正文里没写、也推不出来的年份，本地校验会把它降级成「时间待核」，所以不要凭印象填年份。',
     '6. 每段必须给出 `evidence`：从该卡片原文中**逐字连续**摘出的一段（不得改写、不得拼接、不得跨卡片拼），作为这段的事实依据。',
+    '   · `evidence` 只需覆盖本段的**关键事实**（机构名/数量/时间/地点那一句），**不必覆盖全文**，也不必等于整段正文；',
+    '   · 「关键事实」指数字与《文件/文章名》：**每个数字都必须能在该来源原文里找到**（本地会逐句核验）；',
+    '   · 与主题无关的数字（文号、电话、页码、字号、其它年份、其它单位的数据）**请直接删掉**——删掉不会导致校验失败；',
+    '   · 数字允许**等价改写**：`5.09 亿元` 与 `50900 万元`、`1.2 万` 与 `12000`、`三十所` 与 `30 所` 视为一致，',
+    '     四舍五入到更少位（如 `约 5.1 亿元`）也可接受；但不得改动数值本身、不得推算合计。',
     '7. 某张卡片里确实没有与主题相关的内容时，把它放进 `dropped` 并简述原因。',
     '8. 不要输出任何解释性文字或代码块围栏，只输出一个 JSON 对象。',
     '',
@@ -360,33 +370,6 @@ export function logExtractBatchStats(batchNo: number, total: number, stats: Extr
  * 各档统一做另外两道硬校验（标题型丢弃 / 年份无据标待核）。
  */
 export const DEGRADED_MAX_CHARS = 1200
-
-/** 抽句子（保留句末标点；换行也当边界） */
-export function splitSentences(text: string): string[] {
-  const parts = String(text ?? '')
-    .split(/(?<=[。！？；!?;\n])/)
-    .map((s) => s.replace(/\s+/g, ' ').trim())
-    .filter(Boolean)
-  return parts
-}
-
-/** 句子里的《标题》引用 */
-function titlesIn(text: string): string[] {
-  return [...String(text ?? '').matchAll(/《([^》]{2,40})》/g)].map((m) => m[1])
-}
-
-/**
- * 该句是否"可核验"：句中的数字都能在来源原文里找到，且引用的《标题》也出现在来源原文里。
- * 句子里的**文字**无法本地核验（这是本地校验的边界，故只做"关键 token"核验）。
- */
-export function sentenceFactsVerified(sentence: string, sourceText: string): boolean {
-  if (!numbersCoveredBy(sentence, sourceText)) return false
-  const src = stripSpaces(sourceText)
-  for (const title of titlesIn(sentence)) {
-    if (!src.includes(stripSpaces(title))) return false
-  }
-  return true
-}
 
 /** 逐句保留可核验的句子，返回保留结果（受 `DEGRADED_MAX_CHARS` 约束） */
 function keepVerifiedSentences(text: string, sourceText: string): string[] {
@@ -508,7 +491,12 @@ function degradedChecked(candidate: ExtractCandidate, text: string, stats: Extra
 export function collectExtractResults(
   batch: ExtractCandidate[],
   parsed: { paragraphs: ExtractedParagraphDraft[]; dropped: { sourceRef: string; why: string }[] },
-  stats: ExtractBatchStats
+  stats: ExtractBatchStats,
+  /**
+   * 来源编号 → **该来源的完整正文**（2026-10-03 用户裁定：③ 的比对范围不该只是"本批卡片"，
+   * 从同一来源未被成卡的部分引用的数字同样有据）。缺省时回退为"该来源本批卡片拼接"。
+   */
+  fullSourceTextByRef?: Map<string, string>
 ): { drafts: ExtractedDraft[]; answered: Set<string> } {
   const byRef = new Map<string, ExtractCandidate[]>()
   for (const c of batch) {
@@ -524,7 +512,8 @@ export function collectExtractResults(
     const group = byRef.get(draft.sourceRef)
     if (!group || group.length === 0) continue // 幻觉出来的 sourceRef：忽略
     answered.add(draft.sourceRef)
-    const sourceText = group.map((c) => c.excerpt).join('\n')
+    // ③ 的比对范围 = 该来源**完整正文**（有则用），否则回退为本批卡片拼接
+    const sourceText = fullSourceTextByRef?.get(draft.sourceRef) || group.map((c) => c.excerpt).join('\n')
     const validation = validateExtractedParagraph(draft, sourceText)
     if (!validation.ok) {
       stats.unverified += 1
@@ -571,6 +560,8 @@ export function collectExtractResults(
     const timeConfidence: CompilationTimeConfidence = yearSupported ? time.timeConfidence : 'unknown'
     if (!yearSupported) stats.timeUnsupported += 1
     stats.accepted += 1
+    // 2026-10-03：evidence 不是逐字命中但事实逐句核验通过 → 接受并计数（不再降级）
+    if (validation.evidenceLoose) stats.evidenceLoose += 1
     stats.retainedChars += validation.text.length
     drafts.push({
       parentIndex: parent.index,
@@ -649,9 +640,9 @@ async function callExtract(
 /**
  * 对一批候选执行整合提取：
  * - 首次调用失败（异常/限流）→ ok:false（由管线中断并可续跑）；
- * - 输出无法解析 → 换温度重试一次；仍无法解析 → 整批按原文整段保留（降级，不丢材料）；
- * - 模型漏答的卡片 → 单独小批重问一次；仍漏答 → 按原文整段保留并计入诊断；
- * - 单段校验失败 → 降级为原文整段（不丢材料），并计入诊断。
+ * - 输出无法解析 → 换温度重试一次；仍无法解析 → 按"可核验内容"兜底保留（按句修剪，不灌整卡）；
+ * - 模型漏答的卡片 → 单独小批重问一次；仍漏答 → 同上兜底并计入诊断；
+ * - 单段校验失败（事实无据）→ 按句修剪（保留模型写的有据句子 / 卡片原文有据句子），并计入诊断。
  */
 export async function extractBatch(
   provider: ExtractProvider,
@@ -659,7 +650,9 @@ export async function extractBatch(
   topic: string,
   taskId: string,
   /** 用户撰写要求全文（作为筛选与整合的首要依据，见 `buildExtractMessages`） */
-  requirement?: string
+  requirement?: string,
+  /** 来源编号 → 该来源完整正文：③ 的比对范围（缺省回退为卡片拼接） */
+  fullSourceTextByRef?: Map<string, string>
 ): Promise<ExtractBatchOutcome> {
   const stats = emptyExtractStats(batch.length, batch.reduce((n, c) => n + c.excerpt.length, 0))
   if (batch.length === 0) return { ok: true, drafts: [], stats }
@@ -690,7 +683,7 @@ export async function extractBatch(
     }
   }
 
-  const { drafts, answered } = collectExtractResults(batch, parsed, stats)
+  const { drafts, answered } = collectExtractResults(batch, parsed, stats, fullSourceTextByRef)
 
   // 漏答的卡片：单独小批重问一次（仍漏答则按原文整段保留）
   const missing = batch.filter((c) => !answered.has(c.sourceRef))
@@ -699,7 +692,7 @@ export async function extractBatch(
     const retry = await callExtract(provider, missing, topic, taskId, 0.3, requirement)
     const retryParsed = retry.ok ? parseExtractOutput(retry.text) : null
     if (retryParsed) {
-      const again = collectExtractResults(missing, retryParsed, stats)
+      const again = collectExtractResults(missing, retryParsed, stats, fullSourceTextByRef)
       drafts.push(...again.drafts)
       for (const ref of again.answered) answered.add(ref)
     }
@@ -802,38 +795,81 @@ if (import.meta.vitest) {
       expect(answered.has('#2')).toBe(true)
     })
 
-    it('degrades to verified content only: evidence slice, else pruned sentences (never the whole card)', () => {
+    it('证据不再当门槛（2026-10-03）：事实逐句有据就接受，无据才按句修剪', () => {
       const stats = emptyExtractStats(batch.length, 0)
       const { drafts } = collectExtractResults(
         batch,
         {
           paragraphs: [
-            // 证据是改写过的 → 判为 evidence-not-found → 按句修剪（不再是"退回整卡原文"）
+            // 证据是改写过的（非逐字）→ **不再判失败**：事实逐句核验通过 → 接受并记 evidenceLoose
             { sourceRef: '#1', text: '2018 年，全区普通中学 30 所。', timeLabel: '2018 年', evidence: '全区共有普通中学 30 所' },
-            // 编造数字（32 所） → 判为 number-not-in-source；证据能逐字定位 → 只保留证据片段
+            // 编造数字（232 所，卡片里是 212）→ 判为无据；证据能逐字定位 → 只保留证据片段
             { sourceRef: '#2', text: '2020 年，全区幼儿园 232 所。', timeLabel: '2020 年', evidence: '全区幼儿园 212 所' }
           ],
           dropped: []
         },
         stats
       )
-      expect(stats.accepted).toBe(0)
-      expect(stats.unverified).toBe(2)
-      expect(stats.invalidEvidence).toBe(1)
+      expect(stats.accepted).toBe(1)
+      expect(stats.evidenceLoose).toBe(1)
+      expect(stats.invalidEvidence).toBe(0)
+      expect(stats.unverified).toBe(1)
       expect(stats.invalidNumbers).toBe(1)
       expect(drafts).toHaveLength(2)
-      expect(drafts.every((d) => d.degraded === true)).toBe(true)
-      // ① 证据定位不到 → 按句修剪（保留可核验句子；小卡片可能整张都留下，但**长度受上限约束**）
-      expect(drafts[0].degradedFromEvidence).toBeFalsy()
-      expect(drafts[0].degradedKeptSentences ?? 0).toBeGreaterThan(0)
-      expect(drafts[0].text).toContain('全区普通中学 30 所')
-      expect(drafts[0].text.length).toBeLessThanOrEqual(DEGRADED_MAX_CHARS)
-      // ② 证据能定位 → 只保留该片段（粒度最细）
+      // ① 接受的这段：evidence 被忽略（非逐字），正文原样保留
+      expect(drafts[0].degraded).toBeFalsy()
+      expect(drafts[0].text).toBe('2018 年，全区普通中学 30 所。')
+      expect(drafts[0].evidence).toBeUndefined()
+      // ② 无据的那段：证据能定位 → 只保留该片段（粒度最细）
+      expect(drafts[1].degraded).toBe(true)
       expect(drafts[1].degradedFromEvidence).toBe(true)
       expect(drafts[1].text).toBe('全区幼儿园 212 所')
       expect(stats.degradedFromEvidence).toBe(1)
-      expect(stats.degradedPruned).toBe(1)
+      expect(stats.degradedPruned).toBe(0)
       expect(stats.droppedUnverifiable).toBe(0)
+    })
+
+    it('③ 的比对范围是**整个来源**，不只是本批卡片（未被成卡的数字同样有据）', () => {
+      const stats = emptyExtractStats(batch.length, 0)
+      const full = new Map<string, string>([
+        ['#1', batch[0].excerpt + batch[1].excerpt + '另据台账，全区另有普通高中 4 所。']
+      ])
+      const { drafts } = collectExtractResults(
+        batch,
+        {
+          paragraphs: [
+            {
+              sourceRef: '#1',
+              text: '2018 年，全区普通高中 4 所（另见台账）。',
+              timeLabel: '2018 年',
+              evidence: '全区另有普通高中 4 所'
+            }
+          ],
+          dropped: []
+        },
+        stats,
+        full
+      )
+      expect(stats.accepted).toBe(1)
+      expect(drafts[0].text).toContain('4 所')
+      // 不给全来源正文（只有卡片）→ 该数字无据而被判失败
+      const stats2 = emptyExtractStats(batch.length, 0)
+      const res2 = collectExtractResults(
+        batch,
+        {
+          paragraphs: [
+            { sourceRef: '#1', text: '2018 年，全区普通高中 4 所（另见台账）。', timeLabel: '2018 年', evidence: '全区另有普通高中 4 所' }
+          ],
+          dropped: []
+        },
+        stats2
+      )
+      expect(stats2.accepted).toBe(0)
+      expect(stats2.invalidNumbers).toBe(1)
+      // 证据不在卡片里（只在完整来源里）→ 兜底按句修剪卡片原文（有界），这也是预期行为
+      expect(res2.drafts[0].degraded).toBe(true)
+      expect(res2.drafts[0].text).toContain('普通中学 30 所')
+      expect(res2.drafts[0].text.length).toBeLessThanOrEqual(DEGRADED_MAX_CHARS)
     })
 
     it('同一来源多张卡时，降级在**证据所属的那张卡**里定位（修掉写死 group[0] 的缺陷）', () => {
@@ -861,16 +897,21 @@ if (import.meta.vitest) {
       const big: ExtractCandidate[] = [
         { index: 0, key: 'c1', sourceRef: '#9', sourceTitle: '福建省2020年普通中小学招生入学政策解读', excerpt: page, ts: '2020 年' }
       ]
+      // 模型写的段落含来源里没有的数字 → 无据 → 走兜底：先剔掉无据句子，再按句核验卡片原文（有界）
       const stats = emptyExtractStats(1, page.length)
       const { drafts } = collectExtractResults(
         big,
-        { paragraphs: [{ sourceRef: '#9', text: '概括改写后的段落。', timeLabel: '2020 年', evidence: '' }], dropped: [] },
+        {
+          paragraphs: [{ sourceRef: '#9', text: '全省共 99999 名学生受益。', timeLabel: '2020 年', evidence: '' }],
+          dropped: []
+        },
         stats
       )
       expect(drafts).toHaveLength(1)
       expect(drafts[0].degraded).toBe(true)
       expect(drafts[0].text.length).toBeLessThanOrEqual(DEGRADED_MAX_CHARS)
       expect(drafts[0].text.length).toBeLessThan(page.length)
+      expect(drafts[0].text).not.toContain('99999')
 
       /*
        * 模型那段一句都核验不了（引用了来源里不存在的《文件》与数字）→ **删掉它**，

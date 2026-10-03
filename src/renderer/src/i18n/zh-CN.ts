@@ -593,7 +593,7 @@ export const zhCN = {
     /* 整合提取（Phase 7.2：细读筛选之后、矛盾扫描之前；允许裁剪/补全/整合，本地两道校验兜底） */
     extractSummary: '（整合提取：{fromCards} 张卡片 / {fromChars} 字 → {toParagraphs} 段 / {toChars} 字，保留约 {kept}%）',
     extractDiagnostics:
-      '（校验：通过 {accepted} 段；降级 {degraded} 段 —— 其中数字在来源中找不到 {numbers} 段、证据引文非原文 {evidence} 段；降级处理：保留证据片段 {fromEvidence} 段、按句保留可核验内容 {pruned} 段）',
+      '（校验：通过 {accepted} 段（其中 {loose} 段未给逐字引文、但事实逐句可核验）；降级 {degraded} 段 —— 其中数字在来源中找不到 {numbers} 段；降级处理：保留证据片段 {fromEvidence} 段、按句保留可核验内容 {pruned} 段）',
     extractDroppedUnverifiable: '另有 {count} 张卡片因"没有一句内容能在来源里核验"而丢弃（不再把整页原文灌入汇编）',
     extractDropped: '模型判定与主题无关而整卡丢弃 {count} 张',
     extractTitleOnly: '另有 {count} 段因"只复述了文章标题、没有正文信息"而丢弃（标题不等于材料）',

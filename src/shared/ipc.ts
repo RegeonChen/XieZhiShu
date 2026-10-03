@@ -498,8 +498,10 @@ export type CompilationExtractScan = CompilationStageScan & {
   degraded?: number
   /** 降级原因细分：正文里的数字在来源中找不到（幻觉嫌疑） */
   invalidNumbers?: number
-  /** 降级原因细分：证据引文不是来源原文 */
+  /** 降级原因细分：证据引文不是来源原文（2026-10-03 起不再是失败原因） */
   invalidEvidence?: number
+  /** 2026-10-03：证据未逐字命中、但事实逐句核验通过而接受（证据从门槛降为充分度） */
+  evidenceLoose?: number
   /** 降级处理细分：只保留了 evidence 片段（粒度最细） */
   degradedFromEvidence?: number
   /** 降级处理细分：按句保留可核验内容（取代原来的"退回整卡原文"） */

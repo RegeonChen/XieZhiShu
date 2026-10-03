@@ -59,6 +59,8 @@ function buildGeneratedSummary(
       degraded?: number
       invalidNumbers?: number
       invalidEvidence?: number
+      /** 2026-10-03：证据未逐字命中但事实逐句核验通过而接受 */
+      evidenceLoose?: number
       degradedFromEvidence?: number
       degradedPruned?: number
       droppedUnverifiable?: number
@@ -103,9 +105,9 @@ function buildGeneratedSummary(
       parts.push(
         zhCN.compilation.extractDiagnostics
           .replace('{accepted}', String(ps.accepted ?? 0))
+          .replace('{loose}', String(ps.evidenceLoose ?? 0))
           .replace('{degraded}', String(ps.degraded ?? 0))
           .replace('{numbers}', String(ps.invalidNumbers ?? 0))
-          .replace('{evidence}', String(ps.invalidEvidence ?? 0))
           .replace('{fromEvidence}', String(ps.degradedFromEvidence ?? 0))
           .replace('{pruned}', String(ps.degradedPruned ?? 0))
       )
