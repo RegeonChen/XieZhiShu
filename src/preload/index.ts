@@ -291,6 +291,15 @@ const api = {
   reindexRag(): Promise<ApiResult<{ queued: number; reset: number }>> {
     return ipcRenderer.invoke(IPC.RAG_REINDEX)
   },
+  /**
+   * 来源块表（Phase 9 高亮补充）：把锚点块号换算成字符区间/页码，供查看器画一个短暂高亮框。
+   * 只读：块表没生成时返回空数组（不在点击时顺带触发重解析）。
+   */
+  getSourceBlocks(
+    id: string
+  ): Promise<ApiResult<{ blocks: { blockIndex: number; charStart: number; charEnd: number; page: number | null }[] }>> {
+    return ipcRenderer.invoke(IPC.SOURCES_BLOCKS, { id })
+  },
   /** 来源本地快照（第三批 C）：读库里已存的正文，不联网；用于"网站改版后仍能核对原文" */
   getSourceSnapshot(id: string): Promise<ApiResult<{ id: string; kind: 'file' | 'url'; title: string; url?: string; snapshotAt?: string; publishedAt?: string; text: string; totalChars: number; truncated: boolean; shortText: boolean }>> {
     return ipcRenderer.invoke(IPC.SOURCES_GET_SNAPSHOT, { id })

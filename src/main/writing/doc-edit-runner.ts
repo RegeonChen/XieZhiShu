@@ -41,7 +41,8 @@ import {
   parseDocEditOutput,
   resolveTimeForEdit,
   validateDocOps,
-  type DocEditParagraphRef
+  type DocEditParagraphRef,
+  type DocEditParsed
 } from './doc-edit-service'
 
 const DOC_EDIT_TIMEOUT_MS = 240000
@@ -215,7 +216,7 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
    * 现在：闸门扩展到"问句/要求细化"，命中后走 `navigateSources`（R1 挑资料 → R2/R3 挑章节 → 读正文），
    * 全程由大模型决定看哪里，本地只搬目录与正文，不做任何相关性判断。
    */
-  const nav: NavOutcome = needsLibraryLookup(text)
+  let nav: NavOutcome = needsLibraryLookup(text)
     ? await navigateSources({
         provider: prov.provider,
         taskId: comp.taskId,
@@ -224,30 +225,64 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
         sources: listNavigableSources(comp.taskId, compilationId)
       })
     : { candidates: [], rounds: [], pickedSources: [], pickedSections: [], readChars: 0, state: 'empty' }
-  const leak: LeakSearchOutcome = { candidates: nav.candidates, state: nav.candidates.length > 0 ? 'ok' : nav.state === 'failed' ? 'failed' : 'empty', scanned: nav.readChars }
+  let leak: LeakSearchOutcome = {
+    candidates: nav.candidates,
+    state: nav.candidates.length > 0 ? 'ok' : nav.state === 'failed' ? 'failed' : 'empty',
+    scanned: nav.readChars
+  }
 
   // 用户消息先落库（无论成功失败都留痕）
   insertCompilationMessage({ compilationId, role: 'user', content: text })
 
-  const result = await chatCompletion(
-    prov.provider,
-    buildDocEditMessages(refs, text, sources, { requirement: comp.title, candidates: leak.candidates }),
-    DOC_EDIT_TIMEOUT_MS,
-    { kind: 'compilation-doc-edit', taskId: comp.taskId },
-    { maxRetries: 0, temperature: 0 }
-  )
-  if (!result.ok) {
-    const message = result.error?.message ?? '调用大模型失败'
-    insertCompilationMessage({ compilationId, role: 'assistant', content: '修改失败：' + message })
-    return { ok: false, error: { code: result.error?.code ?? ErrorCodes.LLM_TIMEOUT, message } }
-  }
-  const parsed = parseDocEditOutput(result.text)
-  if (!parsed) {
-    insertCompilationMessage({ compilationId, role: 'assistant', content: '大模型返回的修改格式无法解析，文档未改动。' })
-    return { ok: false, error: { code: ErrorCodes.LLM_FORMAT_INVALID, message: '大模型返回的修改格式无法解析（文档未改动）' } }
+  const askModel = async (candidates: LeakCandidate[]): Promise<{ ok: true; parsed: DocEditParsed } | { ok: false; message: string; code: string }> => {
+    const r = await chatCompletion(
+      prov.provider,
+      buildDocEditMessages(refs, text, sources, { requirement: comp.title, candidates }),
+      DOC_EDIT_TIMEOUT_MS,
+      { kind: 'compilation-doc-edit', taskId: comp.taskId },
+      { maxRetries: 0, temperature: 0 }
+    )
+    if (!r.ok) return { ok: false, message: r.error?.message ?? '调用大模型失败', code: r.error?.code ?? ErrorCodes.LLM_TIMEOUT }
+    const p = parseDocEditOutput(r.text)
+    if (!p) return { ok: false, message: '大模型返回的修改格式无法解析（文档未改动）', code: ErrorCodes.LLM_FORMAT_INVALID }
+    return { ok: true, parsed: p }
   }
 
-  const { accepted, rejected } = validateDocOps(parsed.ops, refs, buildSourceTextByOrdinal(compilationId, refs))
+  let first = await askModel(leak.candidates)
+  if (!first.ok) {
+    insertCompilationMessage({ compilationId, role: 'assistant', content: '修改失败：' + first.message })
+    return { ok: false, error: { code: first.code, message: first.message } }
+  }
+
+  /*
+   * 模型**主动申请查资料库**（2026-10-03 新增）：闸门只按措辞猜（问句/细节词/漏了），
+   * 纯名词短语（如"长乐一中省一级达标情况"）可能猜不到。这里给模型一条自陈通道：
+   * 它判断"必须看资料库原文"时输出 `{"op":"needLibrary","query":"…"}`，软件据此跑一轮导航并**重问一次**。
+   * 上限 1 次——只有第一次回答且本轮尚未导航过时才响应，避免来回烧调用。
+   */
+  let parsed = first.parsed
+  const asked = parsed.ops.find((o) => o.op === 'needLibrary')
+  if (asked && nav.candidates.length === 0) {
+    nav = await navigateSources({
+      provider: prov.provider,
+      taskId: comp.taskId,
+      question: (asked.query ?? '').trim() || text,
+      requirement: comp.title,
+      sources: listNavigableSources(comp.taskId, compilationId)
+    })
+    leak = {
+      candidates: nav.candidates,
+      state: nav.candidates.length > 0 ? 'ok' : nav.state === 'failed' ? 'failed' : 'empty',
+      scanned: nav.readChars
+    }
+    const second = await askModel(leak.candidates)
+    if (second.ok) parsed = second.parsed
+    logMain('compilation', '模型申请查资料库 → 导航候选 ' + leak.candidates.length + ' 段，重问' + (second.ok ? '成功' : '失败'))
+  }
+  // needLibrary 由上面处理；留在 ops 里会让校验报"不支持的操作类型"
+  const ops = parsed.ops.filter((o) => o.op !== 'needLibrary')
+
+  const { accepted, rejected } = validateDocOps(ops, refs, buildSourceTextByOrdinal(compilationId, refs), leak.candidates)
   if (accepted.length === 0) {
     // 一条都没应用 → 文档不变，把原因如实回给用户
     const why = rejected.length > 0 ? '（' + rejected.map((r) => r.op + '：' + r.reason).join('；') + '）' : ''

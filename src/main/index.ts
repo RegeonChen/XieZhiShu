@@ -75,10 +75,13 @@ import {
   type CompilationExcludeItemsReq,
   type CompilationExcludeItemsRes,
   type SourceDeleteRes,
-  type SourceDeleteManyRes
+  type SourceDeleteManyRes,
+  type SourceGetReq,
+  type SourceBlocksRes
 } from '../shared/ipc'
 import type { ApiResult, Source, Tag, LlmProviderConfig, AppSettings, WritingTask, Draft, RetrievedChunk } from '../shared/types'
 import { getDb } from './db/connection'
+import { listSourceBlocks } from './db/source-blocks'
 import { listSources, getSourceById, deleteSource, deleteSources, updateSourceTitle, updateSourceFingerprint } from './db/sources'
 import { listTags, createTag, updateTag, deleteTag, addTagToSource, removeTagFromSource, getTagsBySource, batchAddTags, searchTags, getSourceIdsByTag } from './db/tags'
 import { importFiles, importUrl } from './import'
@@ -1409,6 +1412,22 @@ handleLogged(IPC.COMPILATION_EXCLUDE_ITEMS, (_event, params: CompilationExcludeI
     const comp = getCompilationById(params.compilationId)
     if (!comp) return { ok: false, error: { code: 'INVALID_PARAM', message: '资料汇编不存在' } }
     return { ok: true, data: { compilation: comp, excluded: res.excluded, message: res.message } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 来源块表（Phase 9 高亮补充）：渲染层据此把锚点块号换算成字符区间/页码，画一个短暂高亮框。
+// 块表是懒生成的：这里**只读**（没有就返回空数组），绝不在用户点开来源时顺带触发重解析。
+handleLogged(IPC.SOURCES_BLOCKS, (_event, params: SourceGetReq): ApiResult<SourceBlocksRes> => {
+  try {
+    const rows = listSourceBlocks(params.id)
+    return {
+      ok: true,
+      data: {
+        blocks: rows.map((b) => ({ blockIndex: b.blockIndex, charStart: b.charStart, charEnd: b.charEnd, page: b.page }))
+      }
+    }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }

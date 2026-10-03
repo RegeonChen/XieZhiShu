@@ -41,7 +41,13 @@ export interface DocEditParagraphRef {
 
 /** 大模型返回的一条操作 */
 export interface DocEditOp {
-  op: 'delete' | 'replace' | 'insertAfter' | 'move' | 'merge' | 'split' | 'setTime' | 'replaceAll'
+  op: 'delete' | 'replace' | 'insertAfter' | 'move' | 'merge' | 'split' | 'setTime' | 'replaceAll' | 'needLibrary'
+  /**
+   * `needLibrary`（2026-10-03 新增）：模型判断"用户要的事实必须回资料库找、当前汇编与候选里都没有"时，
+   * 用它**主动申请一次资料库导航**（`query` 是它想查的问题）。软件会跑一轮"目录导航"再重问一次，
+   * 这样任何措辞（不只是含问号或"漏了"）都能触发查资料库，且不靠本地猜测。
+   */
+  query?: string
   /** delete / move / merge 用 */
   ids?: string[]
   /** replace / split / setTime 用 */
@@ -111,6 +117,7 @@ export function parseDocEditOutput(text: string): DocEditParsed | null {
     if (typeof o.timeLabel === 'string') entry.timeLabel = o.timeLabel
     if (typeof o.sourceOrdinal === 'number') entry.sourceOrdinal = o.sourceOrdinal
     if (typeof o.at === 'number') entry.at = o.at
+    if (typeof o.query === 'string') entry.query = o.query
     if (o.allowNewNumbers === true) entry.allowNewNumbers = true
     if (Array.isArray(o.paragraphs)) {
       entry.paragraphs = o.paragraphs
@@ -286,6 +293,10 @@ export function validateDocOps(
         accepted.push(op)
         break
       }
+      case 'needLibrary':
+        // 由 runner 处理（它会去跑一轮资料库导航并重问一次）；走到这里说明模型重复申请，如实告知
+        reject(op, '需要资料库原文，但本轮已无法再检索（请把问题再说具体些）')
+        break
       default:
         reject(op, '不支持的操作类型')
     }
@@ -461,7 +472,12 @@ export function buildDocEditMessages(
     '6. 不要删除用户没有要求删除的内容；改动尽量小、贴合用户要求。',
     '7. 若用户的要求无法用上述 ops 表达，则不要输出任何 op，只在 reply 里说明原因。',
     '8. **用户只是提问（问具体是哪几所/某个数字/某年情况）时**：先在 reply 里把答案讲清楚（含年份口径与来源），',
-    '   再把值得入编的事实用 `insertAfter` 落成一张新卡片；**问题本身不需要改文档时不要输出多余的 op**。'
+    '   再把值得入编的事实用 `insertAfter` 落成一张新卡片；**问题本身不需要改文档时不要输出多余的 op**。',
+    '9. **信息不够、需要回资料库找时**（2026-10-03）：若上面没有给出【资料库原文】，而用户要的答案必须查资料库',
+    '   才能确定（例如问某年名单、某校具体情况、某个数字的出处），**不要猜、也不要只说"汇编里没有"**，',
+    '   而是输出一个 `{"op":"needLibrary","query":"你想查的问题"}`（可只输出这一条 op）。',
+    '   软件会据此去资料库里做一轮检索，然后把原文再发给你，届时再作答与落卡。',
+    '   注意：**只有当答案确实需要资料库原文时**才用它；能凭当前汇编答的就直接答，不要滥用。'
   ].join('\n')
   return [
     { role: 'system', content: sys },
@@ -571,6 +587,22 @@ if (import.meta.vitest) {
         '来源编号超出范围',
         '只能合并同一来源的段落'
       ])
+    })
+
+    it('needLibrary：模型可主动申请查资料库（解析出 query；不改文档；重复申请如实拒绝）', () => {
+      const parsed = parseDocEditOutput('{"reply":"需要查资料库","ops":[{"op":"needLibrary","query":"2022 年省一级达标高中是哪两所"}]}')!
+      expect(parsed.ops).toHaveLength(1)
+      expect(parsed.ops[0].op).toBe('needLibrary')
+      expect(parsed.ops[0].query).toBe('2022 年省一级达标高中是哪两所')
+      // 不改文档（applyDocOps 原样返回）
+      const before = [{ key: 'p1', id: 'i1', text: '甲', sourceOrdinal: 1 }]
+      expect(applyDocOps(before, parsed.ops)).toEqual(before)
+      // 走到校验（说明 runner 没有拦下它）→ 如实拒绝，而不是"不支持的操作类型"
+      const v = validateDocOps(parsed.ops, [
+        { key: 'p1', id: 'i1', text: '甲', sourceOrdinal: 1 }
+      ] as DocEditParagraphRef[], new Map())
+      expect(v.accepted).toHaveLength(0)
+      expect(v.rejected[0].reason).toContain('需要资料库原文')
     })
 
     it('skips the number check when the user explicitly asked for that number (allowNewNumbers)', () => {

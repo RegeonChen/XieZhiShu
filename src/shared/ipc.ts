@@ -124,6 +124,12 @@ export const IPC = {
 
   /* 来源本地快照（第三批 C：网页会改版/撤稿，溯源要看抓取当时存下来的正文） */
   SOURCES_GET_SNAPSHOT: 'sources:getSnapshot',
+  /**
+   * 来源块表（Phase 9 高亮补充，2026-10-03）：
+   * 渲染层据此把"锚点块号"换算成**字符区间 / 页码**，从而在查看器里画一个短暂的高亮框
+   * （只读、只在该来源已生成块表时有内容）。
+   */
+  SOURCES_BLOCKS: 'sources:blocks',
 
   /* 内嵌网页浏览器（Phase 8 / S4：网页来源直接看原网页，而不是本地快照） */
   /** 打开内嵌浏览器并加载某条网页来源；rect 为它在窗口内容区中的位置（DIP） */
@@ -249,6 +255,10 @@ export interface SourceDeleteManyReq {
 export type SourceRenderHtmlReq = SourceGetReq
 export type SourceRenderHtmlRes = { html: string }
 export type SourceGetFileUrlRes = { url: string }
+/** 来源块表：供查看器把锚点块号换算成字符区间/页码（高亮用） */
+export interface SourceBlocksRes {
+  blocks: { blockIndex: number; charStart: number; charEnd: number; page: number | null }[]
+}
 
 /**
  * 内嵌网页浏览器（Phase 8 / S4）。
@@ -1033,6 +1043,7 @@ export interface IpcMapping {
   [IPC.RAG_REINDEX]: { _req: void; _res: ApiResult<RagReindexRes> }
   // 来源本地快照
   [IPC.SOURCES_GET_SNAPSHOT]: { _req: SourceSnapshotReq; _res: ApiResult<SourceSnapshotRes> }
+[IPC.SOURCES_BLOCKS]: { _req: SourceGetReq; _res: ApiResult<SourceBlocksRes> }
   // 内嵌网页浏览器（Phase 8 / S4）
   [IPC.WEB_BROWSER_OPEN]: { _req: WebBrowserOpenReq; _res: ApiResult<WebBrowserStateRes> }
   [IPC.WEB_BROWSER_SET_BOUNDS]: { _req: WebBrowserSetBoundsReq; _res: ApiResult<{ ok: true }> }

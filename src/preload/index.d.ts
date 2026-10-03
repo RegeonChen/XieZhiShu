@@ -78,6 +78,12 @@ export interface AppApi {
   getRagIndexStatus(): Promise<{ ok: boolean; data?: { total: number; ready: number; pending: number; indexing: number; failed: number; lastError: string | null; lastErrorAt: string | null; queued: number; rebuild: { status: 'running' | 'interrupted' | 'done'; startedAt: string | null; totalQueued: number; remaining: number; processed: number; percent: number; active: boolean }; engine?: { poolSize: number; livePool: number; workerThreads: number; workerErrors: number; directFallbacks: number; lastWorkerError: string | null } }; error?: { code: string; message: string } }>
   reindexRag(): Promise<{ ok: boolean; data?: { queued: number; reset: number }; error?: { code: string; message: string } }>
   getSourceSnapshot(id: string): Promise<{ ok: boolean; data?: { id: string; kind: 'file' | 'url'; title: string; url?: string; snapshotAt?: string; publishedAt?: string; text: string; totalChars: number; truncated: boolean; shortText: boolean }; error?: { code: string; message: string } }>
+  /** 来源块表（只读，Phase 9 高亮补充）：锚点块号 → 字符区间 / 页码 */
+  getSourceBlocks(id: string): Promise<{
+    ok: boolean
+    data?: { blocks: { blockIndex: number; charStart: number; charEnd: number; page: number | null }[] }
+    error?: { code: string; message: string }
+  }>
   getWebMaterials(taskId: string): Promise<{ ok: boolean; data?: { pinned: number }; error?: { code: string; message: string } }>
   /** 来源位置（锚点）统计（只读，Phase 9 / S4 补） */
   getAnchorStats(compilationId: string): Promise<{
