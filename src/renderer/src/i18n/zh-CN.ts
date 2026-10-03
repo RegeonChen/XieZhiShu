@@ -634,7 +634,9 @@ export const zhCN = {
     docChatEditSection: '汇编修改记录（下方输入框只改汇编，不会重跑生成）',
     docChatEditing: '正在修改汇编…',
     docChatMinimize: '最小化',
-    docChatDragHint: '可拖动'
+    docChatDragHint: '可拖动',
+    /** 悬浮面板右下角把手（2026-10-03 用户要求：对话框大小可自由调节） */
+    docChatResizeHint: '拖动调整面板大小'
   },
   sourceRemoval: {
     title: '来源已删除',

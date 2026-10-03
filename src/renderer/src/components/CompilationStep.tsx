@@ -1,7 +1,8 @@
-import { Fragment, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { zhCN } from '../i18n/zh-CN'
 import { locateAnchorForItem, type ItemAnchorView, type SourceLocateAnchor } from '../lib/source-locate'
 import ChatPanel, { type ChatMessageItem, type SourceRefItem } from './ChatPanel'
+import MarkdownText from './MarkdownText'
 
 /**
  * 极简行内 Markdown 渲染（Phase 7.3）：只处理段落正文里常见的 `**加粗**`，
@@ -363,6 +364,52 @@ function CompilationStep({
     dragRef.current = null
   }
 
+  /* ---- 悬浮面板大小可调（2026-10-03 用户要求："对话框的大小应当可以自由调节"）----
+     默认尺寸仍由 CSS 决定（`panelSize` 为 null）；用户拖右下角把手后改用内联宽高。
+     夹取口径：不小于 340×220（再小就装不下消息列表），不大于所在容器减去边距，
+     且**不超出容器**，避免把手拖到看不见的地方后无法再拉回来。 */
+  const [panelSize, setPanelSize] = useState<{ w: number; h: number } | null>(null)
+  const resizeRef = useRef<{ startX: number; startY: number; w: number; h: number } | null>(null)
+  const clampPanelSize = useCallback((w: number, h: number): { w: number; h: number } => {
+    const pane = paneRef.current
+    // 默认锚点是 `right:18px / bottom:78px`，所以上限要预留这两处 + 一点余量，
+    // 否则面板会顶到容器外面（实测拖到极限时曾出现 top 为负数）
+    const maxW = pane ? Math.max(340, pane.clientWidth - 44) : 1200
+    const maxH = pane ? Math.max(220, pane.clientHeight - 96) : 900
+    return { w: Math.round(Math.min(Math.max(w, 340), maxW)), h: Math.round(Math.min(Math.max(h, 220), maxH)) }
+  }, [])
+  const onResizePointerDown = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    e.stopPropagation()
+    const panel = panelRef.current
+    if (!panel) return
+    resizeRef.current = { startX: e.clientX, startY: e.clientY, w: panel.offsetWidth, h: panel.offsetHeight }
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+  const onResizePointerMove = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    const start = resizeRef.current
+    if (!start) return
+    e.stopPropagation()
+    // 面板锚在右下角：向左/向上拖 = 变大
+    const next = clampPanelSize(start.w + (start.startX - e.clientX), start.h + (start.startY - e.clientY))
+    setPanelSize(next)
+    // 面板被拖动过（用 left/top 定位）时，把位置一起收进容器，避免右下角越界
+    const pane = paneRef.current
+    if (pane) {
+      setPanelPos((p) =>
+        p
+          ? {
+              x: Math.min(p.x, Math.max(4, pane.clientWidth - next.w - 4)),
+              y: Math.min(p.y, Math.max(4, pane.clientHeight - next.h - 4))
+            }
+          : p
+      )
+    }
+  }
+  const onResizePointerUp = (e: ReactPointerEvent<HTMLDivElement>): void => {
+    e.stopPropagation()
+    resizeRef.current = null
+  }
+
   useEffect(
     () => () => {
       if (locateTimerRef.current !== null) window.clearTimeout(locateTimerRef.current)
@@ -488,12 +535,15 @@ function CompilationStep({
     </button>
   )
 
-  /** 悬浮面板外壳（可拖动 + 可最小化；标题随模式变化） */
+  /** 悬浮面板外壳（可拖动 + 可调整大小 + 可最小化；标题随模式变化） */
   const panelShell = (body: ReactNode): ReactNode => (
     <div
       ref={panelRef}
-      className={cls('compilation-docchat', generatingMode ? 'is-generating' : '')}
-      style={panelPos ? { left: panelPos.x, top: panelPos.y, right: 'auto', bottom: 'auto' } : undefined}
+      className={cls('compilation-docchat', generatingMode ? 'is-generating' : '', panelSize ? 'is-resized' : '')}
+      style={{
+        ...(panelPos ? { left: panelPos.x, top: panelPos.y, right: 'auto', bottom: 'auto' } : null),
+        ...(panelSize ? { width: panelSize.w, height: panelSize.h, maxHeight: 'none' } : null)
+      }}
     >
       <div
         className="compilation-docchat__head"
@@ -516,6 +566,17 @@ function CompilationStep({
         </button>
       </div>
       {body}
+      {/* 右下角把手：拖动即调整面板宽高（面板锚在右下角，向左/向上拖=变大） */}
+      <div
+        className="compilation-docchat__resize"
+        role="separator"
+        aria-label={t.docChatResizeHint}
+        title={t.docChatResizeHint}
+        onPointerDown={onResizePointerDown}
+        onPointerMove={onResizePointerMove}
+        onPointerUp={onResizePointerUp}
+        onPointerCancel={onResizePointerUp}
+      />
     </div>
   )
 
@@ -589,7 +650,8 @@ function CompilationStep({
                 key={`task-${i}`}
                 className={cls('compilation-docchat__msg', 'is-task', m.role === 'user' ? 'is-user' : 'is-assistant')}
               >
-                {m.content}
+                {/* 模型回复常带 Markdown（2026-10-03 用户要求）：助手消息按 Markdown 渲染，用户消息保持原样 */}
+                {m.role === 'assistant' ? <MarkdownText text={m.content} /> : m.content}
               </div>
             ))}
             <div className="compilation-docchat__section">{t.docChatEditSection}</div>
@@ -602,7 +664,8 @@ function CompilationStep({
         ) : (
           messages.map((m, i) => (
             <div key={i} className={cls('compilation-docchat__msg', m.role === 'user' ? 'is-user' : 'is-assistant')}>
-              {m.content}
+              {/* 模型回复常带 Markdown（2026-10-03 用户要求）：助手消息按 Markdown 渲染 */}
+              {m.role === 'assistant' ? <MarkdownText text={m.content} /> : m.content}
               {m.versionNo != null ? <span className="compilation-docchat__ver">v{m.versionNo}</span> : null}
             </div>
           ))
