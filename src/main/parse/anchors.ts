@@ -12,7 +12,30 @@
  * **零幻觉、零 token 成本**，且不怕卡片被改写（锚点取自逐字的摘录/证据，不是改写后的卡片文字）。
  */
 
-import type { BlockRange } from './page-map'
+import { normalizeForMatch, type BlockRange } from './page-map'
+
+/**
+ * 在来源正文里定位一段**逐字摘录**（卡片摘录 / `evidence`）的字符区间。
+ *
+ * 两条路径：① 直接精确匹配（绝大多数情况）；② 失败时**去空白归一化**后匹配，并用下标映射回原文
+ * （摘录与正文常只差排版空白/换行，与 S1「引文不足 4 字不发锚」同口径：太短不作为依据）。
+ * 这是"确定性锚定"的第一步——有了区间才能算出块号与页码。
+ */
+export function findVerbatimRange(text: string, snippet: string): { start: number; end: number } | null {
+  const needle = (snippet ?? '').trim()
+  if (needle.length < 4) return null
+  const exact = text.indexOf(needle)
+  if (exact >= 0) return { start: exact, end: exact + needle.length }
+
+  const hay = normalizeForMatch(text)
+  const need = normalizeForMatch(needle)
+  if (need.text.length === 0) return null
+  const at = hay.text.indexOf(need.text)
+  if (at < 0) return null
+  const start = hay.map[at]
+  const end = hay.map[Math.min(hay.map.length - 1, at + need.text.length - 1)] + 1
+  return { start, end }
+}
 
 /**
  * 引文是否落在本块内（去空白比对：卡片引文与原文常只差空白/换行）。
@@ -61,6 +84,28 @@ if (import.meta.vitest) {
     { blockIndex: 1, start: 100, end: 200, page: 3 },
     { blockIndex: 2, start: 200, end: 300, page: 4 }
   ]
+
+  describe('anchors: findVerbatimRange', () => {
+    it('精确匹配直接给出区间', () => {
+      const text = '前言。某区新增高中一所，招生 300 人。后记。'
+      const r = findVerbatimRange(text, '某区新增高中一所，招生 300 人。') as { start: number; end: number }
+      expect(r).not.toBeNull()
+      expect(text.slice(r.start, r.end)).toBe('某区新增高中一所，招生 300 人。')
+    })
+
+    it('只差排版空白时也能定位，且区间覆盖原文真实字符', () => {
+      const text = '第一段。\n某 区 新增 高中 一所。\n第二段。'
+      const r = findVerbatimRange(text, '某区新增高中一所。') as { start: number; end: number }
+      expect(r).not.toBeNull()
+      // 原文里这段本身带空格，切片应覆盖到句号为止
+      expect(text.slice(r.start, r.end)).toBe('某 区 新增 高中 一所。')
+    })
+
+    it('找不到或过短时返回 null（宁可不发锚，也不乱定位）', () => {
+      expect(findVerbatimRange('甲甲甲甲。', '乙乙乙乙。')).toBeNull()
+      expect(findVerbatimRange('甲甲甲甲。', '甲甲')).toBeNull() // 不足 4 字
+    })
+  })
 
   describe('anchors: evidenceHitsBlock', () => {
     it('去空白比对；过短（<4 字）不作为依据', () => {
