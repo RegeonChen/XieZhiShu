@@ -161,7 +161,6 @@ export default function WebBrowserPane({ sourceId, url }: Props): React.JSX.Elem
           </span>
         ) : null}
       </div>
-      <p className="web-browser__hint">{zhCN.webBrowser.hint}</p>
       {/* 真正的网页在主进程的 WebContentsView 里（它是窗口坐标系的浮层，会盖住这块占位）；
           这里必须保持是**最后一个元素**，否则高度推算会把下面的内容顶出可见区、出现滚动条而错位。 */}
       <div className="web-browser__host" ref={hostRef} />

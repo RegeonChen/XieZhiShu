@@ -54,7 +54,7 @@ export const zhCN = {
   },
   paneEdge: {
     hideCenter: '隐藏中栏',
-    showCenter: '显示中栏'
+    showCenter: '显示中栏（任务/资料列表）'
   },
   topbar: {
     version: '版本',
@@ -138,7 +138,6 @@ export const zhCN = {
     locatePdfNotFound: '未在该 PDF 的文字中找到该句（原文可能是改写版本）',
     locatePdfNoText: '该 PDF 没有文字层（扫描件），无法定位到具体页；可用页码跳转或「用系统默认程序打开」',
     locateNoText: '该文件没有可检索的文字层，无法定位',
-    locateWebPending: '网页来源暂不做文内定位（可在页面内自行查找）',
     openExternal: '用系统默认程序打开',
     openExternalFailed: '打开失败：{message}',
     close: '关闭'
@@ -157,8 +156,7 @@ export const zhCN = {
     go: '前往',
     addressHint: '地址栏（只允许 http/https）',
     opening: '正在打开网页…',
-    openFailed: '打开网页失败',
-    hint: '此处加载的是原网站**当前**的页面（站点改版后内容会随之变化）；若要核对抓取当时的内容，请用来源小卡里的「查看本地快照」。'
+    openFailed: '打开网页失败'
   },
   sourceDelete: {
     success: '删除成功',
