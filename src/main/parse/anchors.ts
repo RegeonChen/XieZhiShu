@@ -54,6 +54,23 @@ export function renderNumberedBlocks(
   return { text: parts.join('\n'), allowed }
 }
 
+/** 把模型回报的任意形状归一化成"可能含块号的字符串数组"（数组/包装对象/嵌套都取到，深度设上限） */
+function collectLabelTexts(raw: unknown, depth = 0): string[] {
+  if (depth > 3) return []
+  if (typeof raw === 'string') return [raw]
+  if (Array.isArray(raw)) {
+    const out: string[] = []
+    for (const v of raw) out.push(...collectLabelTexts(v, depth + 1))
+    return out
+  }
+  if (raw && typeof raw === 'object') {
+    const out: string[] = []
+    for (const v of Object.values(raw as Record<string, unknown>)) out.push(...collectLabelTexts(v, depth + 1))
+    return out
+  }
+  return []
+}
+
 /**
  * 解析模型回报的块号（容忍大小写、空格、全角破折号、以及 `S3B7` 这类省略写法），
  * 并用 `allowed` 校验：合法的进 `refs`，不合法的进 `invalid`（调用方据此丢弃该锚或记诊断日志）。
@@ -65,20 +82,8 @@ export function parseAnchorLabels(
   const refs: ParsedAnchor[] = []
   const invalid: string[] = []
   const seen = new Set<string>()
-  const texts: string[] = []
-  if (typeof raw === 'string') texts.push(raw)
-  else if (Array.isArray(raw)) for (const v of raw) if (typeof v === 'string') texts.push(v)
-  else if (raw && typeof raw === 'object') {
-    // 容忍 {"blocks": [...]} / {"anchor": "S3-B07"} 这类包装
-    const obj = raw as Record<string, unknown>
-    for (const key of ['blocks', 'block', 'anchor', 'anchors', 'source']) {
-      const v = obj[key]
-      if (typeof v === 'string') texts.push(v)
-      else if (Array.isArray(v)) for (const x of v) if (typeof x === 'string') texts.push(x)
-    }
-  }
 
-  for (const t of texts) {
+  for (const t of collectLabelTexts(raw)) {
     LABEL_RE.lastIndex = 0
     let m: RegExpExecArray | null
     while ((m = LABEL_RE.exec(t)) !== null) {
