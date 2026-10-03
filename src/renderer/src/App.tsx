@@ -77,6 +77,11 @@ function readLayout(key: string, fallback: number): number {
   }
 }
 
+/** 中栏宽度夹取（与拖动时的口径一致）：防止持久化里出现过小的值把中栏压成一条线 */
+function clampCenterWidth(v: number): number {
+  return Math.max(MIN_CENTER, Math.min(v, 600))
+}
+
 export default function App() {
   const [page, setPage] = useState<PageKey>('sources')
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null)
@@ -102,7 +107,9 @@ export default function App() {
   /** 撰写初稿任务总数（用于右栏空状态判断；null = 尚未加载） */
   const [draftTaskCount, setDraftTaskCount] = useState<number | null>(null)
   const [sidebarW, setSidebarW] = useState(() => readLayout(LS_SIDEBAR_W, DEFAULT_SIDEBAR))
-  const [centerW, setCenterW] = useState(() => readLayout(LS_CENTER_W, DEFAULT_CENTER))
+  // 读到的宽度统一夹到 [MIN_CENTER, 600]：localStorage 里一旦留下过小的值（旧版本/异常写入），
+  // 中栏会窄成一条线、看起来跟"界面空白"一样，而且会一直被持久化下去（2026-10-03 加固）
+  const [centerW, setCenterW] = useState(() => clampCenterWidth(readLayout(LS_CENTER_W, DEFAULT_CENTER)))
   // 中栏显隐（默认显示；顶栏按钮切换，持久化）
   const [centerVisible, setCenterVisible] = useState(() => {
     try { return localStorage.getItem(LS_CENTER_VISIBLE) !== '0' } catch { return true }
