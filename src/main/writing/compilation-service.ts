@@ -1418,6 +1418,15 @@ async function runExtractPhase(
   const drafts = state.extractDrafts ?? (state.extractDrafts = [])
   const done = state.extractDoneBatches ?? (state.extractDoneBatches = new Set<number>())
   const agg = emptyExtractStats()
+  /**
+   * 来源编号 → **该来源完整正文**（2026-10-03 用户裁定）：③ 的比对范围不该只是"本批卡片"，
+   * 从同一来源未被成卡的部分引用的数字同样有据。一次读库、整阶段复用。
+   */
+  const sourceTextByRef = new Map<string, string>()
+  for (const r of state.refs) {
+    const text = getSourcesByIds([r.sourceId])[0]?.cleanedText ?? ''
+    if (text) sourceTextByRef.set('#' + r.index, text)
+  }
   /** 把累积的段落草稿按「去重 → 时间排序 → 来源编号顺序」成文；返回段落数与来源数 */
   const finish = (incomplete?: string): { paragraphs: number; sources: string[]; chars: number } => {
     const sourceIdByRef = new Map(state.refs.map((r) => ['#' + r.index, r.sourceId]))
@@ -1449,6 +1458,7 @@ async function runExtractPhase(
       degraded: agg.unverified,
       invalidNumbers: agg.invalidNumbers,
       invalidEvidence: agg.invalidEvidence,
+      evidenceLoose: agg.evidenceLoose,
       degradedFromEvidence: agg.degradedFromEvidence,
       degradedPruned: agg.degradedPruned,
       droppedUnverifiable: agg.droppedUnverifiable,
@@ -1542,7 +1552,9 @@ async function runExtractPhase(
         // 《题目》用短标题；用户撰写要求**全文**另作首要依据传下去（2026-10-03 用户裁定）
         state.shortTitle ?? state.title,
         state.taskId,
-        state.title
+        state.title,
+        // ③ 的比对范围 = **该来源完整正文**（2026-10-03 用户裁定：不只是本批卡片）
+        sourceTextByRef
       ).catch((e) => ({
         ok: false,
         drafts: [] as ExtractedDraft[],
@@ -1567,6 +1579,7 @@ async function runExtractPhase(
       agg.unverified += res.stats.unverified
       agg.invalidNumbers += res.stats.invalidNumbers
       agg.invalidEvidence += res.stats.invalidEvidence
+      agg.evidenceLoose += res.stats.evidenceLoose
       agg.emptyText += res.stats.emptyText
       agg.degradedFromEvidence += res.stats.degradedFromEvidence
       agg.degradedPruned += res.stats.degradedPruned

@@ -241,21 +241,112 @@ export function numbersIn(text: string): string[] {
   return text.match(/\d+(?:[.,]\d+)*/g) ?? []
 }
 
-/** 数字 token 归一（去千分位逗号；小数点保留，避免把 `1.2` 误当成 `12`） */
-function normalizeNumberToken(token: string): string {
-  return token.replace(/,/g, '')
+/** 中文数字（含"两"），用于 ③ 的等价类与低置信标记 */
+const CN_DIGITS: Record<string, number> = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 }
+const CN_UNITS: Record<string, number> = { 十: 10, 百: 100, 千: 1000 }
+
+/** 解析简单中文数字（十二 / 三十 / 三百二十 / 一万二千 …）；解析不出返回 null */
+export function parseChineseNumber(raw: string): number | null {
+  const s = (raw ?? '').trim()
+  if (!s || !/^[零一二三四五六七八九十百千万亿两]+$/.test(s)) return null
+  let total = 0
+  let section = 0
+  let digit = 0
+  for (const ch of s) {
+    if (ch in CN_DIGITS) {
+      digit = CN_DIGITS[ch]
+      continue
+    }
+    if (ch in CN_UNITS) {
+      const unit = CN_UNITS[ch]
+      section += (digit === 0 ? 1 : digit) * unit
+      digit = 0
+      continue
+    }
+    // 万 / 亿：把当前 section 结算进 total
+    const big = ch === '万' ? 1e4 : 1e8
+    total += (section + digit || 1) * big
+    section = 0
+    digit = 0
+  }
+  const value = total + section + digit
+  return Number.isFinite(value) && value > 0 ? value : null
+}
+
+/** 抽出中文数字串（用于等价类匹配） */
+export function chineseNumbersIn(text: string): string[] {
+  return [...String(text ?? '').matchAll(/[零一二三四五六七八九十百千万亿两]{2,}/g)].map((m) => m[0])
+}
+
+interface NumberAtom {
+  token: string
+  /** 归一化后的绝对值（把 亿/万/千 折算进去） */
+  canonical: number
+  /** 是否带"量级/小数"（这类值允许末位 1 个单位的舍入容差） */
+  scaled: boolean
+  /** 末位精度（10 的幂）：用于算舍入容差 */
+  lastUnit: number
+}
+
+function numberAtoms(text: string): NumberAtom[] {
+  const out: NumberAtom[] = []
+  const re = /(\d+(?:[.,]\d+)*)\s*(亿|万|千)?/g
+  let m = re.exec(String(text ?? ''))
+  while (m) {
+    const raw = m[1].replace(/,/g, '')
+    const value = Number(raw)
+    if (Number.isFinite(value)) {
+      const unit = m[2]
+      const factor = unit === '亿' ? 1e8 : unit === '万' ? 1e4 : unit === '千' ? 1e3 : 1
+      const decimals = (raw.split('.')[1] ?? '').length
+      out.push({
+        token: raw,
+        canonical: value * factor,
+        scaled: factor > 1 || decimals > 0,
+        lastUnit: factor * Math.pow(10, -decimals)
+      })
+    }
+    m = re.exec(String(text ?? ''))
+  }
+  return out
 }
 
 /**
- * 正文里出现的每个数字是否都能在来源原文中找到。
- * 采用**整 token 相等**比较（不是子串包含）——否则 `2` 会被 `2018` 里的字符蒙混过关、
- * `30` 会被 `130` 蒙混过关，等于给"编造数字"留了后门。容忍 `1,234` 与 `1234` 这类千分位差异。
- * 这是"整合提取可以自由裁剪，但**不得改写事实、不得编造数字**"的本地硬校验。
+ * 数字是否"有据"（2026-10-03 用户裁定重做 ③）：
+ * - **等价类**：`5.09 亿元` ↔ `50900 万元` ↔ `5.09亿`（量级折算）、`1.2 万` ↔ `12000`、
+ *   `三十所` ↔ `30 所`（中文数字）；
+ * - **舍入容差**：只对带量级/小数的值给"末位 1 个单位"的容差（四舍五入），且相对误差 ≤5%；
+ *   整数（如 `30 所`）仍要求精确相等——保住"`2` 不能混进 `2018`、`30` 不能混进 `130`"这条护栏；
+ * - **区间/合计**：`2018—2020`、`30+5=35` 这类由多个数字组成，逐个数字判定即可。
  */
 export function numbersCoveredBy(text: string, sourceText: string): boolean {
-  const srcTokens = new Set(numbersIn(sourceText).map(normalizeNumberToken))
-  for (const token of numbersIn(text)) {
-    if (!srcTokens.has(normalizeNumberToken(token))) return false
+  const srcAtoms = numberAtoms(sourceText)
+  const srcTokens = new Set(numbersIn(sourceText).map((t) => t.replace(/,/g, '')))
+  const srcCn = new Set(
+    chineseNumbersIn(sourceText)
+      .map((s) => parseChineseNumber(s))
+      .filter((n): n is number => n !== null)
+  )
+  for (const atom of numberAtoms(text)) {
+    if (srcTokens.has(atom.token)) continue
+    if (srcAtoms.some((s) => s.canonical === atom.canonical)) continue
+    // 舍入容差：仅当两侧有一侧带量级/小数
+    const tolerant = srcAtoms.some((s) => {
+      if (!(s.scaled || atom.scaled)) return false
+      const tol = Math.max(s.lastUnit, atom.lastUnit)
+      const diff = Math.abs(s.canonical - atom.canonical)
+      return diff <= tol && diff <= Math.max(s.canonical, atom.canonical) * 0.05
+    })
+    if (tolerant) continue
+    return false
+  }
+  // 中文数字也要能对上（否则"三十所"会被当成没据）
+  for (const cn of chineseNumbersIn(text)) {
+    const value = parseChineseNumber(cn)
+    if (value === null) continue
+    if (srcCn.has(value)) continue
+    if (srcAtoms.some((s) => s.canonical === value)) continue
+    return false
   }
   return true
 }
@@ -443,7 +534,11 @@ export interface ExtractedParagraphDraft {
   reason?: string
 }
 
-/** 段落校验失败的原因（失败即降级保留原文整段，并计入诊断） */
+/**
+ * 段落校验失败的原因（失败即按句修剪，并计入诊断）。
+ * 2026-10-03 起 `evidence-not-found` **不再是失败原因**（证据从门槛降为充分度之一，见
+ * `validateExtractedParagraph`），保留在类型里只为读旧诊断数据。
+ */
 export type ParagraphRejectReason = 'empty-text' | 'evidence-not-found' | 'number-not-in-source'
 
 export type ParagraphValidation =
@@ -456,8 +551,48 @@ export type ParagraphValidation =
       month?: number
       day?: number
       evidence?: string
+      /** true = 模型给的 evidence 不是逐字命中（已忽略），但事实逐句核验通过 */
+      evidenceLoose?: boolean
     }
   | { ok: false; reason: ParagraphRejectReason }
+
+/** 抽句子（保留句末标点；换行也当边界） */
+export function splitSentences(text: string): string[] {
+  return String(text ?? '')
+    .split(/(?<=[。！？；!?;\n])/)
+    .map((s) => s.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+}
+
+/** 句子里的《标题》引用 */
+function titlesIn(text: string): string[] {
+  return [...String(text ?? '').matchAll(/《([^》]{2,40})》/g)].map((m) => m[1])
+}
+
+/**
+ * 该句是否"可核验"：句中的数字都能在来源原文里找到，且引用的《标题》也出现在来源原文里。
+ * 句子里的**文字**无法本地核验（这是本地校验的边界，故只做"关键 token"核验）。
+ */
+export function sentenceFactsVerified(sentence: string, sourceText: string): boolean {
+  if (!numbersCoveredBy(sentence, sourceText)) return false
+  const src = stripSpaces(sourceText)
+  for (const title of titlesIn(sentence)) {
+    if (!src.includes(stripSpaces(title))) return false
+  }
+  return true
+}
+
+/**
+ * 逐句核验一段正文（2026-10-03 用户裁定：把"证据必须逐字"从**门槛**降为**充分度**之一）：
+ * 只要每个"带数字或《引用》"的句子都能在来源原文里找到依据，就认为事实有据；
+ * 返回第一句不过的句子（供诊断/降级按句修剪）。
+ */
+export function verifySentenceFacts(text: string, sourceText: string): { ok: boolean; badSentence?: string } {
+  for (const s of splitSentences(text)) {
+    if (!sentenceFactsVerified(s, sourceText)) return { ok: false, badSentence: s }
+  }
+  return { ok: true }
+}
 
 /**
  * 时间可信度**采信大模型自报**（用户 2026-09-10 裁定：去掉"本地再校验时间"这一条）：
@@ -476,18 +611,26 @@ export function mapModelConfidence(raw: string | undefined, timeLabel: string | 
 }
 
 /**
- * 校验一段整合提取结果（纯函数）：
- * ① 正文非空；② `evidence` 必须是来源原文中逐字连续的一段；③ 正文里的数字必须都能在来源原文中找到。
- * **时间不再参与校验**（用户裁定：只靠提示词规范时间格式，不再本地复核），仅解析出结构化 year/month/day 供排序，
- * 并把模型自报的 confidence 原样透出。
- * 任一条不过 → 返回失败原因，调用方**降级保留可定位的原文**（见 extract-service，优先 evidence 片段）。
+ * 校验一段整合提取结果（纯函数）——2026-10-03 用户裁定后重做：
+ *
+ * 旧口径的问题：把「`evidence` 必须逐字命中」当**门槛**，而这一步的任务恰恰是**压缩重写**——
+ * 段落整合得越通顺，越难给出一段覆盖要点的逐字引文；给不出就掉进粒度最粗的兜底。
+ * 新口径（放开的是形式，收紧的是事实）：
+ *  ① 正文非空；
+ *  ② **逐句事实核验**：每个"带数字或《引用》"的句子都必须能在来源原文里找到依据
+ *     （数字支持 亿/万/千 折算、中文数字、单位舍入容差，见 `numbersCoveredBy`）；
+ *  ③ `evidence` 能逐字命中就带上（供来源定位）；命中不了**不再判失败**，而是记 `evidenceLoose`
+ *     ——事实已经逐句核验过了，"证据"从门槛降为充分度之一。
+ * **时间不参与校验**（用户裁定：只靠提示词规范格式），仅解析出结构化 year/month/day 供排序。
+ * 任一硬失败 → 调用方按句修剪（见 extract-service），**绝不退回整卡原文**。
  */
 export function validateExtractedParagraph(draft: ExtractedParagraphDraft, sourceText: string): ParagraphValidation {
   const text = (draft.text ?? '').trim()
   if (!text) return { ok: false, reason: 'empty-text' }
+  const facts = verifySentenceFacts(text, sourceText)
+  if (!facts.ok) return { ok: false, reason: 'number-not-in-source' }
   const evidenceRaw = (draft.evidence ?? '').trim()
-  if (!evidenceRaw || !locateVerbatim(sourceText, evidenceRaw)) return { ok: false, reason: 'evidence-not-found' }
-  if (!numbersCoveredBy(text, sourceText)) return { ok: false, reason: 'number-not-in-source' }
+  const evidence = evidenceRaw && locateVerbatim(sourceText, evidenceRaw) ? evidenceRaw : undefined
   const timeLabel = (draft.timeLabel ?? '').trim()
   const parsed = parseTimeLabel(timeLabel)
   return {
@@ -498,7 +641,8 @@ export function validateExtractedParagraph(draft: ExtractedParagraphDraft, sourc
     year: parsed.year,
     month: parsed.month,
     day: parsed.day,
-    evidence: evidenceRaw
+    evidence,
+    evidenceLoose: !!evidenceRaw && !evidence
   }
 }
 
@@ -923,16 +1067,28 @@ if (import.meta.vitest) {
       )
       if (noConfidence.ok) expect(noConfidence.timeConfidence).toBe('exact')
       expect(validateExtractedParagraph({ sourceRef: '#1', text: '  ' }, src)).toEqual({ ok: false, reason: 'empty-text' })
-      expect(
-        validateExtractedParagraph({ sourceRef: '#1', text: '普通中学 30 所。', evidence: '这段原文里没有' }, src)
-      ).toEqual({ ok: false, reason: 'evidence-not-found' })
-      expect(validateExtractedParagraph({ sourceRef: '#1', text: '普通中学 30 所。' }, src)).toEqual({
-        ok: false,
-        reason: 'evidence-not-found'
-      })
+      /*
+       * 2026-10-03 用户裁定：**证据不再是门槛**——事实逐句核验通过就接受，
+       * 只是把非逐字的 evidence 丢掉并记 `evidenceLoose`（证据降为充分度之一）。
+       */
+      const loose = validateExtractedParagraph({ sourceRef: '#1', text: '普通中学 30 所。', evidence: '这段原文里没有' }, src)
+      expect(loose.ok).toBe(true)
+      if (loose.ok) {
+        expect(loose.evidence).toBeUndefined()
+        expect(loose.evidenceLoose).toBe(true)
+      }
+      const noEvidence = validateExtractedParagraph({ sourceRef: '#1', text: '普通中学 30 所。' }, src)
+      expect(noEvidence.ok).toBe(true)
+      // 但**事实无据**仍然拒绝（把无关数字删掉不会失败，写来源里没有的数字一定失败）
       expect(
         validateExtractedParagraph({ sourceRef: '#1', text: '全区普通中学 32 所。', evidence: '全区普通中学 30 所' }, src)
       ).toEqual({ ok: false, reason: 'number-not-in-source' })
+      // 数字等价类：量级折算 / 中文数字 / 舍入（用户裁定"形式变化不该被误杀"）
+      expect(validateExtractedParagraph({ sourceRef: '#1', text: '2018 年，普通中学共三十所。' }, src).ok).toBe(true)
+      const money = '项目总投资 5.09 亿元。'
+      expect(validateExtractedParagraph({ sourceRef: '#1', text: '项目总投资 50900 万元。' }, money).ok).toBe(true)
+      expect(validateExtractedParagraph({ sourceRef: '#1', text: '项目总投资约 5.1 亿元。' }, money).ok).toBe(true)
+      expect(validateExtractedParagraph({ sourceRef: '#1', text: '项目总投资 5.9 亿元。' }, money).ok).toBe(false)
     })
 
     it('infers a fallback year from the source title (年鉴年份 − 1) when the label has no year', () => {
