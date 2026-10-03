@@ -152,6 +152,11 @@ interface Props {
   webScan?: { sites: number; siteErrors: number; hits: number; fetched: number; skippedByCap: number; chars: number; reused?: number; newCandidates?: number } | null
   /** 本任务已锁定的网页材料篇数（持久化查询结果；重启后仍可显示） */
   pinnedWebCount?: number
+  /**
+   * 来源位置（锚点）覆盖统计（Phase 9 / S4 补）：锚点是生成后**后台异步**写入的，
+   * 这一行让"多少段有位置、多少段没有"可见（此前只能一条条点圆标才发现）。
+   */
+  anchorStats?: { total: number; anchored: number; withPage: number; ambiguous: number } | null
   /** 重新生成汇编（按当前撰写要求重跑一遍生成管线；A1 会复用已锁定材料） */
   onRegenerateCompilation?: () => void
   /** 来源引用清单（消息内 #N 渲染为可点击来源） */
@@ -219,6 +224,7 @@ function CompilationStep({
   /** 第三批 A1：最近一次生成的网页材料情况（用于面板里的"已锁定 N 篇 / 新文章 M 篇"提示） */
   webScan,
   pinnedWebCount,
+  anchorStats,
   onRegenerateCompilation,
   generatingText,
   generateProgress,
@@ -616,6 +622,26 @@ function CompilationStep({
       <div className="compilation-toolbar">
         <span className="compilation-stat">{t.docStats.replace('{paragraphs}', String(keptItems.length)).replace('{sources}', String(sourceCount))}</span>
         {candidateChunks ? <span className="compilation-stat">{t.candidate.replace('{chunks}', String(candidateChunks))}</span> : null}
+        {/*
+          Phase 9 / S4 补：来源位置覆盖情况。锚点是生成后台异步算的，此前完全看不见——
+          这里如实报"多少段已记录位置 / 其中多少段有页码 / 多少段未记录 / 多少段引文在来源里出现多处"。
+        */}
+        {anchorStats && anchorStats.total > 0 ? (
+          <span
+            className={cls('compilation-stat', anchorStats.anchored < anchorStats.total ? 'is-warn' : '')}
+            onMouseEnter={(e) => showHint(e.currentTarget, t.anchorStatsHint)}
+            onMouseLeave={() => setHint(null)}
+          >
+            {t.anchorStats
+              .replace('{anchored}', String(anchorStats.anchored))
+              .replace('{total}', String(anchorStats.total))
+              .replace('{paged}', String(anchorStats.withPage))}
+            {anchorStats.anchored < anchorStats.total
+              ? t.anchorStatsMissing.replace('{missing}', String(anchorStats.total - anchorStats.anchored))
+              : ''}
+            {anchorStats.ambiguous > 0 ? t.anchorStatsAmbiguous.replace('{count}', String(anchorStats.ambiguous)) : ''}
+          </span>
+        ) : null}
         {pendingTimeCount > 0 ? (
           <span
             className="compilation-stat is-warn"

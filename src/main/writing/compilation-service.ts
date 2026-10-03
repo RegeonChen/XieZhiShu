@@ -1227,7 +1227,20 @@ function persistDocument(
   }
   // Phase 9 / S3 收尾：就地算来源锚点（块号 → 页码）。**唯一**能一次拿到全部刚写库段落的位置；
   // 本函数是同步的，故 fire-and-forget —— 锚点失败绝不影响汇编生成（attachAnchorsQuietly 内吞异常）。
-  void attachAnchorsQuietly(items)
+  //
+  // `upsertCompilationParagraphs` 返回的是按 `position`（= 入参下标）排序的段落，因此可与 `paragraphs`
+  // 一一对应——这样并列来源的候选文字（`anchorCandidates`，只走内存）才能带到锚点阶段。
+  void attachAnchorsQuietly(
+    items.length === paragraphs.length
+      ? items.map((it, i) => ({
+          id: it.id,
+          sourceId: it.sourceId,
+          excerpt: it.excerpt,
+          evidence: it.evidence,
+          candidates: paragraphs[i].anchorCandidates
+        }))
+      : items.map((it) => ({ id: it.id, sourceId: it.sourceId, excerpt: it.excerpt, evidence: it.evidence }))
+  )
   return { itemIdByText, inserted: items.length }
 }
 

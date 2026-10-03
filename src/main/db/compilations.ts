@@ -1746,6 +1746,26 @@ if (import.meta.vitest) {
       expect(listed.find((s) => s.sourceId === sourceIds[1])!.citedCount).toBe(2)
     })
 
+    it('返回顺序与入参一致（锚点挂钩点按 `items[i] ↔ paragraphs[i]` 配对，依赖这条不变量）', () => {
+      const { taskId, sourceIds } = seed()
+      const c = createCompilation({ taskId, title: '高中教育' })
+      const inputs = [
+        { sourceId: sourceIds[0], text: '甲段' },
+        { sourceId: sourceIds[1], text: '乙段' },
+        { sourceId: sourceIds[0], text: '丙段' }
+      ]
+      const items = upsertCompilationParagraphs(c.id, inputs)
+      expect(items.map((it) => it.excerpt)).toEqual(['甲段', '乙段', '丙段'])
+      expect(items.map((it) => it.position)).toEqual([0, 1, 2])
+      // 覆盖写（带 id 复用）时顺序同样保持
+      const again = upsertCompilationParagraphs(c.id, [
+        { id: items[2].id, sourceId: sourceIds[0], text: '丙段' },
+        { id: items[0].id, sourceId: sourceIds[0], text: '甲段' }
+      ])
+      expect(again.map((it) => it.excerpt)).toEqual(['丙段', '甲段'])
+      expect(again.map((it) => it.id)).toEqual([items[2].id, items[0].id])
+    })
+
     it('removes relations together with their paragraph (no orphan rows)', () => {
       const { taskId, sourceIds } = seed()
       const c = createCompilation({ taskId, title: '高中教育' })

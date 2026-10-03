@@ -140,6 +140,8 @@ export const IPC = {
   /* 纳入新网页材料（第三批 A1：材料集合首次落定后，新文章由用户显式纳入） */
   /** 查询本任务已锁定的网页材料篇数（只读；供面板显示"已锁定 N 篇"） */
   COMPILATION_WEB_MATERIALS: 'compilation:webMaterials',
+  // 来源位置（锚点）统计（只读，Phase 9 / S4 补）
+  COMPILATION_ANCHOR_STATS: 'compilation:anchorStats',
 
   /* 工作区（Phase 2.2） */
   WORKSPACE_STATUS: 'workspace:status',
@@ -360,6 +362,23 @@ export interface CompilationWebMaterialsReq {
 }
 export type CompilationWebMaterialsRes = {
   pinned: number
+}
+/**
+ * 来源位置（锚点）的统计（只读，Phase 9 / S4 补：锚点是生成后台异步写的，此前完全看不见）。
+ * `ambiguous` = 该段的证据/正文在来源里出现**多处**（主来源按此检查），说明位置可能不是唯一那处。
+ */
+export interface CompilationAnchorStatsReq {
+  compilationId: string
+}
+export type CompilationAnchorStatsRes = {
+  /** 段落总数 */
+  total: number
+  /** 有来源位置的段数 */
+  anchored: number
+  /** 其中**有页码**的段数（PDF 来源；其余为无页概念的来源，界面报"第 N 段"） */
+  withPage: number
+  /** 其中引文在来源里出现多处的段数（如实统计，不做消歧） */
+  ambiguous: number
 }
 export interface SourceGetSummaryReq {
   id: string
@@ -976,6 +995,7 @@ export interface IpcMapping {
   [IPC.WEB_BROWSER_ACTION]: { _req: WebBrowserActionReq; _res: ApiResult<WebBrowserStateRes> }
   // 纳入新网页材料
   [IPC.COMPILATION_WEB_MATERIALS]: { _req: CompilationWebMaterialsReq; _res: ApiResult<CompilationWebMaterialsRes> }
+  [IPC.COMPILATION_ANCHOR_STATS]: { _req: CompilationAnchorStatsReq; _res: ApiResult<CompilationAnchorStatsRes> }
   // 工作区
   [IPC.WORKSPACE_STATUS]: { _req: void; _res: ApiResult<WorkspaceStatusRes> }
   [IPC.WORKSPACE_MIGRATE]: { _req: void; _res: ApiResult<WorkspaceMigrateRes> }

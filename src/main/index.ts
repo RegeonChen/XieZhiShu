@@ -68,6 +68,8 @@ import {
   type SourceSnapshotRes,
   type CompilationWebMaterialsReq,
   type CompilationWebMaterialsRes,
+  type CompilationAnchorStatsReq,
+  type CompilationAnchorStatsRes,
   type SourceDeleteRes,
   type SourceDeleteManyRes
 } from '../shared/ipc'
@@ -125,6 +127,7 @@ import { listTaskMessages, addTaskMessage } from './db/task-messages'
 import { generateDraft, regenerateDraft, retrieveForTask, chatWithTask } from './writing/generate'
 import { applyContradictionEdit } from './writing/contradiction-apply'
 import { askSourceForTask } from './writing/source-query'
+import { collectAnchorStats } from './writing/anchor-stats'
 import { configureEmbedModel, getEmbedEngineStats, stopEmbedWorker } from './rag/embed'
 import { enqueueIndex, getIndexStatus, getQueueSize, getRebuildProgress, initIndexingState, requeuePendingIndexes } from './rag/indexer'
 import { listPinnedWebMaterials } from './db/web-materials'
@@ -1346,6 +1349,17 @@ handleLogged(IPC.COMPILATION_WEB_MATERIALS, (_event, params: CompilationWebMater
   try {
     if (!params.taskId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
     return { ok: true, data: { pinned: listPinnedWebMaterials(params.taskId).length } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+// 来源位置（锚点）统计（只读，Phase 9 / S4 补）：锚点是后台异步写的，界面据此显示"多少段已记录位置"
+handleLogged(IPC.COMPILATION_ANCHOR_STATS, (_event, params: CompilationAnchorStatsReq): ApiResult<CompilationAnchorStatsRes> => {
+  try {
+    if (!params.compilationId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
+    const stats = collectAnchorStats(params.compilationId)
+    return { ok: true, data: { total: stats.total, anchored: stats.anchored, withPage: stats.withPage, ambiguous: stats.ambiguous } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
