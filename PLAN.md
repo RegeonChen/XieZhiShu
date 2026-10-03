@@ -1241,6 +1241,21 @@ Electron 43 + React 18 + TypeScript 脚手架（electron-vite）；三栏导航�
 
 **更正**：提交 `56a00a3` 的信息把单测数写成"324/325"，**实际为 323/324**（我在未核对输出前就写了数字，属我的记录失误，在此更正）。
 
+### 9.6 S3 设计变更：改为**本地确定性锚定**（2026-10-03，用户裁定「按建议来」）
+
+**核查发现（关键）**：原计划"让大模型在生成时回报块号"**不成立**——整合提取送给模型的**不是来源正文**，而是上一阶段切好的**卡片摘录**（[extract-service.ts](src/main/writing/extract-service.ts) 的 `buildExtractMessages`：`'下面每张【资料卡片】都是从来源文献中整段摘出的'` + `c.excerpt`）。模型没见过的块结构，让它回报块号只会**再造成一个幻觉源**，与"否掉全文检索"的初衷相悖。
+
+**改用的方案（确定性锚定）**：卡片摘录与 `evidence` 都是从来源正文里**逐字**切出来的，"位置"在切出那一刻就已确定：
+1. 切片阶段记录候选卡片的字符区间（摘录是原文逐字片段，定位确定性）；
+2. 段落落库时：每段只来自一张卡片（提示词第 255 行已硬性要求），故继承该卡片区间；再用手上已有的 `evidence` 逐字校验（`compilation-document.ts` 的 `locateVerbatim`）把区间收得更紧；
+3. **区间 → 块号**（查 `source_blocks`）→ **块号 → 页码**。**零幻觉、零 token 成本**，且不怕卡片被改写（锚点取自逐字的摘录/证据，不是改写后的卡片文字）。
+
+**已按此裁定清理**：删除 `renderNumberedBlocks` / `parseAnchorLabels`（模型块号标注与解析，已成无用代码）；`anchors.ts` 只保留**本地**逻辑：`evidenceHitsBlock`（引文↔块去空白比对，<4 字不作依据）、`blockAtOffset`、`resolveAnchor`（证据区间优先 → `exact`；只有卡片区间 → `weak`；都没有 → null）。`compilation_item_anchors` 表与仓储**保留**（`block_index` 仍是锚点单位，只是块号改由本地算出）。
+
+**验证**：typecheck 零错误；vitest **331/332 通过**（唯一失败仍是既有 watcher chokidar 环境项）；生产构建成功。
+
+**下一步（S3 收尾 + S4）**：① 切片/候选构造处记录 `charStart/charEnd` 并随 `ExtractCandidate` 传到整合提取；② 段落落库时算 `block_index` 与 `confidence` → `replaceItemAnchors`；③ S4：定位条改报「已定位到第 P 页」/「已定位到第 N 段」/「未记录来源位置」，删句子高亮与上一处/下一处。
+
 ## Last Phase（收尾阶段）: Acceptance & Packaging（待进行）
 > **说明**：本阶段是**整个项目的收尾阶段**，在所有功能阶段（Phase 1–6.x）全部完成后才执行。此处保留「Phase 5」的旧编号仅为历史追溯，不代表其应在 Phase 6 之前完成；序号与执行顺序无关。
 
