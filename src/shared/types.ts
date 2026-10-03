@@ -271,13 +271,36 @@ export interface CompilationItem {
   alsoSourceTitles?: string[]
   /** 该段的原文证据引文（逐字校验 + 「查看出处」） */
   evidence?: string
+  /**
+   * Phase 9 / S4：该段各来源的**定位锚点**（块号 + 页码），由主进程 JOIN `source_blocks` 填充。
+   * 只读展示用；老汇编没有锚点（Q4 裁定：如实提示"未记录来源位置"，不做检索兜底）。
+   */
+  anchors?: CompilationItemAnchor[]
   origin?: CompilationParagraphOrigin
   /** 段级修订号（diff 的辅助键） */
   revision?: number
   kind?: CompilationParagraphKind
 }
 
-/** 文档中的一段（运行期/版本快照形状；由 CompilationItem 归一而来） */
+/**
+ * 段落 → 来源位置（Phase 9）：**块号 → 页码**，全程不做文本匹配（卡片被改写也能定位）。
+ * `page` 为 null 表示该来源没有页概念（Word/WPS/网页）或页表还没生成 → 界面报"第 N 段"。
+ */
+export interface CompilationItemAnchor {
+  sourceId: string
+  /** 该段取自来源正文的第几块（0 起） */
+  blockIndex: number
+  /** 该块所属页码（1 起）；null = 无页码 */
+  page: number | null
+  /** 该块在来源正文里的起始字符偏移（无页码时界面据此换算"第 N 段"） */
+  charStart: number | null
+  /** exact = 引文确实落在该块内；weak = 仅块号可用（位置存疑，界面如实标注） */
+  confidence: 'exact' | 'weak'
+}
+
+/**
+ * 文档中的一段（运行期/版本快照形状；由 CompilationItem 归一而来）
+ */
 export interface CompilationParagraph {
   id: string
   /** 文档内顺序（0 起） */

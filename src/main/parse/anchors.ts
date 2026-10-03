@@ -38,17 +38,6 @@ export function findVerbatimRange(text: string, snippet: string): { start: numbe
 }
 
 /**
- * 引文是否落在本块内（去空白比对：卡片引文与原文常只差空白/换行）。
- * 用途：把锚点的 `confidence` 定为 `exact`（引文确实在这一块里）或 `weak`（只有卡片区间可用）。
- */
-export function evidenceHitsBlock(evidence: string, blockText: string): boolean {
-  const needle = (evidence ?? '').replace(/\s+/g, '')
-  if (needle.length < 4) return false // 太短不作为依据（与 S1 的"引文不足 4 字不发锚"同口径）
-  const hay = (blockText ?? '').replace(/\s+/g, '')
-  return hay.includes(needle)
-}
-
-/**
  * 用字符区间找它所属的块（块表首尾相接且**不跨页**，所以一个位置只可能落在一块里；
  * 位置落在末尾之外时归入最后一块）。
  */
@@ -60,8 +49,9 @@ export function blockAtOffset(blocks: BlockRange[], offset: number): BlockRange 
 }
 
 /**
- * 由"证据区间 / 卡片区间"定出锚点：**优先用证据**（更紧、且是逐字校验过的），
- * 卡片区间兜底。返回块号与置信度；都没有可用区间时返回 null（调用方按"来源位置待定"处理）。
+ * 由"证据区间 / 卡片区间"定出锚点：**优先用证据**（更紧），卡片区间（段落正文逐字命中）兜底。
+ * 都没有可用区间时返回 null（调用方按"未记录来源位置"处理）。
+ * `confidence` 记录**用的是哪一种区间**（见 `ItemAnchorInput`）：两者都是逐字命中，不作界面警示。
  */
 export function resolveAnchor(
   blocks: BlockRange[],
@@ -104,14 +94,6 @@ if (import.meta.vitest) {
     it('找不到或过短时返回 null（宁可不发锚，也不乱定位）', () => {
       expect(findVerbatimRange('甲甲甲甲。', '乙乙乙乙。')).toBeNull()
       expect(findVerbatimRange('甲甲甲甲。', '甲甲')).toBeNull() // 不足 4 字
-    })
-  })
-
-  describe('anchors: evidenceHitsBlock', () => {
-    it('去空白比对；过短（<4 字）不作为依据', () => {
-      expect(evidenceHitsBlock('甲 甲甲 甲。', '〖X〗甲甲甲甲。')).toBe(true)
-      expect(evidenceHitsBlock('丙丙', '甲甲甲甲。')).toBe(false) // 太短
-      expect(evidenceHitsBlock('乙乙乙乙。', '甲甲甲甲。')).toBe(false)
     })
   })
 

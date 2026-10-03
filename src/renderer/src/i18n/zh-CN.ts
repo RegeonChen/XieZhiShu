@@ -127,17 +127,12 @@ export const zhCN = {
     // 大文档分批渲染（Phase 8 / S2）：还有 N 块未渲染时显示
     moreRemaining: '为加快打开速度，剩余 {n} 部分未展开',
     revealAll: '全部展开',
-    // 文内搜索定位（Phase 8 / S1）
-    locateFound: '已定位到该句：第 {i} / {n} 处',
-    locatePrev: '上一处',
-    locateNext: '下一处',
-    locateNotFound: '未在正文中找到该句（原文可能已改版，或该句来自其它段落）',
-    // PDF 文内定位（Phase 8 / S3）
-    locatePdfSearching: '正在 PDF 里定位…（已扫描 {scanned} / {total} 页）',
-    locatePdfFound: '已定位到第 {page} 页，并高亮该句',
-    locatePdfNotFound: '未在该 PDF 的文字中找到该句（原文可能是改写版本）',
-    locatePdfNoText: '该 PDF 没有文字层（扫描件），无法定位到具体页；可用页码跳转或「用系统默认程序打开」',
-    locateNoText: '该文件没有可检索的文字层，无法定位',
+    // 定位条（Phase 9 / S4）：只报"页/段/未记录位置"三种情况，不再做句子级检索与高亮
+    locatePage: '已定位到第 {page} 页',
+    locateParagraph: '已定位到第 {n} 段',
+    locateNone: '该卡片未记录来源位置（重新生成汇编可获得页级定位）',
+    // 有页的来源（PDF）却没算出页码：逐页文字与库里的正文对不上 → 如实说，不拿"第 N 段"糊弄
+    locatePdfNoPage: '未能确定页码（该 PDF 的逐页文字与正文对不上，可自行翻页或「用系统默认程序打开」）',
     openExternal: '用系统默认程序打开',
     openExternalFailed: '打开失败：{message}',
     close: '关闭'

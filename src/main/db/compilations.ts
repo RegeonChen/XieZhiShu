@@ -10,6 +10,7 @@ import type {
   CompilationContradiction,
   CompilationContradictionStatus,
   CompilationItem,
+  CompilationItemAnchor,
   CompilationMessage,
   CompilationParagraph,
   CompilationParagraphKind,
@@ -24,6 +25,7 @@ import type {
 } from '../../shared/types'
 import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
+import { listAnchorsForItems } from './compilation-item-anchors'
 import { buildParagraphSnapshot, renderDocumentMarkdown, summarizeParagraphChange, withFallbackYear } from '../writing/compilation-document'
 
 interface CompilationRow {
@@ -141,7 +143,8 @@ function loadAlsoSourcesByItems(itemIds: string[]): Map<string, { id: string; or
 function mapItem(
   row: CompilationItemRow,
   titles: Map<string, string>,
-  alsoSources: { id: string; ordinal?: number; title?: string }[] = []
+  alsoSources: { id: string; ordinal?: number; title?: string }[] = [],
+  anchors: CompilationItemAnchor[] = []
 ): CompilationItem {
   // 并列来源（Phase 7.12）：关系表里除主来源之外的那些；只把**已分配到编号**的条目透出给界面，
   // 避免出现"有来源却显示不出编号"的空圆标（未编号的仍保留在 alsoSourceIds 里，回写时不丢）。
@@ -168,6 +171,7 @@ function mapItem(
     alsoSourceOrdinals: alsoWithOrdinal.length > 0 ? alsoWithOrdinal.map((s) => s.ordinal as number) : undefined,
     alsoSourceTitles: alsoWithOrdinal.length > 0 ? alsoWithOrdinal.map((s) => s.title ?? s.id) : undefined,
     evidence: row.evidence ?? undefined,
+    anchors: anchors.length > 0 ? anchors : undefined,
     origin: row.origin ?? undefined,
     revision: row.revision ?? undefined,
     kind: row.kind ?? undefined
@@ -231,7 +235,10 @@ function getItemsByCompilation(compilationId: string): CompilationItem[] {
     .all(compilationId) as CompilationItemRow[]
   const titles = loadSourceTitles(rows.map((r) => r.source_id))
   const also = loadAlsoSourcesByItems(rows.map((r) => r.id))
-  return rows.map((r) => mapItem(r, titles, also.get(r.id) ?? []))
+  // Phase 9 / S4：把锚点（块号 + 页码）随段落一起给渲染层——在这里 JOIN，
+  // 省掉"每段再问一次 IPC"。老汇编没有锚点行，items[i].anchors 就是 undefined。
+  const anchors = listAnchorsForItems(rows.map((r) => r.id), db)
+  return rows.map((r) => mapItem(r, titles, also.get(r.id) ?? [], anchors.get(r.id) ?? []))
 }
 
 export function getCompilationById(id: string): Compilation | null {

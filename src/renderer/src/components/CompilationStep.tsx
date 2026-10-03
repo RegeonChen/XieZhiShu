@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { zhCN } from '../i18n/zh-CN'
+import { locateAnchorForItem, type ItemAnchorView, type SourceLocateAnchor } from '../lib/source-locate'
 import ChatPanel, { type ChatMessageItem, type SourceRefItem } from './ChatPanel'
 
 /**
@@ -45,8 +46,16 @@ export interface CompilationItemView {
   alsoSourceTitles?: string[]
   /** 与 `alsoSourceOrdinals` 一一对应的来源 id（Phase 9 / S1：并列圆标据此直接打开对应来源） */
   alsoSourceIds?: string[]
-  /** 该段的原文证据引文（Phase 8 / S1：打开来源时作为定位锚） */
+  /**
+   * 该段的原文证据引文（Phase 9 / S4 起**只**用于「查看本地快照」里高亮该句），
+   * 定位本身已改由上面的 `anchors` 决定，不再拿它去全文检索。
+   */
   evidence?: string
+  /**
+   * 该段的来源定位锚点（Phase 9 / S4）：块号 + 页码，由主进程 JOIN `source_blocks` 填充。
+   * 老汇编为空 → 界面如实显示"未记录来源位置"（用户裁定 Q4）。
+   */
+  anchors?: ItemAnchorView[]
 }
 
 export interface CompilationVariantView {
@@ -87,10 +96,10 @@ interface Props {
   candidateChunks?: number
   onConfirm: () => void
   /**
-   * 打开来源（Phase 8 / S1）：第二个参数是**定位锚**——通常是该段的 `evidence`（逐字证据引文），
-   * 查看器据此滚到原文那句并高亮；第三个参数是给用户看的说明（如「第 3 段」）。
+   * 打开来源（Phase 9 / S4）：第二个参数是**定位锚**——只报"第 P 页 / 第 N 段 / 未记录来源位置"
+   * （由生成期锚点给出，不做句子级检索）；第三个参数是「查看本地快照」弹窗里要高亮的引文。
    */
-  onOpenSource: (sourceId: string, snippet?: string, label?: string) => void
+  onOpenSource: (sourceId: string, locate?: SourceLocateAnchor, snapshotHighlight?: string) => void
   onResolve: (contradictionId: string, action: 'resolve' | 'ignore', chosenItemId?: string) => void
   onReorderItems: (direction: 'asc' | 'desc') => void
   onUndo: () => void
@@ -825,7 +834,7 @@ function CompilationStep({
                       : renderInlineMarkdown(it.excerpt)}
                   </span>
                   {/* Phase 9 / S1：点圆标**直接开右栏的来源文件**（原先弹"来源小卡"这一中间层，已删除）。
-                      锚点用该段自己的证据引文；标签标出它在本汇编的段号，便于对照。 */}
+                      S4：锚点改由生成期算好的"块号 × 页码"给出（只报页/段，不做句子级检索）。 */}
                   {it.sourceOrdinal != null ? (
                     <button
                       type="button"
@@ -834,8 +843,13 @@ function CompilationStep({
                       onClick={() =>
                         onOpenSource(
                           it.sourceId,
-                          it.evidence || it.excerpt,
-                          it.position ? t.sourceAnchorParagraph.replace('{n}', String(it.position)) : undefined
+                          locateAnchorForItem(
+                            it,
+                            it.sourceId,
+                            // 段号对用户是**1 起**的（`position` 是 0 起的排序位次，直接显示会得到"第 0 段"）
+                            t.sourceAnchorParagraph.replace('{n}', String(it.position + 1))
+                          ),
+                          it.evidence || it.excerpt
                         )
                       }
                       onMouseEnter={(e) => showHint(e.currentTarget, t.sourceBadgeTitle.replace('{n}', String(it.sourceOrdinal)))}
@@ -851,13 +865,17 @@ function CompilationStep({
                       className="compilation-src-badge is-also"
                       aria-label={t.sourceBadgeAlsoTitle.replace('{n}', String(ord))}
                       onClick={() => {
-                        // Q5：并列来源圆标**各开各的来源**（不再借主来源的引文、开主来源）
+                        // Q5：并列来源圆标**各开各的来源**，并带**该来源自己的锚点**（没有就如实说没有）
                         const sid = it.alsoSourceIds?.[i]
                         if (!sid) return
                         onOpenSource(
                           sid,
-                          it.evidence || it.excerpt,
-                          it.position ? t.sourceAnchorParagraph.replace('{n}', String(it.position)) : undefined
+                          locateAnchorForItem(
+                            it,
+                            sid,
+                            t.sourceAnchorParagraph.replace('{n}', String(it.position + 1))
+                          ),
+                          it.evidence || it.excerpt
                         )
                       }}
                       onMouseEnter={(e) => showHint(e.currentTarget, t.sourceBadgeAlsoTitle.replace('{n}', String(ord)))}

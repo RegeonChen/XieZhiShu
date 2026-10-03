@@ -5,6 +5,7 @@ import ConfirmDialog from './ConfirmDialog'
 import ContradictionDialog from './ContradictionDialog'
 import ResizeHandle from './ResizeHandle'
 import SourceViewer from './SourceViewer'
+import type { SourceLocateAnchor } from '../lib/source-locate'
 import StyleGuideEditor from './StyleGuideEditor'
 import ChatPanel, { type ChatMessageItem, type SourceRefItem } from './ChatPanel'
 import CompilationStep, {
@@ -311,8 +312,8 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     setChatWidth((prev) => Math.max(320, Math.min(820, prev + delta)))
   }, [])
 
-  // ---- Phase 8 / S1：右侧「来源」分栏（点段落来源 → 就地打开并定位到原文那句） ----
-  const [sourcePane, setSourcePane] = useState<{ sourceId: string; snippet?: string; label?: string } | null>(null)
+  // ---- Phase 8 / S1：右侧「来源」分栏（点段落来源 → 就地打开并定位）；Phase 9 / S4 起只报"页/段" ----
+  const [sourcePane, setSourcePane] = useState<{ sourceId: string; locate?: SourceLocateAnchor; highlight?: string } | null>(null)
   const [sourceWidth, setSourceWidth] = useState(480)
   const handleSourceResize = useCallback((delta: number) => {
     // 分栏在右侧：向左拖（delta < 0）应把分栏拉宽
@@ -1017,13 +1018,14 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   const warningContradictions = contradictions.filter((c) => c.inDraft === false)
 
   /**
-   * 打开来源（Phase 8 / S1 起）：默认在**右侧分栏**里打开，并带上定位锚（通常是该段的证据引文），
-   * 查看器会滚到那句并高亮。要用系统默认程序（WPS/Word/浏览器）打开时走 `handleOpenSourceExternal`
-   * —— 用户裁定 Q2：内部与外部两种打开方式都要有。
+   * 打开来源（Phase 9 / S4）：默认在**右侧分栏**里打开，并带上**定位锚**——
+   * 锚点来自生成期算好的"卡片 → 块号 → 页码"，查看器只报「第 P 页 / 第 N 段 / 未记录来源位置」，
+   * 不在打开来源时做任何全文检索。要用系统默认程序（WPS/Word/浏览器）打开时走
+   * `handleOpenSourceExternal` —— 用户裁定 Q2：内部与外部两种打开方式都要有。
    */
-  const handleOpenSource = (sourceId: string, snippet?: string, label?: string): void => {
+  const handleOpenSource = (sourceId: string, locate?: SourceLocateAnchor, highlight?: string): void => {
     if (!sourceId) return
-    setSourcePane({ sourceId, snippet, label })
+    setSourcePane({ sourceId, locate, highlight })
   }
 
   const handleAskSource = async (selection: string): Promise<void> => {
@@ -1090,7 +1092,7 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           busy={busy !== null}
           candidateChunks={compilationMeta?.candidateChunks}
           onConfirm={() => void handleExportCompilation()}
-          onOpenSource={(sourceId, snippet, label) => handleOpenSource(sourceId, snippet, label)}
+          onOpenSource={(sourceId, locate, highlight) => handleOpenSource(sourceId, locate, highlight)}
           onResolve={handleResolveContradiction}
           onReorderItems={(direction) => void handleReorderItems(direction)}
           onUndo={() => void handleUndo()}
@@ -1275,7 +1277,8 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
                 key={sourcePane.sourceId}
                 sourceId={sourcePane.sourceId}
                 dense
-                locate={sourcePane.snippet ? { snippet: sourcePane.snippet, label: sourcePane.label } : null}
+                locate={sourcePane.locate ?? null}
+                snapshotHighlight={sourcePane.highlight}
                 onClose={() => setSourcePane(null)}
               />
             </section>
@@ -1307,7 +1310,7 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           onClose={() => setDialogState(null)}
           onResolved={handleContradictionResolved}
           onApplied={handleContradictionApplied}
-          onOpenSource={(sourceId, snippet, label) => handleOpenSource(sourceId, snippet, label)}
+          onOpenSource={(sourceId, highlight) => handleOpenSource(sourceId, undefined, highlight)}
         />
       ) : null}
 

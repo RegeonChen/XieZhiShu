@@ -8,9 +8,10 @@ import { runMigrations } from './migrate'
  * 与 S2 的 `source_blocks` 相乘即页码：卡片 → 块号 → 页。全程不做文本匹配，
  * 因此**卡片被大模型改写后仍能定位**（这正是用户否掉"全文检索"路线的原因）。
  *
- * `confidence` 的两种取值（由生成期本地校验给出，见 `../parse/anchors.ts`）：
- *  - `exact`：该卡的证据引文确实落在所引块内 → 位置可信；
- *  - `weak`：仅块号合法、引文落不进块内（可能是改写版）→ 界面如实显示"位置存疑"。
+ * `confidence` 的两种取值（由生成期**本地确定性**定位给出，见 `../parse/anchors.ts`）记录"靠哪段文字定的位"：
+ *  - `exact`：该段的 `evidence`（证据引文）逐字命中 → 用它定的位；
+ *  - `weak`：没有 `evidence`，用该段正文（卡片摘录）逐字命中定的位。
+ * 两者都是逐字命中，位置可靠性没有差别，界面**不作警示**（旧的"模型回报块号 + 引文交叉校验"路线已废弃）。
  */
 
 export type AnchorConfidence = 'exact' | 'weak'
@@ -24,6 +25,8 @@ export interface ItemAnchorInput {
 export interface ItemAnchorWithPage extends ItemAnchorInput {
   /** 由 source_blocks 解析出的页码；该来源无页概念（Word/WPS/网页）或页表未生成时为 null */
   page: number | null
+  /** 该块在来源正文里的起始字符偏移（界面无页码时据此报"第 N 段"）；块行缺失时为 null */
+  charStart: number | null
 }
 
 /** 覆盖写入某段的锚点（事务内先删后插：关系行必须与本次生成结果一致） */
@@ -58,7 +61,7 @@ export function replaceItemAnchors(
 export function listItemAnchorsWithPage(itemId: string, db: Database.Database = getDb()): ItemAnchorWithPage[] {
   return db
     .prepare(
-      `SELECT a.source_id, a.block_index, a.confidence, b.page
+      `SELECT a.source_id, a.block_index, a.confidence, b.page, b.char_start
        FROM compilation_item_anchors a
        LEFT JOIN source_blocks b ON b.source_id = a.source_id AND b.block_index = a.block_index
        WHERE a.item_id = ?
@@ -66,8 +69,20 @@ export function listItemAnchorsWithPage(itemId: string, db: Database.Database = 
     )
     .all(itemId)
     .map((r) => {
-      const row = r as { source_id: string; block_index: number; confidence: AnchorConfidence; page: number | null }
-      return { sourceId: row.source_id, blockIndex: row.block_index, confidence: row.confidence, page: row.page }
+      const row = r as {
+        source_id: string
+        block_index: number
+        confidence: AnchorConfidence
+        page: number | null
+        char_start: number | null
+      }
+      return {
+        sourceId: row.source_id,
+        blockIndex: row.block_index,
+        confidence: row.confidence,
+        page: row.page,
+        charStart: row.char_start
+      }
     })
 }
 
@@ -84,7 +99,7 @@ export function listAnchorsForItems(itemIds: string[], db: Database.Database = g
     const placeholders = slice.map(() => '?').join(',')
     const rows = db
       .prepare(
-        `SELECT a.item_id, a.source_id, a.block_index, a.confidence, b.page
+        `SELECT a.item_id, a.source_id, a.block_index, a.confidence, b.page, b.char_start
          FROM compilation_item_anchors a
          LEFT JOIN source_blocks b ON b.source_id = a.source_id AND b.block_index = a.block_index
          WHERE a.item_id IN (${placeholders})
@@ -92,9 +107,22 @@ export function listAnchorsForItems(itemIds: string[], db: Database.Database = g
       )
       .all(...slice)
     for (const r of rows) {
-      const row = r as { item_id: string; source_id: string; block_index: number; confidence: AnchorConfidence; page: number | null }
+      const row = r as {
+        item_id: string
+        source_id: string
+        block_index: number
+        confidence: AnchorConfidence
+        page: number | null
+        char_start: number | null
+      }
       const list = out.get(row.item_id) ?? []
-      list.push({ sourceId: row.source_id, blockIndex: row.block_index, confidence: row.confidence, page: row.page })
+      list.push({
+        sourceId: row.source_id,
+        blockIndex: row.block_index,
+        confidence: row.confidence,
+        page: row.page,
+        charStart: row.char_start
+      })
       out.set(row.item_id, list)
     }
   }
@@ -136,11 +164,11 @@ if (import.meta.vitest) {
   afterAll(() => db.close())
 
   describe('compilation item anchors (Phase 9 / S3)', () => {
-    it('写入后可解析出页码（块号 → 页）', () => {
+    it('写入后可解析出页码（块号 → 页）与块在正文里的起始偏移', () => {
       expect(replaceItemAnchors(db, 'i1', [{ sourceId: 's1', blockIndex: 0, confidence: 'exact' }])).toBe(1)
       const list = listItemAnchorsWithPage('i1', db)
       expect(list).toHaveLength(1)
-      expect(list[0]).toEqual({ sourceId: 's1', blockIndex: 0, confidence: 'exact', page: 3 })
+      expect(list[0]).toEqual({ sourceId: 's1', blockIndex: 0, confidence: 'exact', page: 3, charStart: 0 })
     })
 
     it('重复块号只记一次；覆盖写入保证与本次生成结果一致', () => {
@@ -158,11 +186,12 @@ if (import.meta.vitest) {
       expect(after.map((a) => a.blockIndex)).toEqual([0]) // 旧锚点被清掉，不是累加
     })
 
-    it('没有块表的来源：锚点在，但页码为 null（界面按"未记录位置"处理）', () => {
+    it('没有块表的来源：锚点在，但页码与块偏移都为 null（界面按"未记录来源位置"处理）', () => {
       replaceItemAnchors(db, 'i1', [{ sourceId: 's2', blockIndex: 0, confidence: 'weak' }])
       const list = listItemAnchorsWithPage('i1', db)
       const s2 = list.find((a) => a.sourceId === 's2')
       expect(s2?.page).toBeNull()
+      expect(s2?.charStart).toBeNull()
     })
 
     it('批量查询按段归组', () => {

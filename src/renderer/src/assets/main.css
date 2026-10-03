@@ -1226,11 +1226,6 @@ body {
   white-space: nowrap;
 }
 
-/* 定位宿主：命中覆盖层以它为坐标系（position: relative），随内容一起滚动 */
-.source-viewer__locate-host {
-  position: relative;
-}
-
 /* ---- Phase 8 / S4：内嵌网页浏览器（网页来源直接看原网页） ---- */
 .web-browser {
   display: flex;
@@ -1275,20 +1270,7 @@ body {
   background: var(--bg-panel);
 }
 
-/* 命中高亮：覆盖层，不改动正文 DOM（docx 是命令式分批追加的，改写文本节点会打乱它） */
-.source-viewer__hit {
-  position: absolute;
-  pointer-events: none;
-  background: var(--hl-locate, rgba(47, 111, 237, 0.22));
-  border-radius: 2px;
-  box-shadow: 0 0 0 1px var(--hl-locate-edge, rgba(47, 111, 237, 0.45));
-}
-.source-viewer__hit.is-current {
-  background: var(--hl-locate-current, rgba(255, 176, 32, 0.35));
-  box-shadow: 0 0 0 1px var(--hl-locate-current-edge, rgba(214, 130, 0, 0.7));
-}
-
-/* 定位结果条（表头下方） */
+/* 定位结果条（表头下方）：Phase 9 / S4 起只报「第 P 页 / 第 N 段 / 未记录来源位置」 */
 .source-viewer__locate {
   display: flex;
   align-items: center;
@@ -1502,21 +1484,6 @@ body {
 }
 .pdf-viewer__page.is-rendered .pdf-viewer__page-note {
   display: none;
-}
-
-/* Phase 8 / S3：PDF 文内定位的命中高亮（覆盖层，按页面百分比定位 → 缩放/分栏变化无需重算） */
-.pdf-viewer__pdf-layer {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  pointer-events: none;
-}
-.pdf-viewer__pdf-hit {
-  position: absolute;
-  transform-origin: 0 0;
-  background: var(--hl-locate-current, rgba(255, 176, 32, 0.4));
-  box-shadow: 0 0 0 1px var(--hl-locate-current-edge, rgba(214, 130, 0, 0.75));
-  border-radius: 2px;
 }
 
 .pdf-viewer__jump {
