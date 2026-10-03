@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
-import type { WorkspaceSourceRemovalPending } from '../shared/ipc'
+import type { WorkspaceSourceRemovalPending, WebBrowserRect, WebBrowserStateRes, WebBrowserAction } from '../shared/ipc'
 import type { ApiResult } from '../shared/types'
 
 interface ImportResults {
@@ -405,6 +405,31 @@ const api = {
   /** 用系统默认软件打开资料源文件（Phase 3.7；URL 资料走浏览器） */
   openSourcePath(sourceId: string): Promise<ApiResult<{ opened: boolean }>> {
     return ipcRenderer.invoke(IPC.SOURCES_OPEN_PATH, { sourceId })
+  },
+
+  /* ---- 内嵌网页浏览器（Phase 8 / S4：网页来源直接看原网页，而不是本地快照） ---- */
+  /** 在指定位置打开内嵌浏览器并加载这条网页来源 */
+  webBrowserOpen(
+    sourceId: string,
+    rect: WebBrowserRect
+  ): Promise<ApiResult<WebBrowserStateRes>> {
+    return ipcRenderer.invoke(IPC.WEB_BROWSER_OPEN, { sourceId, rect })
+  },
+  /** 分栏尺寸/位置变化时同步浏览器视图位置 */
+  webBrowserSetBounds(rect: WebBrowserRect): Promise<ApiResult<{ ok: true }>> {
+    return ipcRenderer.invoke(IPC.WEB_BROWSER_SET_BOUNDS, { rect })
+  },
+  /** 关闭并销毁内嵌浏览器（分栏关闭 / 切换来源 / 离开页面时调用） */
+  webBrowserClose(): Promise<ApiResult<{ ok: true }>> {
+    return ipcRenderer.invoke(IPC.WEB_BROWSER_CLOSE)
+  },
+  /** 地址栏导航（主进程只放行 http/https） */
+  webBrowserNavigate(url: string): Promise<ApiResult<WebBrowserStateRes>> {
+    return ipcRenderer.invoke(IPC.WEB_BROWSER_NAVIGATE, { url })
+  },
+  /** 后退 / 前进 / 重新加载 */
+  webBrowserAction(action: WebBrowserAction): Promise<ApiResult<WebBrowserStateRes>> {
+    return ipcRenderer.invoke(IPC.WEB_BROWSER_ACTION, { action })
   },
   /** 更新片段内容（Markdown；自动记录审核留痕） */
   updateSegment(segmentId: string, content: string): Promise<ApiResult<{ segment: unknown }>> {

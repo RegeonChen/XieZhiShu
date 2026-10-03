@@ -107,6 +107,12 @@ export interface AppApi {
   resolveContradiction(contradictionId: string, action: 'adopt' | 'ignore' | 'revert', variantId?: string): Promise<{ ok: boolean; data?: { contradiction: unknown }; error?: { code: string; message: string } }>
   applyContradiction(draftId: string, contradictionId: string, variantId: string): Promise<{ ok: boolean; data?: { draft: unknown; contradiction: unknown }; error?: { code: string; message: string } }>
   openSourcePath(sourceId: string): Promise<{ ok: boolean; data?: { opened: boolean }; error?: { code: string; message: string } }>
+  /** 内嵌网页浏览器（Phase 8 / S4）：打开 / 调整位置 / 关闭 / 导航 / 后退-前进-刷新 */
+  webBrowserOpen(sourceId: string, rect: { x: number; y: number; width: number; height: number }): Promise<{ ok: boolean; data?: { url: string; title: string; canGoBack: boolean; canGoForward: boolean; loading: boolean }; error?: { code: string; message: string } }>
+  webBrowserSetBounds(rect: { x: number; y: number; width: number; height: number }): Promise<{ ok: boolean; data?: { ok: true }; error?: { code: string; message: string } }>
+  webBrowserClose(): Promise<{ ok: boolean; data?: { ok: true }; error?: { code: string; message: string } }>
+  webBrowserNavigate(url: string): Promise<{ ok: boolean; data?: { url: string; title: string; canGoBack: boolean; canGoForward: boolean; loading: boolean }; error?: { code: string; message: string } }>
+  webBrowserAction(action: 'back' | 'forward' | 'reload'): Promise<{ ok: boolean; data?: { url: string; title: string; canGoBack: boolean; canGoForward: boolean; loading: boolean }; error?: { code: string; message: string } }>
   updateSegment(segmentId: string, content: string): Promise<{ ok: boolean; data?: { segment: unknown }; error?: { code: string; message: string } }>
   getLatestDraftByTask(taskId: string): Promise<{ ok: boolean; data?: { draft: unknown }; error?: { code: string; message: string } }>
   focusWindow(): Promise<{ ok: boolean; error?: { code: string; message: string } }>

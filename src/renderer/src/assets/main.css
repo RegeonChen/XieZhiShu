@@ -1231,6 +1231,50 @@ body {
   position: relative;
 }
 
+/* ---- Phase 8 / S4：内嵌网页浏览器（网页来源直接看原网页） ---- */
+.web-browser {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.web-browser__bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.web-browser__address {
+  flex: 1;
+  min-width: 120px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-panel);
+  color: var(--fg);
+  font-size: 12px;
+}
+.web-browser__status {
+  font-size: 12px;
+  color: var(--fg-soft);
+}
+.web-browser__status--err {
+  color: #dc2626;
+}
+.web-browser__hint {
+  margin-bottom: 6px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--fg-soft);
+}
+/* 主进程的 WebContentsView 会盖住这里；保持可见以便"打开中/失败"时提示能被看到 */
+.web-browser__host {
+  min-height: 160px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-panel);
+}
+
 /* 命中高亮：覆盖层，不改动正文 DOM（docx 是命令式分批追加的，改写文本节点会打乱它） */
 .source-viewer__hit {
   position: absolute;

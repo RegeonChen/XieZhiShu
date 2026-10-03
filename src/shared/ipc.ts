@@ -125,6 +125,18 @@ export const IPC = {
   /* 来源本地快照（第三批 C：网页会改版/撤稿，溯源要看抓取当时存下来的正文） */
   SOURCES_GET_SNAPSHOT: 'sources:getSnapshot',
 
+  /* 内嵌网页浏览器（Phase 8 / S4：网页来源直接看原网页，而不是本地快照） */
+  /** 打开内嵌浏览器并加载某条网页来源；rect 为它在窗口内容区中的位置（DIP） */
+  WEB_BROWSER_OPEN: 'web:browserOpen',
+  /** 分栏尺寸/位置变化时更新浏览器视图的位置 */
+  WEB_BROWSER_SET_BOUNDS: 'web:browserSetBounds',
+  /** 关闭并销毁内嵌浏览器 */
+  WEB_BROWSER_CLOSE: 'web:browserClose',
+  /** 地址栏导航（只允许 http/https） */
+  WEB_BROWSER_NAVIGATE: 'web:browserNavigate',
+  /** 后退 / 前进 / 重新加载 */
+  WEB_BROWSER_ACTION: 'web:browserAction',
+
   /* 纳入新网页材料（第三批 A1：材料集合首次落定后，新文章由用户显式纳入） */
   /** 查询本任务已锁定的网页材料篇数（只读；供面板显示"已锁定 N 篇"） */
   COMPILATION_WEB_MATERIALS: 'compilation:webMaterials',
@@ -232,6 +244,40 @@ export interface SourceDeleteManyReq {
 export type SourceRenderHtmlReq = SourceGetReq
 export type SourceRenderHtmlRes = { html: string }
 export type SourceGetFileUrlRes = { url: string }
+
+/**
+ * 内嵌网页浏览器（Phase 8 / S4）。
+ * `rect` 用**窗口内容区坐标（DIP）**：渲染层用 `getBoundingClientRect()` 量出分栏位置后原样上报。
+ */
+export interface WebBrowserRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+export interface WebBrowserOpenReq {
+  sourceId: string
+  rect: WebBrowserRect
+}
+export interface WebBrowserSetBoundsReq {
+  rect: WebBrowserRect
+}
+export interface WebBrowserNavigateReq {
+  url: string
+}
+/** 只暴露前进/后退/重新加载三种动作：不做通用脚本执行，避免界面层获得额外能力 */
+export type WebBrowserAction = 'back' | 'forward' | 'reload'
+export interface WebBrowserActionReq {
+  action: WebBrowserAction
+}
+export type WebBrowserStateRes = {
+  /** 当前实际地址（重定向后会变） */
+  url: string
+  title: string
+  canGoBack: boolean
+  canGoForward: boolean
+  loading: boolean
+}
 /** 删除单个资料的结果：pendingCascade=true 表示该来源被资料汇编引用，已进入级联清理确认流程（来源尚未删除） */
 export type SourceDeleteRes = { pendingCascade: boolean }
 /** 批量删除资料的结果：pendingCascade=true 表示至少一个来源被资料汇编引用，已进入级联清理确认流程（这些来源尚未删除） */
@@ -922,6 +968,12 @@ export interface IpcMapping {
   [IPC.RAG_REINDEX]: { _req: void; _res: ApiResult<RagReindexRes> }
   // 来源本地快照
   [IPC.SOURCES_GET_SNAPSHOT]: { _req: SourceSnapshotReq; _res: ApiResult<SourceSnapshotRes> }
+  // 内嵌网页浏览器（Phase 8 / S4）
+  [IPC.WEB_BROWSER_OPEN]: { _req: WebBrowserOpenReq; _res: ApiResult<WebBrowserStateRes> }
+  [IPC.WEB_BROWSER_SET_BOUNDS]: { _req: WebBrowserSetBoundsReq; _res: ApiResult<{ ok: true }> }
+  [IPC.WEB_BROWSER_CLOSE]: { _req: void; _res: ApiResult<{ ok: true }> }
+  [IPC.WEB_BROWSER_NAVIGATE]: { _req: WebBrowserNavigateReq; _res: ApiResult<WebBrowserStateRes> }
+  [IPC.WEB_BROWSER_ACTION]: { _req: WebBrowserActionReq; _res: ApiResult<WebBrowserStateRes> }
   // 纳入新网页材料
   [IPC.COMPILATION_WEB_MATERIALS]: { _req: CompilationWebMaterialsReq; _res: ApiResult<CompilationWebMaterialsRes> }
   // 工作区
