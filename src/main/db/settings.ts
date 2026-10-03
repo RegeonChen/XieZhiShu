@@ -58,6 +58,8 @@ export function getSettings(): AppSettings {
   // Phase 7.6：资料汇编字号档位（缺省 = medium，调用方自行兜底）
   const docScale = getSetting('doc_scale')
   if (docScale === 'small' || docScale === 'medium' || docScale === 'large') settings.docScale = docScale
+  // 新手引导已完成标记（落库，dev 与打包版共用；仅显式完成时落库）
+  if (getSetting('onboarding_done') === '1') settings.onboardingDone = true
   // 长任务保持唤醒：只在显式关闭时落库（缺省即开启）
   // 注：原先只写不读，导致该开关重启后被重置为"开启"——2026-09-10 一并修掉
   if (getSetting('keep_awake') === 'false') settings.keepAwake = false
@@ -112,6 +114,12 @@ export function updateSettings(patch: Partial<AppSettings>): AppSettings {
   if ('keepAwake' in patch) {
     if (patch.keepAwake === false) setSetting('keep_awake', 'false')
     else deleteSetting('keep_awake') // 缺省即开启，清除键即可回到默认
+  }
+
+  if ('onboardingDone' in patch) {
+    // 只在"已完成"时落库；传 false 视为清除标记（设置页"重新打开新手引导"不需要清，用户点开即视为未完成）
+    if (patch.onboardingDone === true) setSetting('onboarding_done', '1')
+    else deleteSetting('onboarding_done')
   }
 
   if ('docScale' in patch) {

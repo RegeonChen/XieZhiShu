@@ -495,6 +495,13 @@ export interface AppSettings {
    * `small` = 改造前的字号与文档宽度；`medium`（缺省）/`large` 依次放大字号并收窄两侧留白。
    */
   docScale?: DocScale
+  /**
+   * 新手引导是否已完成/已跳过（2026-10-03 新增）。
+   * 为什么落库而不是只用 localStorage：渲染层在 dev（http://localhost:5173）与打包版（file://）
+   * 属于**两个不同的源**，localStorage 各存一份 → 用户在一种运行方式里跳过，换另一种又会弹一次。
+   * 落库后两种运行方式共用同一标记。localStorage 仍保留作为快速路径。
+   */
+  onboardingDone?: boolean
 }
 
 /** 资料汇编查看器字号档位 */
