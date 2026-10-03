@@ -60,7 +60,8 @@ function buildGeneratedSummary(
       invalidNumbers?: number
       invalidEvidence?: number
       degradedFromEvidence?: number
-      degradedWholeCard?: number
+      degradedPruned?: number
+      droppedUnverifiable?: number
       droppedCards?: number
       omitted?: number
       passthrough?: number
@@ -106,8 +107,11 @@ function buildGeneratedSummary(
           .replace('{numbers}', String(ps.invalidNumbers ?? 0))
           .replace('{evidence}', String(ps.invalidEvidence ?? 0))
           .replace('{fromEvidence}', String(ps.degradedFromEvidence ?? 0))
-          .replace('{wholeCard}', String(ps.degradedWholeCard ?? 0))
+          .replace('{pruned}', String(ps.degradedPruned ?? 0))
       )
+    }
+    if (ps.droppedUnverifiable) {
+      parts.push(zhCN.compilation.extractDroppedUnverifiable.replace('{count}', String(ps.droppedUnverifiable)))
     }
     if (ps.droppedCards) parts.push(zhCN.compilation.extractDropped.replace('{count}', String(ps.droppedCards)))
     // C：两条硬校验的结果如实告知（标题型段落被丢弃 / 年份无据被标待核）
@@ -632,7 +636,8 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
             invalidNumbers?: number
             invalidEvidence?: number
             degradedFromEvidence?: number
-            degradedWholeCard?: number
+            degradedPruned?: number
+            droppedUnverifiable?: number
             droppedCards?: number
             omitted?: number
             passthrough?: number

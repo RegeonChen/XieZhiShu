@@ -6,11 +6,13 @@
  * 旧管线为了保住文本整体性而禁止模型裁剪/组织，导致每段掺入大量与主题无关的内容；
  * 现在放宽限制，允许模型主动**裁剪 + 补全 + 整合**，产出可直接写进志稿的段落。
  *
- * 自由度换来的是幻觉风险，因此本阶段配三道**本地硬校验**（见 compilation-document）：
+ * 自由度换来的是幻觉风险，因此本阶段配本地校验（见 compilation-document）：
  * ① `evidence` 必须是某张卡片原文中**逐字连续**的一段（证明段落确实出自该来源）；
- * ② 正文里的**数字必须都能在该来源的卡片原文中找到**（整 token 比较，不允许编造/推算）；
- * ③ 每段**单一来源**（evidence 落在同一张卡片内，禁止跨来源拼接）。
- * 任一条不过 → **降级保留该卡片原文整段**（不丢材料），并计入诊断。
+ * ② 正文里的**数字必须都能在该来源原文中找到**（整 token 比较，不允许编造/推算）；
+ * ③ 每段**单一来源**（evidence 落在同一张来源的卡片内，禁止跨来源拼接）。
+ * 任一条不过 → **降级只保留可核验的内容**（evidence 片段 → 按句修剪 → 丢弃；见
+ * `degradeKeepingVerifiedContent`），**绝不退回整张卡片原文**（2026-10-03 用户裁定：
+ * 兜底粒度不该由上游卡片粒度决定，否则"整页 = 一张卡"时会把整页原文灌进汇编），并计入诊断。
  *
  * 另外两条硬约束（写进提示词 + 由结构保证）：
  * - **不得合并互相矛盾的说法**：冲突必须保留为不同段落，交给随后的矛盾扫描（否则"自由整合"会把矛盾抹平）；
@@ -24,6 +26,8 @@ import {
   isTitleOnlyParagraph,
   isYearSupportedBySource,
   locateVerbatim,
+  numbersCoveredBy,
+  stripSpaces,
   validateExtractedParagraph,
   withFallbackYear,
   type ExtractedParagraphDraft,
@@ -67,10 +71,14 @@ export interface ExtractedDraft {
   /** 时间可信度：exact=原文明确；inferred=按来源标题兜底推断（年鉴年份 −1）；unknown=仍未确定 */
   timeConfidence?: CompilationTimeConfidence
   evidence?: string
-  /** true = 校验未通过、已降级为原文（优先 evidence 片段，定位不到才用整张卡片原文） */
+  /** true = 校验未通过、已降级为原文（只保留**可核验**的内容，见 `degradeKeepingVerifiedContent`） */
   degraded?: boolean
-  /** true = 降级时用的是 evidence 片段（粒度细）；false = 退回整张卡片原文 */
+  /** true = 降级时用的是 evidence 片段（粒度最细） */
   degradedFromEvidence?: boolean
+  /** 降级时按句保留了 N 句（>0 表示走的是"按句修剪"这条路） */
+  degradedKeptSentences?: number
+  /** true = 按句修剪的是**模型自己写的那段**（而非卡片原文） */
+  degradedPrunedFromModel?: boolean
 }
 
 export interface ExtractBatchStats {
@@ -87,10 +95,12 @@ export interface ExtractBatchStats {
   /** 其中因"证据引文不是原文"降级 */
   invalidEvidence: number
   emptyText: number
-  /** 降级时只保留 evidence 片段（粒度细）的段数 */
+  /** 降级时只保留 evidence 片段（粒度最细）的段数 */
   degradedFromEvidence: number
-  /** 降级时退回整张卡片原文的段数 */
-  degradedWholeCard: number
+  /** 降级时按句保留"可核验句子"的段数（2026-10-03 新增：取代原来的"退回整卡原文"） */
+  degradedPruned: number
+  /** 一句都留不下而**丢弃**的卡片数（2026-10-03：宁可如实丢弃，也不把整页原文灌进汇编） */
+  droppedUnverifiable: number
   /** 模型判定"该卡片与主题无关"而整体丢弃的卡片数 */
   droppedCards: number
   /** 模型始终未回答的卡片数（重问后仍未答） */
@@ -116,7 +126,8 @@ export function emptyExtractStats(input = 0, inputChars = 0): ExtractBatchStats 
     invalidEvidence: 0,
     emptyText: 0,
     degradedFromEvidence: 0,
-    degradedWholeCard: 0,
+    degradedPruned: 0,
+    droppedUnverifiable: 0,
     droppedCards: 0,
     omitted: 0,
     passthrough: 0,
@@ -151,8 +162,10 @@ export interface ExtractScanStats {
   invalidEvidence: number
   /** 降级粒度细分：只保留 evidence 片段 */
   degradedFromEvidence?: number
-  /** 降级粒度细分：退回整张卡片原文 */
-  degradedWholeCard?: number
+  /** 降级粒度细分：按句保留可核验句子（取代原来的"退回整卡原文"） */
+  degradedPruned?: number
+  /** 因"一句可核验的都没有"而丢弃的卡片数（如实告知，不再灌整页原文） */
+  droppedUnverifiable?: number
   /** 模型判定与主题无关而整卡丢弃 */
   droppedCards: number
   /** 模型始终未回答、按原文保留的卡片数 */
@@ -328,36 +341,143 @@ export function logExtractBatchStats(batchNo: number, total: number, stats: Extr
 // ---------------------------------------------------------------- 批次处理（核心，可测试）
 
 /**
- * 降级（用户 2026-09-10 收窄粒度）：
- * - 若能定位到 `evidence`（说明该段确实出自这张卡片）→ **只保留 evidence 那段逐字原文**，
- *   而不是整张卡片原文——实测降级段平均 247 字/段、把整体相关性从 91% 拖到 76%，粒度太粗是主因；
- * - 定位不到 evidence → 才退回整张卡片原文（真正无法定位，只能整体保留）。
- * 两条路径都做段首时间兜底（缺年份时按来源标题推断，年鉴年份 −1）。
+ * 降级（2026-09-10 收窄粒度 → 2026-10-03 用户裁定再改）：
+ *
+ * **永不退回整张卡片原文**。原因（真实案例）：某网页正文没有换行结构（整页 3546 字只有 2 个换行），
+ * 细读把它当**一张卡**；整合提取重写后因 `evidence` 给不出逐字片段而校验失败 → 旧逻辑"退回整卡"
+ * → **整页原文**（3512 字，且没有 evidence、定位失效）进了汇编。兜底粒度取决于上游卡片粒度的设计，
+ * 等于"越忠于原文的重写，惩罚越重"，必须去掉。
+ *
+ * 新顺序（每一档都是**有界**的）：
+ *  ① `evidence` 能在**证据真正所属的那张卡**里逐字定位 → 只保留该片段（修掉旧实现写死 `cards[0]`，
+ *     同一来源多张卡时会去错卡片里找、进而退回错误原文的缺陷）；
+ *  ② 否则**按句核验模型自己写的那段**（`modelText`）：逐句检查，只保留"句中的数字与《标题》
+ *     都能在来源原文里找到"的句子——这样模型做好的整合/压缩被保住，只删掉无据的句子；
+ *  ③ 没有模型文本时（解析失败 / 漏答）→ 按句核验**卡片原文**，同样只留可核验的句子；
+ *  ④ 一句都留不下 → **丢弃该卡**（计入 `droppedUnverifiable`）。
+ *  ②③ 的总长上限 `DEGRADED_MAX_CHARS`（1200 字），因此**不可能再把整页原文灌进汇编**。
+ *
+ * 各档统一做另外两道硬校验（标题型丢弃 / 年份无据标待核）。
  */
-function degraded(candidate: ExtractCandidate, evidence?: string): ExtractedDraft {
-  const located = evidence ? locateVerbatim(candidate.excerpt, evidence) : null
-  const text = located ? candidate.excerpt.slice(located.start, located.end) : candidate.excerpt
-  const time = withFallbackYear(candidate.ts, candidate.sourceTitle, { kind: candidate.sourceKind, publishedAt: candidate.sourcePublishedAt })
-  return {
+export const DEGRADED_MAX_CHARS = 1200
+
+/** 抽句子（保留句末标点；换行也当边界） */
+export function splitSentences(text: string): string[] {
+  const parts = String(text ?? '')
+    .split(/(?<=[。！？；!?;\n])/)
+    .map((s) => s.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+  return parts
+}
+
+/** 句子里的《标题》引用 */
+function titlesIn(text: string): string[] {
+  return [...String(text ?? '').matchAll(/《([^》]{2,40})》/g)].map((m) => m[1])
+}
+
+/**
+ * 该句是否"可核验"：句中的数字都能在来源原文里找到，且引用的《标题》也出现在来源原文里。
+ * 句子里的**文字**无法本地核验（这是本地校验的边界，故只做"关键 token"核验）。
+ */
+export function sentenceFactsVerified(sentence: string, sourceText: string): boolean {
+  if (!numbersCoveredBy(sentence, sourceText)) return false
+  const src = stripSpaces(sourceText)
+  for (const title of titlesIn(sentence)) {
+    if (!src.includes(stripSpaces(title))) return false
+  }
+  return true
+}
+
+/** 逐句保留可核验的句子，返回保留结果（受 `DEGRADED_MAX_CHARS` 约束） */
+function keepVerifiedSentences(text: string, sourceText: string): string[] {
+  const kept: string[] = []
+  let chars = 0
+  for (const s of splitSentences(text)) {
+    if (!sentenceFactsVerified(s, sourceText)) continue
+    if (chars + s.length > DEGRADED_MAX_CHARS && kept.length > 0) break
+    kept.push(s)
+    chars += s.length
+  }
+  return kept
+}
+
+function degradeKeepingVerifiedContent(
+  cards: ExtractCandidate[],
+  evidence: string | undefined,
+  modelText: string,
+  sourceText: string,
+  stats: ExtractBatchStats
+): ExtractedDraft | null {
+  const ev = (evidence ?? '').trim()
+  // ① 证据片段：在**证据所属的卡片**里定位（不再固定第一张）
+  if (ev) {
+    const owner = cards.find((c) => locateVerbatim(c.excerpt, ev) !== null)
+    if (owner) {
+      const located = locateVerbatim(owner.excerpt, ev)!
+      const slice = owner.excerpt.slice(located.start, located.end)
+      const d = degradedChecked(owner, slice, stats)
+      if (d) {
+        stats.degradedFromEvidence += 1
+        // 证据片段本身就是逐字原文 → 顺手写回 evidence，让这段仍能拿到来源定位（Phase 9）
+        return { ...d, degradedFromEvidence: true, evidence: slice }
+      }
+      return null // 标题型内容 → degradedChecked 已计 titleOnlyDropped
+    }
+  }
+  // ② 优先按句修剪**模型自己写的那段**（保住它做好的整合/压缩，只删无据句子）
+  const base = cards.find((c) => c.excerpt) ?? cards[0]
+  const modelKept = keepVerifiedSentences(modelText, sourceText)
+  if (base && modelKept.length > 0) {
+    const d = degradedChecked(base, modelKept.join(''), stats)
+    if (d) {
+      stats.degradedPruned += 1
+      return { ...d, degradedPrunedFromModel: true, degradedKeptSentences: modelKept.length, evidence: pickEvidence(modelKept) }
+    }
+    return null
+  }
+  // ③ 没有可用的模型文本（解析失败 / 漏答）→ 按句核验卡片原文（有界保留）
+  if (base) {
+    const cardKept = keepVerifiedSentences(base.excerpt, sourceText || base.excerpt)
+    if (cardKept.length > 0) {
+      const d = degradedChecked(base, cardKept.join(''), stats)
+      if (d) {
+        stats.degradedPruned += 1
+        return { ...d, degradedKeptSentences: cardKept.length, evidence: pickEvidence(cardKept) }
+      }
+      return null
+    }
+  }
+  // ④ 一句可核验的都没有 → 丢弃（不再退回整卡原文）
+  stats.droppedUnverifiable += 1
+  return null
+}
+
+/**
+ * 用**最长的一句**作 evidence：它确实是卡片里的逐字连续片段，且 ≥12 字，
+ * 于是降级段落仍能拿到来源定位（Phase 9 的锚点走 evidence 优先）。
+ */
+function pickEvidence(sentences: string[]): string | undefined {
+  const longest = sentences.reduce((a, b) => (b.length > a.length ? b : a), sentences[0] ?? '')
+  return longest.length >= 12 ? longest : undefined
+}
+
+/**
+ * 降级保留（evidence 片段 / 按句修剪结果）**并做同样的两道硬校验**（纯函数）：
+ * 标题型段落无新信息 → 直接丢弃；年份无据 → 标「时间待核」。返回 null 表示该卡片被丢掉。
+ * 文本已由 `degradeKeepingVerifiedContent` 定位好，这里只负责组稿、段首时间兜底与这两道校验。
+ */
+function degradedChecked(candidate: ExtractCandidate, text: string, stats: ExtractBatchStats): ExtractedDraft | null {
+  const time = withFallbackYear(candidate.ts, candidate.sourceTitle, {
+    kind: candidate.sourceKind,
+    publishedAt: candidate.sourcePublishedAt
+  })
+  const d: ExtractedDraft = {
     parentIndex: candidate.index,
     text,
     timeLabel: time.timeLabel,
     timeConfidence: time.timeConfidence,
-    degraded: true,
-    degradedFromEvidence: located !== null
+    degraded: true
   }
-}
-
-/**
- * 降级保留（原文整段 / evidence 片段）**并做同样的两道硬校验**（纯函数）：
- * 标题型段落无新信息 → 直接丢弃；年份无据 → 标「时间待核」。返回 null 表示该卡片被丢掉。
- */
-function degradedChecked(
-  candidate: ExtractCandidate,
-  evidence: string | undefined,
-  stats: ExtractBatchStats
-): ExtractedDraft | null {
-  const d = degraded(candidate, evidence)
   if (isTitleOnlyParagraph(d.text, candidate.sourceTitle)) {
     stats.titleOnlyDropped += 1
     return null
@@ -412,13 +532,16 @@ export function collectExtractResults(
       if (reason === 'number-not-in-source') stats.invalidNumbers += 1
       else if (reason === 'evidence-not-found') stats.invalidEvidence += 1
       else stats.emptyText += 1
-      // 降级：优先只保留 evidence 片段（粒度细），定位不到才退回整张卡片原文
-      const fallback = degradedChecked(group[0], (draft.evidence ?? '').trim() || undefined, stats)
-      if (fallback) {
-        if (fallback.degradedFromEvidence) stats.degradedFromEvidence += 1
-        else stats.degradedWholeCard += 1
-        drafts.push(fallback)
-      }
+      // 降级（2026-10-03 用户裁定）：只保留**可核验**的内容——evidence 片段 → 按句修剪模型输出 →
+      // 按句修剪卡片原文 → 丢弃；永不退回整张卡片原文（否则"整页 = 一张卡"时会把整页灌进汇编）。
+      const fallback = degradeKeepingVerifiedContent(
+        group,
+        (draft.evidence ?? '').trim() || undefined,
+        (draft.text ?? '').trim(),
+        sourceText,
+        stats
+      )
+      if (fallback) drafts.push(fallback)
       continue
     }
     // 段落归属：优先归到 evidence 所在的那张卡片（用于矛盾说法映射与诊断），否则归该来源第一张
@@ -555,8 +678,15 @@ export async function extractBatch(
     } else {
       stats.passthrough = batch.length
       stats.omitted = batch.length
-      logMain('extract', '整批 ' + batch.length + ' 张卡片的输出无法解析，已按原文整段保留')
-      return { ok: true, drafts: batch.map((c) => degradedChecked(c, undefined, stats)).filter((d): d is ExtractedDraft => d !== null), stats }
+      logMain('extract', '整批 ' + batch.length + ' 张卡片的输出无法解析，已按"可核验内容"兜底保留（按句修剪，不再灌整卡原文）')
+      return {
+        ok: true,
+        drafts: batch
+          // 没有模型文本 → 走第 ③ 档：按句核验卡片原文（有界保留）
+          .map((c) => degradeKeepingVerifiedContent([c], undefined, '', c.excerpt, stats))
+          .filter((d): d is ExtractedDraft => d !== null),
+        stats
+      }
     }
   }
 
@@ -578,7 +708,8 @@ export async function extractBatch(
     if (answered.has(c.sourceRef)) continue
     stats.omitted += 1
     stats.passthrough += 1
-    const d = degradedChecked(c, undefined, stats)
+    // 漏答的卡片同样只做"可核验内容"兜底（按句修剪卡片原文 / 丢弃），不灌整卡原文
+    const d = degradeKeepingVerifiedContent([c], undefined, '', c.excerpt, stats)
     if (d) drafts.push(d)
   }
   return { ok: true, drafts, stats }
@@ -671,15 +802,15 @@ if (import.meta.vitest) {
       expect(answered.has('#2')).toBe(true)
     })
 
-    it('degrades to the original card when evidence is not verbatim or numbers are invented', () => {
+    it('degrades to verified content only: evidence slice, else pruned sentences (never the whole card)', () => {
       const stats = emptyExtractStats(batch.length, 0)
       const { drafts } = collectExtractResults(
         batch,
         {
           paragraphs: [
-            // 证据是改写过的 → 判为 evidence-not-found → 降级保留原文整段
+            // 证据是改写过的 → 判为 evidence-not-found → 按句修剪（不再是"退回整卡原文"）
             { sourceRef: '#1', text: '2018 年，全区普通中学 30 所。', timeLabel: '2018 年', evidence: '全区共有普通中学 30 所' },
-            // 编造数字（32 所） → 判为 number-not-in-source → 降级
+            // 编造数字（32 所） → 判为 number-not-in-source；证据能逐字定位 → 只保留证据片段
             { sourceRef: '#2', text: '2020 年，全区幼儿园 232 所。', timeLabel: '2020 年', evidence: '全区幼儿园 212 所' }
           ],
           dropped: []
@@ -692,14 +823,100 @@ if (import.meta.vitest) {
       expect(stats.invalidNumbers).toBe(1)
       expect(drafts).toHaveLength(2)
       expect(drafts.every((d) => d.degraded === true)).toBe(true)
-      // 粒度收窄（用户裁定）：evidence 能定位 → 只保留证据片段；定位不到 → 才退回整张卡片原文
-      expect(drafts[0].degradedFromEvidence).toBe(false)
-      expect(drafts[0].text).toBe(batch[0].excerpt)
-      expect(drafts[0].timeLabel).toBe('2018 年')
+      // ① 证据定位不到 → 按句修剪（保留可核验句子；小卡片可能整张都留下，但**长度受上限约束**）
+      expect(drafts[0].degradedFromEvidence).toBeFalsy()
+      expect(drafts[0].degradedKeptSentences ?? 0).toBeGreaterThan(0)
+      expect(drafts[0].text).toContain('全区普通中学 30 所')
+      expect(drafts[0].text.length).toBeLessThanOrEqual(DEGRADED_MAX_CHARS)
+      // ② 证据能定位 → 只保留该片段（粒度最细）
       expect(drafts[1].degradedFromEvidence).toBe(true)
       expect(drafts[1].text).toBe('全区幼儿园 212 所')
       expect(stats.degradedFromEvidence).toBe(1)
-      expect(stats.degradedWholeCard).toBe(1)
+      expect(stats.degradedPruned).toBe(1)
+      expect(stats.droppedUnverifiable).toBe(0)
+    })
+
+    it('同一来源多张卡时，降级在**证据所属的那张卡**里定位（修掉写死 group[0] 的缺陷）', () => {
+      const stats = emptyExtractStats(batch.length, 0)
+      const { drafts } = collectExtractResults(
+        batch,
+        {
+          paragraphs: [
+            // 证据只出现在第 2 张卡（c2）里；旧实现会在 c1 里找 → 找不到 → 退回 c1 整段
+            { sourceRef: '#1', text: '2018 年，全区教职工 901 人。', timeLabel: '2018 年', evidence: '全区教职工 900 人' }
+          ],
+          dropped: []
+        },
+        stats
+      )
+      expect(drafts).toHaveLength(1)
+      expect(drafts[0].degradedFromEvidence).toBe(true)
+      expect(drafts[0].text).toBe('全区教职工 900 人')
+      expect(drafts[0].text).not.toContain('普通中学')
+    })
+
+    it('超长整页卡片不会再被整卡灌入：兜底文本长度受限，且无一句可核验时直接丢弃', () => {
+      // 真实案例：网页正文没有换行结构（整页 = 一张卡，3512 字）
+      const page = Array.from({ length: 60 }, (_, i) => `第${i + 1}项工作要求，各地各校要认真落实到位。`).join('')
+      const big: ExtractCandidate[] = [
+        { index: 0, key: 'c1', sourceRef: '#9', sourceTitle: '福建省2020年普通中小学招生入学政策解读', excerpt: page, ts: '2020 年' }
+      ]
+      const stats = emptyExtractStats(1, page.length)
+      const { drafts } = collectExtractResults(
+        big,
+        { paragraphs: [{ sourceRef: '#9', text: '概括改写后的段落。', timeLabel: '2020 年', evidence: '' }], dropped: [] },
+        stats
+      )
+      expect(drafts).toHaveLength(1)
+      expect(drafts[0].degraded).toBe(true)
+      expect(drafts[0].text.length).toBeLessThanOrEqual(DEGRADED_MAX_CHARS)
+      expect(drafts[0].text.length).toBeLessThan(page.length)
+
+      /*
+       * 模型那段一句都核验不了（引用了来源里不存在的《文件》与数字）→ **删掉它**，
+       * 落回卡片里有据的句子（而不是把无据内容留下、也不是退回整卡）。
+       */
+      const cardOnly: ExtractCandidate[] = [
+        { index: 0, key: 'c1', sourceRef: '#9', sourceTitle: '某网页', excerpt: '正文里有一句可核验的内容。', ts: '2020 年' }
+      ]
+      const stats2 = emptyExtractStats(1, 0)
+      const res2 = collectExtractResults(
+        cardOnly,
+        {
+          paragraphs: [
+            {
+              sourceRef: '#9',
+              text: '依据《并不存在的文件》第 99 号要求，共 9999 人。',
+              timeLabel: '2020 年',
+              evidence: ''
+            }
+          ],
+          dropped: []
+        },
+        stats2
+      )
+      expect(res2.drafts).toHaveLength(1)
+      expect(res2.drafts[0].text).toBe('正文里有一句可核验的内容。')
+      expect(res2.drafts[0].degradedPrunedFromModel).toBeFalsy()
+      expect(stats2.degradedPruned).toBe(1)
+
+      // 防御性兜底：模型那段与卡片都没有任何可核验句子 → 丢弃并如实计数
+      const emptyCard: ExtractCandidate[] = [
+        { index: 0, key: 'c1', sourceRef: '#9', sourceTitle: '某网页', excerpt: ' ', ts: '2020 年' }
+      ]
+      const stats3 = emptyExtractStats(1, 0)
+      const res3 = collectExtractResults(
+        emptyCard,
+        {
+          paragraphs: [
+            { sourceRef: '#9', text: '依据《并不存在的文件》共 9999 人。', timeLabel: '2020 年', evidence: '' }
+          ],
+          dropped: []
+        },
+        stats3
+      )
+      expect(res3.drafts).toHaveLength(0)
+      expect(stats3.droppedUnverifiable).toBe(1)
     })
 
     it('ignores hallucinated source refs and leaves unanswered cards for the caller', () => {
