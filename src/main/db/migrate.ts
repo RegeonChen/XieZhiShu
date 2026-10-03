@@ -1088,6 +1088,28 @@ CREATE TABLE IF NOT EXISTS source_blocks (
 );
 CREATE INDEX IF NOT EXISTS idx_source_blocks_page ON source_blocks(source_id, page);
 `
+  },
+  {
+    // 2026-10-03（Phase 9 S3「卡片的来源锚点」）
+    // 定位链条的**前半截**：生成汇编时把来源正文按块编号送模型，要求每张卡回报"取自哪些块"。
+    // 与 S2 的 `source_blocks` 相乘即"这张卡来自第几页"——全程不做文本匹配，**卡片被改写也能定位**。
+    //
+    // 设计要点：① 只存块号，**不存页码**（页码的唯一来源是 source_blocks，避免两份口径漂移）；
+    // ② `confidence`：'exact' = 该卡的证据引文确实落在所引块内（本地交叉校验通过），
+    //    'weak' = 仅块号合法（引文落不进块内，可能是改写版）→ 界面如实标注"位置存疑"；
+    // ③ 纯新增，不改现有列；④ 老汇编没有锚点 → 界面按 Q4 如实提示"未记录来源位置"。
+    version: 44,
+    sql: `
+CREATE TABLE IF NOT EXISTS compilation_item_anchors (
+  item_id TEXT NOT NULL REFERENCES compilation_items(id) ON DELETE CASCADE,
+  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  block_index INTEGER NOT NULL,
+  confidence TEXT NOT NULL CHECK (confidence IN ('exact','weak')),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (item_id, source_id, block_index)
+);
+CREATE INDEX IF NOT EXISTS idx_compilation_item_anchors_source ON compilation_item_anchors(source_id);
+`
   }
 ]
 
