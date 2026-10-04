@@ -393,6 +393,24 @@ export default function App() {
           onToggle={() => setCenterVisible((v) => !v)}
           onResize={centerVisible ? handleResizeCenter : () => {}}
         />
+        {/*
+          中栏被折叠时的显眼恢复入口（2026-10-03 补）：折叠状态存在 localStorage（`ui.centerVisible`），
+          重启仍生效，只留边界上一个小三角很容易被误认为"页面白屏/没渲染"，因此再给一个带文字的按钮。
+        */}
+        {!centerVisible ? (
+          <button
+            type="button"
+            className="center-pane-restore"
+            style={{ left: sidebarW + 14 }}
+            title={zhCN.paneEdge.showCenter}
+            onClick={() => setCenterVisible(true)}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <polygon points="10,6 10,18 16,12" />
+            </svg>
+            <span>{zhCN.paneEdge.hiddenChip}</span>
+          </button>
+        ) : null}
         {renderWorkPane()}
         {/* 生成汇编工作台常驻挂载：切换页面仅隐藏不卸载，保留进行中的对话记录与生成进度 */}
         <main className="work-pane work-pane--writing" style={{ display: page === 'compile' ? undefined : 'none' }}>
