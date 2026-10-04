@@ -3,6 +3,7 @@ import { zhCN } from '../i18n/zh-CN'
 import { locateAnchorForItem, type ItemAnchorView, type SourceLocateAnchor } from '../lib/source-locate'
 import ChatPanel, { type ChatMessageItem, type SourceRefItem } from './ChatPanel'
 import MarkdownText from './MarkdownText'
+import EdgeResizeHandle from './EdgeResizeHandle'
 
 /**
  * 极简行内 Markdown 渲染（Phase 7.3）：只处理段落正文里常见的 `**加粗**`，
@@ -318,6 +319,9 @@ function CompilationStep({
   /* ---- Phase 7.5：悬浮对话框（人机协同编辑） ---- */
   const [chatOpen, setChatOpen] = useState(false)
   const [chatInput, setChatInput] = useState('')
+  /** 「与汇编对话」输入框高度（null = 用 rows 默认；拖它的上边界后为显式像素值） */
+  const [docInputH, setDocInputH] = useState<number | null>(null)
+  const docInputRef = useRef<HTMLTextAreaElement | null>(null)
   /** 对话面板位置（null = 默认贴右下角；拖动后为相对 `.compilation-step` 的坐标） */
   const [panelPos, setPanelPos] = useState<{ x: number; y: number } | null>(null)
   const paneRef = useRef<HTMLDivElement | null>(null)
@@ -364,12 +368,12 @@ function CompilationStep({
     dragRef.current = null
   }
 
-  /* ---- 悬浮面板大小可调（2026-10-03 用户要求："对话框的大小应当可以自由调节"）----
-     默认尺寸仍由 CSS 决定（`panelSize` 为 null）；用户拖右下角把手后改用内联宽高。
-     夹取口径：不小于 340×220（再小就装不下消息列表），不大于所在容器减去边距，
-     且**不超出容器**，避免把手拖到看不见的地方后无法再拉回来。 */
+  /* ---- 悬浮面板大小可调（2026-10-03 用户要求；2026-10-04 改为**拖边界**）----
+     默认尺寸仍由 CSS 决定（`panelSize` 为 null）；拖动左/上边界即改宽高。
+     语义：**边界跟着鼠标走**——往左拖左边界=变宽，往上拖上边界=变高（原来的右下角小三角是反的，已废弃）。 */
   const [panelSize, setPanelSize] = useState<{ w: number; h: number } | null>(null)
-  const resizeRef = useRef<{ startX: number; startY: number; w: number; h: number } | null>(null)
+  /** 当前尺寸的镜像（拖动时会连续调用，用 ref 避免"在 setState 更新函数里再调 setState"） */
+  const panelSizeRef = useRef<{ w: number; h: number } | null>(null)
   const clampPanelSize = useCallback((w: number, h: number): { w: number; h: number } => {
     const pane = paneRef.current
     // 默认锚点是 `right:18px / bottom:78px`，所以上限要预留这两处 + 一点余量，
@@ -378,37 +382,35 @@ function CompilationStep({
     const maxH = pane ? Math.max(220, pane.clientHeight - 96) : 900
     return { w: Math.round(Math.min(Math.max(w, 340), maxW)), h: Math.round(Math.min(Math.max(h, 220), maxH)) }
   }, [])
-  const onResizePointerDown = (e: ReactPointerEvent<HTMLDivElement>): void => {
-    e.stopPropagation()
+  /** 按下边界把手时：把 CSS 默认尺寸读成显式尺寸（否则第一次拖动会跳一下） */
+  const seedPanelSize = useCallback((): void => {
     const panel = panelRef.current
-    if (!panel) return
-    resizeRef.current = { startX: e.clientX, startY: e.clientY, w: panel.offsetWidth, h: panel.offsetHeight }
-    e.currentTarget.setPointerCapture(e.pointerId)
-  }
-  const onResizePointerMove = (e: ReactPointerEvent<HTMLDivElement>): void => {
-    const start = resizeRef.current
-    if (!start) return
-    e.stopPropagation()
-    // 面板锚在右下角：向左/向上拖 = 变大
-    const next = clampPanelSize(start.w + (start.startX - e.clientX), start.h + (start.startY - e.clientY))
+    if (!panel || panelSizeRef.current) return
+    const next = { w: panel.offsetWidth, h: panel.offsetHeight }
+    panelSizeRef.current = next
     setPanelSize(next)
-    // 面板被拖动过（用 left/top 定位）时，把位置一起收进容器，避免右下角越界
-    const pane = paneRef.current
-    if (pane) {
-      setPanelPos((p) =>
-        p
-          ? {
-              x: Math.min(p.x, Math.max(4, pane.clientWidth - next.w - 4)),
-              y: Math.min(p.y, Math.max(4, pane.clientHeight - next.h - 4))
-            }
-          : p
-      )
-    }
-  }
-  const onResizePointerUp = (e: ReactPointerEvent<HTMLDivElement>): void => {
-    e.stopPropagation()
-    resizeRef.current = null
-  }
+  }, [])
+  /**
+   * 边界拖动：`outward > 0` 表示边界向外（左/上）移动。
+   * 面板**钉在容器右下角**时，只要加宽/加高就会向上/向左延伸（边界跟着鼠标走）；
+   * 但面板被拖动过（用 left/top 定位）时不会，需要同步挪位置，否则边界不跟手。
+   */
+  const resizePanel = useCallback(
+    (axis: 'left' | 'top', outward: number): void => {
+      const panel = panelRef.current
+      const base = panelSizeRef.current ?? (panel ? { w: panel.offsetWidth, h: panel.offsetHeight } : null)
+      if (!base) return
+      const next = clampPanelSize(axis === 'left' ? base.w + outward : base.w, axis === 'top' ? base.h + outward : base.h)
+      const dw = next.w - base.w
+      const dh = next.h - base.h
+      if (dw === 0 && dh === 0) return
+      panelSizeRef.current = next
+      setPanelSize(next)
+      // 纯函数式更新：被拖动过的面板要同步挪位置，左/上边界才会跟着鼠标
+      setPanelPos((p) => (p ? { x: p.x - dw, y: p.y - dh } : p))
+    },
+    [clampPanelSize]
+  )
 
   useEffect(
     () => () => {
@@ -566,16 +568,20 @@ function CompilationStep({
         </button>
       </div>
       {body}
-      {/* 右下角把手：拖动即调整面板宽高（面板锚在右下角，向左/向上拖=变大） */}
-      <div
-        className="compilation-docchat__resize"
-        role="separator"
-        aria-label={t.docChatResizeHint}
+      {/* 边界把手：拖左边界改宽、拖上边界改高（边界跟着鼠标走） */}
+      <EdgeResizeHandle
+        edge="left"
+        className="compilation-docchat__edge-left"
         title={t.docChatResizeHint}
-        onPointerDown={onResizePointerDown}
-        onPointerMove={onResizePointerMove}
-        onPointerUp={onResizePointerUp}
-        onPointerCancel={onResizePointerUp}
+        onStart={seedPanelSize}
+        onDelta={(d) => resizePanel('left', d)}
+      />
+      <EdgeResizeHandle
+        edge="top"
+        className="compilation-docchat__edge-top"
+        title={t.docChatResizeHint}
+        onStart={seedPanelSize}
+        onDelta={(d) => resizePanel('top', d)}
       />
     </div>
   )
@@ -674,20 +680,38 @@ function CompilationStep({
       </div>
       {docError ? <div className="compilation-docchat__error">{docError}</div> : null}
       <div className="compilation-docchat__foot">
-        <textarea
-          className="compilation-docchat__input"
-          rows={2}
-          value={chatInput}
-          placeholder={t.docChatPlaceholder}
-          disabled={docEditing === true}
-          onChange={(e) => setChatInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && canSend) {
-              onDocSend?.(chatInput.trim())
-              setChatInput('')
-            }
-          }}
-        />
+        <div className="compilation-docchat__input-wrap">
+          <textarea
+            className="compilation-docchat__input"
+            ref={docInputRef}
+            rows={2}
+            style={docInputH != null ? { height: docInputH } : undefined}
+            value={chatInput}
+            placeholder={t.docChatPlaceholder}
+            disabled={docEditing === true}
+            onChange={(e) => setChatInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && canSend) {
+                onDocSend?.(chatInput.trim())
+                setChatInput('')
+              }
+            }}
+          />
+          {/* 输入框的上边界：拖着它上下移动即改输入框高度（边界跟着鼠标走；系统自带的右下角小三角已关掉） */}
+          <EdgeResizeHandle
+            edge="top"
+            className="compilation-docchat__input-edge"
+            title={t.docInputResizeHint}
+            onStart={() => setDocInputH((h) => h ?? docInputRef.current?.offsetHeight ?? null)}
+            onDelta={(d) => {
+              setDocInputH((h) => {
+                const base = h ?? docInputRef.current?.offsetHeight
+                if (base == null) return h
+                return Math.round(Math.min(Math.max(base + d, 44), 320))
+              })
+            }}
+          />
+        </div>
         <div className="compilation-docchat__actions">
           <span className="compilation-docchat__hint">{t.docChatHint}</span>
           {/*

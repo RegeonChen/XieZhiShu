@@ -3,6 +3,7 @@ import { zhCN } from '../i18n/zh-CN'
 import { copyPlainText } from '../utils/clipboard'
 import { splitRefTokens } from '../utils/ref-text'
 import MarkdownText from './MarkdownText'
+import EdgeResizeHandle from './EdgeResizeHandle'
 
 export interface ChatMessageItem {
   role: 'user' | 'assistant'
@@ -147,6 +148,8 @@ function ChatPanel({
   onOpenSource
 }: ChatPanelProps) {
   const [input, setInput] = useState('')
+  /** 输入框高度（null = 用 rows 默认；拖它的上边界后为显式像素值） */
+  const [inputH, setInputH] = useState<number | null>(null)
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null)
   const [presetOpen, setPresetOpen] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
@@ -456,6 +459,7 @@ function ChatPanel({
           className="chat-panel__input"
           ref={inputRef}
           rows={2}
+          style={inputH != null ? { height: inputH } : undefined}
           value={input}
           placeholder={zhCN.writingChat.inputPlaceholder}
           disabled={busy}
@@ -465,6 +469,20 @@ function ChatPanel({
               e.preventDefault()
               submit()
             }
+          }}
+        />
+        {/* 输入框的上边界：拖着它上下移动即改输入框高度（边界跟着鼠标走，符合常见习惯） */}
+        <EdgeResizeHandle
+          edge="top"
+          className="chat-panel__input-edge"
+          title={zhCN.writingChat.inputResizeHint}
+          onStart={() => setInputH((h) => h ?? inputRef.current?.offsetHeight ?? null)}
+          onDelta={(d) => {
+            setInputH((h) => {
+              const base = h ?? inputRef.current?.offsetHeight
+              if (base == null) return h
+              return Math.round(Math.min(Math.max(base + d, 44), 320))
+            })
           }}
         />
         <button
