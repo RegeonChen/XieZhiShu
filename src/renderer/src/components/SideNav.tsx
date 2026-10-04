@@ -6,6 +6,13 @@ interface SideNavProps {
   current: PageKey
   items: { key: PageKey; label: string }[]
   onSelect: (key: PageKey) => void
+  /**
+   * 顶部附加按钮（2026-10-04 用户要求）：
+   * 在「资料库」上方插入一个**无文字**的「隐藏中栏」按钮，原来的三个功能区入口整体下移一格。
+   */
+  leading?: ReactNode
+  /** 贴在导航栏**最下方**的入口（「设置」由用户要求移到这里） */
+  bottomItems?: { key: PageKey; label: string }[]
   style?: React.CSSProperties
 }
 
@@ -40,20 +47,26 @@ const ICONS: Record<PageKey, ReactNode> = {
   )
 }
 
-export default function SideNav({ current, items, onSelect, style }: SideNavProps) {
+export default function SideNav({ current, items, onSelect, leading, bottomItems, style }: SideNavProps) {
+  const renderItem = (item: { key: PageKey; label: string }): ReactNode => (
+    <button
+      key={item.key}
+      type="button"
+      className={`side-nav__item${current === item.key ? ' side-nav__item--active' : ''}`}
+      onClick={() => onSelect(item.key)}
+    >
+      <span className="side-nav__icon">{ICONS[item.key]}</span>
+      <span className="side-nav__label">{item.label}</span>
+    </button>
+  )
+
   return (
     <nav className="side-nav" style={style}>
-      {items.map((item) => (
-        <button
-          key={item.key}
-          type="button"
-          className={`side-nav__item${current === item.key ? ' side-nav__item--active' : ''}`}
-          onClick={() => onSelect(item.key)}
-        >
-          <span className="side-nav__icon">{ICONS[item.key]}</span>
-          <span className="side-nav__label">{item.label}</span>
-        </button>
-      ))}
+      {leading}
+      {items.map(renderItem)}
+      {/* 弹性间隔：把 `bottomItems`（设置）压到导航栏最下方 */}
+      <div className="side-nav__spacer" aria-hidden="true" />
+      {bottomItems?.map(renderItem)}
     </nav>
   )
 }

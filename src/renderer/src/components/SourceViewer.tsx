@@ -288,36 +288,64 @@ function SourceViewer({
     >
       <div className="source-viewer__header" ref={headerRef}>
         <div className="source-viewer__header-actions">
-          {onBack ? (
-            <button type="button" className="source-viewer__back" onClick={onBack} title={t.back}>
-              &larr; {t.back}
-            </button>
-          ) : null}
-          {/* 内部查看之外，恒提供"用系统默认程序打开"（Q2：所有格式两种方式都要有） */}
-          <button
-            type="button"
-            className="source-viewer__back"
-            onClick={() => void handleOpenExternal()}
-            title={t.openExternal}
-          >
-            {t.openExternal}
-          </button>
-          {/* Phase 9 / S1：网页来源另给"查看本地快照"（读库里抓取当时的正文，不联网核对"当时"的内容） */}
-          {isWebSource ? (
+          {/* 左侧：返回（资料库）/「隐藏右栏」（分栏查看时，仅图标，2026-10-04 用户要求） */}
+          <div className="source-viewer__header-actions-left">
+            {onBack ? (
+              <button type="button" className="source-viewer__back" onClick={onBack} title={t.back}>
+                &larr; {t.back}
+              </button>
+            ) : null}
+            {onClose ? (
+              <button
+                type="button"
+                className="source-viewer__pane-toggle"
+                onClick={onClose}
+                title={zhCN.paneEdge.hideRight}
+                aria-label={zhCN.paneEdge.hideRight}
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <rect x="3" y="4.5" width="18" height="15" rx="2.2" />
+                  <path d="M14.8 4.5v15" />
+                </svg>
+              </button>
+            ) : null}
+          </div>
+          {/* 右侧：用系统默认程序打开（+ 网页的本地快照），以及小「×」关闭 */}
+          <div className="source-viewer__header-actions-right">
+            {/* 内部查看之外，恒提供"用系统默认程序打开"（Q2：所有格式两种方式都要有） */}
             <button
               type="button"
               className="source-viewer__back"
-              onClick={() => setSnapshotOpen(true)}
-              title={zhCN.compilation.snapshotOpen}
+              onClick={() => void handleOpenExternal()}
+              title={t.openExternal}
             >
-              {zhCN.compilation.snapshotOpen}
+              {t.openExternal}
             </button>
-          ) : null}
-          {onClose ? (
-            <button type="button" className="source-viewer__back" onClick={onClose} title={t.close}>
-              {t.close}
-            </button>
-          ) : null}
+            {/* Phase 9 / S1：网页来源另给"查看本地快照"（读库里抓取当时的正文，不联网核对"当时"的内容） */}
+            {isWebSource ? (
+              <button
+                type="button"
+                className="source-viewer__back"
+                onClick={() => setSnapshotOpen(true)}
+                title={zhCN.compilation.snapshotOpen}
+              >
+                {zhCN.compilation.snapshotOpen}
+              </button>
+            ) : null}
+            {onClose ? (
+              <button
+                type="button"
+                className="source-viewer__close-x"
+                onClick={onClose}
+                title={t.close}
+                aria-label={t.close}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            ) : null}
+          </div>
         </div>
         <h3 className="source-viewer__title" title={source.title}>
           {source.title}

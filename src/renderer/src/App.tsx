@@ -23,9 +23,24 @@ import { zhCN } from './i18n/zh-CN'
 const NAV_ITEMS: { key: PageKey; label: string }[] = [
   { key: 'sources', label: zhCN.nav.sources },
   { key: 'compile', label: zhCN.nav.compile },
-  { key: 'draft', label: zhCN.nav.draft },
-  { key: 'settings', label: zhCN.nav.settings }
+  { key: 'draft', label: zhCN.nav.draft }
 ]
+
+/** 「设置」按用户要求（2026-10-04）移出主导航组，贴在左栏最下方 */
+const NAV_BOTTOM_ITEMS: { key: PageKey; label: string }[] = [{ key: 'settings', label: zhCN.nav.settings }]
+
+/**
+ * 「隐藏中栏 / 显示中栏」图标（2026-10-04 用户要求的造型）：
+ * 圆角矩形 + 靠左的竖分隔线；按钮本身不带文字，仅图标（悬停有提示）。
+ */
+function CenterPaneIcon(): ReactNode {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="3" y="4.5" width="18" height="15" rx="2.2" />
+      <path d="M9.2 4.5v15" />
+    </svg>
+  )
+}
 
 /** 中栏区块导航的小图标 */
 function navIcon(paths: string[]): ReactNode {
@@ -384,7 +399,28 @@ export default function App() {
   return (
     <div className="app-shell">
       <div className="app-body">
-        <SideNav current={page} items={NAV_ITEMS} onSelect={setPage} style={{ width: sidebarW, flexShrink: 0 }} />
+        <SideNav
+          current={page}
+          items={NAV_ITEMS}
+          bottomItems={NAV_BOTTOM_ITEMS}
+          onSelect={setPage}
+          style={{ width: sidebarW, flexShrink: 0 }}
+          leading={
+            /* 顶部第一格：隐藏/显示中栏（无文字，仅图标；与中栏边界的小三角是同一个开关） */
+            <button
+              type="button"
+              className={`side-nav__item side-nav__item--icon-only${centerVisible ? '' : ' side-nav__item--active'}`}
+              title={centerVisible ? zhCN.paneEdge.hideCenter : zhCN.paneEdge.showCenter}
+              aria-label={centerVisible ? zhCN.paneEdge.hideCenter : zhCN.paneEdge.showCenter}
+              aria-pressed={!centerVisible}
+              onClick={() => setCenterVisible((v) => !v)}
+            >
+              <span className="side-nav__icon">
+                <CenterPaneIcon />
+              </span>
+            </button>
+          }
+        />
         <ResizeHandle onResize={handleResizeSidebar} />
         {centerVisible ? renderCenterPane() : null}
         {/* 中栏/右栏边界：光标悬停时边界线高亮并出现圆角小三角按钮，点击切换中栏显隐（原顶栏「隐藏中栏」按钮已移除，迁移至此） */}

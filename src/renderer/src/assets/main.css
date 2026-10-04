@@ -111,6 +111,19 @@ body {
   background: var(--bg-panel);
   border-right: 1px solid var(--border);
   overflow-y: auto;
+  /* 2026-10-04：改纵向 flex，配合 `__spacer` 把「设置」压到最下方 */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.side-nav__spacer {
+  flex: 1 1 auto;
+  min-height: 8px;
+}
+/* 只有图标的导航项（顶部「隐藏中栏」）：与带文字项保持同样的格子高度，图标垂直居中 */
+.side-nav__item--icon-only {
+  justify-content: center;
+  padding: 12px 2px;
 }
 
 .side-nav__item {
@@ -4067,8 +4080,53 @@ textarea:focus-visible {
 .source-viewer__header-actions {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
   margin-bottom: 10px;
+}
+.source-viewer__header-actions-left,
+.source-viewer__header-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.source-viewer__header-actions-right {
+  margin-left: auto;
+  justify-content: flex-end;
+}
+/* 「隐藏右栏」（仅图标，2026-10-04 用户要求）：与文字按钮同样的圆角按钮外观 */
+.source-viewer__pane-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--fg);
+  cursor: pointer;
+}
+/* 关闭：小「×」 */
+.source-viewer__close-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-soft);
+  cursor: pointer;
+}
+.source-viewer__pane-toggle:hover,
+.source-viewer__close-x:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
 }
 .source-viewer__header-actions .source-viewer__back {
   margin-bottom: 0;
