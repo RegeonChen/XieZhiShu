@@ -1053,6 +1053,32 @@ body {
 .pane-edge:hover {
   background: var(--accent);
 }
+/* 中栏折叠时：边界上的小三角**常显**，并新增一个带文字的恢复按钮（2026-10-03 补，防误认为白屏） */
+.pane-edge--collapsed .pane-edge__btn {
+  opacity: 1;
+}
+.center-pane-restore {
+  /* 位置由内联样式给出（left 跟随用户可拖拽的侧栏宽度），固定定位避免挤动分栏布局 */
+  position: fixed;
+  top: 60px;
+  z-index: 20;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  color: var(--fg-soft);
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+}
+.center-pane-restore:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
 .pane-edge__btn {
   position: absolute;
   top: 50%;

@@ -54,7 +54,13 @@ export const zhCN = {
   },
   paneEdge: {
     hideCenter: '隐藏中栏',
-    showCenter: '显示中栏'
+    showCenter: '显示中栏',
+    /**
+     * 中栏（列表栏）被折叠时显示的恢复入口（2026-10-03 补）：
+     * 折叠状态记在 localStorage，重启仍生效——曾被误当成"页面白屏/渲染失败"，
+     * 因此折叠时给一个显眼的按钮，而不是只靠边界上那个小三角。
+     */
+    hiddenChip: '列表已隐藏 · 点此显示'
   },
   topbar: {
     version: '版本',
