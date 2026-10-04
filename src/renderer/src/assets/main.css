@@ -2352,7 +2352,29 @@ body {
   box-shadow: var(--shadow-sm);
   /* 这里是分栏自己的滚动容器：PDF 工具栏的 sticky 与"定位滚动"都挂在它上面 */
   overflow: auto;
-  padding: 16px;
+  /* 2026-10-04 用户反馈"右栏左右两侧留白明显"：分栏不再自带内边距，
+     让 PDF 页 / 内嵌网页 / 图片铺满分栏宽度；需要呼吸感的文字与工具栏各自留 12–14px。 */
+  padding: 0;
+}
+/* 表头（标题 / 来源信息 / 定位条）：贴边会难读，给 12px 内边距；背景仍铺满整宽以盖住滚动内容 */
+.writing-workspace__source .source-viewer__header {
+  padding: 12px 12px 8px;
+}
+/* 正文区：只保留上边距（分隔线仍铺满整宽） */
+.writing-workspace__source .source-viewer__body {
+  padding-top: 12px;
+}
+/* 工具条（PDF / 内嵌网页地址栏）：左右各 12px，按钮不贴边 */
+.writing-workspace__source .pdf-viewer__toolbar,
+.writing-workspace__source .web-browser__bar {
+  padding-left: 12px;
+  padding-right: 12px;
+}
+/* 纯文本 / Word 正文：文字左右各 14px（图片、PDF 页、网页不缩进，保持铺满） */
+.writing-workspace__source .source-viewer__content,
+.writing-workspace__source .source-viewer__docx {
+  padding-left: 14px;
+  padding-right: 14px;
 }
 .writing-workspace__source .source-viewer {
   min-width: 0;
