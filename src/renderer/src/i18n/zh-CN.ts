@@ -385,6 +385,8 @@ export const zhCN = {
   },
   writingChat: {
     inputPlaceholder: '输入本次撰写的标题与要求，或与助手对话…',
+    /** 输入框上边界（2026-10-04：改成拖边界改高度，取代系统自带的右下角小三角） */
+    inputResizeHint: '拖动这条边界调整输入框高度',
     sendBtn: '发送',
     generateBtn: '生成初稿',
     generating: '正在整理资料摘要并生成初稿（资料较多时可能需要数分钟，请耐心等待）...',
@@ -642,7 +644,9 @@ export const zhCN = {
     docChatMinimize: '最小化',
     docChatDragHint: '可拖动',
     /** 悬浮面板右下角把手（2026-10-03 用户要求：对话框大小可自由调节） */
-    docChatResizeHint: '拖动调整面板大小'
+    docChatResizeHint: '拖动边界调整面板大小',
+    /** 输入框上边界（2026-10-04：改成拖边界改高度，取代系统自带的右下角小三角） */
+    docInputResizeHint: '拖动这条边界调整输入框高度'
   },
   sourceRemoval: {
     title: '来源已删除',

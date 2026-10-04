@@ -1053,6 +1053,69 @@ body {
 .pane-edge:hover {
   background: var(--accent);
 }
+/* 边界缩放手柄（2026-10-04 用户要求：鼠标放到边界上直接拖动边界改大小）。
+   视觉上平时几乎不可见，鼠标移到那条边界上时高亮成一条细线，明确"这里能拖"。
+   `left` 边：竖条贴左边界；`top` 边：横条贴上边界。 */
+.edge-resize {
+  position: absolute;
+  z-index: 3;
+  background: transparent;
+  transition: background 0.12s;
+  touch-action: none;
+}
+.edge-resize--left {
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+}
+.edge-resize--top {
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 7px;
+  cursor: row-resize;
+}
+.edge-resize:hover {
+  background: var(--accent);
+  opacity: 0.55;
+}
+.edge-resize:active {
+  background: var(--accent);
+  opacity: 0.8;
+}
+/* 输入框的上边界把手：贴在输入区顶部（含一点点外扩，便于抓取） */
+.chat-panel__input-edge,
+.compilation-docchat__input-edge {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: -4px;
+  height: 8px;
+  cursor: row-resize;
+  z-index: 3;
+  border-radius: 4px;
+  background: transparent;
+  transition: background 0.12s;
+}
+.chat-panel__input-edge:hover,
+.compilation-docchat__input-edge:hover,
+.chat-panel__input-edge:active,
+.compilation-docchat__input-edge:active {
+  background: var(--accent);
+  opacity: 0.5;
+}
+/* 输入区包裹层：给上面的把手一个定位参考 */
+.chat-panel__input-wrap,
+.compilation-docchat__input-wrap {
+  position: relative;
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  width: 100%;
+}
+
 /* 中栏折叠时：边界上的小三角**常显**，并新增一个带文字的恢复按钮（2026-10-03 补，防误认为白屏） */
 .pane-edge--collapsed .pane-edge__btn {
   opacity: 1;
@@ -2488,6 +2551,7 @@ body {
 }
 
 .chat-panel__input-row {
+  position: relative;
   display: flex;
   gap: 8px;
   align-items: flex-end;
@@ -5233,25 +5297,6 @@ textarea:focus-visible {
   box-shadow: var(--shadow-lg, 0 10px 30px rgba(0, 0, 0, 0.22));
   overflow: hidden;
 }
-/* 右下角把手（2026-10-03 用户要求：对话框大小可自由调节）。
-   用两条斜线画出"可缩放"的视觉暗示；命中区域比图形大一些，便于拖拽。 */
-.compilation-docchat__resize {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 18px;
-  height: 18px;
-  cursor: nwse-resize;
-  touch-action: none;
-  z-index: 2;
-  background:
-    linear-gradient(135deg, transparent 0 46%, var(--border) 46% 54%, transparent 54% 100%),
-    linear-gradient(135deg, transparent 0 66%, var(--border) 66% 74%, transparent 74% 100%);
-  opacity: 0.75;
-}
-.compilation-docchat__resize:hover {
-  opacity: 1;
-}
 /* 调过大小后：宽高都由内联样式决定，正文区仍可滚动 */
 .compilation-docchat.is-resized .compilation-docchat__chatpanel,
 .compilation-docchat.is-resized > .chat-panel {
@@ -5412,6 +5457,7 @@ textarea:focus-visible {
   line-height: 1.7;
 }
 .compilation-docchat__foot {
+  position: relative;
   flex-shrink: 0;
   padding: 8px 10px 10px;
   border-top: 1px solid var(--border);
@@ -5419,7 +5465,7 @@ textarea:focus-visible {
 }
 .compilation-docchat__input {
   width: 100%;
-  resize: vertical;
+  resize: none; /* 2026-10-04：改为拖上边界 */
   padding: 7px 9px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
