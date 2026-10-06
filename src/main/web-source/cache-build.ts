@@ -215,7 +215,8 @@ export async function runCacheBuild(
       `已有缓存跳过 ${state.alreadyBuilt} 篇（未联网、未重复建立）`
     ]
     if (res.blocked && res.blocked > 0) parts.push(`白名单外跳过 ${res.blocked} 篇（已标记，不计入缺口）`)
-    if (res.failed > 0) parts.push(`**${res.failed} 篇抓取失败、未写入缓存——可再点「建立」重试**`)
+    // 注意：这条 message 会**原样显示在设置页**（纯文本，不走 Markdown 渲染）→ 不要写 markdown 记号
+    if (res.failed > 0) parts.push(`${res.failed} 篇抓取失败、未写入缓存——可再点「建立」重试`)
     if (res.cancelled) parts.push('（已按你的要求停止；已抓到的都已写入缓存）')
     state.message = parts.join('；')
     logMain('web', `建立缓存结束：${state.message}`)

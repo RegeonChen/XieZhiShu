@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { zhCN } from '../i18n/zh-CN'
 import ConfirmDialog from './ConfirmDialog'
 import PresetGuideDialog from './PresetGuideDialog'
+import CacheBuildPanel from './CacheBuildPanel'
 import { LLM_PRESETS } from '../../../shared/llm-presets'
 import type { LlmPreset } from '../../../shared/llm-presets'
 import type { DocScale } from '../../../shared/types'
@@ -86,86 +87,11 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docS
   const [legacySources, setLegacySources] = useState(0)
   const [migrating, setMigrating] = useState(false)
 
-  // 本地向量索引状态（2026-09-12）：语义检索不可用时此前只能翻日志，界面看不到
-  const [ragStatus, setRagStatus] = useState<{
-    total: number
-    ready: number
-    pending: number
-    indexing: number
-    failed: number
-    /** 正文缺失（页面为模板/文章已失效）而不参与检索、也不重试索引的来源数（2026-09-12 A1） */
-    bodyMissing?: number
-    lastError: string | null
-    queued: number
-    engine?: { poolSize: number; livePool: number; workerThreads: number; workerErrors: number; directFallbacks: number; lastWorkerError: string | null }
-    rebuild: {
-      status: 'running' | 'interrupted' | 'done'
-      startedAt: string | null
-      totalQueued: number
-      remaining: number
-      processed: number
-      percent: number
-      active: boolean
-    }
-  } | null>(null)
-  const [indexMsg, setIndexMsg] = useState<{ ok: boolean; text: string } | null>(null)
-
-  /**
-   * preload 桥能力自检（2026-09-12 实测踩坑）：Electron 的 preload **只在创建窗口时加载一次**，
-   * 界面热更新/刷新不会换掉它。于是"新界面 + 旧桥"会出现 `xxx is not a function` 这种莫名报错。
-   * 这里按方法存在性自检，缺方法时给出"请重启软件"的明确指引，而不是抛 TypeError。
+  /*
+   * 2026-10-06（Phase 11 D）：原「本地检索索引」整块（含 rag 状态、重建按钮、引擎自检、消息）
+   * 已搬进 `CacheBuildPanel`（更名「建立缓存与索引」）——它自己轮询 `cacheBuildStatus` 与
+   * `getRagIndexStatus`，这里不再保留第二份状态（避免两个真相）。
    */
-  const ragApiReady = typeof window.api.getRagIndexStatus === 'function' && typeof window.api.reindexRag === 'function'
-
-  const loadRagStatus = useCallback(async () => {
-    if (typeof window.api.getRagIndexStatus !== 'function') return
-    try {
-      const res = await window.api.getRagIndexStatus()
-      if (res.ok && res.data) setRagStatus(res.data)
-    } catch {
-      /* 桥不可用：上方 ragApiReady 提示已覆盖，这里静默 */
-    }
-  }, [])
-
-  useEffect(() => {
-    void loadRagStatus()
-  }, [loadRagStatus])
-
-  /** 重建是否在进行中——**由持久化状态推导**，因此切换页面、重启软件后回来仍然显示"重建中" */
-  const rebuilding = ragStatus?.rebuild.status === 'running'
-  const rebuildInterrupted = ragStatus?.rebuild.status === 'interrupted'
-
-  // 重建期间轮询进度（状态来自 DB，故轮询本身也不依赖组件生命周期）
-  useEffect(() => {
-    if (!rebuilding) return
-    const timer = window.setInterval(() => void loadRagStatus(), 1500)
-    return () => window.clearInterval(timer)
-  }, [rebuilding, loadRagStatus])
-
-  const handleReindex = async () => {
-    setIndexMsg(null)
-    if (typeof window.api.reindexRag !== 'function') {
-      setIndexMsg({ ok: false, text: zhCN.settingsPage.index.staleBridge })
-      return
-    }
-    try {
-      const res = await window.api.reindexRag()
-      if (res.ok && res.data) {
-        setIndexMsg({
-          ok: true,
-          text: (res.data.queued > 0 ? zhCN.settingsPage.index.queued : zhCN.settingsPage.index.nothingToDo).replace(
-            '{count}',
-            String(res.data.queued)
-          )
-        })
-        await loadRagStatus()
-      } else {
-        setIndexMsg({ ok: false, text: zhCN.settingsPage.index.failed.replace('{message}', res.error?.message ?? '') })
-      }
-    } catch (e) {
-      setIndexMsg({ ok: false, text: zhCN.settingsPage.index.failed.replace('{message}', String(e)) })
-    }
-  }
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -540,91 +466,12 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docS
         ) : null}
       </section>
 
+      {/*
+        2026-10-06（Phase 11 D）：更名「建立缓存与索引」，整块交给 `CacheBuildPanel`
+        （年份区间 + 只读规划 + 网页/本地两条进度 + 抓取节奏档位 + 正文缓存占用与清空）。
+      */}
       <section className="settings__section" id="settings-index">
-        <div className="settings__section-header">
-          <span className="settings__section-icon settings__section-icon--workspace" aria-hidden="true">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M4 7h16M4 12h16M4 17h10" />
-              <circle cx="18" cy="17" r="3" />
-            </svg>
-          </span>
-          <h4 className="settings__section-title">{zhCN.settingsPage.index.title}</h4>
-          <div className="settings__workspace-actions">
-            <button
-              type="button"
-              className="source-list__btn source-list__btn--primary"
-              onClick={() => void handleReindex()}
-              disabled={rebuilding || !ragApiReady}
-            >
-              {rebuilding
-                ? zhCN.settingsPage.index.rebuilding
-                : rebuildInterrupted
-                  ? zhCN.settingsPage.index.continueBtn
-                  : zhCN.settingsPage.index.rebuildBtn}
-            </button>
-          </div>
-        </div>
-        <p className="settings__hint">{zhCN.settingsPage.index.hint}</p>
-        {!ragApiReady ? (
-          <p className="settings__hint settings__hint--err">{zhCN.settingsPage.index.staleBridge}</p>
-        ) : null}
-        {ragStatus ? (
-          <>
-            <p className="settings__workspace-path">
-              <span className={`settings__status-chip${ragStatus.failed === 0 && ragStatus.ready === ragStatus.total && ragStatus.total > 0 ? ' is-ok' : ''}`}>
-                {ragStatus.failed > 0
-                  ? zhCN.settingsPage.index.stateFailed
-                  : ragStatus.ready === ragStatus.total && ragStatus.total > 0
-                    ? zhCN.settingsPage.index.stateReady
-                    : zhCN.settingsPage.index.statePending}
-              </span>
-              <span>
-                {zhCN.settingsPage.index.counts
-                  .replace('{ready}', String(ragStatus.ready))
-                  .replace('{total}', String(ragStatus.total))
-                  .replace('{failed}', String(ragStatus.failed))}
-              </span>
-            </p>
-            {ragStatus.bodyMissing && ragStatus.bodyMissing > 0 ? (
-              <p className="settings__hint">
-                {zhCN.settingsPage.index.bodyMissing.replace('{count}', String(ragStatus.bodyMissing))}
-              </p>
-            ) : null}
-            {rebuilding || rebuildInterrupted ? (
-              <p className="settings__hint">
-                {zhCN.settingsPage.index.progress
-                  .replace('{percent}', String(ragStatus.rebuild.percent))
-                  .replace('{processed}', String(ragStatus.rebuild.processed))
-                  .replace('{total}', String(ragStatus.rebuild.totalQueued))
-                  .replace('{remaining}', String(ragStatus.rebuild.remaining))}
-                {rebuildInterrupted ? ' ' + zhCN.settingsPage.index.interruptedHint : ''}
-              </p>
-            ) : null}
-            {!rebuilding && !rebuildInterrupted && ragStatus.rebuild.status === 'done' && ragStatus.rebuild.totalQueued > 0 && ragStatus.failed > 0 ? (
-              <p className="settings__hint settings__hint--err">
-                {zhCN.settingsPage.index.doneWithFailures.replace('{count}', String(ragStatus.failed))}
-              </p>
-            ) : null}
-          </>
-        ) : null}
-        {ragStatus?.engine ? (
-          <p className="settings__hint">
-            {zhCN.settingsPage.index.engine
-              .replace('{pool}', String(ragStatus.engine.poolSize))
-              .replace('{threads}', String(ragStatus.engine.workerThreads || 1))
-              .replace('{errors}', String(ragStatus.engine.workerErrors))
-              .replace('{fallbacks}', String(ragStatus.engine.directFallbacks))}
-            {ragStatus.engine.lastWorkerError ? '：' + ragStatus.engine.lastWorkerError : ''}
-          </p>
-        ) : null}
-        {ragStatus?.lastError ? (
-          <p className="settings__hint settings__hint--err">
-            {zhCN.settingsPage.index.lastError}：<code>{ragStatus.lastError}</code>
-          </p>
-        ) : null}
-        {indexMsg ? (
-          <p className={`settings__hint ${indexMsg.ok ? 'settings__hint--ok' : 'settings__hint--err'}`}>{indexMsg.text}</p>
-        ) : null}
+        <CacheBuildPanel />
       </section>
 
       <section className="settings__section" id="settings-preset" data-onboarding="settings-preset">
