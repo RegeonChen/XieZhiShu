@@ -21,7 +21,9 @@ import Database from 'better-sqlite3'
 import { setDb } from '../db/connection'
 import { runMigrations } from '../db/migrate'
 import { getWebSiteById, listWebSites } from '../db/web-sites'
-import { syncSite } from './site-crawler'
+import { syncSite, type DiscoveryReport, type SyncSiteOptions, type SiteSyncResult } from './site-crawler'
+import { resolveLimits, type DiscoveryLimits } from './site-discovery'
+import { getDiscoverySettings, updateSettings } from '../db/settings'
 import type { WebSite } from '../../shared/types'
 
 /** 正在同步的站点 id（内存） */
@@ -51,20 +53,54 @@ export interface SiteSyncOutcome {
   added: number
   /** 失败原因（成功时不带此字段） */
   error?: string
+  /**
+   * 本次发现的**实测报告**（Phase 11 H）：走了多少页/层、停止原因、发现/新增条数。
+   * 界面与日志据此如实展示"这个站点实际需要走多深"（页/层数由算法测出，不再由人预设）。
+   */
+  report?: DiscoveryReport
+}
+
+/** 同步时可选的上下文（Phase 11 H）：限额（自动/手动 + 上次用量）与目标年份区间 */
+export interface SiteSyncContext {
+  /** 目标年份区间（建立区间），用于"未覆盖年份优先出队" */
+  fromYear?: number
+  toYear?: number
+  /** 限额（不传则按自动默认 + 该站上次用量解析） */
+  limits?: DiscoveryLimits
 }
 
 /** 测试缝：默认走真实的 `syncSite` 与站点列表 */
 export interface SiteSyncDeps {
-  sync?: (siteId: string) => Promise<number>
+  sync?: (siteId: string, opts?: SyncSiteOptions) => Promise<SiteSyncResult>
   list?: () => WebSite[]
   get?: (siteId: string) => WebSite | null
+}
+
+/**
+ * 解析某个站点本次的发现限额（Phase 11 H）。
+ * 输入：设置页的自动/手动模式与数值（`resolveDiscoveryLimitsOf`）+ **该站上次实测用量**（站点行）。
+ */
+export function limitsForSite(site: WebSite | null, ctx: SiteSyncContext = {}): DiscoveryLimits {
+  if (ctx.limits) return ctx.limits
+  const s = getDiscoverySettings()
+  return resolveLimits({
+    mode: s.mode,
+    manualPages: s.pages,
+    manualDepth: s.depth,
+    hintPages: site?.discoveryPages ?? null,
+    hintDepth: site?.discoveryDepth ?? null
+  })
 }
 
 /**
  * 同步单个站点的清单（**带状态跟踪**）。
  * 同一个站点同时只跑一次：已在同步中时直接返回（不排队、不重复请求站点）。
  */
-export async function syncSiteTracked(siteId: string, deps: SiteSyncDeps = {}): Promise<SiteSyncOutcome> {
+export async function syncSiteTracked(
+  siteId: string,
+  deps: SiteSyncDeps = {},
+  ctx: SiteSyncContext = {}
+): Promise<SiteSyncOutcome> {
   const get = deps.get ?? getWebSiteById
   const sync = deps.sync ?? syncSite
   const site = get(siteId)
@@ -74,9 +110,14 @@ export async function syncSiteTracked(siteId: string, deps: SiteSyncDeps = {}): 
   syncing.add(siteId)
   errors.delete(siteId)
   try {
-    const added = await sync(siteId)
-    logMain('web', `站点清单同步完成：${site.rootUrl} 新增 ${added} 篇`)
-    return { siteId, rootUrl: site.rootUrl, title: site.title ?? '', added }
+    // 发现限额：设置页的自动/手动 + 该站**上次实测用量**（下限，防退化）
+    const limits = limitsForSite(site, ctx)
+    const res = await sync(siteId, { limits, fromYear: ctx.fromYear, toYear: ctx.toYear })
+    logMain(
+      'web',
+      `站点清单同步完成：${site.rootUrl} 新增 ${res.added} 篇（发现 ${res.report.discovered} 篇，走 ${res.report.pagesFetched} 页/${res.report.maxDepthReached} 层，${res.report.stopText}）`
+    )
+    return { siteId, rootUrl: site.rootUrl, title: site.title ?? '', added: res.added, report: res.report }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     errors.set(siteId, message)
@@ -87,7 +128,7 @@ export async function syncSiteTracked(siteId: string, deps: SiteSyncDeps = {}): 
   }
 }
 
-export interface SyncAllOptions extends SiteSyncDeps {
+export interface SyncAllOptions extends SiteSyncDeps, SiteSyncContext {
   /** 用户按了「停止」→ 不再开下一个站点（**当前这个站点的同步不会被中断**：它没有取消通道） */
   shouldCancel?: () => boolean
   /** 开始同步某个站点前的回调（供建立引擎推进度：第几个/共几个/哪个站） */
@@ -118,7 +159,9 @@ export async function syncAllSitesTracked(opts: SyncAllOptions = {}): Promise<Sy
       break
     }
     opts.onSite?.({ index: i + 1, total: sites.length, site: sites[i] })
-    outcomes.push(await syncSiteTracked(sites[i].id, opts))
+    outcomes.push(
+      await syncSiteTracked(sites[i].id, opts, { fromYear: opts.fromYear, toYear: opts.toYear, limits: opts.limits })
+    )
   }
   const added = outcomes.reduce((n, o) => n + o.added, 0)
   const failed = outcomes.filter((o) => o.error).length
@@ -143,9 +186,30 @@ if (import.meta.vitest) {
   })
   afterAll(() => db.close())
 
+  /** 假同步结果（Phase 11 H 起 `syncSite` 返回"新增数 + 发现报告"） */
+  const fakeSyncResult = (added: number): SiteSyncResult => ({
+    added,
+    report: {
+      method: 'bfs',
+      pagesFetched: 3,
+      maxDepthReached: 1,
+      stopReason: 'saturated',
+      stopText: '收益饱和（走到 3 页后，连续多页已无新文章）',
+      discovered: added,
+      freshArticles: added,
+      added,
+      dated: added,
+      byYear: {},
+      cellCount: 1,
+      depthPruned: 0,
+      seconds: 0.1,
+      limits: resolveLimits({})
+    }
+  })
+
   describe('site-sync（站点清单同步编排，Phase 11 G）', () => {
     it('单站同步：成功记新增数、清掉旧失败原因；失败记原因且不抛', async () => {
-      const ok = await syncSiteTracked('s1', { sync: async () => 7 })
+      const ok = await syncSiteTracked('s1', { sync: async () => fakeSyncResult(7) })
       expect(ok).toMatchObject({ siteId: 's1', added: 7 })
       expect(ok.error).toBeUndefined()
       expect(getSiteSyncSnapshot().errors.s1).toBeUndefined()
@@ -162,16 +226,38 @@ if (import.meta.vitest) {
     })
 
     it('站点不存在 → 不抛错、如实报原因', async () => {
-      const r = await syncSiteTracked('nope', { sync: async () => 1 })
+      const r = await syncSiteTracked('nope', { sync: async () => fakeSyncResult(1) })
       expect(r.error).toBe('站点不存在')
       expect(r.added).toBe(0)
+    })
+
+    it('限额按站点解析：自动模式吃该站上次用量当下限，手动模式用用户值', async () => {
+      // 自动（默认）：s1 上次走了 77 页 / 4 层 → 本次下限 77、层数上限至少 4
+      db.prepare("UPDATE web_sites SET discovery_pages = 77, discovery_depth = 4 WHERE id = 's1'").run()
+      const s1 = getWebSiteById('s1')
+      const auto = limitsForSite(s1)
+      expect(auto.mode).toBe('auto')
+      expect(auto.minPages).toBe(77)
+      expect(auto.maxPages).toBeGreaterThanOrEqual(77)
+      expect(auto.maxDepth).toBeGreaterThanOrEqual(4)
+      // 显式传 limits 时以传入为准
+      const fixed = limitsForSite(s1, { limits: resolveLimits({ mode: 'manual', manualPages: 30, manualDepth: 2 }) })
+      expect(fixed).toMatchObject({ mode: 'manual', maxPages: 30, minPages: 0 })
+
+      // 手动（设置项）→ 用户值生效，且不被该站上次用量盖过（取大者）
+      updateSettings({ webDiscoveryMode: 'manual', webDiscoveryPages: 50, webDiscoveryDepth: 3 })
+      const manual = limitsForSite(getWebSiteById('s2'))
+      expect(manual).toMatchObject({ mode: 'manual', saturation: false })
+      expect(manual.maxPages).toBe(50)
+      // 复原（避免影响其它用例与库状态）
+      updateSettings({ webDiscoveryMode: 'auto', webDiscoveryPages: undefined, webDiscoveryDepth: undefined })
     })
 
     it('全部站点：单站失败不中断其它站；统计新增与失败数', async () => {
       const res = await syncAllSitesTracked({
         sync: async (id) => {
           if (id === 's1') throw new Error('A站挂了')
-          return 3
+          return fakeSyncResult(3)
         }
       })
       expect(res.outcomes).toHaveLength(2)
@@ -185,7 +271,7 @@ if (import.meta.vitest) {
       const res = await syncAllSitesTracked({
         sync: async (id) => {
           visited.push(id)
-          return 1
+          return fakeSyncResult(1)
         },
         // 第一个站点同步完就返回 true（模拟用户在同步过程中按了停止）
         shouldCancel: () => visited.length >= 1,

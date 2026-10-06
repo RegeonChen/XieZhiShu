@@ -7,6 +7,9 @@ interface WebSiteItem {
   rootUrl: string
   title: string
   lastSyncedAt?: string
+  /** Phase 11 H：上次发现**实测**走了多少页 / 到了多少层（页/层数由算法测出，不是用户设的） */
+  discoveryPages?: number
+  discoveryDepth?: number
 }
 
 /**
@@ -83,7 +86,17 @@ function WebSourcePanel() {
     try {
       const res = await window.api.syncWebSource(id)
       if (res.ok && res.data) {
-        setMsg(res.data.error ? t.syncFailed.replace('{message}', res.data.error) + t.syncRetryHint : t.syncDone.replace('{count}', String(res.data.added)))
+        const r = res.data.report
+        setMsg(
+          res.data.error
+            ? t.syncFailed.replace('{message}', res.data.error) + t.syncRetryHint
+            : t.syncDone
+                .replace('{count}', String(res.data.added))
+                .replace('{discovered}', String(r?.discovered ?? res.data.added))
+                .replace('{pages}', String(r?.pagesFetched ?? 0))
+                .replace('{depth}', String(r?.maxDepthReached ?? 0))
+                .replace('{stop}', r?.stopText ?? '')
+        )
       } else {
         setErr(t.operationFailed.replace('{message}', res.error?.message ?? ''))
       }
@@ -252,7 +265,9 @@ function WebSourcePanel() {
                       {syncState.syncing.includes(s.id)
                         ? t.syncing
                         : (articleCounts[s.id] ?? 0) > 0
-                          ? `${t.articles.replace('{count}', String(articleCounts[s.id]))}　${t.syncedAt.replace('{time}', formatTime(s.lastSyncedAt))}`
+                          ? `${t.articles.replace('{count}', String(articleCounts[s.id]))}${
+                              s.discoveryPages ? '　' + t.discoveryMeasured.replace('{pages}', String(s.discoveryPages)).replace('{depth}', String(s.discoveryDepth ?? '-')) : ''
+                            }　${t.syncedAt.replace('{time}', formatTime(s.lastSyncedAt))}`
                           : t.articlesEmpty}
                     </span>
                     {syncState.errors[s.id] ? (

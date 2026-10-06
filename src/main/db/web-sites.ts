@@ -7,6 +7,7 @@
 import Database from 'better-sqlite3'
 import type { WebArticleDateStats, WebSite } from '../../shared/types'
 import { estimateWebFetchMinutes } from '../web-source/fetch-estimate'
+import { dedupeArticleKey } from '../web-source/url-key'
 import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
 
@@ -17,6 +18,10 @@ interface WebSiteRow {
   created_at: string
   updated_at: string
   last_synced_at: string | null
+  // Phase 11 H（Migration 052）：上次发现实际走了多少页 / 到了多少层（NULL = 从没走过 BFS）
+  discovery_pages: number | null
+  discovery_depth: number | null
+  discovery_at: string | null
 }
 
 interface SiteArticleRow {
@@ -47,7 +52,10 @@ function rowToWebSite(row: WebSiteRow): WebSite {
     title: row.title,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    lastSyncedAt: row.last_synced_at ?? undefined
+    lastSyncedAt: row.last_synced_at ?? undefined,
+    discoveryPages: row.discovery_pages ?? undefined,
+    discoveryDepth: row.discovery_depth ?? undefined,
+    discoveryAt: row.discovery_at ?? undefined
   }
 }
 
@@ -106,6 +114,33 @@ export function updateWebSite(id: string, patch: { rootUrl?: string; title?: str
 export function updateWebSiteLastSynced(id: string, at: string): void {
   const db = getDb()
   db.prepare('UPDATE web_sites SET last_synced_at = ?, updated_at = ? WHERE id = ?').run(at, at, id)
+}
+
+/**
+ * 站内目录已有的全部 URL（Phase 11 H，自适应发现的输入）。
+ *
+ * 为什么发现器需要它：`收益饱和` 判据里的"新"必须相对**已有目录**来算——
+ * 若只按"本次遍历内是否重复"判断，重复同步时每一页都显得"很有收益"，永远停不下来。
+ * 62k 条 URL 的 Set 内存开销可忽略，但换来两个能力：① 真正的"新增"计数；② 目录已建全时立刻收工。
+ */
+export function listSiteArticleKeys(siteId: string): Set<string> {
+  const db = getDb()
+  const rows = db.prepare('SELECT url FROM web_site_articles WHERE site_id = ?').all(siteId) as { url: string }[]
+  const out = new Set<string>()
+  for (const r of rows) out.add(dedupeArticleKey(r.url))
+  return out
+}
+
+/**
+ * 记录本次发现**实际走了多少页 / 到了多少层**（Phase 11 H，Migration 052 两列）。
+ * 用途：下次同步的**起点下限**——防"一次偶发失败导致发现范围逐次退化"，并让设置页能如实展示
+ * "这个站点实测需要走多深"（页/层数不再靠人拍）。
+ */
+export function updateSiteDiscoveryLimits(siteId: string, pages: number, depth: number): void {
+  const db = getDb()
+  db.prepare(
+    'UPDATE web_sites SET discovery_pages = ?, discovery_depth = ?, discovery_at = ? WHERE id = ?'
+  ).run(Math.max(0, Math.round(pages)), Math.max(0, Math.round(depth)), new Date().toISOString(), siteId)
 }
 
 

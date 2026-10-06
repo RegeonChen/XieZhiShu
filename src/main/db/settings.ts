@@ -6,6 +6,15 @@
  */
 import Database from 'better-sqlite3'
 import type { AppSettings } from '../../shared/types'
+import {
+  AUTO_MAX_DEPTH,
+  AUTO_MAX_PAGES,
+  MAX_DISCOVERY_DEPTH,
+  MAX_DISCOVERY_PAGES,
+  MIN_DISCOVERY_DEPTH,
+  MIN_DISCOVERY_PAGES,
+  type DiscoveryMode
+} from '../web-source/site-discovery'
 import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
 import { existsSync, statSync } from 'node:fs'
@@ -77,7 +86,30 @@ export function getSettings(): AppSettings {
   // 2026-10-05：网页抓取节奏档位（缺省 = 标准档，由调用方兜底）
   const tier = getSetting('web_crawl_tier')
   if (tier === 'safe' || tier === 'fast') settings.webCrawlTier = tier
+  // 2026-10-06（Phase 11 H）：站点清单发现——自动（默认）/手动
+  const dm = getSetting('web_discovery_mode')
+  if (dm === 'manual') settings.webDiscoveryMode = 'manual'
+  const dp = Number(getSetting('web_discovery_pages') ?? '')
+  if (Number.isFinite(dp) && dp > 0) settings.webDiscoveryPages = dp
+  const dd = Number(getSetting('web_discovery_depth') ?? '')
+  if (Number.isFinite(dd) && dd > 0) settings.webDiscoveryDepth = dd
   return settings
+}
+
+/**
+ * 站点清单发现的**实际生效设置**（Phase 11 H）。
+ * 缺省 = 自动（页/层数由算法测出）；手动模式才用用户填的值。
+ * 单独抽一个读取函数，因为发现器（`site-sync.ts`）不方便直接拿整个 AppSettings。
+ */
+export function getDiscoverySettings(): { mode: DiscoveryMode; pages: number; depth: number } {
+  const mode: DiscoveryMode = getSetting('web_discovery_mode') === 'manual' ? 'manual' : 'auto'
+  const pages = Number(getSetting('web_discovery_pages') ?? '')
+  const depth = Number(getSetting('web_discovery_depth') ?? '')
+  return {
+    mode,
+    pages: Number.isFinite(pages) && pages > 0 ? pages : AUTO_MAX_PAGES,
+    depth: Number.isFinite(depth) && depth > 0 ? depth : AUTO_MAX_DEPTH
+  }
 }
 
 /** 年份是否落在可接受范围内（与 `article-date.ts` 的 MIN_YEAR 口径一致） */
@@ -170,6 +202,33 @@ export function updateSettings(patch: Partial<AppSettings>): AppSettings {
     const v = patch.webCrawlTier
     if (v === 'safe' || v === 'fast') setSetting('web_crawl_tier', v)
     else deleteSetting('web_crawl_tier') // standard 是默认值，不落库
+  }
+
+  /*
+   * 2026-10-06（Phase 11 H）：站点清单发现模式与手动上限。
+   * 缺省 = 自动（不落库）；手动才写。数值一律夹到合法范围，**绝不把坏值写进库**
+   * （发现器还会再夹一次，两道防线）。
+   */
+  if ('webDiscoveryMode' in patch) {
+    const v = patch.webDiscoveryMode
+    if (v === 'manual') setSetting('web_discovery_mode', 'manual')
+    else deleteSetting('web_discovery_mode')
+  }
+  if ('webDiscoveryPages' in patch) {
+    const v = Number(patch.webDiscoveryPages)
+    if (Number.isFinite(v) && v > 0) {
+      setSetting('web_discovery_pages', String(Math.min(MAX_DISCOVERY_PAGES, Math.max(MIN_DISCOVERY_PAGES, Math.round(v)))))
+    } else {
+      deleteSetting('web_discovery_pages')
+    }
+  }
+  if ('webDiscoveryDepth' in patch) {
+    const v = Number(patch.webDiscoveryDepth)
+    if (Number.isFinite(v) && v > 0) {
+      setSetting('web_discovery_depth', String(Math.min(MAX_DISCOVERY_DEPTH, Math.max(MIN_DISCOVERY_DEPTH, Math.round(v)))))
+    } else {
+      deleteSetting('web_discovery_depth')
+    }
   }
 
   return getSettings()

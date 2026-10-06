@@ -6,13 +6,37 @@ import { logMain }
  from '../logger'
 import { parseUrlDate, pickArticleDate, type ArticleDateSource }
  from './article-date'
-import { getWebSiteById,  updateWebSiteLastSynced,  upsertSiteArticles}
+import { getWebSiteById,  updateWebSiteLastSynced,  upsertSiteArticles, listSiteArticleKeys, updateSiteDiscoveryLimits}
  from '../db/web-sites'
+import {
+  decideStop,
+  cellOf,
+  pagePriority,
+  patternOf,
+  resolveLimits,
+  describeStop,
+  SATURATION_WINDOW,
+  AUTO_TIME_BUDGET_MS,
+  type DiscoveryLimits,
+  type DiscoveryStopReason,
+  type PageYield,
+  type PatternStat
+} from './site-discovery'
+import type { WebDiscoveryReport } from '../../shared/types'
 /** 政务网站常见的静态文章后缀 */
 const ARTICLE_SUFFIX_RE = /\.(?:htm|html|shtml|aspx?)\b/i/** 单次站点同步最多抓取列表页数（首页 + 栏目/分页），控制耗时 */
+/*
+ * ⚠ 2026-10-06（Phase 11 H）：固定上限 `SYNC_MAX_PAGES/SYNC_MAX_DEPTH` 已被**自适应发现**取代
+ * （`site-discovery.ts`：走到"收益饱和"为止，页/层数由算法测出来并记回站点行）。
+ * 下面这两个常量**只作为回退值与单测基线**保留——真实走的是 `resolveLimits()` 解析出的限额：
+ *   自动 = 安全阀（300 页/6 层/3 分钟）+ 饱和提前收工；手动 = 设置页填的页/层（不提前收工）。
+ * 为什么必须换掉固定值：实测 `clnews.com.cn` 既无 sitemap 也无 RSS，它的 62,506 条目录来自一次
+ * **深层**发现，而 20 页/2 层的帽子让它此后每次同步只能新增几十条——旧站自己都喂不饱。
+ */
 const SYNC_MAX_PAGES = 20/** 站点发现 BFS 最大深度（0=仅首页） */
 const SYNC_MAX_DEPTH = 2/** 增量导入正文的串行延迟（毫秒），降低对目标站点的压力 */
-const IMPORT_DELAY_MS = 120/** Phase 10 P4：同一站点两次请求之间的**最小**间隔（毫秒）——抓取流水线据此计算 ETA 的物理下限 */
+const IMPORT_DELAY_MS = 120/** 前沿（待访问列表页）容量上限：超出时丢弃**优先级最差**的，避免内存被导航链接撑爆 */
+const FRONTIER_CAP = 2000/** Phase 10 P4：同一站点两次请求之间的**最小**间隔（毫秒）——抓取流水线据此计算 ETA 的物理下限 */
 export const WEB_FETCH_MIN_INTERVAL_MS = IMPORT_DELAY_MS/** * robots.txt 里 `Crawl-delay` 的上限（毫秒）。 * **2026-10-04 修正的单位缺陷**：`parseRobotsTxt` 原先按**秒**解析、`politeDelay` 按**毫秒**使用， * 于是站点声明 `Crawl-delay: 10` 时我们仍按 120ms 连发（快约 83 倍）——站点声明的限速被完全忽略， * 而且看不出来。现在统一在解析处换算为毫秒；另设上限，避免个别站点声明 `Crawl-delay: 3600` * 让一次生成卡死数小时（超上限时记日志说明）。 */
 const CRAWL_DELAY_MAX_MS = 10000/** * 空标题候选（sitemap 发现，`title === ''`）的正文长度下限。 * 这类候选取不到"抓取前就知道的标题"，A1 的标题探针必然命中页面自己的 `<title>` → 形同不存在； * 改用两条可判定的兜底：① 清洗后正文短于此长度；② 同站点**别的 URL** 已抓到完全相同的正文（模板页成群出现）。 */
 /** 简单 HTML → 纯文本（标签/实体/空白清理，供提取链接文本） */
@@ -134,32 +158,13 @@ export function expandDomainHints(terms: string[]): string[] {
   }
   }
   return [...out]}
-/** 常见跟踪参数（URL 规范化时移除，避免同一文章多入口重复抓取/入库） */
-const TRACKING_QUERY_KEYS = new Set([  'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'spm', 'from', 'ref', 'share', 'source', 'redirect'])/** * URL 规范化（纯函数、可测试）：小写主机、去默认端口、去 fragment、去跟踪参数、去尾部斜杠。 * 用于文章去重（A3），使 `?utm_*`、`http/https`、尾斜杠等差异归并为同一篇。 */
-export function normalizeArticleUrl(raw: string, baseUrl?: string): string {
-  let u: URL
-  try { u = new URL(raw, baseUrl) }
- catch {
-  return raw }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:')
-        return raw
-  u.host = u.host.toLowerCase()
-        if ((u.protocol === 'http:' && u.port === '80') || (u.protocol === 'https:' && u.port === '443'))
-  u.port = ''
-  u.hash = ''
-  const keep = new URLSearchParams()
-        for (const [k, v] of u.searchParams.entries()) {
-  if (!TRACKING_QUERY_KEYS.has(k.toLowerCase()))
-  keep.append(k, v)
-  }
-  u.search = keep.toString()
-  u.pathname = u.pathname.replace(/\/+$/, '')
-        return u.toString()}
-/** 文章 URL 去重键（纯函数、可测试）：基于规范化 URL，去掉协议与尾部斜杠，使 http/https/跟踪参数/尾斜杠归并为同一篇 */
-export function dedupeArticleKey(url: string): string {
-  const n = normalizeArticleUrl(url)
-        const i = n.indexOf('://')
-        return i >= 0 ? n.slice(i + 3) : n}
+/*
+ * URL 规范化与去重键已抽到 `url-key.ts`（2026-10-06 Phase 11 H）：它现在有**两个使用方**
+ * （本文件的发现遍历 + `db/web-sites.ts#listSiteArticleKeys`），两边口径必须完全一致，
+ * 否则"已知/新增"判错、饱和判据永远不成立。这里导入并**重新导出**，旧调用方与单测不受影响。
+ */
+import { dedupeArticleKey, normalizeArticleUrl } from './url-key'
+export { dedupeArticleKey, normalizeArticleUrl }
 /** * 解析 sitemap（xml）为 `{ url, lastmod?, publicationDate? }`（纯函数、可测试）：兼容 sitemap index（子 sitemap）与 urlset。 * `publicationDate` 取 Google News 扩展的 `<news:publication_date>`——它比 `lastmod` 更贴"发布时间"（Phase 10 日期阶梯 L2 的 a/b 两级）。 */
 export function parseSiteMap(  html: string, baseUrl: string): { url: string;
   lastmod?: string;
@@ -406,92 +411,366 @@ else {
   break  }
   return [...found.values()].map((v) => ({ url: v.url, title: '', sitemapLastmod: v.lastmod,
   sitemapPublication: v.publicationDate  }))}
-/** * 站点发现（BFS）：从 rootUrl 开始抓列表页，提取同域文章链接清单； * 栏目/分页链接入队继续（限深度与页数）。返回 `DiscoveredArticle[]`（URL 去重，按发现顺序，**带日期**）。 * * Phase 10：目录必须在建立时就带上发布日期（用户裁定 ①），因此每条都走一遍日期阶梯的 L1/L2/L3 * （L4 `Last-Modified`、L5 页面日期要抓正文才有，放在抓取阶段回填）。 */
-export async function discoverSiteArticles(  rootUrl: string, opts: { maxPages?: number; maxDepth?: number }
- = {
-}): Promise<DiscoveredArticle[]> {
-  const { maxPages = SYNC_MAX_PAGES, maxDepth = SYNC_MAX_DEPTH }
- = opts
-  let base: URL
-  try { base = new URL(rootUrl)
+/**
+ * 站点发现的**报告**（Phase 11 H）：页/层数不再是输入，而是这次的**实测结果**，
+ * 必须如实报给用户（撞安全阀时不能假装"抓全了"）。
+ * 跨层契约部分（IPC/界面用）定义在 `shared/types.ts#WebDiscoveryReport`，这里补上主进程侧才有的 `limits`。
+ */
+export interface DiscoveryReport extends WebDiscoveryReport {
+  seconds: number
+  limits: DiscoveryLimits
+}
+
+export interface DiscoveryOptions {
+  /** 兼容旧调用：直接给定页/层上限（会给出一份"自动但指定硬顶"的限额） */
+  maxPages?: number
+  maxDepth?: number
+  /** 限额（优先于 maxPages/maxDepth；由 `resolveLimits` 解析，见 `site-discovery.ts`） */
+  limits?: DiscoveryLimits
+  /** 站内目录已有的 URL 去重键（用于"新增"统计与饱和判据；重复同步时它很大） */
+  existingKeys?: Set<string>
+  /** 目标年份区间（建立区间）：用于"未覆盖年份优先出队" */
+  fromYear?: number
+  toYear?: number
+  /**
+   * 测试缝：注入页面抓取（默认走 Electron net 的 `fetchUrl`）。
+   * 遍历器是本次改动的核心（优先级队列 + 饱和停止），必须可被单测完整驱动。
+   */
+  fetchHtml?: (url: string) => Promise<string>
+}
+
+function emptyReport(): DiscoveryReport {
+  return {
+    method: 'bfs',
+    pagesFetched: 0,
+    maxDepthReached: 0,
+    stopReason: 'frontier-empty',
+    stopText: '未开始',
+    discovered: 0,
+    freshArticles: 0,
+    added: 0,
+    dated: 0,
+    byYear: {},
+    cellCount: 0,
+    depthPruned: 0,
+    seconds: 0,
+    limits: resolveLimits({})
   }
- catch {
-  return []  }
+}
+
+/** 取优先级最优的前沿候选（线性扫描；前沿有容量上限，规模可控） */
+function takeBestFrontier(
+  frontier: { url: string; depth: number }[],
+  stats: Map<string, PatternStat>,
+  uncoveredYears: Set<number>
+): { url: string; depth: number } {
+  let bestIdx = 0
+  let bestScore = Number.POSITIVE_INFINITY
+  for (let i = 0; i < frontier.length; i++) {
+    const s = pagePriority({ url: frontier[i].url, depth: frontier[i].depth, stats, uncoveredYears })
+    if (s < bestScore) {
+      bestScore = s
+      bestIdx = i
+    }
+  }
+  return frontier.splice(bestIdx, 1)[0]
+}
+
+/** 入队（容量满时按优先级淘汰最差的一个；优先级更差的直接丢弃） */
+function pushFrontier(
+  frontier: { url: string; depth: number }[],
+  item: { url: string; depth: number },
+  stats: Map<string, PatternStat>,
+  uncoveredYears: Set<number>
+): void {
+  if (frontier.length < FRONTIER_CAP) {
+    frontier.push(item)
+    return
+  }
+  let worstIdx = 0
+  let worstScore = Number.NEGATIVE_INFINITY
+  for (let i = 0; i < frontier.length; i++) {
+    const s = pagePriority({ url: frontier[i].url, depth: frontier[i].depth, stats, uncoveredYears })
+    if (s > worstScore) {
+      worstScore = s
+      worstIdx = i
+    }
+  }
+  const newScore = pagePriority({ url: item.url, depth: item.depth, stats, uncoveredYears })
+  if (newScore < worstScore) frontier.splice(worstIdx, 1, item)
+}
+
+/** * 站点发现（feed → sitemap → **自适应 BFS**）：返回文章清单 + 本次发现报告。 * * 与旧实现的差别（Phase 11 H）：BFS 不再固定 20 页/2 层，而是 *   - 出队**按优先级**（年-月归档 > 索引页 > 翻页 > 其他；并按本次实测的形态收益自我调整）； *   - 停止条件为"**收益饱和**"（连续多页既无新文章也无新的年月格子）或前沿走空， *     页/层数只是安全阀； *   - 每次至少走到**上次的用量**（`limits.minPages`，来自站点行的 discovery_pages），防退化。 * * Phase 10：目录必须在建立时就带上发布日期（用户裁定 ①），因此每条都走一遍日期阶梯的 L1/L2/L3 * （L4 `Last-Modified`、L5 页面日期要抓正文才有，放在抓取阶段回填）。 */
+export async function discoverSiteArticlesDetailed(
+  rootUrl: string,
+  opts: DiscoveryOptions = {}
+): Promise<{ articles: DiscoveredArticle[]; report: DiscoveryReport }> {
+  const started = Date.now()
+  let base: URL
+  try {
+    base = new URL(rootUrl)
+  } catch {
+    return { articles: [], report: emptyReport() }
+  }
   const host = base.host
+  const known = opts.existingKeys ?? new Set<string>()
   const robots = await fetchRobotsTxt(rootUrl).catch(() => ({ crawlDelayMs: undefined, disallow: [] }))
-        const found = new Map<string, RawDiscovered>() // dedupeKey -> 文章
+  const found = new Map<string, RawDiscovered>() // dedupeKey -> 文章
+
+  /** 汇总报告（feed/sitemap/BFS 三条路共用） */
+  const buildReport = (
+    method: DiscoveryReport['method'],
+    list: DiscoveredArticle[],
+    extra: { pagesFetched: number; maxDepthReached: number; stopReason: DiscoveryStopReason | null; stopText: string; cellCount: number; depthPruned?: number; limits: DiscoveryLimits }
+  ): DiscoveryReport => {
+    const byYear: Record<string, number> = {}
+    let dated = 0
+    for (const a of list) {
+      if (a.publishedDate) dated++
+      const y = a.publishedDate?.slice(0, 4)
+      if (y) byYear[y] = (byYear[y] ?? 0) + 1
+    }
+    return {
+      method,
+      pagesFetched: extra.pagesFetched,
+      maxDepthReached: extra.maxDepthReached,
+      stopReason: extra.stopReason,
+      stopText: extra.stopText,
+      discovered: list.length,
+      freshArticles: [...found.keys()].filter((k) => !known.has(k)).length,
+      added: 0,
+      dated,
+      byYear,
+      cellCount: extra.cellCount,
+      depthPruned: extra.depthPruned ?? 0,
+      seconds: Math.round((Date.now() - started) / 100) / 10,
+      limits: extra.limits
+    }
+  }
+
   // A2: RSS/Atom 订阅源优先（最稳、带标题/日期）；无订阅源则回退 sitemap/BFS
   const feedArticles = await fetchFeedArticles(rootUrl).catch(() => [])
-        for (const a of feedArticles) {
-  if (!found.has(dedupeArticleKey(a.url)))
-  found.set(dedupeArticleKey(a.url), a)
+  for (const a of feedArticles) {
+    if (!found.has(dedupeArticleKey(a.url))) found.set(dedupeArticleKey(a.url), a)
   }
   if (found.size > 0) {
-  const list = toDiscovered([...found.values()])
-  logDiscovery(host, 'feed', list)
-        return list  }
+    const list = toDiscovered([...found.values()])
+    logDiscovery(host, 'feed', list)
+    const limits = resolveLimits({})
+    return {
+      articles: list,
+      report: buildReport('feed', list, { pagesFetched: 0, maxDepthReached: 0, stopReason: null, stopText: '站点提供 RSS/Atom 订阅源（无需遍历列表页）', cellCount: 0, limits })
+    }
+  }
   // A1: sitemap 优先发现（更全、省翻页；标题需在导入正文时从页面 <title> 补齐）
   const sitemapArticles = await fetchSiteMapArticles(rootUrl).catch(() => [])
-        for (const a of sitemapArticles) {
-  if (!found.has(dedupeArticleKey(a.url)))
-  found.set(dedupeArticleKey(a.url), a)
+  for (const a of sitemapArticles) {
+    if (!found.has(dedupeArticleKey(a.url))) found.set(dedupeArticleKey(a.url), a)
   }
   if (found.size > 0) {
-  const list = toDiscovered([...found.values()])
-  logDiscovery(host, 'sitemap', list)
-        return list  }
-  // 无 RSS/sitemap → 回退 BFS（限深度与页数；遵守 robots + 礼貌延迟）
+    const list = toDiscovered([...found.values()])
+    logDiscovery(host, 'sitemap', list)
+    const limits = resolveLimits({})
+    return {
+      articles: list,
+      report: buildReport('sitemap', list, { pagesFetched: 0, maxDepthReached: 0, stopReason: null, stopText: '站点提供 sitemap（无需遍历列表页）', cellCount: 0, limits })
+    }
+  }
+
+  /*
+   * 无 RSS/sitemap → 回退**自适应 BFS**（遵守 robots + 礼貌延迟；页/层数由收益决定）。
+   * 限额来源（优先级从高到低）：调用方给的 limits（设置页的自动/手动 + 上次用量）→ 兼容旧参数 → 默认自动。
+   */
+  const limits: DiscoveryLimits =
+    opts.limits ??
+    (opts.maxPages !== undefined || opts.maxDepth !== undefined
+      ? {
+          maxPages: Math.max(1, opts.maxPages ?? SYNC_MAX_PAGES),
+          maxDepth: Math.max(0, opts.maxDepth ?? SYNC_MAX_DEPTH),
+          minPages: 0,
+          saturation: true,
+          timeBudgetMs: AUTO_TIME_BUDGET_MS,
+          mode: 'auto' as const
+        }
+      : resolveLimits({}))
+
   const visited = new Set<string>()
-        const queue: { url: string; depth: number }[] = [{ url: base.toString(), depth: 0 }
-]
+  const queued = new Set<string>([base.toString()])
+  const frontier: { url: string; depth: number }[] = [{ url: base.toString(), depth: 0 }]
+  const stats = new Map<string, PatternStat>()
+  const cells = new Set<string>()
+  const byYear = new Map<string, number>()
+  const recent: PageYield[] = []
   let pages = 0
-  while (queue.length > 0 && pages < maxPages) {
-  const { url, depth }
- = queue.shift()!
-  if (visited.has(url) || depth > maxDepth)
-  continue
-      if (isPathDisallowed(url, robots.disallow))
-  continue
-      visited.add(url)
-        await politeDelay(host, robots.crawlDelayMs)
-        let html: string
-  try { html = (await fetchUrl(url)).rawHtml    }
- catch {
-  continue // 列表页抓取失败则跳过该页
+  let maxDepthReached = 0
+  let freshArticles = 0
+  /** 因层数上限被剪掉的更深链接数（如实报给用户） */
+  let depthPruned = 0
+  let stopReason: DiscoveryStopReason = 'frontier-empty'
+
+  const uncoveredYears = (): Set<number> => {
+    const out = new Set<number>()
+    if (!opts.fromYear || !opts.toYear || opts.fromYear > opts.toYear) return out
+    for (let y = opts.fromYear; y <= opts.toYear; y++) if (!byYear.has(String(y))) out.add(y)
+    return out
+  }
+
+  for (;;) {
+    // 取下一个可用候选（跳过已访问 / robots 禁止的）
+    let next: { url: string; depth: number } | null = null
+    for (;;) {
+      if (frontier.length === 0) break
+      const cand = takeBestFrontier(frontier, stats, uncoveredYears())
+      if (visited.has(cand.url)) continue
+      if (isPathDisallowed(cand.url, robots.disallow)) {
+        visited.add(cand.url)
+        continue
+      }
+      next = cand
+      break
+    }
+    const reason = decideStop({
+      recent,
+      frontierEmpty: next === null,
+      pages,
+      limits,
+      nextDepth: next?.depth ?? 0,
+      elapsedMs: Date.now() - started,
+      alreadyKnown: known.size,
+      discoveredNow: found.size
+    })
+    if (reason) {
+      stopReason = reason
+      break
+    }
+    const { url, depth } = next as { url: string; depth: number }
+    visited.add(url)
+    await politeDelay(host, robots.crawlDelayMs)
+    let html: string | null = null
+    try {
+      // 测试缝：注入的抓取优先（单测据此完整驱动遍历器）
+      html = opts.fetchHtml ? await opts.fetchHtml(url) : (await fetchUrl(url)).rawHtml
+    } catch {
+      html = null // 列表页抓取失败则跳过该页（计为"零收益"，让饱和判据照样能收工）
     }
     pages++
-  for (const { href, text }
- of extractLinks(html, url)) {
-  let u: URL
-  try { u = new URL(href)
-  }
- catch {
-  continue      }
-  if (u.host !== host)
-  continue // 只在本站内
-  const abs = u.toString()
+    maxDepthReached = Math.max(maxDepthReached, depth)
+    let pageFresh = 0
+    let pageArticles = 0
+    let pageNewCells = 0
+    if (html !== null) {
+      for (const { href, text } of extractLinks(html, url)) {
+        let u: URL
+        try {
+          u = new URL(href)
+        } catch {
+          continue
+        }
+        if (u.host !== host) continue // 只在本站内
+        const abs = u.toString()
         if (isArticleUrl(abs)) {
-  const key = dedupeArticleKey(abs)
-        if (!found.has(key))
-  found.set(key, { url: abs, title: text || abs })
-  }
- 
-else if (depth + 1 <= maxDepth) { queue.push({ url: abs, depth: depth + 1 })
-  }
+          pageArticles++
+          const key = dedupeArticleKey(abs)
+          if (!found.has(key)) {
+            found.set(key, { url: abs, title: text || abs })
+            const cell = cellOf(abs)
+            if (cell) {
+              if (!cells.has(cell)) {
+                cells.add(cell)
+                pageNewCells++
+              }
+              byYear.set(cell.slice(0, 4), (byYear.get(cell.slice(0, 4)) ?? 0) + 1)
+            }
+            if (!known.has(key)) {
+              pageFresh++
+              freshArticles++
+            }
+          }
+        } else if (depth + 1 <= limits.maxDepth && !queued.has(abs)) {
+          // 非文章链接（栏目/归档/翻页）入队继续走；容量满时按优先级淘汰
+          queued.add(abs)
+          pushFrontier(frontier, { url: abs, depth: depth + 1 }, stats, uncoveredYears())
+        } else if (depth + 1 > limits.maxDepth) {
+          // 因层数上限没走：**如实计数**（撞层数时不能假装"抓全了"）
+          depthPruned++
+        }
+      }
     }
+    // 形态收益统计（用"这一页给出多少文章"衡量，重复同步时也成立——用于自我调整出队顺序）
+    const pattern = patternOf(url)
+    const st = stats.get(pattern) ?? { pages: 0, articles: 0 }
+    stats.set(pattern, { pages: st.pages + 1, articles: st.articles + pageArticles })
+    recent.push({ newArticles: pageFresh, newCells: pageNewCells })
+    if (recent.length > SATURATION_WINDOW * 3) recent.splice(0, recent.length - SATURATION_WINDOW * 3)
   }
+
   const list = toDiscovered([...found.values()])
   logDiscovery(host, 'bfs', list)
-        return list}
-/** * 同步站点：发现文章清单 → 增量写入 web_site_articles → 更新 last_synced_at。 * 返回本次**新增**文章数（首次同步为全量，之后仅新增）。 */
-export async function syncSite(siteId: string): Promise<number> {
+  const stopText = describeStop(stopReason, pages, limits.maxPages, frontier.length)
+  const prunedNote = depthPruned > 0 ? `；另有 ${depthPruned} 个更深的链接因层数上限（${limits.maxDepth}）未走` : ''
+  logMain(
+    'web',
+    `站点发现（自适应）：${host} 走了 ${pages} 页 / ${maxDepthReached} 层，发现 ${list.length} 篇（新增 ${freshArticles} 篇，年月格子 ${cells.size} 个），${stopText}${prunedNote}`
+  )
+  return {
+    articles: list,
+    report: buildReport('bfs', list, {
+      pagesFetched: pages,
+      maxDepthReached,
+      stopReason,
+      stopText: stopText + prunedNote,
+      cellCount: cells.size,
+      depthPruned,
+      limits
+    })
+  }
+}
+
+/** 兼容入口：只要文章清单（旧的 `discoverSiteArticles` 语义与返回类型不变） */
+export async function discoverSiteArticles(rootUrl: string, opts: DiscoveryOptions = {}): Promise<DiscoveredArticle[]> {
+  const { articles } = await discoverSiteArticlesDetailed(rootUrl, opts)
+  return articles
+}
+
+export interface SyncSiteOptions {
+  /** 限额（设置页的自动/手动 + 上次用量，由 `site-sync.ts` 解析） */
+  limits?: DiscoveryLimits
+  /** 目标年份区间（建立区间），用于"未覆盖年份优先" */
+  fromYear?: number
+  toYear?: number
+}
+
+export interface SiteSyncResult {
+  added: number
+  report: DiscoveryReport
+}
+
+/** * 同步站点：发现文章清单 → 增量写入 web_site_articles → 更新 last_synced_at。 * 返回**本次新增条数 + 发现报告**（Phase 11 H：页/层数实测值会记回站点行，供下次当起点下限）。 */
+export async function syncSite(siteId: string, opts: SyncSiteOptions = {}): Promise<SiteSyncResult> {
   const site = getWebSiteById(siteId)
-        if (!site)
-        return 0
-  const articles = await discoverSiteArticles(site.rootUrl)
-        const added = upsertSiteArticles(siteId, articles)
+  if (!site) return { added: 0, report: emptyReport() }
+  /*
+   * 把站内目录已有的 URL 键喂给发现器：① "新增"才算收益（饱和判据的分子）；
+   * ② 重复同步时它很大 → 阈值随之变大 → 只要还有成批新文章就会继续走；目录已建全则立刻饱和。
+   */
+  const existingKeys = listSiteArticleKeys(siteId)
+  const { articles, report } = await discoverSiteArticlesDetailed(site.rootUrl, { ...opts, existingKeys })
+  const added = upsertSiteArticles(siteId, articles)
   updateWebSiteLastSynced(siteId, new Date().toISOString())
-        return added}
+  // 把这次实际走的规模记回站点行（Migration 052），下次当**下限**（防"一次偶发失败导致发现范围退化"）
+  if (report.method === 'bfs' && report.pagesFetched > 0) {
+    try {
+      updateSiteDiscoveryLimits(siteId, report.pagesFetched, report.maxDepthReached)
+    } catch (err) {
+      logMain('web', `记录站点发现规模失败（不影响同步）：${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  logMain(
+    'web',
+    `站点同步完成：${site.rootUrl} 方式=${report.method} 发现 ${report.discovered} 篇（新增 ${added} 篇）耗时 ${report.seconds}s`
+  )
+  return { added, report: { ...report, added } }
+}
 /** 专指词（机构 / 学段）：真正指示"写的是哪一类学校" */
 const SPECIFIC_TERMS = [  '高中', '完中', '中学', '初中', '小学', '幼儿园', '学前', '保育', '托育', '入园', '幼教',  '校区', '一中', '侨中', '附中', '高级中学', '职业中学', '职专', '中学部', '高中部', '双语',  '名校', '学考', '教育局', '大学', '学院', '附小',
   /*
@@ -784,6 +1063,88 @@ if (import.meta.vitest) {
   it('detects rss/atom feed link in homepage (A2, 2026-08-28)', () => {
   const html = '<html><head><link rel="alternate" type="application/rss+xml" href="/rss.xml"/></head></html>'
   expect(detectFeedUrls(html, 'https://x.gov.cn')).toEqual(['https://x.gov.cn/rss.xml'])
+  })
+
+  /*
+   * Phase 11 H：**自适应发现遍历器**的单测（用注入的假站点驱动，不碰网络）。
+   * 假站点结构（模仿 clnews 那种"栏目 → 年-月归档 → 文章"）：
+   *   首页 → 2 个栏目页；每个栏目页 → 1 个年-月归档页 + 若干文章；归档页 → 一批文章。
+   * 要验证的四件事：① 归档页优先出队；② 收益饱和即停（不走满上限）；③ 目录已有的文章不算"新增"；
+   * ④ 报告如实（页数/层数/停止原因/年月格子/年份分布）。
+   */
+  it('自适应发现：归档页优先、收益饱和即停、目录已有的不算新增、报告如实（Phase 11 H）', async () => {
+    const fetched: string[] = []
+    const pages: Record<string, string> = {
+      'http://x.gov.cn/': `<a href="/news/a/">栏目A</a><a href="/news/b/">栏目B</a><a href="/news/c/">栏目C</a>`,
+      'http://x.gov.cn/news/a/': `<a href="/html/1/2016-01/">2016年1月</a><a href="/html/1/2016-01-05/aaa.shtml">A1</a>`,
+      'http://x.gov.cn/news/b/': `<a href="/html/2/2016-02/">2016年2月</a><a href="/html/2/2016-02-06/bbb.shtml">B1</a>`,
+      'http://x.gov.cn/html/1/2016-01/': `<a href="/html/1/2016-01-07/ccc.shtml">C1</a><a href="/html/1/2016-01-08/ddd.shtml">D1</a>`,
+      'http://x.gov.cn/html/2/2016-02/': `<a href="/html/2/2016-02-09/eee.shtml">E1</a>`,
+      // 栏目 C 及其空归档页：**不产出任何文章**，只为把"可走页面数"做大，用来考"页数下限"
+      'http://x.gov.cn/news/c/': `<a href="/html/3/2016-03/">2016年3月</a><a href="/html/4/2016-04/">2016年4月</a><a href="/html/5/2016-05/">2016年5月</a>`,
+      'http://x.gov.cn/html/3/2016-03/': '<html></html>',
+      'http://x.gov.cn/html/4/2016-04/': '<html></html>',
+      'http://x.gov.cn/html/5/2016-05/': '<html></html>'
+    }
+    const fetchHtml = async (url: string): Promise<string> => {
+      fetched.push(url)
+      const html = pages[url]
+      if (html === undefined) return '<html></html>' // 未定义页面：空页（零收益）
+      return html
+    }
+
+    // ① 全新站点：应发现 5 篇文章，且**归档页先于栏目页里的其它路径**被访问
+    const first = await discoverSiteArticlesDetailed('http://x.gov.cn/', { fetchHtml, fromYear: 2016, toYear: 2016 })
+    expect(first.report.discovered).toBe(5)
+    expect(first.report.method).toBe('bfs')
+    // 首页之后，第 3 个被访问的页面应当是归档页（年-月优先；首页/栏目页必然在前两步之一）
+    const archiveIdx = fetched.findIndex((u) => u.includes('2016-01/') || u.includes('2016-02/'))
+    expect(archiveIdx).toBeGreaterThan(0)
+    expect(archiveIdx).toBeLessThanOrEqual(2)
+    expect(first.report.byYear).toEqual({ '2016': 5 })
+    expect(first.report.cellCount).toBe(2)
+    expect(first.report.limits.mode).toBe('auto')
+    // 收益饱和后主动收工（不该走满安全阀）
+    expect(first.report.pagesFetched).toBeLessThan(first.report.limits.maxPages)
+    expect(['saturated', 'frontier-empty']).toContain(first.report.stopReason)
+
+    // ② 重复同步：目录里已有这 5 篇 → 一篇"新增"都没有，应当更快收工（省请求）
+    const existing = new Set([...first.articles.map((a) => dedupeArticleKey(a.url))])
+    const fetched2: string[] = []
+    const second = await discoverSiteArticlesDetailed('http://x.gov.cn/', {
+      fetchHtml: async (u) => {
+        fetched2.push(u)
+        return pages[u] ?? '<html></html>'
+      },
+      existingKeys: existing
+    })
+    expect(second.report.discovered).toBe(5)
+    expect(second.report.freshArticles).toBe(0)
+    expect(fetched2.length).toBeLessThanOrEqual(fetched.length)
+
+    /*
+     * ③ 页数下限：上次用量当下限——即使看起来饱和，也要走到至少这么多页。
+     * （假站点共 9 个可达页面，其中 3 个空归档页不产出 → 足以让"下限 6"真正生效）
+     */
+    const floored = await discoverSiteArticlesDetailed('http://x.gov.cn/', {
+      fetchHtml,
+      existingKeys: existing,
+      limits: resolveLimits({ hintPages: 6 })
+    })
+    expect(floored.report.pagesFetched).toBeGreaterThanOrEqual(6)
+    expect(floored.report.limits.minPages).toBe(6)
+    // 但也不该走满安全阀：下限之上仍然按饱和收工
+    expect(floored.report.pagesFetched).toBeLessThan(floored.report.limits.maxPages)
+
+    // ④ 手动限额：层数上限 1 → 只能抓首页与它的直接链接，邮件/深层归档走不到，且如实记剪枝数
+    const shallow = await discoverSiteArticlesDetailed('http://x.gov.cn/', {
+      fetchHtml,
+      limits: resolveLimits({ mode: 'manual', manualPages: 20, manualDepth: 1 })
+    })
+    expect(shallow.report.maxDepthReached).toBeLessThanOrEqual(1)
+    expect(shallow.report.limits.saturation).toBe(false)
+    // 归档页（第 2 层）没走到 → 只有栏目页里的 2 篇文章
+    expect(shallow.report.discovered).toBe(2)
   })
   })
 }

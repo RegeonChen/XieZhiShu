@@ -631,7 +631,7 @@ handleLogged(IPC.WEB_SOURCE_SYNC, async (_event, params: WebSourceSyncReq): Prom
   try {
     if (!params?.id) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
     const res = await syncSiteTracked(params.id)
-    return { ok: true, data: { added: res.added, ...(res.error ? { error: res.error } : {}) } }
+    return { ok: true, data: { added: res.added, ...(res.error ? { error: res.error } : {}), ...(res.report ? { report: res.report } : {}) } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }

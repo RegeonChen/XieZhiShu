@@ -127,10 +127,12 @@ export const zhCN = {
      */
     articles: '清单 {count} 条',
     articlesEmpty: '清单 0 条（尚未同步）',
+    /* 2026-10-06（Phase 11 H）：发现规模是算法**实测**出来的（页/层数不由人设） */
+    discoveryMeasured: '实测发现 {pages} 页 / {depth} 层',
     syncNow: '同步清单',
     syncing: '正在同步清单…',
     syncStarted: '已开始同步清单：完成后这里会显示清单条数。',
-    syncDone: '清单同步完成：新增 {count} 条。',
+    syncDone: '清单同步完成：新增 {count} 条（发现 {discovered} 条，走 {pages} 页 / {depth} 层；{stop}）。',
     syncFailed: '清单同步失败：{message}',
     syncRetryHint: '可点「同步清单」重试。',
     /*
@@ -373,6 +375,16 @@ export const zhCN = {
       syncLabel: '站点清单',
       syncSummary: '已同步 {done}/{total} 个站点，新增 {added} 条',
       syncFailedCount: '，{count} 个站点同步失败（可稍后重试）',
+      /* 2026-10-06（Phase 11 H）：站点清单发现的规模由算法测出（走到收益饱和为止），不由用户填 */
+      discoveryLabel: '站点清单发现',
+      discoveryAuto: '自动（推荐）',
+      discoveryManual: '手动',
+      discoveryAutoHint:
+        '自动：从站点首页逐层走列表页，走到"再走也没有新文章"为止（收益饱和），并把每个站点实测需要的页数/层数记下来供下次起点使用；安全阀为 {pages} 页 / {depth} 层 / 3 分钟，撞到会如实说明"还有列表页没走完"。有 RSS 或 sitemap 的站点不用遍历列表页。',
+      discoveryManualHint: '手动：按你填的页数/层数走满（不提前收工），适合自动撞安全阀后想放开的站点。',
+      discoveryPages: '页数上限',
+      discoveryDepth: '层数上限',
+      discoveryMeasured: '（上次实测：{pages} 页 / {depth} 层）',
       planPending: '本次要建立 {pending} 篇，预计约 {minutes} 分钟',
       planAlready: '已有 {already} 篇直接跳过（不会重做）',
       planBlocked: '另有 {blocked} 篇地址不在该站点的同域白名单内，永远不会建立（已如实排除，不影响生成）',

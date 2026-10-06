@@ -3,6 +3,7 @@
  * 命名：模块:动作。请求/响应均为 ApiResult<T> 包裹。
  */
 import type {
+  WebDiscoveryReport,
   ApiResult,
   AppSettings,
   CacheBuildPlan,
@@ -299,6 +300,11 @@ export interface WebSourceSyncRes {
   added: number
   /** 失败原因（成功时不带） */
   error?: string
+  /**
+   * Phase 11 H：本次发现的**实测报告**——走了多少页/层、发现多少、为什么停（收益饱和/前沿走空/撞安全阀）。
+   * 页/层数由算法测出（不再由用户预设），界面据此如实展示"这个站点实际需要走多深"。
+   */
+  report?: WebDiscoveryReport
 }
 /** 站点清单同步状态（界面轮询） */
 export interface WebSourceSyncStatusRes {

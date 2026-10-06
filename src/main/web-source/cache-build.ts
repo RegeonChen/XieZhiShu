@@ -28,6 +28,7 @@ import { logMain } from '../logger'
 import { crawlAndScreenArticles } from './article-crawl'
 import { requestFetchCancel } from './fetch-control'
 import { syncAllSitesTracked } from './site-sync'
+import type { DiscoveryReport } from './site-crawler'
 import {
   DEFAULT_BUILD_FROM_YEAR,
   DEFAULT_BUILD_TO_YEAR,
@@ -115,9 +116,17 @@ export interface CacheBuildDeps {
    * 单测**必须**注入它——否则会走真实同步去请求站点。
    */
   syncAll?: (opts: {
+    /** 目标年份区间（Phase 11 H）：发现器据此优先走"还没发现任何文章的年份"相关页面 */
+    fromYear?: number
+    toYear?: number
     shouldCancel?: () => boolean
     onSite?: (p: { index: number; total: number; site: { id: string; rootUrl: string; title?: string } }) => void
-  }) => Promise<{ added: number; failed: number; notAttempted: number; outcomes: unknown[] }>
+  }) => Promise<{
+    added: number
+    failed: number
+    notAttempted: number
+    outcomes: { siteId: string; rootUrl: string; title?: string; added: number; error?: string; report?: DiscoveryReport }[]
+  }>
 }
 
 /** 当前状态（界面按 1.5s 轮询；`local` 每次实时取，因此本地索引跑完/被打断都能立刻反映） */
@@ -174,6 +183,8 @@ export async function runCacheBuild(
   try {
     const syncAll = deps.syncAll ?? syncAllSitesTracked
     const syncRes = await syncAll({
+      fromYear,
+      toYear,
       shouldCancel: () => stopRequested,
       onSite: ({ index, total, site }) => {
         state.sync = { siteIndex: index, siteTotal: total, currentSite: site.rootUrl, added: syncAdded, failed: syncFailed }
@@ -182,12 +193,21 @@ export async function runCacheBuild(
     })
     syncAdded = syncRes.added
     syncFailed = syncRes.failed
+    /*
+     * Phase 11 H：把**最后一个站点的实测发现规模**如实摆出来（走了多少页/层、为什么停）。
+     * 页/层数不再由人预设，用户需要的正是这个"算法测出来的结果"。
+     */
+    const last = syncRes.outcomes[syncRes.outcomes.length - 1]
+    const lastSummary = last?.report
+      ? `${last.title || last.rootUrl}：走 ${last.report.pagesFetched} 页 / ${last.report.maxDepthReached} 层，发现 ${last.report.discovered} 篇（新增 ${last.added} 篇），${last.report.stopText}`
+      : undefined
     state.sync = {
       siteIndex: syncRes.outcomes.length,
       siteTotal: syncRes.outcomes.length + syncRes.notAttempted,
       currentSite: '',
       added: syncAdded,
-      failed: syncFailed
+      failed: syncFailed,
+      ...(lastSummary ? { lastSummary } : {})
     }
   } catch (err) {
     // 同步整体异常也不能阻断建立（目录保持原样，按已有清单继续）
@@ -429,7 +449,7 @@ if (import.meta.vitest) {
     added: number
     failed: number
     notAttempted: number
-    outcomes: unknown[]
+    outcomes: { siteId: string; rootUrl: string; title?: string; added: number; error?: string }[]
   }> => ({ added: res.added ?? 0, failed: res.failed ?? 0, notAttempted: 0, outcomes: [] })
 
   describe('cache-build 建立引擎（Phase 11 C）', () => {

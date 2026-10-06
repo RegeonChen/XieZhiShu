@@ -1305,6 +1305,26 @@ BEGIN
   DELETE FROM web_article_body WHERE site_id = OLD.site_id AND url = OLD.url;
 END;
 `
+  },
+  /*
+   * ---- 052：站点发现的**实际规模**（Phase 11 H，2026-10-06 用户裁定"自动测试各站最佳页/层数"）----
+   *
+   * 背景：发现一个站点有哪些文章（无 feed/sitemap 时走 BFS）原来用固定 20 页/2 层，
+   * 实测 `clnews.com.cn` 的 62,506 条目录来自一次深层发现，而 20/2 之后每次只能新增几十条
+   * ——旧站自己都喂不饱。新实现改为"走到收益饱和为止"（`web-source/site-discovery.ts`），
+   * 页/层数成为**算法的输出**：这次实际走了多少就记在这里，下次作为**起点下限**
+   * （`resolveLimits({ hintPages, hintDepth })`），避免一次偶发失败让发现范围逐次退化。
+   *
+   * 三列都可空：NULL = 这个站点从没走过 BFS（有 feed/sitemap 的站点不需要，也永远不会写）。
+   * 不建索引、不回填旧数据（旧站下次同步自然写入）。
+   */
+  {
+    version: 52,
+    sql: `
+ALTER TABLE web_sites ADD COLUMN discovery_pages INTEGER;
+ALTER TABLE web_sites ADD COLUMN discovery_depth INTEGER;
+ALTER TABLE web_sites ADD COLUMN discovery_at TEXT;
+`
   }
 ]
 

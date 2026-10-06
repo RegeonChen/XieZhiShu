@@ -69,6 +69,10 @@ export default function CacheBuildPanel(): JSX.Element {
   const [rag, setRag] = useState<RagStatus | null>(null)
   const [cache, setCache] = useState<CacheStats | null>(null)
   const [tier, setTier] = useState<CrawlTier>('standard')
+  // Phase 11 H：站点清单发现——默认自动（页/层由算法测出）；手动才用下面两个数
+  const [discoveryMode, setDiscoveryMode] = useState<'auto' | 'manual'>('auto')
+  const [discoveryPages, setDiscoveryPages] = useState(300)
+  const [discoveryDepth, setDiscoveryDepth] = useState(6)
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [clearing, setClearing] = useState(false)
@@ -127,13 +131,19 @@ export default function CacheBuildPanel(): JSX.Element {
     return () => window.clearInterval(timer)
   }, [running, localActive, refresh])
 
-  // 初始设置（抓取节奏档位）与一次性刷新
+  // 初始设置（抓取节奏档位 + 站点清单发现模式）与一次性刷新
   useEffect(() => {
     void (async () => {
       try {
         const res = await window.api.getSettings()
-        const patch = res.ok && res.data ? (res.data as { webCrawlTier?: CrawlTier }) : null
+        const patch =
+          res.ok && res.data
+            ? (res.data as { webCrawlTier?: CrawlTier; webDiscoveryMode?: 'auto' | 'manual'; webDiscoveryPages?: number; webDiscoveryDepth?: number })
+            : null
         if (patch?.webCrawlTier) setTier(patch.webCrawlTier)
+        if (patch?.webDiscoveryMode) setDiscoveryMode(patch.webDiscoveryMode)
+        if (patch?.webDiscoveryPages) setDiscoveryPages(patch.webDiscoveryPages)
+        if (patch?.webDiscoveryDepth) setDiscoveryDepth(patch.webDiscoveryDepth)
       } catch {
         /* 设置读不到就用默认档位 */
       }
@@ -206,6 +216,29 @@ export default function CacheBuildPanel(): JSX.Element {
     setTier(next)
     const res = await window.api.updateSettings({ webCrawlTier: next })
     if (!res.ok) setTier(prev) // 落库失败就回到原值，不假装已生效
+  }
+
+  /**
+   * 2026-10-06（Phase 11 H）：站点清单发现——自动（默认，页/层由算法测出）/ 手动（自己填硬顶）。
+   * 落库失败一律回到原值，不假装已生效。
+   */
+  const saveDiscoveryMode = async (next: 'auto' | 'manual'): Promise<void> => {
+    const prev = discoveryMode
+    setDiscoveryMode(next)
+    const res = await window.api.updateSettings({ webDiscoveryMode: next })
+    if (!res.ok) setDiscoveryMode(prev)
+  }
+
+  const saveDiscoveryNumber = async (field: 'webDiscoveryPages' | 'webDiscoveryDepth', raw: string): Promise<void> => {
+    const n = Number(raw)
+    if (!Number.isFinite(n) || n <= 0) return
+    const res = await window.api.updateSettings({ [field]: n })
+    if (res.ok) {
+      const got = await window.api.getSettings()
+      const s = got.ok && got.data ? (got.data as { webDiscoveryPages?: number; webDiscoveryDepth?: number }) : null
+      if (s?.webDiscoveryPages) setDiscoveryPages(s.webDiscoveryPages)
+      if (s?.webDiscoveryDepth) setDiscoveryDepth(s.webDiscoveryDepth)
+    }
   }
 
   const clearCache = async (): Promise<void> => {
@@ -339,8 +372,76 @@ export default function CacheBuildPanel(): JSX.Element {
                 (status.sync.failed > 0 ? index.syncFailedCount.replace('{count}', String(status.sync.failed)) : '')}
           </p>
           {status.phase === 'syncing' ? <p className="settings__field-hint">{index.syncPendingHint}</p> : null}
+          {/* Phase 11 H：算法**实测**出来的发现规模（页/层数不再由人预设） */}
+          {status.phase !== 'syncing' && status.sync.lastSummary ? (
+            <p className="settings__field-hint" data-testid="cache-build-discovery">
+              {status.sync.lastSummary}
+            </p>
+          ) : null}
         </div>
       ) : null}
+
+      {/* 站点清单发现的规模（Phase 11 H）：默认自动，页/层由算法测出；撞安全阀时可切手动放开 */}
+      <div className="cache-build__block">
+        <span className="settings__field-label">{index.discoveryLabel}</span>
+        <div className="cache-build__tiers">
+          <label className="cache-build__tier-item">
+            <input
+              type="radio"
+              name="cache-build-discovery"
+              checked={discoveryMode === 'auto'}
+              disabled={running}
+              onChange={() => void saveDiscoveryMode('auto')}
+            />
+            {index.discoveryAuto}
+          </label>
+          <label className="cache-build__tier-item">
+            <input
+              type="radio"
+              name="cache-build-discovery"
+              checked={discoveryMode === 'manual'}
+              disabled={running}
+              onChange={() => void saveDiscoveryMode('manual')}
+            />
+            {index.discoveryManual}
+          </label>
+          {discoveryMode === 'manual' ? (
+            <>
+              <label className="cache-build__tier-item">
+                {index.discoveryPages}
+                <input
+                  type="number"
+                  className="cache-build__year-input"
+                  min={10}
+                  max={2000}
+                  value={discoveryPages}
+                  disabled={running}
+                  onChange={(e) => setDiscoveryPages(Number(e.target.value))}
+                  onBlur={(e) => void saveDiscoveryNumber('webDiscoveryPages', e.target.value)}
+                />
+              </label>
+              <label className="cache-build__tier-item">
+                {index.discoveryDepth}
+                <input
+                  type="number"
+                  className="cache-build__year-input"
+                  min={1}
+                  max={8}
+                  value={discoveryDepth}
+                  disabled={running}
+                  onChange={(e) => setDiscoveryDepth(Number(e.target.value))}
+                  onBlur={(e) => void saveDiscoveryNumber('webDiscoveryDepth', e.target.value)}
+                />
+              </label>
+            </>
+          ) : null}
+        </div>
+        <p className="settings__field-hint">
+          {discoveryMode === 'auto'
+            ? index.discoveryAutoHint.replace('{pages}', String(discoveryPages)).replace('{depth}', String(discoveryDepth))
+            : index.discoveryManualHint}
+        </p>
+      </div>
 
       {/* ① 网页正文缓存 */}
       <div className="cache-build__block">
