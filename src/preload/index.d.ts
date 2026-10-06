@@ -1,4 +1,4 @@
-import type { CacheBuildPlan, CacheBuildStartRes, CacheBuildStatus } from '../shared/types'
+import type { CacheBuildPlan, CacheBuildStartRes, CacheBuildStatus, CompilationReadiness } from '../shared/types'
 
 export interface ImportResult {
   path: string
@@ -64,6 +64,11 @@ export interface AppApi {
   /** 生成资料汇编；`skipConvergence` = 第二组 ⑤ 的逃生门（本轮不做收敛、全量送入） */
   generateCompilation(taskId: string, title: string, skipConvergence?: boolean): Promise<{ ok: boolean; data?: { compilation: unknown; interrupted?: { stage: string; message: string; percent: number } }; error?: { code: string; message: string } }>
   continueCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown; interrupted?: { stage: string; message: string; percent: number } }; error?: { code: string; message: string } }>
+  /**
+   * 2026-10-06（Phase 11 E 用户需求 ②）：生成前的**就绪检查**（只读）。
+   * 未就绪时界面**必须**弹阻断提示并指引去设置页建立（严格阻断、无逃生门）；主进程生成时会再查一次。
+   */
+  compilationReadiness(taskId: string): Promise<{ ok: boolean; data?: CompilationReadiness; error?: { code: string; message: string } }>
   /** 生成前的材料规模预检（只读，2026-10-05 用户要求 P1）：不落库、不抓网页、不调大模型，只提示不限制 */
   estimateCompilationMaterials(
     taskId: string,

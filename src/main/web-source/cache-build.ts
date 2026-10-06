@@ -21,12 +21,28 @@ import { getIndexStatus, getQueueSize, getRebuildProgress, requeuePendingIndexes
 import Database from 'better-sqlite3'
 import { setDb } from '../db/connection'
 import { runMigrations } from '../db/migrate'
-import { putCachedBody } from '../db/article-body-cache'
+import { putCachedBody, putCacheMiss } from '../db/article-body-cache'
+import { getTaskById } from '../db/tasks'
+import { getSettings } from '../db/settings'
 import { logMain } from '../logger'
 import { crawlAndScreenArticles } from './article-crawl'
 import { requestFetchCancel } from './fetch-control'
-import { DEFAULT_BUILD_FROM_YEAR, DEFAULT_BUILD_TO_YEAR, buildCacheBuildPlan, normalizeYearRange } from './cache-build-plan'
-import type { CacheBuildStartRes, CacheBuildStatus, CacheBuildWebProgress } from '../../shared/types'
+import {
+  DEFAULT_BUILD_FROM_YEAR,
+  DEFAULT_BUILD_TO_YEAR,
+  buildCacheBuildPlan,
+  decideReadiness,
+  normalizeYearRange,
+  readLocalBuildPlan
+} from './cache-build-plan'
+import type {
+  BuildNotReadyReason,
+  CacheBuildStartRes,
+  CacheBuildStatus,
+  CacheBuildWebProgress,
+  CompilationReadiness,
+  WebBuildPlan
+} from '../../shared/types'
 
 const WEB_ZERO: CacheBuildWebProgress = {
   total: 0,
@@ -243,6 +259,67 @@ export function requestCacheBuildStop(): boolean {
   return true
 }
 
+/**
+ * 生成前的**就绪检查**（Phase 11 E，用户需求 ②；严格阻断、无逃生门＝决策 1A）。
+ *
+ * 口径全部沿用只读规划（决策 2A：**逐篇判定**这一篇有没有缓存，**不比较区间大小**）：
+ * - 年份区间取**该次生成真正会用的那一组**（任务优先、回退全局默认），与
+ *   `compilation-service` 里 `task.webYearFrom ?? getSettings().webYearFrom` **同一表达式**——
+ *   两者都没有时，生成期**根本不抓网页**，网页侧就不构成缺口；
+ * - `no-body` / `blocked` 标记不算缺口（否则失效链接会让闸门永远不放行）；
+ * - 本地侧排除 `body_missing = 1`；索引失败**也算未就绪**（重建即可恢复）；
+ * - 正在建立缓存与索引时**也不放行**：抓取池是全局单例，两条抓取会互相干扰。
+ *
+ * **只读**：不写库、不抓网页、不调模型。本函数是生成前闸门的**唯一真相**（界面与主进程都用它）。
+ */
+export function checkCompilationReadiness(taskId: string): CompilationReadiness {
+  const task = getTaskById(taskId)
+  const settings = getSettings()
+  const fromYear = task?.webYearFrom ?? settings.webYearFrom ?? null
+  const toYear = task?.webYearTo ?? settings.webYearTo ?? null
+  const buildRunning = isCacheBuildRunning()
+
+  const local = readLocalBuildPlan()
+  const hasRange = fromYear != null && toYear != null
+  // 有区间才算网页侧的账；没区间时生成期不抓网页，网页侧一律记 0（不是"已建齐"，是"用不上"）
+  const web: WebBuildPlan = hasRange
+    ? buildCacheBuildPlan({ fromYear, toYear }).web
+    : { fromYear: fromYear ?? 0, toYear: toYear ?? 0, total: 0, cached: 0, noBody: 0, blocked: 0, pending: 0, byYear: [], estimatedMinutes: 0, undatedArticles: 0 }
+
+  const decision = decideReadiness(web, local)
+  const reasons: BuildNotReadyReason[] = buildRunning ? ['build-running', ...decision.reasons] : decision.reasons
+  return {
+    ready: decision.ready && !buildRunning,
+    reasons,
+    fromYear,
+    toYear,
+    webPending: web.pending,
+    webCached: web.cached + web.noBody + web.blocked,
+    webBlocked: web.blocked,
+    webUndated: web.undatedArticles,
+    localPending: local.pending,
+    localIndexing: local.indexing,
+    localFailed: local.failed,
+    buildRunning,
+    estimatedMinutes: web.estimatedMinutes
+  }
+}
+
+/** 未就绪时给用户的一句话（主进程拒绝生成时的 `error.message`，界面也有自己的富提示框） */
+export function describeReadiness(r: CompilationReadiness): string {
+  if (r.ready) return '缓存与索引已建立齐，可以生成。'
+  const parts: string[] = []
+  if (r.reasons.includes('build-running')) parts.push('正在「建立缓存与索引」（抓取池同一时刻只能跑一个，等它结束再生成）')
+  if (r.reasons.includes('web-pending')) {
+    parts.push(
+      `网页资料还有 ${r.webPending} 篇没有建立缓存（年份 ${r.fromYear ?? '?'}–${r.toYear ?? '?'}，建立预计约 ${r.estimatedMinutes} 分钟）`
+    )
+  }
+  if (r.reasons.includes('local-pending')) parts.push(`本地资料库还有 ${r.localPending} 篇没有建立索引`)
+  if (r.reasons.includes('local-index-failed')) parts.push(`本地资料库有 ${r.localFailed} 篇索引失败（重新建立可恢复）`)
+  return `还不能生成汇编：${parts.join('；')}。请到「设置 → 建立缓存与索引」点「建立」，建完再来生成。`
+}
+
 // ---- vitest inline test ----
 if (import.meta.vitest) {
   const { describe, expect, it, beforeAll, afterAll } = import.meta.vitest
@@ -410,6 +487,77 @@ if (import.meta.vitest) {
       expect(res.status.phase).toBe('cancelled')
       // 没在跑时再点停止 → false（界面据此不显示"停止"）
       expect(requestCacheBuildStop()).toBe(false)
+    })
+
+    /*
+     * 生成前就绪检查（Phase 11 E，用户需求 ②）——**闸门的唯一真相**，所以单测要覆盖：
+     * 待建立 → 阻断；建齐 → 放行；任务没设年份（生成期不抓网页）→ 网页侧不构成缺口；
+     * 正在建立 → 也阻断（抓取池是全局单例）。
+     */
+    it('就绪检查：区间内有未建立的文章 → 未就绪（并给出来源年份与"不算缺口"的三态）', () => {
+      db.prepare("DELETE FROM web_article_body").run()
+      db.prepare("INSERT INTO writing_tasks (id, title, scope_json) VALUES ('t1','任务一','{\"all\":true}')").run()
+      db.prepare('UPDATE writing_tasks SET web_year_from = 2020, web_year_to = 2020 WHERE id = ?').run('t1')
+      putCachedBody('s1', 'https://x.gov.cn/a.htm', '某中学新建项目开工。', 'h-a')
+      putCacheMiss('s1', 'https://x.gov.cn/b.htm', 'no-body')
+
+      const r = checkCompilationReadiness('t1')
+      expect(r.ready).toBe(false)
+      expect(r.reasons).toEqual(['web-pending'])
+      expect(r.fromYear).toBe(2020)
+      expect(r.toYear).toBe(2020)
+      // b 已"试过但没正文"、a 已建好 → 都不算缺口；只剩 c 待建立
+      expect(r.webPending).toBe(1)
+      expect(r.webCached).toBe(2)
+      expect(r.estimatedMinutes).toBeGreaterThanOrEqual(0)
+      // 文案必须给出去处（界面据此指引用户）
+      expect(describeReadiness(r)).toContain('建立缓存与索引')
+      expect(describeReadiness(r)).toContain('1 篇')
+    })
+
+    it('就绪检查：把剩下的也建好 → 放行（本地资料库为空则本地侧无缺口）', () => {
+      putCachedBody('s1', 'https://x.gov.cn/c.htm', '某小学教学楼落成。', 'h-c')
+      const r = checkCompilationReadiness('t1')
+      expect(r.webPending).toBe(0)
+      expect(r.webCached).toBe(3)
+      expect(r.ready).toBe(true)
+      expect(r.reasons).toEqual([])
+      expect(describeReadiness(r)).toContain('可以生成')
+    })
+
+    it('就绪检查：任务与全局都没设年份 → 生成期不抓网页，网页侧不构成缺口', () => {
+      db.prepare('UPDATE writing_tasks SET web_year_from = NULL, web_year_to = NULL WHERE id = ?').run('t1')
+      const r = checkCompilationReadiness('t1')
+      expect(r.fromYear).toBeNull()
+      expect(r.toYear).toBeNull()
+      expect(r.webPending).toBe(0)
+      expect(r.ready).toBe(true)
+    })
+
+    it('就绪检查：正在建立缓存与索引 → 也阻断（抓取池同一时刻只能跑一个）', async () => {
+      db.prepare('UPDATE writing_tasks SET web_year_from = 2020, web_year_to = 2020 WHERE id = ?').run('t1')
+      let release: () => void = () => undefined
+      const gate = new Promise<void>((r) => {
+        release = r
+      })
+      const first = runCacheBuild(
+        { fromYear: 2020, toYear: 2020, includeLocal: false },
+        {
+          crawl: async () => {
+            await gate
+            return fakeResult()
+          }
+        }
+      )
+      await new Promise((r) => setTimeout(r, 0))
+      const r = checkCompilationReadiness('t1')
+      expect(r.buildRunning).toBe(true)
+      expect(r.ready).toBe(false)
+      expect(r.reasons[0]).toBe('build-running')
+      expect(describeReadiness(r)).toContain('建立缓存与索引')
+      release()
+      await first
+      expect(checkCompilationReadiness('t1').buildRunning).toBe(false)
     })
   })
 }

@@ -11,6 +11,7 @@ import type {
   Compilation,
   CompilationContradiction,
   CompilationInterrupt,
+  CompilationReadiness,
   CompilationRecycleBinItem,
   CompilationVersionSummary,
   Contradiction,
@@ -69,6 +70,11 @@ export const IPC = {
    * **不落库、不抓网页、不调大模型**——因此本轮将要抓取的网页资料不计入估算。
    */
   COMPILATION_ESTIMATE_MATERIALS: 'compilation:estimateMaterials',
+  /**
+   * 2026-10-06（Phase 11 E 用户需求 ②）：生成前的**就绪检查**——本次生成要用到的资料是否都已建立缓存/索引。
+   * 只读、不花钱；界面据此决定"弹预检确认框"还是"弹阻断提示 + 去设置页建立"（严格阻断、无逃生门）。
+   */
+  COMPILATION_READINESS: 'compilation:readiness',
   COMPILATION_RESOLVE_CONTRADICTION: 'compilation:resolveContradiction',
   COMPILATION_CONFIRM: 'compilation:confirm',
   COMPILATION_REORDER: 'compilation:reorder',
@@ -565,6 +571,11 @@ export interface CompilationGenerateReq {
 export interface CompilationEstimateMaterialsReq {
   taskId: string
   instruction: string
+}
+
+/** 生成前就绪检查的请求（Phase 11 E） */
+export interface CompilationReadinessReq {
+  taskId: string
 }
 /**
  * 第二组 ⑤：**文章内取高信号段 ± 上下文**的统计（随生成结果/预检透出，用于如实汇报）。
@@ -1148,7 +1159,8 @@ export interface IpcMapping {
   [IPC.COMPILATION_GET]: { _req: CompilationGetReq; _res: ApiResult<CompilationGetRes> }
   [IPC.COMPILATION_GENERATE]: { _req: CompilationGenerateReq; _res: ApiResult<CompilationGenerateRes> }
   [IPC.COMPILATION_CONTINUE]: { _req: CompilationContinueReq; _res: ApiResult<CompilationContinueRes> }
-  [IPC.COMPILATION_ESTIMATE_MATERIALS]: { _req: CompilationEstimateMaterialsReq; _res: ApiResult<CompilationEstimateMaterialsRes> }
+  [IPC.COMPILATION_ESTIMATE_MATERIALS]: { _req: CompilationEstimateMaterialsReq; _res: ApiResult<CompilationEstimateMaterialsRes> },
+  [IPC.COMPILATION_READINESS]: { _req: CompilationReadinessReq; _res: ApiResult<CompilationReadiness> }
   [IPC.COMPILATION_RESOLVE_CONTRADICTION]: { _req: CompilationResolveContradictionReq; _res: ApiResult<CompilationResolveContradictionRes> }
   [IPC.COMPILATION_CONFIRM]: { _req: CompilationConfirmReq; _res: ApiResult<CompilationConfirmRes> }
   [IPC.COMPILATION_REORDER]: { _req: CompilationReorderReq; _res: ApiResult<CompilationReorderRes> }
