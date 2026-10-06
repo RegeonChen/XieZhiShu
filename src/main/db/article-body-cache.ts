@@ -154,6 +154,28 @@ export function clearBodyCache(): number {
   return getDb().prepare('DELETE FROM web_article_body').run().changes
 }
 
+/**
+ * 2026-10-06（Phase 11 F，用户需求 ④「资料删除后对应缓存/索引同步删除」）：**清扫孤儿缓存**——
+ * 删掉那些"目录（`web_site_articles`）里已经没有对应条目"的缓存行。
+ *
+ * 正常情况下应该是 **0 条**：Migration 051 的触发器保证"删目录行 → 缓存跟着删"，站点级联覆盖另一路。
+ * 但仍然值得定期扫一遍，因为**历史数据**（051 之前的库）与"URL 规范化后目录行换了地址"这类情况
+ * 都可能留下孤儿——它们白占磁盘，而且**谁也看不见**（既不在待建立里、也不在已建立里）。
+ *
+ * 只删缓存行：**不动目录、不动 sources、不动索引、不动任务账本**。返回清掉的条数，由调用方如实记日志。
+ */
+export function sweepOrphanBodyCaches(): number {
+  return getDb()
+    .prepare(
+      `DELETE FROM web_article_body
+        WHERE NOT EXISTS (
+          SELECT 1 FROM web_site_articles a
+           WHERE a.site_id = web_article_body.site_id AND a.url = web_article_body.url
+        )`
+    )
+    .run().changes
+}
+
 // ---- vitest inline test ----
 if (import.meta.vitest) {
   const { describe, expect, it, beforeAll, afterAll } = import.meta.vitest
@@ -232,6 +254,63 @@ if (import.meta.vitest) {
       expect(stats.byState['no-body']).toBe(2)
       expect(stats.byState['blocked']).toBe(1)
       expect(stats.entries).toBe(4)
+    })
+
+    /*
+     * Phase 11 F（用户需求 ④「资料删除后对应缓存/索引同步删除」）：
+     * 两条防线各测一次——**Migration 051 的触发器**（删目录行 → 缓存跟着删）与
+     * **孤儿清扫**（历史遗留：目录里根本没有对应条目的缓存行）。
+     */
+    it('Migration 051：删掉目录行时，它的缓存行必须跟着删（无论谁删、用什么 SQL 删）', () => {
+      db.prepare("INSERT INTO web_sites (id, root_url, title, created_at, updated_at) VALUES ('s3','https://z.gov.cn','Z站','2026-01-01','2026-01-01')").run()
+      const art = db.prepare(
+        'INSERT INTO web_site_articles (site_id, url, title, discovered_at, published_date) VALUES (?,?,?,?,?)'
+      )
+      art.run('s3', 'https://z.gov.cn/keep.htm', 'K', '2026-01-01', '2020-01-01')
+      art.run('s3', 'https://z.gov.cn/gone.htm', 'G', '2026-01-01', '2020-02-01')
+      putCachedBody('s3', 'https://z.gov.cn/keep.htm', '保留的正文。', 'hk')
+      putCachedBody('s3', 'https://z.gov.cn/gone.htm', '要被删掉的正文。', 'hg')
+
+      db.prepare('DELETE FROM web_site_articles WHERE site_id = ? AND url = ?').run('s3', 'https://z.gov.cn/gone.htm')
+
+      expect(getCachedBody('s3', 'https://z.gov.cn/gone.htm')).toBeNull()
+      // **只删这一条**：别的缓存不受影响（触发器按 (site_id,url) 精确匹配）
+      expect(getCachedBody('s3', 'https://z.gov.cn/keep.htm')?.text).toBe('保留的正文。')
+    })
+
+    it('孤儿缓存清扫：只清掉"目录里没有对应条目"的行，其余一律不动', () => {
+      /*
+       * ⚠ 用例里的站点归属要小心：`s1` 在前面的用例里**已被删除**（级联测试），
+       * 再往 s1 插目录行会违反外键。这里用仍然存在的 s3。
+       */
+      // ① 正常配对（目录 + 缓存）→ 必须保留
+      db.prepare(
+        "INSERT INTO web_site_articles (site_id, url, title, discovered_at, published_date) VALUES ('s3','https://z.gov.cn/paired.htm','P','2026-01-01','2021-01-01')"
+      ).run()
+      putCachedBody('s3', 'https://z.gov.cn/paired.htm', '配对正文。', 'hp')
+      // ② 孤儿：缓存有行、目录没有（历史遗留 / URL 规范化换了地址）
+      putCachedBody('s3', 'https://z.gov.cn/orphan.htm', '孤儿正文。', 'ho')
+      const articlesBefore = (db.prepare('SELECT COUNT(*) c FROM web_site_articles').get() as { c: number }).c
+      // ③ 按定义数一遍孤儿（与实现无关的独立口径），清扫结果必须与它一致
+      const orphansBefore = (
+        db
+          .prepare(
+            `SELECT COUNT(*) c FROM web_article_body b
+              WHERE NOT EXISTS (SELECT 1 FROM web_site_articles a WHERE a.site_id = b.site_id AND a.url = b.url)`
+          )
+          .get() as { c: number }
+      ).c
+      expect(orphansBefore).toBeGreaterThanOrEqual(1)
+
+      const swept = sweepOrphanBodyCaches()
+
+      expect(swept).toBe(orphansBefore)
+      expect(getCachedBody('s3', 'https://z.gov.cn/orphan.htm')).toBeNull()
+      expect(getCachedBody('s3', 'https://z.gov.cn/paired.htm')?.text).toBe('配对正文。')
+      // 目录一条都不能少（清扫只针对缓存表）
+      expect((db.prepare('SELECT COUNT(*) c FROM web_site_articles').get() as { c: number }).c).toBe(articlesBefore)
+      // 再扫一次是幂等的（正常库应为 0 条）
+      expect(sweepOrphanBodyCaches()).toBe(0)
     })
   })
 }

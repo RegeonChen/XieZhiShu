@@ -1279,6 +1279,32 @@ CREATE INDEX IF NOT EXISTS idx_web_article_body_used ON web_article_body(last_us
 ALTER TABLE web_article_body ADD COLUMN state TEXT NOT NULL DEFAULT 'ok'
   CHECK (state IN ('ok', 'no-body', 'blocked'));
 `
+  },
+  {
+    /*
+     * Migration 051（2026-10-06，Phase 11 F，用户需求 ④「资料删除后对应缓存/索引同步删除」）：
+     * **目录行（`web_site_articles`）被删除时，同步删掉它对应的正文缓存行**。
+     *
+     * 为什么用触发器而不是"在代码里记得一起删"：
+     * - 今天删目录行只有一条路（删站点，靠 FK 级联），**但靠"记得"迟早会漏**——将来任何新增的
+     *   单行删除（栏目清理、URL 规范化后清旧行……）都会静默留下**孤儿缓存**：占磁盘、且让
+     *   "待建立篇数"与实际目录对不上；
+     * - 放在数据层就**与调用方无关**：无论谁删、用什么 SQL 删，缓存都跟着走。删除语义由数据库保证，
+     *   比写在注释里的约定可靠。
+     *
+     * 注意：**站点级联**（`web_article_body.site_id → web_sites(id) ON DELETE CASCADE`）已经覆盖
+     * "删站点"这一路；本触发器补的是"删单个目录行"。两条路都指向同一结论：缓存**绝不比目录活得久**。
+     * 反方向（删缓存）**不**需要补偿：目录行留着、这篇就回到"待建立"，正是我们要的语义。
+     */
+    version: 51,
+    sql: `
+CREATE TRIGGER IF NOT EXISTS trg_web_article_body_follow_catalog
+AFTER DELETE ON web_site_articles
+FOR EACH ROW
+BEGIN
+  DELETE FROM web_article_body WHERE site_id = OLD.site_id AND url = OLD.url;
+END;
+`
   }
 ]
 

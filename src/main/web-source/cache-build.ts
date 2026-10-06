@@ -21,7 +21,7 @@ import { getIndexStatus, getQueueSize, getRebuildProgress, requeuePendingIndexes
 import Database from 'better-sqlite3'
 import { setDb } from '../db/connection'
 import { runMigrations } from '../db/migrate'
-import { putCachedBody, putCacheMiss } from '../db/article-body-cache'
+import { putCachedBody, putCacheMiss, sweepOrphanBodyCaches } from '../db/article-body-cache'
 import { getTaskById } from '../db/tasks'
 import { getSettings } from '../db/settings'
 import { logMain } from '../logger'
@@ -168,6 +168,17 @@ export async function runCacheBuild(
     'web',
     `建立缓存开始：区间 ${fromYear}–${toYear}；本次要建 ${plannedPending} 篇，已有 ${alreadyBuilt} 篇（含"试过但没正文"与"越权地址"标记）直接跳过，不重复建立`
   )
+  /*
+   * Phase 11 F：顺手清扫孤儿缓存（目录里已经没有对应条目的缓存行）。
+   * 正常是 0 条（Migration 051 的触发器 + 站点级联已经保证），所以只在**真清到东西**时记一条日志——
+   * 不刷无意义的日志，也不让用户看到"0 条"这种噪声。
+   */
+  try {
+    const swept = sweepOrphanBodyCaches()
+    if (swept > 0) logMain('web', `建立缓存：清扫孤儿缓存 ${swept} 条（目录里已无对应条目）`)
+  } catch (err) {
+    logMain('web', `建立缓存：孤儿缓存清扫失败（不影响建立）：${err instanceof Error ? err.message : String(err)}`)
+  }
 
   const crawl = deps.crawl ?? crawlAndScreenArticles
   try {
