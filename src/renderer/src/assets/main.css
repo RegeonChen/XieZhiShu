@@ -4432,6 +4432,62 @@ textarea:focus-visible {
   border-color: #a7f3d0;
 }
 
+/* 2026-10-06（Phase 11 D）：「建立缓存与索引」面板（CacheBuildPanel） */
+.cache-build__years {
+  margin-top: 10px;
+}
+.cache-build__years-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.cache-build__year-input {
+  width: 76px;
+  padding: 4px 6px;
+  font-size: 12.5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elevated, #fff);
+  color: var(--fg);
+}
+.cache-build__years-sep {
+  color: var(--fg-soft);
+}
+.cache-build__block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 10px;
+}
+.cache-build__progress {
+  height: 6px;
+  margin: 4px 0 2px;
+  border-radius: 3px;
+  background: var(--bg-elevated, rgba(127, 127, 127, 0.2));
+  overflow: hidden;
+}
+.cache-build__progress-bar {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent, #3b82f6);
+  transition: width 0.4s ease;
+}
+.cache-build__tier {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+.cache-build__tier-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--fg);
+  cursor: pointer;
+}
+
 /* 预设模型卡片 */
 .settings__preset-item {
   transition: border-color 0.12s ease, box-shadow 0.12s ease;

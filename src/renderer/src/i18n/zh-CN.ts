@@ -219,7 +219,7 @@ export const zhCN = {
       overview: '总览',
       appearance: '外观',
       workspace: '工作区资料库',
-      index: '本地检索索引',
+      index: '建立缓存与索引',
       preset: '预设大模型',
       stepModels: '步骤默认模型',
       provider: '模型服务（Provider）'
@@ -339,29 +339,43 @@ export const zhCN = {
       saved: '工作区已更新',
       failed: '操作失败：{message}'
     },
-    /* 本地向量索引（2026-09-12）：语义检索依赖本地模型与 onnxruntime 引擎，此前失败原因只在日志里 */
+    /* 2026-10-06（Phase 11 D）：原「本地检索索引」升级为「建立缓存与索引」——
+       一次把**网页正文缓存**（按年份区间，默认 2005–2025）与**本地资料库索引**建立起来，进度与预计剩余时间如实显示。
+       抓取节奏与正文缓存占用的文案复用 `compilation.webCrawlTier*` / `compilation.webCache*`（当初就是为这块写的）。 */
     index: {
-      title: '本地检索索引',
-      hint: '本地语义检索（向量索引）让「字面不相关但意思相关」的资料也能被检索到；它依赖随软件附带的嵌入模型与 onnxruntime 引擎，全部在本地运行、不联网。若这里显示失败，检索会退化为纯关键词匹配。',
-      rebuildBtn: '重建索引',
-      continueBtn: '继续重建',
-      rebuilding: '重建中…',
-      stateReady: '索引可用',
-      stateFailed: '索引失败',
-      statePending: '尚未索引',
-      counts: '已索引 {ready} / 共 {total} 篇（失败 {failed}）',
-      bodyMissing:
-        '另有 {count} 篇网页材料未取到正文（老文章链接已失效、站点返回的是通用页面）：已排除在检索之外，也不会被「重建索引」重试。',
-      progress: '重建进度 {percent}%（已处理 {processed} / {total}，剩余 {remaining}）',
-      interruptedHint: '上次重建被关闭软件打断，点击「继续重建」从剩余部分接着跑（已索引的不会重做）。',
-      lastError: '最近失败原因',
-      /** 引擎自检：Worker 池 × WASM 线程数；回退/出错数 >0 说明在走单线程慢路径 */
+      title: '建立缓存与索引',
+      hint: '为网页资料库（按年份区间）与本地资料库建立缓存与索引；建立之后，生成汇编时直接调用这些缓存，不必再联网抓取。全部在本地完成、不消耗大模型额度；已经建立过的不会重复建立，中途关软件也没关系——下次点「建立」会从没建完的地方接着跑。',
+      rebuildBtn: '建立',
+      continueBtn: '继续建立',
+      rebuilding: '建立中…',
+      stopBtn: '停止建立',
+      yearLabel: '要建立的年份区间',
+      yearInvalid: '年份区间无效（两个都必须是 4 位年份，且起始不晚于结束）',
+      planPending: '本次要建立 {pending} 篇，预计约 {minutes} 分钟',
+      planAlready: '已有 {already} 篇直接跳过（不会重做）',
+      planBlocked: '另有 {blocked} 篇地址不在该站点的同域白名单内，永远不会建立（已如实排除，不影响生成）',
+      planUndated: '另有 {undated} 篇日期未知，不参与任何年份区间',
+      planFailed: '区间统计失败：{message}',
+      webTitle: '网页正文缓存',
+      webProgress: '已处理 {done} / {total} 篇（正文可用 {hits}、无可用正文 {dropped}、失败 {failed}）',
+      webRate: '{rate} 篇/秒，预计剩余 {eta}',
+      webSkipped: '本次跳过 {count} 篇（已建立）',
+      webIdle: '尚未建立：点「建立」按上面的年份区间开始（已建立的会自动跳过）。',
+      localTitle: '本地资料库索引',
+      localCounts: '已索引 {ready} / 共 {total} 篇（失败 {failed}）',
+      localPending: '待索引 {count} 篇（与网页抓取并行进行）',
+      localProgress: '索引进度 {percent}%（已处理 {processed} / {total}，剩余 {remaining}）',
+      localInterrupted: '上次索引被关闭软件打断：点「建立」会从剩余部分接着跑（已索引的不重做）。',
+      localReady: '本地索引已就绪，无需建立。',
+      localBodyMissing: '另有 {count} 篇网页材料未取到正文（老文章失效/站点返回模板页）：已排除在检索之外，也不算「未建立」。',
       engine: '引擎：{pool} 个 Worker × {threads} 线程（回退 {fallbacks} 次、Worker 出错 {errors} 次）',
-      queued: '已开始重建：{count} 篇排队中。进度会一直保留（可切页面、可关软件后再「继续重建」），已索引的资料不会重做。',
-      nothingToDo: '没有需要索引的资料（全部已完成）。',
-      done: '重建完成，索引可用。',
-      doneWithFailures: '重建结束，仍有 {count} 篇失败（原因见上）。',
-      failed: '重建失败：{message}',
+      lastError: '最近失败原因',
+      started: '已开始建立：可以切走做别的，进度会一直保留。',
+      refused: '已在建立中：不会重复建立，已建立的会自动跳过。',
+      stopped: '已请求停止：不再抓取新文章（已抓到的都已写入缓存）。',
+      stopFailed: '停止失败：{message}',
+      failed: '建立失败：{message}',
+      nothingToDo: '本次没有需要建立的篇数（该区间已全部建立过）。',
       /** preload 桥过旧（界面已更新但核心进程仍是旧版本）——preload 只在创建窗口时加载一次 */
       staleBridge: '当前运行的软件核心进程仍是旧版本（界面已更新、内核未更新），此功能暂不可用。请完全退出软件后重新启动再试。'
     }
@@ -469,7 +483,7 @@ export const zhCN = {
     regenerateBtn: '重新生成汇编',
     regenerateConfirmTitle: '重新生成资料汇编',
     regenerateConfirmMessage:
-      '将按当前撰写要求重新走一遍生成管线：网页资料会**按本任务的年份区间重新抓取并按正文重筛**（未命中的正文按裁定丢弃），当前这版的对话记录与版本历史不会带入新版本。确定继续？',
+      '将按当前撰写要求重新走一遍生成管线：网页资料会按本任务的年份区间重新抓取并按正文重筛（未命中的正文按裁定丢弃），当前这版的对话记录与版本历史不会带入新版本。确定继续？',
     regenerateConfirmBtn: '重新生成',
     exportBtn: '导出资料汇编',    exportDocx: '导出 Word (…docx)',
     exportArchive: '导出软件格式 (…xzsc)',
@@ -570,9 +584,9 @@ export const zhCN = {
      * 同时给出"不做收敛（全量送入）"的数——用户据此判断要不要勾下面的逃生门。两个数都写出来，不藏。
      */
     materialEstimateBody:
-      '默认**收敛**后本轮将细读 {segments} 段 / {wan} 万字（本地 {local} 段 + 网页 {web} 段），' +
+      '默认收敛后本轮将细读 {segments} 段 / {wan} 万字（本地 {local} 段 + 网页 {web} 段），' +
       '预计约 {windows} 个细读窗口 / 约 {minutes} 分钟，并会消耗相应的大模型额度。' +
-      '（做法：文章内只送有信号的段落及其紧邻上下文；另有 {dropped} 段因无信号本轮不送，**仍留在资料库中、可随时打开查看**。）' +
+      '（做法：文章内只送有信号的段落及其紧邻上下文；另有 {dropped} 段因无信号本轮不送，仍留在资料库中、可随时打开查看。）' +
       '若不收敛（全量送入）则为 {fullSegments} 段 / {fullWan} 万字 / 约 {fullWindows} 个窗口 / 约 {fullMinutes} 分钟。' +
       '（网页资料会在生成时按年份区间抓取并重筛，不在此估算内。）是否继续？',
     materialEstimateConvergeOff: '本轮不做收敛（全量送入）',
@@ -661,7 +675,7 @@ export const zhCN = {
     webCrawlTierHint: '标准档约比保守档快 2 倍。若站点出现批量失败（限流/超时），软件会自动降档并重抓失败的篇，降档只对本次运行有效。',
     webCacheTitle: '正文缓存',
     webCacheUsage: '已缓存 {entries} 篇正文，占用约 {mb} MB。',
-    webCacheHint: '正文只与文章本身有关，与撰写主题无关：缓存后，换任务或重新生成本区间时**不再重复下载**，只做本地重筛（秒级）。',
+    webCacheHint: '正文只与文章本身有关，与撰写主题无关：缓存后，换任务或重新生成本区间时不再重复下载，只做本地重筛（秒级）。',
     webCacheClearBtn: '清空缓存',
     webCacheCleared: '已清空 {count} 篇正文缓存（不影响已有资料与目录）。',
     webCacheEmpty: '暂无缓存。',
