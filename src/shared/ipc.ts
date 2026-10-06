@@ -205,6 +205,13 @@ export const IPC = {
      WEB_SOURCE_RESET_FETCH_STATE（抓取由生成管线按任务自动完成，见 `compilation-service`）。 */
   /** 2026-10-05（用户要求）：**暂停/继续抓取**——暂停期间不发新请求，账本与缓存都保留，点「继续」从原处接着跑 */
   WEB_SOURCE_SET_CRAWL_PAUSED: 'webSource:setCrawlPaused',
+  /**
+   * 2026-10-06（Phase 11 G，用户实测反馈）：**同步站点清单**（feed → sitemap → BFS 列表页 → `web_site_articles`）。
+   * 注册站点后会自动同步一次；失败后可以在这里重试（否则只能删掉重注册）。「建立缓存与索引」开始时也会先全量同步。
+   */
+  WEB_SOURCE_SYNC: 'webSource:sync',
+  /** 站点清单同步状态（谁在同步、谁上次失败）——界面轮询 */
+  WEB_SOURCE_SYNC_STATUS: 'webSource:syncStatus',
   /** 2026-10-05：正文缓存占用（多少篇 / 多少字节），资料库面板显示用 */
   WEB_SOURCE_CACHE_STATS: 'webSource:cacheStats',
   /** 2026-10-05：清空正文缓存（只删缓存；sources / 目录 / 账本都不动） */
@@ -274,7 +281,30 @@ export type SourceAddUrlRes = { source: Source }
 
 // -- 网页资料库（2026-08-11） --
 export interface WebSourceListReq {}
-export type WebSourceListRes = { sites: WebSite[] }
+export type WebSourceListRes = {
+  sites: WebSite[]
+  /**
+   * 2026-10-06（Phase 11 G）：每个站点的**清单条数**（`siteId → 条数`）。
+   * 有了它，"这个站还没同步过"在界面上一眼可见（条数 0），不必等建立完才发现。
+   */
+  articleCounts: Record<string, number>
+}
+
+/** 手动同步单个站点的清单（Phase 11 G） */
+export interface WebSourceSyncReq {
+  id: string
+}
+export interface WebSourceSyncRes {
+  /** 本次新增的清单条数（增量 upsert） */
+  added: number
+  /** 失败原因（成功时不带） */
+  error?: string
+}
+/** 站点清单同步状态（界面轮询） */
+export interface WebSourceSyncStatusRes {
+  syncing: string[]
+  errors: Record<string, string>
+}
 
 export interface WebSourceAddReq {
   rootUrl: string
@@ -1125,6 +1155,8 @@ export interface IpcMapping {
   [IPC.WEB_SOURCE_DATE_STATS]: { _req: WebSourceDateStatsReq; _res: ApiResult<WebSourceDateStatsRes> }
   ,
   [IPC.WEB_SOURCE_SET_CRAWL_PAUSED]: { _req: { paused: boolean }; _res: ApiResult<{ paused: boolean }> },
+  [IPC.WEB_SOURCE_SYNC]: { _req: WebSourceSyncReq; _res: ApiResult<WebSourceSyncRes> },
+  [IPC.WEB_SOURCE_SYNC_STATUS]: { _req: Record<string, never>; _res: ApiResult<WebSourceSyncStatusRes> },
   [IPC.WEB_SOURCE_CACHE_STATS]: {
     _req: Record<string, never>
     _res: ApiResult<{ entries: number; bytes: number; byState: { ok: number; 'no-body': number; blocked: number } }>

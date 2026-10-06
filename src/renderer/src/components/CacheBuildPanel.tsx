@@ -291,7 +291,7 @@ export default function CacheBuildPanel(): JSX.Element {
             <span className="settings__field-hint settings__hint--err">{index.yearInvalid}</span>
           ) : null}
         </div>
-        {yearsValid && plan ? (
+        {yearsValid && plan && status?.phase !== 'syncing' ? (
           <p className="settings__field-hint" data-testid="cache-build-plan">
             {plan.web.pending > 0
               ? index.planPending.replace('{pending}', String(plan.web.pending)).replace('{minutes}', String(plan.web.estimatedMinutes))
@@ -299,6 +299,16 @@ export default function CacheBuildPanel(): JSX.Element {
             {plan.web.total - plan.web.pending > 0
               ? '；' + index.planAlready.replace('{already}', String(plan.web.total - plan.web.pending))
               : ''}
+          </p>
+        ) : null}
+        {/*
+          Phase 11 G（C）：站点概况 —— "有几个站、几个还没清单"必须看得见。
+          没同步过的站点在目录里是 0 条，不写清楚的话，用户会以为软件漏了它（用户实测反馈）。
+        */}
+        {yearsValid && plan && status?.phase !== 'syncing' ? (
+          <p className="settings__field-hint" data-testid="cache-build-sites">
+            {index.sites.replace('{total}', String(plan.sites.total))}
+            {plan.sites.neverSynced > 0 ? index.sitesNeverSynced.replace('{count}', String(plan.sites.neverSynced)) : ''}
           </p>
         ) : null}
         {yearsValid && plan && plan.web.blocked > 0 ? (
@@ -309,6 +319,28 @@ export default function CacheBuildPanel(): JSX.Element {
         ) : null}
         {planErr ? <p className="settings__field-hint settings__hint--err">{index.planFailed.replace('{message}', planErr)}</p> : null}
       </div>
+
+      {/* 站点清单同步（A 的第一阶段）：运行中如实显示在同步哪个站点，结束后给汇总 */}
+      {status && (status.phase === 'syncing' || status.sync.added > 0 || status.sync.failed > 0) ? (
+        <div className="cache-build__block">
+          <span className="settings__field-label">{index.syncLabel}</span>
+          <p className="settings__field-hint" data-testid="cache-build-sync">
+            {status.phase === 'syncing'
+              ? status.sync.currentSite
+                ? index.syncingSites
+                    .replace('{index}', String(Math.max(1, status.sync.siteIndex)))
+                    .replace('{total}', String(status.sync.siteTotal || '?'))
+                    .replace('{site}', status.sync.currentSite)
+                : index.syncingSitesSimple
+              : index.syncSummary
+                  .replace('{done}', String(status.sync.siteIndex))
+                  .replace('{total}', String(status.sync.siteTotal))
+                  .replace('{added}', String(status.sync.added)) +
+                (status.sync.failed > 0 ? index.syncFailedCount.replace('{count}', String(status.sync.failed)) : '')}
+          </p>
+          {status.phase === 'syncing' ? <p className="settings__field-hint">{index.syncPendingHint}</p> : null}
+        </div>
+      ) : null}
 
       {/* ① 网页正文缓存 */}
       <div className="cache-build__block">

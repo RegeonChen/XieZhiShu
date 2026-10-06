@@ -121,6 +121,19 @@ export const zhCN = {
     neverSynced: '尚未同步',
     operationFailed: '操作失败：{message}',
     /*
+     * 2026-10-06（Phase 11 G，用户实测反馈）：注册站点后**自动同步清单**，并在每个站点上显示
+     * 「清单条数 / 正在同步 / 同步失败」+「同步清单」重试按钮。
+     * 为什么必须有：清单（站点里有哪些文章）不同步就永远是 0 条，「建立缓存与索引」也就完全看不到这个站。
+     */
+    articles: '清单 {count} 条',
+    articlesEmpty: '清单 0 条（尚未同步）',
+    syncNow: '同步清单',
+    syncing: '正在同步清单…',
+    syncStarted: '已开始同步清单：完成后这里会显示清单条数。',
+    syncDone: '清单同步完成：新增 {count} 条。',
+    syncFailed: '清单同步失败：{message}',
+    syncRetryHint: '可点「同步清单」重试。',
+    /*
      * 2026-10-05（用户裁定 A）：本面板只剩"站点注册与列表" —— 年份输入（P3）、年份只读展示（P5）、
      * 区间预览与分年分布、手动抓取（P4）**整块已删除**：年份与预览改到任务流程的年份控件里
      * （见 `zhCN.compilation.webYear*`），抓取由生成管线按任务自动完成。
@@ -351,6 +364,15 @@ export const zhCN = {
       stopBtn: '停止建立',
       yearLabel: '要建立的年份区间',
       yearInvalid: '年份区间无效（两个都必须是 4 位年份，且起始不晚于结束）',
+      /* 2026-10-06（Phase 11 G）：站点清单同步（建立的第一阶段）——数字与状态都如实摆出来 */
+      sites: '站点：{total} 个',
+      sitesNeverSynced: '，其中 {count} 个尚未同步清单（点「建立」会先同步站点清单）',
+      syncingSites: '正在同步站点清单（{index}/{total}：{site}）…',
+      syncingSitesSimple: '正在同步站点清单…',
+      syncPendingHint: '同步完成后才会给出准确的"本次要建"数字（新站点的文章要同步进来才算数）。',
+      syncLabel: '站点清单',
+      syncSummary: '已同步 {done}/{total} 个站点，新增 {added} 条',
+      syncFailedCount: '，{count} 个站点同步失败（可稍后重试）',
       planPending: '本次要建立 {pending} 篇，预计约 {minutes} 分钟',
       planAlready: '已有 {already} 篇直接跳过（不会重做）',
       planBlocked: '另有 {blocked} 篇地址不在该站点的同域白名单内，永远不会建立（已如实排除，不影响生成）',

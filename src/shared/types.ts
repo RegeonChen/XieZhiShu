@@ -759,13 +759,42 @@ export interface CompilationReadiness {
 export interface CacheBuildPlan {
   web: WebBuildPlan
   local: LocalBuildPlan
+  /** 站点概况（Phase 11 G）：`neverSynced > 0` 时必须如实告诉用户"建立前会先同步" */
+  sites: WebLibrarySiteStats
   /** 是否已"建齐"（可以生成汇编） */
   ready: boolean
   reasons: BuildNotReadyReason[]
 }
 
-/** 建立过程的阶段（Phase 11 C） */
-export type CacheBuildPhase = 'idle' | 'web' | 'done' | 'cancelled' | 'failed'
+/** 建立过程的阶段（Phase 11 C；`syncing` 为 Phase 11 G 补：**先同步站点清单**再按区间建立） */
+export type CacheBuildPhase = 'idle' | 'syncing' | 'web' | 'done' | 'cancelled' | 'failed'
+
+/**
+ * 2026-10-06（Phase 11 G，用户实测反馈）：建立开始时的**站点清单同步**进度。
+ * 为什么必须有这一步：站点里"有哪些文章"只有同步过才知道，而注册站点不触发同步——不先同步，
+ * 新注册的站点在建立里**完全不可见**（目录 0 条）。
+ */
+export interface CacheBuildSyncProgress {
+  /** 正在同步第几个站点 / 共几个（从 1 开始） */
+  siteIndex: number
+  siteTotal: number
+  /** 正在同步的站点根地址（空 = 还没开始） */
+  currentSite: string
+  /** 已同步站点累计**新增**清单条数 */
+  added: number
+  /** 同步失败的站点数（失败不中断，界面如实报） */
+  failed: number
+}
+
+/** 网页资料库的站点清单同步概况（Phase 11 G：让"有几个站、几个还没清单"看得见） */
+export interface WebLibrarySiteStats {
+  total: number
+  /** 已经同步过清单的站点数（`last_synced_at` 非空） */
+  synced: number
+  /** **从未同步过**清单的站点数（目录必为 0 —— 建立前会先同步） */
+  neverSynced: number
+}
+
 
 /** 建立过程的**网页侧**进度（`build` 模式下 `hits`/`dropped` 的含义见 `WebCrawlResult`） */
 export interface CacheBuildWebProgress {
@@ -805,6 +834,8 @@ export interface CacheBuildStatus {
   plannedPending: number
   /** 已经建好（含 `no-body` / `blocked` 标记）、本次**直接跳过**的篇数（需求 ③：已建立的不重复建立） */
   alreadyBuilt: number
+  /** 站点清单同步进度（Phase 11 G：建立的第一阶段） */
+  sync: CacheBuildSyncProgress
   web: CacheBuildWebProgress
   local: {
     total: number

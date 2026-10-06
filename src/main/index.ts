@@ -96,6 +96,7 @@ import { getSettings, updateSettings } from './db/settings'
 import { bodyCacheStats, clearBodyCache, sweepOrphanBodyCaches } from './db/article-body-cache'
 import { buildCacheBuildPlan, normalizeYearRange } from './web-source/cache-build-plan'
 import { getCacheBuildStatus, isCacheBuildRunning, requestCacheBuildStop, runCacheBuild, checkCompilationReadiness, describeReadiness } from './web-source/cache-build'
+import { getSiteSyncSnapshot, syncSiteTracked } from './web-source/site-sync'
 import { requestFetchCancel, setFetchPaused } from './web-source/fetch-control'
 import { startKeepAwake, stopKeepAwake } from './power/keep-awake'
 import { createTask as createWritingTask, listTasks as listWritingTasks, getTaskById, deleteTask as deleteWritingTask, renameTask, updateTaskProvider, updateTaskInstruction, updateTaskModelText } from './db/tasks'
@@ -154,7 +155,7 @@ import { loadWindowState, trackWindowState } from './window-state'
 import type { WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceUpdateReq, WebSourceUpdateRes, WebSourceDateStatsReq, WebSourceDateStatsRes, WritingSetWebYearsReq, WritingSetWebYearsRes, AppGetPdfCmapsUrlRes, LogAppendReq, LogExportRes, StyleGuideListRes, StyleGuideSaveReq, StyleGuideSaveRes, StyleGuideSetDefaultReq, StyleGuideSetDefaultRes, StyleGuideDeleteReq, CompilationExportDocxReq, CompilationExportDocxRes, CompilationExportArchiveReq, CompilationExportArchiveRes, CompilationImportArchiveReq, CompilationImportArchiveRes, CompilationImportFromTaskReq, CompilationImportFromTaskRes, CompilationListFinalizedForImportReq, CompilationListFinalizedForImportRes } from '../shared/ipc'
 import { logMain, logIpc, logRenderer, exportLogsText } from './logger'
 import { resolveFileDelivery } from './file-range'
-import type { WebBrowserOpenReq, WebBrowserSetBoundsReq, WebBrowserNavigateReq, WebBrowserActionReq, WebBrowserStateRes, CacheBuildPlanReq, CacheBuildStartReq, CompilationReadinessReq } from '../shared/ipc'
+import type { WebBrowserOpenReq, WebBrowserSetBoundsReq, WebBrowserNavigateReq, WebBrowserActionReq, WebBrowserStateRes, CacheBuildPlanReq, CacheBuildStartReq, CompilationReadinessReq, WebSourceSyncReq, WebSourceSyncStatusRes, WebSourceSyncRes } from '../shared/ipc'
 
 /** 长任务保持唤醒：开启则 start，任务结束/异常在 finally 中 stop（引用计数，重叠任务不提前释放） */
 function keepAwakeEnabled(): boolean {
@@ -587,7 +588,18 @@ handleLogged(IPC.SOURCES_ADD_URL, async (_event, params: { url: string }): Promi
 // ---- 网页资料库（2026-08-11）----
 handleLogged(IPC.WEB_SOURCE_LIST, (): ApiResult<WebSourceListRes> => {
   try {
-    return { ok: true, data: { sites: listWebSites() } }
+    const sites = listWebSites()
+    /*
+     * Phase 11 G（C）：把每个站点的清单条数一并给界面 —— "这个站还没同步过"（0 条）要一眼可见，
+     * 否则用户会以为软件漏了它。一条 GROUP BY 查询，成本可忽略。
+     */
+    const rows = getDb().prepare('SELECT site_id, COUNT(*) AS n FROM web_site_articles GROUP BY site_id').all() as {
+      site_id: string
+      n: number
+    }[]
+    const articleCounts: Record<string, number> = {}
+    for (const r of rows) articleCounts[r.site_id] = r.n
+    return { ok: true, data: { sites, articleCounts } }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
@@ -597,7 +609,37 @@ handleLogged(IPC.WEB_SOURCE_ADD, (_event, params: WebSourceAddReq): ApiResult<We
   try {
     const site = addWebSite(params.rootUrl, params.title)
     if (!site) return { ok: false, error: { code: 'ALREADY_EXISTS', message: '该网址已注册为网页资料库' } }
+    /*
+     * Phase 11 G（B，用户实测反馈）：注册后**立刻在后台同步一次清单**。
+     * 为什么必须自动做：站点里"有哪些文章"只有同步过才知道；不同步的话，这个站在目录里是 0 条，
+     * 「建立缓存与索引」完全看不到它（用户实测：注册了新站，建立里还是只有旧站）。
+     * 刻意**不 await**：同步要请求站点（可能要几秒~几十秒），不能让"添加"按钮卡住；
+     * 界面用 `webSource:syncStatus` 轮询，看到「正在同步清单…」→ 变成清单条数。
+     * 失败也不抛给用户：状态里记原因，界面显示并可点「同步清单」重试。
+     */
+    void syncSiteTracked(site.id).catch((err) => {
+      logMain('web', `注册站点后自动同步异常：${String(err)}`)
+    })
     return { ok: true, data: { site } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+/** Phase 11 G：手动同步单个站点的清单（失败后的重试入口） */
+handleLogged(IPC.WEB_SOURCE_SYNC, async (_event, params: WebSourceSyncReq): Promise<ApiResult<WebSourceSyncRes>> => {
+  try {
+    if (!params?.id) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
+    const res = await syncSiteTracked(params.id)
+    return { ok: true, data: { added: res.added, ...(res.error ? { error: res.error } : {}) } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.WEB_SOURCE_SYNC_STATUS, (): ApiResult<WebSourceSyncStatusRes> => {
+  try {
+    return { ok: true, data: getSiteSyncSnapshot() }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }

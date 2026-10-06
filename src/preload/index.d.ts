@@ -14,7 +14,13 @@ export interface AppApi {
   writeClipboardText(text: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   addUrl(url: string): Promise<{ ok: boolean; data?: { source: unknown }; error?: { code: string; message: string } }>
   /** 网页资料库站点列表（2026-08-11） */
-  listWebSources(): Promise<{ ok: boolean; data?: { sites: unknown[] }; error?: { code: string; message: string } }>
+  listWebSources(): Promise<{ ok: boolean; data?: { sites: unknown[]; articleCounts: Record<string, number> }; error?: { code: string; message: string } }>
+  /**
+   * 2026-10-06（Phase 11 G）：**同步单个站点的清单**（注册后自动同步一次；这里是失败后的重试入口）。
+   * 同步可能要几秒~几十秒，用 `webSourceSyncStatus()` 轮询。
+   */
+  syncWebSource(id: string): Promise<{ ok: boolean; data?: { added: number; error?: string }; error?: { code: string; message: string } }>
+  webSourceSyncStatus(): Promise<{ ok: boolean; data?: { syncing: string[]; errors: Record<string, string> }; error?: { code: string; message: string } }>
   /** 注册网页资料库站点（生成初稿时自动检索该站点相关文章） */
   addWebSource(rootUrl: string, title?: string): Promise<{ ok: boolean; data?: { site: unknown }; error?: { code: string; message: string } }>
   /** 删除网页资料库站点 */

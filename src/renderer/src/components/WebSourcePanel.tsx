@@ -38,12 +38,60 @@ function WebSourcePanel() {
    * 因此本面板现在只负责**站点注册与列表**（站点发现与清单同步见 `main/web-source/site-crawler.ts`）。
    */
 
+  /**
+   * 2026-10-06（Phase 11 G，用户实测反馈）：清单同步状态（谁在同步、谁上次失败）。
+   * 注册站点后主进程会**自动同步一次**，所以这里必须轮询——否则用户点完「注册」看不到任何反应。
+   */
+  const [syncState, setSyncState] = useState<{ syncing: string[]; errors: Record<string, string> }>({
+    syncing: [],
+    errors: {}
+  })
+  const [articleCounts, setArticleCounts] = useState<Record<string, number>>({})
+  const [syncingId, setSyncingId] = useState<string | null>(null)
+
   const load = useCallback(async () => {
     const res = await window.api.listWebSources()
-    if (res.ok && res.data) setSites(res.data.sites as WebSiteItem[])
+    if (res.ok && res.data) {
+      setSites(res.data.sites as WebSiteItem[])
+      setArticleCounts(res.data.articleCounts ?? {})
+    }
+    if (typeof window.api.webSourceSyncStatus === 'function') {
+      try {
+        const st = await window.api.webSourceSyncStatus()
+        if (st.ok && st.data) setSyncState(st.data)
+      } catch {
+        /* 桥不可用：不影响站点列表 */
+      }
+    }
   }, [])
 
   useEffect(() => { void load() }, [load])
+
+  /** 有站点在同步时 2 秒轮询一次（同步完自动停，不打扰主进程） */
+  const anySyncing = syncState.syncing.length > 0
+  useEffect(() => {
+    if (!anySyncing) return
+    const timer = window.setInterval(() => void load(), 2000)
+    return () => window.clearInterval(timer)
+  }, [anySyncing, load])
+
+  /** 手动同步（失败后的重试入口；注册后也会自动跑一次） */
+  const handleSync = async (id: string) => {
+    setSyncingId(id)
+    setMsg(null)
+    setErr(null)
+    try {
+      const res = await window.api.syncWebSource(id)
+      if (res.ok && res.data) {
+        setMsg(res.data.error ? t.syncFailed.replace('{message}', res.data.error) + t.syncRetryHint : t.syncDone.replace('{count}', String(res.data.added)))
+      } else {
+        setErr(t.operationFailed.replace('{message}', res.error?.message ?? ''))
+      }
+    } finally {
+      setSyncingId(null)
+      await load()
+    }
+  }
 
   const handleAdd = async () => {
     const rootUrl = urlInput.trim()
@@ -56,7 +104,8 @@ function WebSourcePanel() {
       if (res.ok && res.data) {
         setUrlInput('')
         setTitleInput('')
-        setMsg(t.added)
+        // 注册后主进程会自动同步清单 → 如实告诉用户"正在同步"，别让人以为没反应
+        setMsg(t.added + '：' + t.syncStarted)
         await load()
       } else {
         setErr(t.operationFailed.replace('{message}', res.error?.message ?? ''))
@@ -195,9 +244,33 @@ function WebSourcePanel() {
                   <div className="web-source__item-info">
                     <span className="web-source__item-title">{s.title || s.rootUrl}</span>
                     {s.title ? <span className="web-source__item-url">{s.rootUrl}</span> : null}
-                    <span className="web-source__item-synced">{t.syncedAt.replace('{time}', formatTime(s.lastSyncedAt))}</span>
+                    {/*
+                      Phase 11 G：把"清单条数 / 正在同步 / 上次失败"如实摆出来——用户实测的困惑正是
+                      "注册了新站却看不到任何东西"，而根因就是清单没同步（0 条）。
+                    */}
+                    <span className="web-source__item-synced">
+                      {syncState.syncing.includes(s.id)
+                        ? t.syncing
+                        : (articleCounts[s.id] ?? 0) > 0
+                          ? `${t.articles.replace('{count}', String(articleCounts[s.id]))}　${t.syncedAt.replace('{time}', formatTime(s.lastSyncedAt))}`
+                          : t.articlesEmpty}
+                    </span>
+                    {syncState.errors[s.id] ? (
+                      <span className="web-source__item-synced web-source__item-synced--err">
+                        {t.syncFailed.replace('{message}', syncState.errors[s.id])}
+                        {t.syncRetryHint}
+                      </span>
+                    ) : null}
                   </div>
                   <div className="web-source__item-actions">
+                    <button
+                      type="button"
+                      className="source-list__btn"
+                      onClick={() => void handleSync(s.id)}
+                      disabled={busy || syncingId === s.id || syncState.syncing.includes(s.id)}
+                    >
+                      {syncState.syncing.includes(s.id) || syncingId === s.id ? t.syncing : t.syncNow}
+                    </button>
                     <button type="button" className="source-list__btn" onClick={() => startEdit(s)} disabled={busy}>
                       {t.edit}
                     </button>
