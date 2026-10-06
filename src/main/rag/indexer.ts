@@ -202,12 +202,17 @@ export function getRebuildProgress(): RebuildProgress {
 }
 
 /** 为单个资料建立向量索引（幂等：先清旧块再插入） */
-export async function indexSource(sourceId: string): Promise<{ ok: boolean; error?: string; chunks?: number }> {
+export async function indexSource(sourceId: string): Promise<{ ok: boolean; error?: string; chunks?: number; missing?: boolean }> {
   const db = getDb()
   const row = db.prepare('SELECT id, cleaned_text FROM sources WHERE id = ?').get(sourceId) as
     | { id: string; cleaned_text: string }
     | undefined
-  if (!row) return { ok: false, error: '资料不存在' }
+  /*
+   * 2026-10-06（Phase 11 F，用户需求 ④）：资料**已被删除**时用 `missing` 明确区分出来。
+   * 队列据此记为"跳过"而不是"失败"——否则删掉一篇资料后，面板会永远显示"失败 1 篇"（其实它已经不存在了）。
+   * 用字段而不是匹配错误文案，避免以后改文案把逻辑悄悄改坏。
+   */
+  if (!row) return { ok: false, error: '资料不存在', missing: true }
 
   // 空资料无需向量化，直接标记就绪
   if (row.cleaned_text.trim().length === 0) {
@@ -304,6 +309,8 @@ export async function ensureSourcesIndexed(
     try {
       const res = await indexSource(id)
       if (res.ok) indexed += 1
+      // 资料已被删除（Phase 11 F）：跳过，不算失败——否则删一篇就永远多一条"失败"
+      else if (res.missing) skipped += 1
       else failed += 1
     } catch {
       failed += 1
@@ -385,6 +392,7 @@ async function runRebuildQueue(ids: string[], totalQueued: number, startedAt?: s
   let cursor = 0
   let indexed = 0
   let failed = 0
+  let skipped = 0
   let firstError: string | undefined
   const worker = async (): Promise<void> => {
     for (;;) {
@@ -394,6 +402,8 @@ async function runRebuildQueue(ids: string[], totalQueued: number, startedAt?: s
       try {
         const res = await indexSource(id)
         if (res.ok) indexed += 1
+        // 资料已被删除（Phase 11 F，用户需求 ④）：计入"跳过"，**不**计入失败（失败数会一直挂在界面上）
+        else if (res.missing) skipped += 1
         else {
           failed += 1
           firstError = firstError ?? res.error
@@ -411,7 +421,7 @@ async function runRebuildQueue(ids: string[], totalQueued: number, startedAt?: s
     await Promise.all(Array.from({ length: Math.min(REBUILD_CONCURRENCY, ids.length) }, () => worker()))
   } finally {
     const secs = Math.round((Date.now() - started) / 1000)
-    logMain('rag', `重建索引结束：成功 ${indexed} 篇 / 失败 ${failed} 篇 / 共 ${ids.length} 篇，耗时 ${secs}s${firstError ? '；首个失败原因：' + firstError : ''}`)
+    logMain('rag', `重建索引结束：成功 ${indexed} 篇 / 失败 ${failed} 篇 / 共 ${ids.length} 篇，耗时 ${secs}s${skipped > 0 ? `（另有 ${skipped} 篇资料已删除、跳过）` : ''}${firstError ? '；首个失败原因：' + firstError : ''}`)
     rebuildRunning = false
     writeRebuildRecord('done', totalQueued, startedAt)
   }
@@ -435,6 +445,14 @@ if (import.meta.vitest) {
       const got = Array.from(bufferToVector(vectorToBuffer(v)))
       // float32 存储存在舍入误差，用近似比较
       got.forEach((x, i) => expect(x).toBeCloseTo(v[i], 6))
+    })
+
+    // 2026-10-06（Phase 11 F，用户需求 ④）：资料已删除时必须**明确**报"不存在"，
+    // 队列据此记为"跳过"而不是"失败"——否则删一篇资料，面板上就永远多一条失败。
+    it('已删除的资料：返回 missing 标记（队列据此跳过，不计失败）', async () => {
+      const res = await indexSource('this-source-was-deleted')
+      expect(res.ok).toBe(false)
+      expect(res.missing).toBe(true)
     })
 
     it('marks empty sources as ready without embedding', async () => {

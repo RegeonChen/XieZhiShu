@@ -93,7 +93,7 @@ import { safeStorageCodec } from './llm/secret'
 import { listProviders, saveProvider, deleteProvider } from './llm/provider-store'
 import { testProviderConnection } from './llm/test'
 import { getSettings, updateSettings } from './db/settings'
-import { bodyCacheStats, clearBodyCache } from './db/article-body-cache'
+import { bodyCacheStats, clearBodyCache, sweepOrphanBodyCaches } from './db/article-body-cache'
 import { buildCacheBuildPlan, normalizeYearRange } from './web-source/cache-build-plan'
 import { getCacheBuildStatus, isCacheBuildRunning, requestCacheBuildStop, runCacheBuild, checkCompilationReadiness, describeReadiness } from './web-source/cache-build'
 import { requestFetchCancel, setFetchPaused } from './web-source/fetch-control'
@@ -606,6 +606,13 @@ handleLogged(IPC.WEB_SOURCE_ADD, (_event, params: WebSourceAddReq): ApiResult<We
 handleLogged(IPC.WEB_SOURCE_REMOVE, (_event, params: WebSourceRemoveReq): ApiResult<void> => {
   try {
     removeWebSite(params.id)
+    /*
+     * Phase 11 F（用户需求 ④）：删站点时把该站缓存一并清掉——**主要靠外键级联**
+     * （`web_article_body.site_id → web_sites(id) ON DELETE CASCADE`），这里再扫一次孤儿缓存兜底，
+     * 顺手把历史遗留的孤儿（若有）也清掉。**只清缓存，不动目录与来源**。
+     */
+    const swept = sweepOrphanBodyCaches()
+    if (swept > 0) logMain('web', `删除站点后清扫孤儿缓存 ${swept} 条`)
     return { ok: true, data: undefined }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
