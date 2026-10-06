@@ -27,7 +27,7 @@ import { enqueueIndex } from '../rag/indexer'
 import { judgeBodyRelevance, type RelevanceTier } from './body-relevance'
 import { getSourceByUrl, insertSource, updateSourcePublishedAt } from '../db/sources'
 import { updateArticleDates, updateArticleFetchState } from '../db/web-sites'
-import { countTaskFetch, listRangeArticles, recordTaskFetch, type TaskFetchTarget } from '../db/task-web-fetch'
+import { countTaskFetch, listRangeArticles, listUncachedRangeArticles, recordTaskFetch, type TaskFetchTarget } from '../db/task-web-fetch'
 import { fetchUrl, type FetchResult } from '../import/url-fetcher'
 import { logMain } from '../logger'
 import { extractArticle } from './article-extract'
@@ -201,7 +201,7 @@ export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCra
    * 目标 = 区间内**全部**文章（用户裁定 A：账本不再作为跳过依据，每次生成都全量重筛）。
    * 是否联网完全由 `article-body-cache`（正文缓存）决定：命中 → 本地重筛（毫秒级、零网络），未命中 → 抓取。
    */
-  const allTargets = listRangeArticles(fromYear, toYear)
+  const allTargets = buildMode ? listUncachedRangeArticles(fromYear, toYear) : listRangeArticles(fromYear, toYear)
   /** `build` 模式不写任务账本，所以"区间内多少篇"直接取区间目录条数 */
   const rangeCount = buildMode ? { total: allTargets.length, processed: 0, failed: 0 } : countTaskFetch(taskId, fromYear, toYear)
 
@@ -311,7 +311,8 @@ export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCra
       currentTitle: lastTitle,
       paused: isFetchPaused(),
       cacheHits,
-      intervalMs
+      intervalMs,
+      cacheWritten
     })
   }
 
@@ -991,7 +992,7 @@ if (import.meta.vitest) {
       expect(row.date_confidence).toBe('medium')
     })
 
-    it('第二次建立：全部命中缓存 → 零网络、零写入（幂等；已建立的不重复建立）', async () => {
+    it('第二次建立：已建立的**根本不进队列** → 零网络、零写入、零判定（幂等）', async () => {
       const fetched: string[] = []
       const result = await crawlAndScreenArticles({
         fromYear: 2021,
@@ -1005,11 +1006,17 @@ if (import.meta.vitest) {
         }
       })
       expect(fetched).toEqual([])
-      expect(result.cacheHits).toBe(3)
+      /*
+       * Phase 11 C 起：build 模式的目标来自 `listUncachedRangeArticles`（**只取没有缓存行的**），
+       * 所以第二次建立连"逐篇判定"都不做——`total` 直接是 0。这比"取全区间再靠缓存命中跳过"更省，
+       * 也让进度条的"总数"等于真正要干活的篇数（真实库 50,825 而不是目录 61,701）。
+       * 界面上"已建立的不重复建立"由引擎用只读规划如实汇报（`alreadyBuilt`），见 cache-build.ts。
+       */
+      expect(result.total).toBe(0)
+      expect(result.done).toBe(0)
       expect(result.cacheWritten).toBe(0)
-      // 三篇里两篇 no-body、一篇 ok：`hits` 仍按"正文可用"计
-      expect(result.hits).toBe(1)
-      expect(result.dropped).toBe(2)
+      expect(result.hits).toBe(0)
+      expect(result.dropped).toBe(0)
     })
   })
 }

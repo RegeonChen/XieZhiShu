@@ -1,4 +1,4 @@
-import type { CacheBuildPlan } from '../shared/types'
+import type { CacheBuildPlan, CacheBuildStartRes, CacheBuildStatus } from '../shared/types'
 
 export interface ImportResult {
   path: string
@@ -39,6 +39,13 @@ export interface AppApi {
    * 省略年份时按默认区间 2005–2025；反向区间返回错误。
    */
   cacheBuildPlan(params?: { fromYear?: number; toYear?: number }): Promise<{ ok: boolean; data?: CacheBuildPlan; error?: { code: string; message: string } }>
+  /**
+   * 2026-10-06（用户需求，Phase 11 C）：**建立缓存与索引**（网页正文缓存 + 本地索引并行）。
+   * `start` 后台跑，用 `cacheBuildStatus()` 轮询进度与 ETA；`stop` 只停止"抓新的"。
+   */
+  cacheBuildStart(params?: { fromYear?: number; toYear?: number; includeLocal?: boolean }): Promise<{ ok: boolean; data?: CacheBuildStartRes; error?: { code: string; message: string } }>
+  cacheBuildStop(): Promise<{ ok: boolean; data?: { stopped: boolean }; error?: { code: string; message: string } }>
+  cacheBuildStatus(): Promise<{ ok: boolean; data?: CacheBuildStatus; error?: { code: string; message: string } }>
   listSources(params?: { tagIds?: string[]; search?: string }): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   importFiles(paths: string[]): Promise<{ ok: boolean; data?: { results: ImportResult[] }; error?: { code: string; message: string } }>
   openFileDialog(): Promise<{ ok: boolean; data?: { paths: string[] }; error?: { code: string; message: string } }>

@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
 import type { WorkspaceSourceRemovalPending, WebBrowserRect, WebBrowserStateRes, WebBrowserAction } from '../shared/ipc'
-import type { ApiResult, CacheBuildPlan } from '../shared/types'
+import type { ApiResult, CacheBuildPlan, CacheBuildStartRes, CacheBuildStatus } from '../shared/types'
 
 interface ImportResults {
   results: { path: string; source?: unknown; error?: string }[]
@@ -105,6 +105,20 @@ const api = {
    */
   cacheBuildPlan(params?: { fromYear?: number; toYear?: number }): Promise<ApiResult<CacheBuildPlan>> {
     return ipcRenderer.invoke(IPC.CACHE_BUILD_PLAN, params ?? {})
+  },
+  /**
+   * 2026-10-06（用户需求，Phase 11 C）：**建立缓存与索引**。
+   * `start` 是**后台跑**（网页抓取可能几十分钟），用 `cacheBuildStatus()` 轮询进度与 ETA；
+   * `stop` 只停止"抓新的"（已抓到的都已写入缓存）。
+   */
+  cacheBuildStart(params?: { fromYear?: number; toYear?: number; includeLocal?: boolean }): Promise<ApiResult<CacheBuildStartRes>> {
+    return ipcRenderer.invoke(IPC.CACHE_BUILD_START, params ?? {})
+  },
+  cacheBuildStop(): Promise<ApiResult<{ stopped: boolean }>> {
+    return ipcRenderer.invoke(IPC.CACHE_BUILD_STOP, {})
+  },
+  cacheBuildStatus(): Promise<ApiResult<CacheBuildStatus>> {
+    return ipcRenderer.invoke(IPC.CACHE_BUILD_STATUS, {})
   },
   /** Phase 10 P5：设置该任务的网页资料年份区间（null = 回退全局默认） */
   setTaskWebYears(taskId: string, fromYear: number | null, toYear: number | null): Promise<ApiResult<{ task: unknown }>> {
