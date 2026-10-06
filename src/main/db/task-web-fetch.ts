@@ -17,6 +17,7 @@ import Database from 'better-sqlite3'
 import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
 import { putCachedBody, putCacheMiss } from './article-body-cache'
+import { logMain } from '../logger'
 
 export interface TaskFetchTarget {
   url: string
@@ -153,6 +154,16 @@ export function recordTaskFetch(
     publishedDate?: string
   }
 ): void {
+  /*
+   * 2026-10-06（Phase 11 C 真机自检教训）：`task_id` 为空是**调用方的编程错误**——
+   * 账本的外键指向 `writing_tasks(id)`，写空值会抛 `FOREIGN KEY constraint failed`，
+   * 而账本按用户裁定**只作诊断与计数**（绝不再作跳过依据），所以这里**宁可丢一条诊断**，
+   * 也不能因为一条诊断把整次"建立缓存"或整次生成打崩。日志里留痕，方便发现调用方漏传。
+   */
+  if (!taskId) {
+    logMain('web', `记任务账本时缺少 taskId（${siteId} ${url}）——已忽略这条诊断，不影响抓取`)
+    return
+  }
   const db = getDb()
   db.prepare(
     `INSERT INTO task_web_fetch (task_id, site_id, url, state, hit, best_score, body_hash, body_chars, published_date, fetched_at)

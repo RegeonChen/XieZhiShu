@@ -564,8 +564,17 @@ export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCra
       } catch (err) {
         // 失败也是一次真实的服务耗时（超时/连接失败），照常计入样本；截尾均值会压掉偶发尖峰
         if (fetchMs === 0 && processMs === 0) fetchMs = 0
-        recordTaskFetch(taskId, t.siteId, t.url, { state: 'failed' })
-        updateArticleFetchState(t.siteId, t.url, { state: 'failed' })
+        /*
+         * ⚠ 2026-10-06（Phase 11 C **真机自检抓到的 bug**，务必保留这道判断）：
+         * `build` 模式**没有任务**（`taskId === ''`），若照旧写任务账本，会命中
+         * `task_web_fetch.task_id → writing_tasks(id)` 外键 → 抛 `FOREIGN KEY constraint failed`，
+         * 把整次「建立」直接打成 failed（实测日志：`建立失败：FOREIGN KEY constraint failed`）。
+         * 建立模式只计数：**失败篇不写任何缓存行**，所以它仍然是"待建立"，下次「建立」自然会再试。
+         */
+        if (!buildMode) {
+          recordTaskFetch(taskId, t.siteId, t.url, { state: 'failed' })
+          updateArticleFetchState(t.siteId, t.url, { state: 'failed' })
+        }
         failed++
         failedTargets.push(t)
         logMain('web', `网页抓取失败 url=${t.url}：${err instanceof Error ? err.message : String(err)}`)
@@ -1017,6 +1026,42 @@ if (import.meta.vitest) {
       expect(result.cacheWritten).toBe(0)
       expect(result.hits).toBe(0)
       expect(result.dropped).toBe(0)
+    })
+
+    it('抓取失败只计数：不写任务账本、不写缓存、不把整次建立打崩（真机自检抓到的 FK 崩溃回归）', async () => {
+      /*
+       * 真机自检实测（2026-10-06）：build 模式下第一篇文章抓取失败时，旧代码在 catch 里照旧写任务账本
+       * （`taskId === ''`）→ 命中 `task_web_fetch.task_id → writing_tasks(id)` 外键 →
+       * 整次「建立」直接变成 `建立失败：FOREIGN KEY constraint failed`。
+       * 本用例的**关键**是注入的 fetch **抛错**——此前所有管线级测试的注入 fetch 都成功返回，
+       * 于是这条 catch 分支从未被跑到（这就是漏掉它的原因）。
+       */
+      db.exec('DELETE FROM web_article_body')
+      db.exec('DELETE FROM task_web_fetch')
+      const fetched: string[] = []
+      const result = await crawlAndScreenArticles({
+        fromYear: 2021,
+        toYear: 2021,
+        mode: 'build',
+        concurrency: 1,
+        onProgress: () => undefined,
+        fetchImpl: async (url: string) => {
+          fetched.push(url)
+          throw new Error('模拟网络失败')
+        }
+      })
+      // 三篇站内文章都尝试过（跨域那篇在白名单外、不发起请求）。
+      // 注意：连续失败会触发**自适应降档并重抓一轮**，所以 `fetched` 里同一 URL 会出现多次 → 用去重集合断言。
+      expect([...new Set(fetched)].sort()).toEqual(
+        [`${HOST}/a.htm`, `${HOST}/d.htm`, `${HOST}/e.htm`].sort()
+      )
+      expect(result.failed).toBe(3)
+      expect(result.done).toBeGreaterThanOrEqual(3)
+      // ① **不写任务账本**（建立缓存没有任务）
+      expect(count('task_web_fetch')).toBe(0)
+      // ② 失败篇**不写缓存**：它仍然是"待建立"，下次「建立」自然会再试
+      expect(result.cacheWritten).toBe(0)
+      expect(getCachedBody('s1', `${HOST}/a.htm`)).toBeNull()
     })
   })
 }
