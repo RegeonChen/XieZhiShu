@@ -29,6 +29,7 @@ import type { CompilationTimeConfidence } from '../../shared/types'
 import { chatCompletion, type ChatMessage } from '../llm/chat'
 import { logMain } from '../logger'
 import {
+  formatSourceDate,
   isTitleOnlyParagraph,
   isYearSupportedBySource,
   locateVerbatim,
@@ -63,6 +64,13 @@ export interface ExtractCandidate {
   /** 来源类型（file/url）与网页发布时间：段首时间兜底的依据选择（网页不能用年鉴 −1 规则） */
   sourceKind?: 'file' | 'url'
   sourcePublishedAt?: string
+  /**
+   * 这张卡片在**来源正文**里的字符区间（左闭右开；2026-10-05 用户裁定 P0-2）。
+   * 来自细读窗口的候选块（切块时算出），一路带到落锚点：有它就直接映射 `source_blocks` 得到页码，
+   * 不必再拿文字去来源里回溯匹配。模型改写过卡片、或来源正文被重新解析时本字段可能缺省。
+   */
+  charStart?: number
+  charEnd?: number
 }
 
 /** 一批的产出：已校验（或降级）的段落草稿 */
@@ -75,6 +83,9 @@ export interface ExtractedDraft {
   /** 时间可信度：exact=原文明确；inferred=按来源标题兜底推断（年鉴年份 −1）；unknown=仍未确定 */
   timeConfidence?: CompilationTimeConfidence
   evidence?: string
+  /** 该段在来源正文里的字符区间（生成期记录，见 `ExtractCandidate.charStart`；P0-2） */
+  charStart?: number
+  charEnd?: number
   /** true = 校验未通过、已降级为原文（只保留**可核验**的内容，见 `degradeKeepingVerifiedContent`） */
   degraded?: boolean
   /** true = 降级时用的是 evidence 片段（粒度最细） */
@@ -303,7 +314,22 @@ export function describeExtractOutput(
 export function buildExtractMessages(batch: ExtractCandidate[], topic: string, requirement?: string): ChatMessage[] {
   const req = (requirement ?? '').trim()
   const cardList = batch
-    .map((c) => '[' + c.sourceRef + ']（引用号 ' + c.key + '） 来源：《' + (c.sourceTitle || c.sourceRef) + '》 时间：' + (c.ts ?? '无') + '\n原文：\n' + c.excerpt)
+    .map(
+      (c) =>
+        '[' +
+        c.sourceRef +
+        ']（引用号 ' +
+        c.key +
+        '） 来源：《' +
+        (c.sourceTitle || c.sourceRef) +
+        '》' +
+        // 来源类型与发布时间也是**证据**：正文里没有年份时，网页的发布年是唯一可靠依据（2026-10-05 用户裁定）
+        (c.sourceKind === 'url' ? '（网页' + (c.sourcePublishedAt ? '，发布时间 ' + formatSourceDate(c.sourcePublishedAt) : '') + '）' : '') +
+        ' 时间：' +
+        (c.ts ?? '无') +
+        '\n原文：\n' +
+        c.excerpt
+    )
     .join('\n\n')
   const sys = [
     '你是一名地方志资料编辑，正在为一部题为《' + topic + '》的志稿整理素材。',
@@ -336,7 +362,12 @@ export function buildExtractMessages(batch: ExtractCandidate[], topic: string, r
     '2. **每段只能来自一张卡片**（即一个来源）：不得把不同卡片的文字拼成一段；不同来源的内容必须分成不同段落。',
     '3. 允许的加工：删掉无关内容；在同一张卡片内部调整语序、合并同一事实的多句表述、把省略的主语或指代补全（「他」「该校」→ 具体人名/校名）；去掉或改写「【概况】」这类栏目名。**允许压缩概括，但主体名称与规模/数量/金额/地点/时间等关键要素不得丢失**（例如「福州市福外高级中学…设计规模为高中3个年级60个班，可容纳3000名学生…总投资约6亿元，占地142亩」不能压缩成「长乐新添一所普通高中」）。',
     '4. **不得合并互相矛盾的说法**：若两张卡片（或同一卡片内两处）对同一事实给出不同数字、时间或说法，必须**分别保留为不同段落**，不要取其中一种，也不要折中。',
-    '5. 每段必须给出 `timeLabel`（段首时间，**必须含 4 位年份**，如「2018 年」「2018 年 5 月」「2018 年 5 月 19 日」；不要写「5 月 19 日」这种缺年份的写法）：依据正文、卡片时间与来源文献年份推断（**年鉴惯例**：来源为《长乐年鉴2019》时，其正文通常记述 2018 年，即年鉴年份减 1）。确实推断不出年份时也必须给出一个含年份的时间（按上述惯例推定），不要留空。**年份必须有依据**：正文里没写、也推不出来的年份，本地校验会把它降级成「时间待核」，所以不要凭印象填年份。',
+    '5. 每段必须给出 `timeLabel`（段首时间，**必须含 4 位年份**，如「2018 年」「2018 年 5 月」「2018 年 5 月 19 日」；不要写「5 月 19 日」这种缺年份的写法）。**年份必须有依据，按下列顺序取**：',
+    '   · **正文里有年份** → 直接用（这是最好的依据）；',
+    '   · **卡片上写明了发布时间**（形如「网页，发布时间 2021-05-06」）→ 正文没写年份时，用这个**发布年份**，并在 `reason` 里说明"年份依据是来源发布时间"；',
+    '   · **年鉴惯例（年份减 1）只适用于「年鉴 / 年报 / 年度报告 / 志书 / 大事记」这类来源的本地文件**（如《长乐年鉴2019》记述的是 2018 年）。',
+    '   · **网页新闻一律不得减 1**：网页没有"年度出版物次年产出"这个体例，标题/正文里的年份就是内容年本身；网页来源上套用减 1 会造成**整片错年**（实测缺陷：大量网页段落的年份 = 发布年 − 1）。',
+    '   · **正文里没有年份、也推断不出来时，宁可留空（`timeLabel` 写 null 或省略），不要凭惯例猜年份**——本地会如实把该段标成「时间待核」并计入汇总，让它出现在「N 段时间待核」里由人核，这比一个看起来正常的错年份安全得多。',
     '6. 每段必须给出 `evidence`：从该卡片原文中**逐字连续**摘出的一段（不得改写、不得拼接、不得跨卡片拼），作为这段的事实依据。',
     '   · `evidence` 只需覆盖本段的**关键事实**（机构名/数量/时间/地点那一句），**不必覆盖全文**，也不必等于整段正文；',
     '   · 「关键事实」指数字与《文件/文章名》：**每个数字都必须能在该来源原文里找到**（本地会逐句核验）；',
@@ -500,6 +531,37 @@ export function collectExtractResults(
   const answered = new Set<string>()
   stats.returned = parsed.paragraphs.length
 
+  /**
+   * 该段在来源正文里的**生成期字符区间**（P0-2）。优先级从高到低，**全程不看段落的改写文字**：
+   * ① 段落所属卡片的区间——即"这段来自哪张卡"，卡片区间是**切块时**算出来的，模型改写过正文也照样成立；
+   * ② 该来源本批卡片区间的**并集**，并用逐字证据在这个范围内收窄（同一来源跨卡片整合的段落会落到这里）；
+   * ③ 只有整批卡片都没带区间（老链路 / 历史向量块）时，才把逐字证据/正文对回该来源正文取一个区间。
+   * ③ 是**旧路径的兜底**：不扫全库、不做模糊匹配，找不到就如实缺省。
+   */
+  const rangeOf = (
+    parent: ExtractCandidate,
+    group: ExtractCandidate[],
+    sourceText: string,
+    evidence: string,
+    text: string
+  ): { charStart?: number; charEnd?: number } => {
+    if (parent.charStart != null && parent.charEnd != null) {
+      return { charStart: parent.charStart, charEnd: parent.charEnd }
+    }
+    const starts = group.map((c) => c.charStart).filter((v): v is number => v != null)
+    const ends = group.map((c) => c.charEnd).filter((v): v is number => v != null)
+    if (starts.length > 0 && ends.length > 0) {
+      const from = Math.min(...starts)
+      const to = Math.max(...ends)
+      // 跨卡片整合：卡片区间并集是"这一摞卡片"，再用逐字证据在**并集范围**内把它收窄
+      const inRange = evidence ? locateVerbatim(sourceText.slice(from, to), evidence) : null
+      if (inRange) return { charStart: from + inRange.start, charEnd: from + inRange.end }
+      return { charStart: from, charEnd: to }
+    }
+    const located = locateVerbatim(sourceText, evidence) ?? locateVerbatim(sourceText, text)
+    return located ? { charStart: located.start, charEnd: located.end } : {}
+  }
+
   for (const draft of parsed.paragraphs) {
     const group = byRef.get(draft.sourceRef)
     if (!group || group.length === 0) continue // 幻觉出来的 sourceRef：忽略
@@ -516,7 +578,13 @@ export function collectExtractResults(
       // 兜底（2026-10-03 用户裁定 A1）：**只保留逐字证据片段，没有就丢弃**——
       // 绝不原样搬运卡片原文（"可核验 ≠ 相关"，实测正是这条把年鉴的概况/项目表/扶贫段搬进了汇编）。
       const fallback = degradeToEvidenceOnly(group, (draft.evidence ?? '').trim() || undefined, stats)
-      if (fallback) drafts.push(fallback)
+      if (fallback) {
+        // 降级路径同样要记区间：否则这些段又要靠事后匹配去定位（P0-2 要消灭的正是这个）
+        // 证据片段属于哪张卡就取哪张卡的区间（degradedChecked 已按同一张卡定位）
+        const owner = group.find((c) => c.charStart != null && c.charEnd != null && fallback.evidence && locateVerbatim(c.excerpt, fallback.evidence) !== null) ?? group[0]
+        const slice = fallback.evidence ?? ''
+        drafts.push({ ...fallback, ...rangeOf(owner, group, sourceText, slice, fallback.text) })
+      }
       continue
     }
     // 段落归属：优先归到 evidence 所在的那张卡片（用于矛盾说法映射与诊断），否则归该来源第一张
@@ -554,7 +622,8 @@ export function collectExtractResults(
       text: validation.text,
       timeLabel: time.timeLabel,
       timeConfidence,
-      evidence: validation.evidence
+      evidence: validation.evidence,
+      ...rangeOf(parent, group, sourceText, validation.evidence ?? evidence, validation.text)
     })
   }
 
@@ -803,10 +872,45 @@ if (import.meta.vitest) {
       // 时间必须含年份，且给出年鉴惯例（用户裁定：时间只靠提示词规范，不再本地复核）
       expect(sys).toContain('必须含 4 位年份')
       expect(sys).toContain('年鉴惯例')
-      expect(sys).toContain('年鉴年份减 1')
+      /*
+       * 2026-10-05 用户裁定（P0-1，实测缺陷）：年鉴 −1 只对**本地年鉴类文件**生效，网页一律不得减 1；
+       * 正文里没有年份、也推不出时**宁可留空**（本地如实标「时间待核」并计入汇总），不许凭惯例猜。
+       */
+      expect(sys).toContain('只适用于「年鉴 / 年报 / 年度报告 / 志书 / 大事记」这类来源的本地文件')
+      expect(sys).toContain('网页新闻一律不得减 1')
+      expect(sys).toContain('宁可留空')
+      expect(sys).toContain('不要凭惯例猜年份')
+      // 来源发布时间要作为**有据**依据出现在提示词里（网页正文常写「近日」，这是唯一可靠依据）
+      expect(sys).toContain('发布时间')
       // 输出格式
       expect(sys).toContain('"paragraphs"')
       expect(sys).toContain('"dropped"')
+    })
+
+    it('把来源发布时间写进卡片头，作为年份的**有据**依据（2026-10-05 用户裁定 P0-1）', () => {
+      const withDate = buildExtractMessages(
+        [
+          {
+            index: 0,
+            key: 'c1',
+            sourceRef: '#2',
+            sourceTitle: '全区教育工作会议召开',
+            excerpt: '近日，全区教育工作会议召开。',
+            sourceKind: 'url',
+            sourcePublishedAt: '2021-05-06T00:00:00.000Z'
+          },
+          { index: 1, key: 'c2', sourceRef: '#3', sourceTitle: '长乐年鉴2019', excerpt: '普通高中 4 所。', sourceKind: 'file' },
+          { index: 2, key: 'c3', sourceRef: '#4', sourceTitle: '没有日期的网页', excerpt: '甲乙丙丁。', sourceKind: 'url' }
+        ],
+        '高中教育'
+      )[1].content
+      // 格式与用户裁定一致：`（网页，发布时间 2021-05-06）`（ISO 只截到日，不做时区换算）
+      expect(withDate).toContain('来源：《全区教育工作会议召开》（网页，发布时间 2021-05-06）')
+      // 本地文件不写「网页/发布时间」（没有"发布时间"这个概念）
+      expect(withDate).toContain('来源：《长乐年鉴2019》 时间：无')
+      // 页面没有发布时间 → 如实不写，绝不拿别的字段顶上
+      expect(withDate).toContain('来源：《没有日期的网页》（网页）')
+      expect(withDate).not.toContain('发布时间 无')
     })
 
     it('把用户的撰写要求**全文**作为首要依据给模型，并单列"超出范围"判据（2026-10-03 用户裁定）', () => {
@@ -923,8 +1027,56 @@ if (import.meta.vitest) {
       expect(stats2.droppedUnverifiable).toBe(1)
     })
 
-    it('同一来源多张卡时，降级在**证据所属的那张卡**里定位（修掉写死 group[0] 的缺陷）', () => {
-      const stats = emptyExtractStats(batch.length, 0)
+    /*
+     * 2026-10-05 用户裁定（P0-2）：卡片自带的**生成期字符区间**要被段落继承下来。
+     * 这一步不看段落文字，所以模型改写过正文也照样带上区间（落锚点因此不再依赖事后匹配）。
+     */
+    it('段落继承卡片的生成期字符区间；卡片没带区间时才用逐字证据回退定位', () => {
+      const ranged: ExtractCandidate[] = [
+        { ...batch[0], key: 'c1', charStart: 100, charEnd: 130 },
+        { ...batch[1], key: 'c2', charStart: 200, charEnd: 240 }
+      ]
+      const stats = emptyExtractStats(ranged.length, 0)
+      const { drafts } = collectExtractResults(
+        ranged,
+        {
+          paragraphs: [
+            // 正文被改写（与卡片原文并不逐字一致）→ 单张卡时直接继承该卡的区间
+            { sourceRef: '#1', text: '2018 年，全区普通中学 30 所。', timeLabel: '2018 年', evidence: '全区普通中学 30 所' },
+            // 段落落在第 2 张卡里 → 多张卡时用逐字证据把那摞卡片的区间收窄
+            { sourceRef: '#1', text: '2018 年，全区教职工 900 人。', timeLabel: '2018 年', evidence: '全区教职工 900 人' }
+          ],
+          dropped: []
+        },
+        stats
+      )
+      expect(drafts).toHaveLength(2)
+      // 第 1 段：证据只出现在第 1 张卡里 → 单张卡，直接继承它的区间
+      expect(drafts[0].charStart).toBe(100)
+      expect(drafts[0].charEnd).toBe(130)
+      // 第 2 段：没有能对上证据的卡 → 落到该来源第一张卡（多张卡路径），区间取"卡片区间的并集 ∩ 证据收窄"
+      expect(drafts[1].charStart).toBeGreaterThanOrEqual(100)
+      expect(drafts[1].charEnd).toBeLessThanOrEqual(240)
+
+      // 卡片完全没带区间（老链路）→ 用逐字证据在来源正文里换算区间（fallback，不丢）
+      const noRange = collectExtractResults(
+        batch,
+        {
+          paragraphs: [
+            { sourceRef: '#1', text: '2018 年，全区普通中学 30 所。', timeLabel: '2018 年', evidence: '全区普通中学 30 所' }
+          ],
+          dropped: []
+        },
+        emptyExtractStats(batch.length, 0)
+      )
+      // 命中卡只有第 1 张、但它没带区间 → 回退到"把逐字证据对回该来源正文"，区间取回原文 = 该证据
+      const fb = noRange.drafts[0]
+      expect(fb.charStart).toBeGreaterThanOrEqual(0)
+      const fbSource = batch.map((c) => c.excerpt).join('\n')
+      expect(fbSource.slice(fb.charStart!, fb.charEnd!)).toBe('全区普通中学 30 所')
+    })
+
+    it('同一来源多张卡时，降级在**证据所属的那张卡**里定位（修掉写死 group[0] 的缺陷）', () => {      const stats = emptyExtractStats(batch.length, 0)
       const { drafts } = collectExtractResults(
         batch,
         {

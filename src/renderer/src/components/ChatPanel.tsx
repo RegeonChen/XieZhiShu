@@ -18,6 +18,36 @@ export interface SourceRefItem {
   position?: string
 }
 
+/**
+ * 2026-10-05（用户要求）：抓取中的「暂停抓取 / 继续抓取」。
+ * 只在网页抓取**正在进行**时出现（`fetch.active`）；暂停后按钮变「继续抓取」并显示提示文本，
+ * 点「继续抓取」后按钮变回「暂停抓取」、提示消失、进度从原处接着跑。
+ */
+function FetchPauseControl({
+  fetch,
+  paused,
+  onToggle
+}: {
+  fetch?: { active: boolean; paused: boolean }
+  paused: boolean
+  onToggle?: (paused: boolean) => void
+}): React.ReactElement | null {
+  if (!fetch?.active || !onToggle) return null
+  const isPaused = paused || fetch.paused
+  return (
+    <div className="chat-panel__fetch-ctl">
+      <button
+        type="button"
+        className="chat-panel__fetch-btn"
+        onClick={() => onToggle(!isPaused)}
+      >
+        {isPaused ? zhCN.compilation.crawlResumeBtn : zhCN.compilation.crawlPauseBtn}
+      </button>
+      {isPaused ? <div className="chat-panel__fetch-hint">{zhCN.compilation.crawlPausedHint}</div> : null}
+    </div>
+  )
+}
+
 interface ChatPanelProps {
   messages: ChatMessageItem[]
   /** 初稿是否已生成：未生成时主按钮为「生成初稿」，已生成时为「发送」 */
@@ -27,8 +57,13 @@ interface ChatPanelProps {
   busyText: string | null
   /** 流式增量文本（2026-08-19：生成/对话期间实时显示的正文或回复） */
   streamText?: string | null
-  /** 生成初稿进度（2026-08-11：percent 进度百分比 + etaSeconds 预计剩余秒数，供进度条显示） */
-  progress?: { percent: number; etaSeconds?: number } | null
+  /** 生成初稿进度（2026-08-11：percent 进度百分比 + etaSeconds 预计剩余秒数，供进度条显示）
+   *  2026-10-05：`fetch` 表示"网页抓取正在进行"（据此显示「暂停抓取 / 继续抓取」按钮） */
+  progress?: { percent: number; etaSeconds?: number; fetch?: { active: boolean; paused: boolean } } | null
+  /** 2026-10-05：抓取是否处于暂停态（渲染层自己的状态，点按钮后立即反馈，不等主进程回包） */
+  fetchPaused?: boolean
+  /** 2026-10-05：点「暂停抓取 / 继续抓取」 */
+  onToggleFetchPause?: (paused: boolean) => void
   /** 生成资料汇编时大模型异常中断信息（Phase 6.x：展示「尝试继续」断点续传） */
   interrupt?: { stage: string; message: string; percent: number } | null
   /** 点击「尝试继续」：从断点继续生成资料汇编 */
@@ -47,6 +82,116 @@ interface ChatPanelProps {
   refs?: SourceRefItem[]
   /** 打开来源文件（系统默认软件） */
   onOpenSource?: (sourceId: string) => void
+  /**
+   * 资料年份范围（2026-10-04 用户裁定）：**在任务流程里**选择，不再去资料库面板。
+   * 不传 = 不渲染该控件（其它调用方零影响）；只有「生成汇编」的首次撰写要求才传。
+   */
+  webYears?: { from?: number; to?: number }
+  /** 是否显示年份控件（仅"还没有汇编"的新任务显示；发送成功后由父组件收起） */
+  showWebYears?: boolean
+  /** 年份变化：合法即回调（保存由调用方负责，走任务级 IPC） */
+  onWebYearsChange?: (from: number, to: number) => void
+  /**
+   * 区间规模预览（2026-10-05 用户裁定 A：从资料库面板搬到这里的年份控件下方）。
+   * **成品文案由父组件查主进程后传入**——本组件与 `CompilationStep` 一样**不直接调 IPC**（纯呈现约定）。
+   */
+  webYearsPreview?: { text: string; distribution?: string | null; warning?: string | null } | null
+  /** 年份输入两个都合法时按 400ms 防抖回调一次（`null` = 当前输入不合法，请清掉预览） */
+  onWebYearsPreviewQuery?: (years: { from: number; to: number } | null) => void
+  /**
+   * 「取消生成」后把刚提交的那段文字**回填输入框**（2026-10-05 用户要求）。
+   * 为什么需要它：`submit()` 会先清空输入框再回调父组件，父组件若因二次确认被取消而不生成，
+   * 用户刚敲的撰写要求就被吞掉了，只能重敲一遍——这与项目「不让用户重复操作」的口径相悖。
+   * 语义：`seq` 是自增触发值，**同一段文字被取消两次也能回填**（只比较文本会让第二次失效）。
+   */
+  restoreDraft?: { text: string; seq: number } | null
+}
+
+/**
+ * 内联「资料年份范围」（仅生成汇编首次撰写要求时显示）。
+ * 口径与后端一致：`published_date` 落在区间内的网页文章才会被抓取并按正文重筛；
+ * 本地资料（年鉴/文档）不受此限。
+ */
+function WebYearsInline({
+  years,
+  busy,
+  preview,
+  onChange,
+  onPreviewQuery
+}: {
+  years?: { from?: number; to?: number }
+  busy: boolean
+  preview?: { text: string; distribution?: string | null; warning?: string | null } | null
+  onChange?: (from: number, to: number) => void
+  onPreviewQuery?: (years: { from: number; to: number } | null) => void
+}): JSX.Element {
+  const maxYear = new Date().getFullYear() + 1
+  const [from, setFrom] = useState(years?.from != null ? String(years.from) : '')
+  const [to, setTo] = useState(years?.to != null ? String(years.to) : '')
+  useEffect(() => {
+    setFrom(years?.from != null ? String(years.from) : '')
+    setTo(years?.to != null ? String(years.to) : '')
+  }, [years?.from, years?.to])
+  const f = Number(from)
+  const t = Number(to)
+  const valid = Number.isInteger(f) && Number.isInteger(t) && f >= 1990 && t <= maxYear && f <= t
+  // 输入合法 → 防抖 400ms 通知父组件统计"区间内多少篇、预计抓多久"（IPC 在父组件里）
+  useEffect(() => {
+    if (!onPreviewQuery) return
+    if (!valid) {
+      onPreviewQuery(null)
+      return
+    }
+    const timer = setTimeout(() => onPreviewQuery({ from: f, to: t }), 400)
+    return () => clearTimeout(timer)
+  }, [f, t, valid, onPreviewQuery])
+  return (
+    <div className="chat-panel__web-years">
+      <div className="chat-panel__web-years-row">
+        <span className="chat-panel__web-years-title">{zhCN.compilation.webYearTitle}</span>
+        <input
+          type="number"
+          className="chat-panel__web-years-input"
+          placeholder={zhCN.compilation.webYearFrom}
+          min={1990}
+          max={maxYear}
+          value={from}
+          disabled={busy}
+          onChange={(e) => setFrom(e.target.value)}
+          aria-label={zhCN.compilation.webYearFrom}
+        />
+        <span className="chat-panel__web-years-sep">–</span>
+        <input
+          type="number"
+          className="chat-panel__web-years-input"
+          placeholder={zhCN.compilation.webYearTo}
+          min={1990}
+          max={maxYear}
+          value={to}
+          disabled={busy}
+          onChange={(e) => setTo(e.target.value)}
+          aria-label={zhCN.compilation.webYearTo}
+        />
+        <span className="chat-panel__web-years-hint">{valid ? zhCN.compilation.webYearHint : zhCN.compilation.webYearInvalid}</span>
+        <button
+          type="button"
+          className="source-list__btn chat-panel__web-years-save"
+          disabled={busy || !valid}
+          onClick={() => onChange?.(f, t)}
+        >
+          {zhCN.compilation.webYearApply}
+        </button>
+      </div>
+      {/* 区间规模预览（选完年份立刻知道"这次要抓多少篇、大概多久"） */}
+      {valid && preview?.text ? <p className="chat-panel__web-years-preview">{preview.text}</p> : null}
+      {valid && preview?.distribution ? (
+        <p className="chat-panel__web-years-preview chat-panel__web-years-preview--dist">{preview.distribution}</p>
+      ) : null}
+      {valid && preview?.warning ? (
+        <p className="chat-panel__web-years-preview chat-panel__web-years-preview--warn">{preview.warning}</p>
+      ) : null}
+    </div>
+  )
 }
 
 /** 秒 → "约 X–Y 秒 / 约 X–Y 分钟"（区间化，体现 AI 耗时不确定性，C） */
@@ -145,7 +290,15 @@ function ChatPanel({
   showPresetButton,
   hasCompilation = false,
   refs,
-  onOpenSource
+  onOpenSource,
+  webYears,
+  showWebYears,
+  onWebYearsChange,
+  webYearsPreview,
+  onWebYearsPreviewQuery,
+  fetchPaused = false,
+  onToggleFetchPause,
+  restoreDraft = null
 }: ChatPanelProps) {
   const [input, setInput] = useState('')
   /** 输入框高度（null = 用 rows 默认；拖它的上边界后为显式像素值） */
@@ -173,6 +326,22 @@ function ChatPanel({
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
     if (nearBottom || busyText) el.scrollTop = el.scrollHeight
   }, [messages, busyText, streamText])
+
+  /** 已回填过的 `restoreDraft.seq`（只处理比它更大的触发值，避免 effect 重跑把用户新输入覆盖掉） */
+  const restoredSeqRef = useRef(0)
+  /** 「取消生成」后回填文字（见 props.restoreDraft）：写入输入框并聚焦、光标落在末尾，用户可直接改完再发 */
+  useEffect(() => {
+    if (!restoreDraft || restoreDraft.seq <= restoredSeqRef.current) return
+    restoredSeqRef.current = restoreDraft.seq
+    if (!restoreDraft.text.trim()) return
+    setInput(restoreDraft.text)
+    window.requestAnimationFrame(() => {
+      const el = inputRef.current
+      if (!el) return
+      el.focus()
+      el.setSelectionRange(restoreDraft.text.length, restoreDraft.text.length)
+    })
+  }, [restoreDraft])
 
   /** 复制某条 AI 回复（纯文本） */
   const handleCopy = async (idx: number, text: string): Promise<void> => {
@@ -323,6 +492,7 @@ function ChatPanel({
                       <span>{zhCN.writingChat.etaText.replace('{time}', formatEtaRange(displayEtaSec))}</span>
                     ) : null}
                   </div>
+                  <FetchPauseControl fetch={progress.fetch} paused={fetchPaused} onToggle={onToggleFetchPause} />
                 </div>
               ) : null}
             </div>
@@ -348,6 +518,7 @@ function ChatPanel({
                       <span>{zhCN.writingChat.etaText.replace('{time}', formatEtaRange(displayEtaSec))}</span>
                     ) : null}
                   </div>
+                  <FetchPauseControl fetch={progress.fetch} paused={fetchPaused} onToggle={onToggleFetchPause} />
                 </div>
               ) : null}
             </div>
@@ -452,6 +623,22 @@ function ChatPanel({
             </div>
           ) : null}
         </div>
+      ) : null}
+
+      {/*
+        2026-10-05 用户裁定：年份范围在**任务流程里**选、显示在**输入框上方**（独立一行）。
+        ⚠ 真机自检（CDP 截图）抓到过一版错误实现：把它塞进下面这个 `.chat-panel__input-row`
+        里就变成横向 flex 的第三个子元素，输入框 `flex:1; min-width:0` 被挤成 0 宽、直接从界面上消失。
+        所以它必须在输入行**之外、之上**。
+      */}
+      {showWebYears ? (
+        <WebYearsInline
+          years={webYears}
+          busy={busy}
+          preview={webYearsPreview}
+          onChange={onWebYearsChange}
+          onPreviewQuery={onWebYearsPreviewQuery}
+        />
       ) : null}
 
       <div className="chat-panel__input-row">

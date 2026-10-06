@@ -19,8 +19,10 @@ import {
   clusterCandidateCards,
   packCandidateCalls,
   reduceConcurrency,
-  mapWindowGroupsThroughExtract
+  mapWindowGroupsThroughExtract,
+  summarizeMaterialScale
 } from '../src/main/writing/compilation-service'
+import type { RetrievedChunk } from '../src/shared/types'
 
 let db: Database.Database
 beforeAll(() => {
@@ -146,6 +148,28 @@ describe('recallCompilationCandidates (Phase 6.1 优化：保守本地闸门)', 
     const recall = recallCompilationCandidates(['s12'], '学前教育园所设置 学前 幼儿园 园所 幼教')
     expect(recall.chunks.some((c) => c.text.includes('经费报销'))).toBe(true)
     expect(recall.chunks.length).toBe(2)
+    /*
+     * 第二组 ⑤ 之后，"专属来源整篇保留"只保证**闸门**不再逐段剔（`preConvergenceChunks` 仍是整篇 2 段）；
+     * 本次真正送细读的集合还要过一遍"文章内取段"。本用例只有 2 段且其中 1 段有信号 → 另一段作为
+     * 上下文仍留下，所以两段都在。若第 2 段离信号段更远，就会被 ⑤ 跳过（见下面的宽口径用例）。
+     */
+    expect(recall.preConvergenceChunks.length).toBe(2)
+  })
+
+  it('⑤：整篇无信号的来源整篇不送，但**不报错**（材料仍在库中、仍可打开）', () => {
+    // 标题含"幼儿园" → 闸门把它当专属来源整篇保留；但正文逐段判定后**没有任何一段有信号** →
+    // ⑤ 应整篇不送（0 段）、如实计入 noSignalSources，且**不抛错**（这不是异常，材料仍在库中）。
+    db.prepare(`INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('s15', 'file', '幼儿园工作记录（与主题无关的存档）', '本季度降雨量较常年偏多。\n全县林地面积保持稳定。\n县城路灯亮化工程完成验收。', 'ready')`).run()
+    let recall: ReturnType<typeof recallCompilationCandidates> | null = null
+    expect(() => {
+      recall = recallCompilationCandidates(['s15'], '学前教育 幼儿园 学前 园所 幼教')
+    }).not.toThrow()
+    // 闸门口径下确实有材料（整篇 3 段），⑤ 之后一段都不送
+    expect(recall!.preConvergenceChunks.length).toBe(3)
+    expect(recall!.chunks).toHaveLength(0)
+    expect(recall!.convergence!.noSignalSources).toBe(1)
+    expect(recall!.convergence!.keptSegments).toBe(0)
+    expect(recall!.convergence!.droppedSegments).toBe(3)
   })
 
   it('broad source (non-dedicated) keeps only signal chunks (宽口径来源截段)', () => {
@@ -153,8 +177,50 @@ describe('recallCompilationCandidates (Phase 6.1 优化：保守本地闸门)', 
     db.prepare(`INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('s13', 'file', '某县综合工作文档', '${filler}\n2005年全县幼儿园89所。\n另一段无关内容，讲述农田水利建设。', 'ready')`).run()
     const recall = recallCompilationCandidates(['s13'], '学前教育 幼儿园 学前 园所 幼教')
     expect(recall.chunks.some((c) => c.text.includes('幼儿园'))).toBe(true)
+    /*
+     * 第二组 ⑤（2026-10-06）起，**默认**还会保留"紧邻有信号段"的上下文（此处即幼儿园段的上下各 1 段），
+     * 因此天气填充段与"农田水利"段会作为**上下文**一起送细读——这是 ⑤ 有意为之（避免把年份/主语切掉），
+     * 不是闸门放宽。要"只留有信号段"的老行为，走逃生门 `converge: false`（见下一个用例）。
+     */
+    expect(recall.convergence).not.toBeNull()
+    expect(recall.convergence!.contextRange).toBe(1)
+    expect(recall.convergence!.keptSegments).toBeLessThan(recall.convergence!.articleSegments)
+    // 上下文只放宽 1 段：远离幼儿园段的填充段仍不进本轮
+    const keptFiller = recall.chunks.filter((c) => c.text.includes('降水')).length
+    expect(keptFiller).toBeLessThanOrEqual(2)
+  })
+
+  it('逃生门 converge:false = 本轮不做收敛（行为回到 ⑤ 之前）', () => {
+    const filler = '全省未来三天将迎来一次大范围降水过程，气温小幅下降，出行请注意携带雨具。'.repeat(240)
+    db.prepare(`INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('s14', 'file', '某县综合工作文档乙', '${filler}\n2005年全县幼儿园89所。\n另一段无关内容，讲述农田水利建设。', 'ready')`).run()
+    const recall = recallCompilationCandidates(['s14'], '学前教育 幼儿园 学前 园所 幼教', undefined, [], { converge: false })
+    expect(recall.chunks.some((c) => c.text.includes('幼儿园'))).toBe(true)
     expect(recall.chunks.some((c) => c.text.includes('降水'))).toBe(false)
     expect(recall.chunks.some((c) => c.text.includes('农田水利'))).toBe(false)
+    // 未做收敛时没有统计，且"闸门口径"与"本轮送入"是同一批
+    expect(recall.convergence).toBeNull()
+    expect(recall.preConvergenceChunks.length).toBe(recall.chunks.length)
+  })
+
+  it('⑤：整篇无信号的来源整篇不送，但**不报错**（材料仍在库中）', () => {
+    db.prepare(`INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('s17', 'file', '某县气象与林业记录', '本季度降雨量较常年偏多。\n全县林地面积保持稳定。\n县城路灯亮化工程完成验收。', 'ready')`).run()
+    let recall: ReturnType<typeof recallCompilationCandidates> | null = null
+    expect(() => {
+      // 来源级闸门会先把它剔掉（无任何词法信号）→ 不抛错、不返回任何段
+      recall = recallCompilationCandidates(['s17'], '学前教育 幼儿园 学前 园所 幼教')
+    }).not.toThrow()
+    expect(recall!.chunks).toHaveLength(0)
+    expect(recall!.convergence?.noSignalSources ?? 0).toBe(0)
+  })
+
+  it('⑤ 保留的段仍带来源正文坐标（charStart/charEnd 不变，来源定位不错位）', () => {
+    db.prepare(`INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('s16', 'file', '某县综合工作文档丙', '本季度降雨量较常年偏多。\n2005年全县幼儿园89所，学前三年入园率提升。\n县城路灯亮化工程完成验收。', 'ready')`).run()
+    const recall = recallCompilationCandidates(['s16'], '学前教育 幼儿园 学前 园所 幼教')
+    const hit = recall.chunks.find((c) => c.text.includes('幼儿园'))!
+    expect(hit.charStart).toBeGreaterThanOrEqual(0)
+    // 坐标必须能在**来源正文**里精确切出这段文字（坐标系没有被 ⑤ 改动）
+    const src = '本季度降雨量较常年偏多。\n2005年全县幼儿园89所，学前三年入园率提升。\n县城路灯亮化工程完成验收。'
+    expect(src.slice(hit.charStart, hit.charEnd)).toBe(hit.text)
   })
 
   it('returns empty for empty query or scope', () => {
@@ -189,6 +255,49 @@ describe('keyword extraction & coarse query (Phase 6.1 大模型提取标题/关
     const keyworded = recallCompilationCandidates(['s20'], '学前教育园所设置 学前 幼儿园 幼儿 保育 托育 入园 幼教 托儿所 招生 等级 占比')
     expect(keyworded.chunks.some((c) => c.text.includes('托儿所'))).toBe(true)
     expect(keyworded.chunks.some((c) => c.text.includes('入园'))).toBe(true)
+  })
+})
+
+describe('material scale estimate (2026-10-05 P1：生成前材料规模预检)', () => {
+  /** 造一段指定长度的候选材料（内容本身不参与规模计算） */
+  const chunk = (sourceId: string, len: number): RetrievedChunk => ({
+    sourceId,
+    sourceTitle: sourceId,
+    position: '第1段',
+    text: 'x'.repeat(len),
+    score: 1
+  })
+
+  it('splits local vs web segments and reports windows/minutes', () => {
+    // 本地 2 万字 + 网页 2 万字 = 4 万字；细读窗口上限 3 万字 → 2 个窗口
+    const est = summarizeMaterialScale([chunk('local', 20000), chunk('web', 20000)], ['web'])
+    expect(est.segments).toBe(2)
+    expect(est.chars).toBe(40000)
+    expect(est.localSegments).toBe(1)
+    expect(est.webSegments).toBe(1)
+    expect(est.estimatedWindows).toBe(2)
+    // 单窗口先验 20 秒 → 2 窗口 = 40 秒 → 四舍五入到 1 分钟（界面不显示"0 分钟"）
+    expect(est.estimatedMinutes).toBe(1)
+  })
+
+  it('rounds windows up and scales minutes with the window count', () => {
+    // 30,001 字（刚过一个窗口）→ 2 个窗口
+    expect(summarizeMaterialScale([chunk('a', 30001)], []).estimatedWindows).toBe(2)
+    // 30 万字 → 10 个窗口 → 10 × 20s = 200s → 3 分钟
+    const big = summarizeMaterialScale([chunk('a', 300000)], [])
+    expect(big.estimatedWindows).toBe(10)
+    expect(big.estimatedMinutes).toBe(3)
+  })
+
+  it('never reports less than one window/minute for empty materials', () => {
+    expect(summarizeMaterialScale([], [])).toEqual({
+      segments: 0,
+      chars: 0,
+      localSegments: 0,
+      webSegments: 0,
+      estimatedWindows: 1,
+      estimatedMinutes: 1
+    })
   })
 })
 

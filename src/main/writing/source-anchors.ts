@@ -24,11 +24,10 @@ import { runMigrations } from '../db/migrate'
 import { logMain } from '../logger'
 import { ensureSourceBlocks, listSourceBlocks } from '../db/source-blocks'
 import { listItemAnchorsWithPage, replaceItemAnchors } from '../db/compilation-item-anchors'
-import { findVerbatimRange, resolveAnchor } from '../parse/anchors'
+import { findVerbatimRange, blockForRecordedRange, resolveAnchor } from '../parse/anchors'
 import { getSourceById } from '../db/sources'
 import { getPdfCmapsDir } from '../import/file-parser'
 import type { BlockRange } from '../parse/page-map'
-
 /** 本模块只依赖这几个字段（`CompilationItem` 结构兼容），便于单测直接构造 */
 export interface AnchorCandidate {
   id: string
@@ -40,8 +39,14 @@ export interface AnchorCandidate {
    * 并列来源是"被合并掉的那一段"的出处，只能靠**那一段自己的**文字去找它的位置
    * （用合并后的正文去别的来源里找是另一回事，会锚错）。缺省时退化为"只有主来源"。
    * 只走内存，不落库。
+   *
+   * 2026-10-05（P0-2）：每项还可以带 `charStart/charEnd`——**生成期记录的字符区间**，
+   * 有它就直接映射块表，不再拿文字去正文里回溯匹配。
    */
-  candidates?: { sourceId: string; evidence?: string; excerpt: string }[]
+  candidates?: { sourceId: string; evidence?: string; excerpt: string; charStart?: number; charEnd?: number }[]
+  /** 主来源的生成期字符区间（`candidates` 缺省时用） */
+  charStart?: number
+  charEnd?: number
 }
 
 export interface AnchorAttachStats {
@@ -53,6 +58,11 @@ export interface AnchorAttachStats {
   sources: number
   /** 其中写入了**并列来源**锚点的段数（诊断用） */
   alsoAnchored: number
+  /**
+   * 其中靠**生成期记录的字符区间**定的位（P0-2 的核心指标，诊断用）。
+   * 这个数越高，"未记录来源位置"就越不再靠事后文本匹配来救。
+   */
+  fromRecordedRange: number
 }
 
 /**
@@ -82,15 +92,17 @@ async function pageTextsForSource(sourceId: string, _text: string): Promise<stri
  * ——`replaceItemAnchors` 是"先删后插"的覆盖写，所以必须攒齐再写，否则并列来源的锚点会把主来源的抹掉。
  */
 export async function attachAnchors(items: AnchorCandidate[]): Promise<AnchorAttachStats> {
-  const stats: AnchorAttachStats = { anchored: 0, skipped: 0, sources: 0, alsoAnchored: 0 }
+  const stats: AnchorAttachStats = { anchored: 0, skipped: 0, sources: 0, alsoAnchored: 0, fromRecordedRange: 0 }
   const db = getDb()
-  /** 待定位的任务：一段 × 一个来源 × 该来源的候选文字 */
+  /** 待定位的任务：一段 × 一个来源 × 该来源的候选文字（+ 生成期记录的字符区间） */
   interface Target {
     itemId: string
     mainSourceId: string
     sourceId: string
     evidence?: string
     excerpt: string
+    charStart?: number
+    charEnd?: number
   }
   const bySource = new Map<string, Target[]>()
   for (const it of items) {
@@ -102,7 +114,7 @@ export async function attachAnchors(items: AnchorCandidate[]): Promise<AnchorAtt
     const raw =
       it.candidates && it.candidates.length > 0
         ? it.candidates.filter((c) => c?.sourceId)
-        : [{ sourceId: it.sourceId, evidence: it.evidence, excerpt: it.excerpt }]
+        : [{ sourceId: it.sourceId, evidence: it.evidence, excerpt: it.excerpt, charStart: it.charStart, charEnd: it.charEnd }]
     const seen = new Set<string>()
     const list = raw.filter((c) => (seen.has(c.sourceId) ? false : (seen.add(c.sourceId), true)))
     for (const c of list) {
@@ -111,7 +123,9 @@ export async function attachAnchors(items: AnchorCandidate[]): Promise<AnchorAtt
         mainSourceId: it.sourceId,
         sourceId: c.sourceId,
         evidence: c.evidence,
-        excerpt: c.excerpt
+        excerpt: c.excerpt,
+        charStart: c.charStart,
+        charEnd: c.charEnd
       }
       const group = bySource.get(c.sourceId) ?? []
       group.push(target)
@@ -151,6 +165,22 @@ export async function attachAnchors(items: AnchorCandidate[]): Promise<AnchorAtt
       page: b.page
     }))
     for (const t of group) {
+      /*
+       * ① **优先用生成期记录的字符区间**（2026-10-05 用户裁定 P0-2）。
+       * 这条路径完全不看段落文字：区间是切块/成卡那一刻记下来的，因此
+       * 模型改写过正文、或证据串里混进了页眉噪声/空格时，**仍然给出正确页码**——
+       * 这正是本次要修的回归（实测 2/86 段"未记录来源位置"、要用户自己翻 PDF）。
+       */
+      if (t.charStart != null) {
+        const block = blockForRecordedRange(blocks, t.charStart)
+        if (block) {
+          add(t, block.blockIndex, 'exact')
+          stats.fromRecordedRange += 1
+          continue
+        }
+        // 区间与块表对不上（来源正文被重新解析过）→ 落到下面的逐字匹配兜底，不猜
+      }
+      // ② fallback（保留不删）：拿逐字证据/段落正文去来源里定位。区间缺失时才会走到这里。
       const evidence = t.evidence ? findVerbatimRange(text, t.evidence) : null
       const excerpt = t.excerpt ? findVerbatimRange(text, t.excerpt) : null
       const anchor = resolveAnchor(blocks, { evidence, excerpt })
@@ -166,6 +196,19 @@ export async function attachAnchors(items: AnchorCandidate[]): Promise<AnchorAtt
     replaceItemAnchors(db, itemId, anchors)
     stats.anchored += 1
   }
+  /*
+   * 本次**没有**任何可用位置的段：必须显式清空它的锚点行（2026-10-05 用户裁定）。
+   *
+   * 为什么这不是可选的：`replaceItemAnchors` 只对 `anchorsByItem` 里出现过的段做"先删后插"，
+   * 全组定位失败的段根本进不了这个 Map → 上一轮留在库里的锚点会**留到这一轮**。
+   * 界面据此报出一个**看起来正常的错页码**，比"未记录来源位置"更有害（用户会以为定位是对的）。
+   * 代价：多一次 DELETE（无锚点可删时是空操作），换"锚点行永远只反映本次生成结果"这条不变量。
+   */
+  for (const it of items) {
+    if (!it?.id || !it.sourceId) continue // 无名无姓的入参无从清起（`AnchorCandidate` 允许缺省）
+    if (anchorsByItem.has(it.id)) continue
+    replaceItemAnchors(db, it.id, [])
+  }
   return stats
 }
 
@@ -179,7 +222,7 @@ export async function attachAnchorsQuietly(items: AnchorCandidate[]): Promise<vo
     logMain(
       'anchor',
       `来源锚点：处理 ${stats.sources} 个来源 / ${items.length} 段，写入 ${stats.anchored} 段` +
-        `（含并列来源锚点 ${stats.alsoAnchored} 个），未定位 ${stats.skipped} 处`,
+        `（其中靠生成期字符区间定的位 ${stats.fromRecordedRange} 段、并列来源锚点 ${stats.alsoAnchored} 个），未定位 ${stats.skipped} 处`,
       'INFO'
     )
   } catch (err) {
@@ -302,6 +345,118 @@ if (import.meta.vitest) {
       expect(stats.anchored).toBe(1)
       expect(stats.alsoAnchored).toBe(0)
       expect(listItemAnchorsWithPage('i1', db).map((a) => a.sourceId)).toEqual(['s1'])
+    })
+
+    /*
+     * 2026-10-05 用户裁定（P0-2 的回归钉子）：**生成期记录的字符区间 → 页码**必须成立，
+     * 且**故意让证据串无法逐字命中**时仍然给出页码。
+     * 旧行为（纯 indexOf 回溯）：证据串混进页眉噪声/排版空格 → 命中失败 → "未记录来源位置"（实测 2/86 段），
+     * 用户只能自己翻 PDF。新行为：区间优先，根本不看这段文字能不能对上。
+     */
+    it('生成期字符区间优先：证据串无法逐字命中（多一个空格）时仍给出正确页码', async () => {
+      // 造一份"有页概念"的来源：全书 80 字，第 1 页 [0,40)、第 2 页 [40,80)
+      const long = TEXT.repeat(2)
+      db.prepare("INSERT INTO sources (id, kind, title, file_path, cleaned_text, status) VALUES ('s3','file','分页','分页.pdf',?,'ready')").run(long)
+      db.prepare(
+        "INSERT INTO compilation_items (id, compilation_id, position, source_id, excerpt, created_at) VALUES ('i9','c1',9,'s3','待定位段落','2026-10-03')"
+      ).run()
+      // 块表：块 0 = 第 1 页，块 1 = 第 2 页
+      db.prepare(
+        "INSERT INTO source_blocks (source_id, block_index, char_start, char_end, page, label, created_at) VALUES ('s3',0,0,40,1,NULL,'2026-10-03')"
+      ).run()
+      db.prepare(
+        "INSERT INTO source_blocks (source_id, block_index, char_start, char_end, page, label, created_at) VALUES ('s3',1,40,80,2,NULL,'2026-10-03')"
+      ).run()
+      // 该段来自第 2 页：区间落在 [40,80) 里；而证据串被插了页眉噪声字符（'★'）→ 逐字匹配必然失败
+      const stats = await attachAnchors([
+        {
+          id: 'i9',
+          sourceId: 's3',
+          excerpt: '改写过的段落正文',
+          evidence: '全区普通高中招生录取 4123 ★ 人',
+          charStart: 45,
+          charEnd: 62
+        }
+      ])
+      expect(stats.anchored).toBe(1)
+      expect(stats.fromRecordedRange).toBe(1)
+      const anchors = listItemAnchorsWithPage('i9', db)
+      expect(anchors).toHaveLength(1)
+      expect(anchors[0]).toMatchObject({ sourceId: 's3', blockIndex: 1, page: 2, confidence: 'exact' })
+      // 反向确认：这条证据串确实无法命中（含"去空白归一化"这条退路也命中不了），否则测试没有证明力
+      expect(findVerbatimRange(long, '全区普通高中招生录取 4123 ★ 人')).toBeNull()
+    })
+
+    /*
+     * 2026-10-05 用户裁定（本轮新增）：**某段本次没有任何可用锚点时，必须显式清空它库里的旧锚点**。
+     *
+     * 不修的后果：`replaceItemAnchors` 只对"本次算出锚点"的段做先删后插，落空的段根本进不了那张 Map，
+     * 于是**上一轮留下的锚点（带着旧页码）会活到这一轮**——用户看到的是一个"看起来正常的错页码"，
+     * 比"未记录来源位置"更有害（他会以为定位是对的）。这条断言把"锚点行只反映本次生成结果"钉住。
+     */
+    it('同一段：第一次有锚点、第二次落空时，库里的旧锚点被清空', async () => {
+      const first = await attachAnchors([{ id: 'i9', sourceId: 's1', excerpt: '比上学年增加 120 人' }])
+      expect(first.anchored).toBe(1)
+      expect(listItemAnchorsWithPage('i9', db)).toHaveLength(1)
+
+      // 第二次：区间越界（不能当锚点）+ 逐字也命中不了 → 本次无可用位置
+      const second = await attachAnchors([
+        {
+          id: 'i9',
+          sourceId: 's1',
+          excerpt: '这段文字来源里根本没有',
+          evidence: '★这段证据也根本没有★',
+          charStart: 99999,
+          charEnd: 100009
+        }
+      ])
+      expect(second.anchored).toBe(0)
+      expect(second.skipped).toBe(1)
+      // 关键断言：不是"保留旧锚点"，而是读回为空
+      expect(listItemAnchorsWithPage('i9', db)).toHaveLength(0)
+    })
+
+    it('区间明确落在某页时要给出页码；区间越界则回退逐字匹配', async () => {
+      // 区间与来源正文无关（越界）→ 不能拿它当锚点，回退到逐字匹配（旧行为不受影响）
+      const fallback = await attachAnchors([
+        { id: 'i9', sourceId: 's1', excerpt: '比上学年增加 120 人', charStart: 99999, charEnd: 100009 }
+      ])
+      expect(fallback.fromRecordedRange).toBe(0)
+      expect(fallback.skipped).toBe(0)
+      expect(fallback.anchored).toBe(1)
+      // 回退路径定到的仍是第 0 块（confidence=weak：靠段落正文而非证据）
+      expect(listItemAnchorsWithPage('i9', db).map((a) => [a.sourceId, a.blockIndex, a.confidence])).toEqual([
+        ['s1', 0, 'weak']
+      ])
+    })
+
+    it('并列来源各自带自己的生成期区间，各落各的块', async () => {
+      db.prepare(
+        "INSERT INTO sources (id, kind, title, file_path, cleaned_text, status) VALUES ('s8','file','另一页','另一页.pdf',?,'ready')"
+      ).run(TEXT)
+      db.prepare(
+        "INSERT INTO source_blocks (source_id, block_index, char_start, char_end, page, label, created_at) VALUES ('s8',0,0,80,7,NULL,'2026-10-03')"
+      ).run()
+      const stats = await attachAnchors([
+        {
+          id: 'i9',
+          sourceId: 's1',
+          excerpt: '改写正文',
+          evidence: '证据根本对不上',
+          candidates: [
+            { sourceId: 's1', excerpt: '甲', charStart: 10, charEnd: 20 },
+            { sourceId: 's8', excerpt: '乙', charStart: 30, charEnd: 45 }
+          ]
+        }
+      ])
+      expect(stats.anchored).toBe(1)
+      expect(stats.alsoAnchored).toBe(1)
+      expect(stats.fromRecordedRange).toBe(2)
+      const anchors = listItemAnchorsWithPage('i9', db)
+      expect(anchors.map((a) => [a.sourceId, a.page, a.confidence])).toEqual([
+        ['s1', null, 'exact'],
+        ['s8', 7, 'exact']
+      ])
     })
   })
 }

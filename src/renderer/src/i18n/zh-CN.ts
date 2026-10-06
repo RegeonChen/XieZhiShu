@@ -27,12 +27,6 @@ export const zhCN = {
       detailTitle: '还没有资料',
       detailHint: '导入文件或添加信源网址后，将在这里展示与管理资料。'
     },
-    templates: {
-      listTitle: '写作规范',
-      listEmpty: '',
-      detailTitle: '写作规范',
-      detailHint: '管理志书写作规范（通用规范 + 部类细则），生成初稿时自动注入相应规范。'
-    },
     compile: {
       listTitle: '生成汇编任务',
       listEmpty: '暂无任务',
@@ -125,7 +119,15 @@ export const zhCN = {
     updateSave: '确认',
     syncedAt: '上次同步：{time}',
     neverSynced: '尚未同步',
-    operationFailed: '操作失败：{message}'
+    operationFailed: '操作失败：{message}',
+    /*
+     * 2026-10-05（用户裁定 A）：本面板只剩"站点注册与列表" —— 年份输入（P3）、年份只读展示（P5）、
+     * 区间预览与分年分布、手动抓取（P4）**整块已删除**：年份与预览改到任务流程的年份控件里
+     * （见 `zhCN.compilation.webYear*`），抓取由生成管线按任务自动完成。
+     * 随之删除的 13 条手动抓取文案：crawlStart / crawlRunning / crawlCancel / crawlReset /
+     * crawlResetConfirm / crawlResetDone / crawlInvalidRange / crawlNeedQuery / crawlProgress /
+     * crawlEtaProvisional / crawlDone / crawlCancelled / crawlFailed。
+     */
   },
   sourceViewer: {
     summaryTitle: '资料摘要',
@@ -162,7 +164,6 @@ export const zhCN = {
     openFailed: '打开网页失败'
   },
   sourceDelete: {
-    success: '删除成功',
     failed: '删除失败：{message}'
   },
   tagManager: {
@@ -393,25 +394,13 @@ export const zhCN = {
     generateBtn: '生成初稿',
     generating: '正在整理资料摘要并生成初稿（资料较多时可能需要数分钟，请耐心等待）...',
     regenerating: '正在整理资料摘要并重新生成初稿（资料较多时可能需要数分钟，请耐心等待）...',
-    generated: '初稿《{title}》已生成。',
     generateFailed: '生成失败：{message}',
     needConfirmedCompilation: '请先在第一步「生成资料汇编」中确认汇编，再生成初稿。',
-    chatFailed: '对话失败：{message}',
     regenerateBtn: '重新生成初稿',
     regenerateConfirmTitle: '重新生成初稿',
     regenerateConfirmMessage: '将丢弃当前第 0 稿（含你的修改），按当前要求与资料重新生成。确定继续？',
     regenerateConfirmBtn: '重新生成',
-    skillLabel: '写作规范',
-    skillAuto: '未手动选定（生成时自动匹配）',
-    suggestBtn: '智能匹配',
-    suggesting: '匹配中...',
-    suggestNeedEmpty: '请先在下方输入撰写要求，再进行智能匹配',
-    pickBtn: '手动选择',
-    providerLabel: '大模型',
-    providerNone: '跟随全局设置',
-    providerLockHint: '（请先在「设置」页配置大模型）',
     noDraftHint: '在下方对话框中输入本次撰写的标题与要求（如"这次撰写任务的标题为……"），点击「生成初稿」开始。',
-    emptyChat: '还没有对话。在下方输入撰写要求，点击「生成初稿」开始。',
     /** 生成进度剩余时间（2026-08-11：进度条旁展示） */
     etaText: '预计还需 {time}',
     copyReply: '复制该回复',
@@ -427,9 +416,6 @@ export const zhCN = {
     loading: '加载中...',
     loadFailed: '加载失败：{message}',
     next: '开始撰写',
-    styleHint: '本环节为预留：默认注入「志书通用行文规范」，也可在左侧对话框中直接提出行文要求。',
-    styleTitle: '指定行文规范',
-    styleGuideLabel: '以下为默认注入的「志书文体文风与行文规则」规范，可在左侧对话框中补充行文要求。'
   },
   draftArea: {
     importTitle: '导入资料汇编',
@@ -440,9 +426,7 @@ export const zhCN = {
     emptyList: '「生成汇编」功能区暂无已完成的任务，请先在「生成汇编」中生成并确认资料汇编。',
     imported: '已导入资料汇编：{title}',
     importFailed: '导入资料汇编失败：{message}',
-    goStyle: '开始撰写',
     backToStyle: '返回规范',
-    writeHint: '已导入资料汇编。可先指定行文规范，再点击「开始撰写」生成初稿。'
   },
   styleGuide: {
     entry: '规范',
@@ -485,20 +469,16 @@ export const zhCN = {
     regenerateBtn: '重新生成汇编',
     regenerateConfirmTitle: '重新生成资料汇编',
     regenerateConfirmMessage:
-      '将按当前撰写要求重新检索并生成一版资料汇编：网页材料沿用本任务已锁定的那一批（不会重新抓取），当前这版的对话记录与版本历史不会带入新版本。确定继续？',
+      '将按当前撰写要求重新走一遍生成管线：网页资料会**按本任务的年份区间重新抓取并按正文重筛**（未命中的正文按裁定丢弃），当前这版的对话记录与版本历史不会带入新版本。确定继续？',
     regenerateConfirmBtn: '重新生成',
-    confirmBtn: '导出资料汇编',
     exportBtn: '导出资料汇编',    exportDocx: '导出 Word (…docx)',
     exportArchive: '导出软件格式 (…xzsc)',
     exportTitle: '导出资料汇编',
-    sortBtn: '按时间排序',
     sortAsc: '按时间正序',
     sortDesc: '按时间反序',
     undo: '撤销操作',
     redo: '恢复操作',
-    confirmedBadge: '已确认',
     candidate: '候选 {chunks} 段',
-    cards: '卡片 {count} 张',
     /* Phase 7.3：连续文档查看器（段首时间 + 段尾来源圆标 + 按年份分节） */
     /* Phase 7.5：对话修改后**自动**进入复核态（对比模式）——用户只需「采纳 / 回退」二选一 */
     versionReviewTitle: '大模型本次修改',
@@ -512,7 +492,6 @@ export const zhCN = {
     versionRemovedTag: '已删除',
     emptyDoc: '（暂无资料段落：本次生成没有筛出与主题相关的内容，可调整标题后重新生成）',
     yearHeading: '{year} 年',
-    sourceCardTitle: '来源 {n}',
     docStats: '{paragraphs} 段 / {sources} 篇来源',
     pendingTimeStat: '{count} 段时间待核',
     pendingTimeHint: '这些段落的时间标签里没有年份，无法按年份分节与排序',
@@ -530,7 +509,10 @@ export const zhCN = {
       '· 未记录的段 = 该段文字在来源里逐字找不到（被模型改写或卡片本身夹带了页眉等噪声），宁可不给位置；\n' +
       '· 引文出现多处的段 = 同一句话在来源里出现两次以上，锚点取的是第一处（尚未消歧）。\n' +
       '后续每次生成都会重算；老汇编（生成于本功能之前）整份都没有位置记录。',
-    /* Phase 9 补充：疑似超出范围的段落复核（用户裁定「界面兜底」） */
+    /* Phase 9 补充：疑似超出范围的段落复核（用户裁定「界面兜底」）
+       2026-10-05 用户裁定关闭：界面入口已整体删除（越界段落直接保留），这几条文案**保留不动**——
+       主进程 `writing/scope-check.ts` 与 IPC（`compilation:scopeCheck` / `compilation:excludeItems`）仍在，
+       且导出/导入与旧数据可能仍引用同一口径，故不删（当前界面无引用）。 */
     scopeTitle: '⚠ 疑似超出范围 {count} 段（点击复核）',
     scopeHint: '按撰写要求里的范围线索挑出：{scope}。命中"全省/省级/国家"层面的字眼、且通篇没有提到本地地名的段落。移出 = 从汇编中移除该段（不删原资料，可用「↶ 撤销」还原）。',
     scopeHigherLevel: '明确排除上级/全省内容',
@@ -546,7 +528,6 @@ export const zhCN = {
     noTime: '无时间',
     pendingContradictions: '{count} 组矛盾待处理',
     noContradictions: '无未处理矛盾',
-    openSource: '打开来源',
     /* 第三批 C：本地快照（网站改版/撤稿后仍能核对抓取当时的原文） */
     snapshotOpen: '查看本地快照',
     snapshotLoading: '读取中…',
@@ -557,7 +538,6 @@ export const zhCN = {
     snapshotTruncated: '（正文过长，仅显示前 {chars} 字中的一部分）',
     /* E3：正文过短多为只抓到导航/页脚，提示该篇可信度存疑 */
     snapshotShort: '注意：这篇的正文很短（可能只抓到导航/页脚，正文由脚本加载），引用时请谨慎核对。',
-    snapshotShortBadge: '（正文过短，可信度存疑）',
     cancel: '取消',
     resolve: '采纳该说法',
     ignore: '忽略该矛盾',
@@ -567,9 +547,7 @@ export const zhCN = {
     resolved: '已采纳',
     ignored: '已忽略',
     pending: '待处理',
-    more: '更多操作',
     collapse: '收起',
-    contradict: '矛盾',
     /** Phase 7.6：矛盾分组编号（用户要求段尾标注"矛盾N"，与导出文档同源） */
     contradictNo: '矛盾{n}',
     generating: '正在生成资料汇编（本地宽召回 + AI 细读，资料较多时可能需要数分钟）...',
@@ -580,9 +558,36 @@ export const zhCN = {
     continuing: '正在从断点继续生成资料汇编（复用已完成的部分）…',
     adviceReduceConcurrency: '检测到频繁限流（HTTP 429）。已自动降低本次生成资料的并发数；建议您在「设置 → LLM Provider」中把当前大模型的「并发窗口数」调低（如 2），可减少限流。',
     continueFailed: '继续生成失败：',
-    confirmed: '资料汇编已确认，可进入下一步指定行文规范。',
-    regenerated: '已重新生成资料汇编：{count} 段。',
     contradictionScanFailed: '矛盾扫描未完成（{reason}），可能存在遗漏，请酌情复核。',
+    /* 生成前的「材料规模预检」确认（2026-10-05 用户要求 P1）：
+       动机是用户实测"跑到一半才发现要 20 多分钟"——真正开始生成之前弹一次确认，只提示、不限制。
+       口径：把与生成同一条「召回 + 保守闸门」路径估出的规模如实报出；**只读**（不落库、不抓网页、不调大模型），
+       因此本轮将要抓取的网页资料**不在估算内**（这条限制必须写在正文里，不能让用户以为已含网页量）。 */
+    materialEstimateTitle: '本次材料规模',
+    materialEstimateLoading: '正在估算材料规模（本地召回 + 收敛，不消耗大模型额度）…',
+    /*
+     * 第二组 ⑤（2026-10-06）：默认收敛（文章内取高信号段 ± 上下文）后，确认框要如实报"收敛后"的规模，
+     * 同时给出"不做收敛（全量送入）"的数——用户据此判断要不要勾下面的逃生门。两个数都写出来，不藏。
+     */
+    materialEstimateBody:
+      '默认**收敛**后本轮将细读 {segments} 段 / {wan} 万字（本地 {local} 段 + 网页 {web} 段），' +
+      '预计约 {windows} 个细读窗口 / 约 {minutes} 分钟，并会消耗相应的大模型额度。' +
+      '（做法：文章内只送有信号的段落及其紧邻上下文；另有 {dropped} 段因无信号本轮不送，**仍留在资料库中、可随时打开查看**。）' +
+      '若不收敛（全量送入）则为 {fullSegments} 段 / {fullWan} 万字 / 约 {fullWindows} 个窗口 / 约 {fullMinutes} 分钟。' +
+      '（网页资料会在生成时按年份区间抓取并重筛，不在此估算内。）是否继续？',
+    materialEstimateConvergeOff: '本轮不做收敛（全量送入）',
+    materialEstimateConvergeOffHint: '勾选后跳过"文章内取段"，闸门后的全部段落都交给大模型细读；耗时与额度消耗随之上升。仅对本次生成生效。',
+    materialEstimateConvergeSkipNote: '（已勾选「本轮不做收敛（全量送入）」：下面按全量口径来。）',
+    materialEstimateConfirm: '继续生成',
+    materialEstimateCancel: '取消（不生成）',
+    materialEstimateUnavailable: '本次无法估算材料规模（不影响生成：确认后照常开始）。',
+    materialEstimateError: '估算失败：{message}',
+    materialEstimateCancelled: '已取消本次生成，未消耗大模型额度；刚才那条撰写要求已放回输入框，可直接修改后再发送。',
+    estimating: '正在估算材料规模（不消耗大模型额度）…',
+    /* 生成汇总里如实带一句"本轮送了多少段/字、多少段因无信号未送"（第二组 ⑤） */
+    convergenceSummary:
+      '本轮细读材料：送 {segments} 段 / {wan} 万字（来自 {sources} 篇）；另有 {dropped} 段因无信号未送（仍在库中，可打开查看）。',
+    convergenceSummaryOff: '本轮未做收敛（全量送入）：闸门筛出的全部 {segments} 段材料都交给细读。',
     /* 预设提示词（2026-09-08：弹出面板 + 分组；点击填入输入框并选中「……」占位符） */
     presetButton: '预设提示词',
     presetMenuTitle: '预设提示词',
@@ -611,18 +616,56 @@ export const zhCN = {
     extractTimeUnsupported: '另有 {count} 段的年份在来源里查不到、也推不出，已标为「时间待核」',
     extractConflictsKept: '{count} 段因「疑似同一事实但数字不一致」特意保留（交给矛盾扫描）',
     extractScanFailed: '整合提取未完成（{reason}），部分卡片可能仍按原文原样保留、未做裁剪整合。',
-    /* 网页资料抓取情况（2026-09-12 第二批）：如实告知本轮用了多少网页材料、是否被上限截断 */
-    webScan: '网页资料：标题命中 {hits} 篇，实际采用 {fetched} 篇（{chars} 字）',
-    webScanCapped: '（另有 {count} 篇因抓取上限未采用，可提高上限或分多次生成）',
+    /*
+     * 网页资料本轮抓取情况。2026-10-05 P6 清理：
+     * 「标题命中」与「抓取上限」两处口径已失效（P5 起只按发布时间抓、**不再有篇数上限**，
+     * 相关性只看正文），故 `webScanCapped` / `webScanReused` / `webScanNewCandidates` /
+     * `webMaterialsPinned` / `webMaterialsNew` 五个死文案已删除；
+     * `webScanInvalidBody` 的含义也随之改为"未通过正文相关性判定而丢弃"。
+     */
+    webScan: '网页资料：本轮抓取 {hits} 篇，采用 {fetched} 篇（{chars} 字）',
+    /* 2026-10-04 用户裁定：年份区间改在**任务流程里**选（新建任务、第一次发撰写要求时） */
+    webYearTitle: '资料年份范围',
+    webYearFrom: '起始年',
+    webYearTo: '结束年',
+    webYearApply: '确定',
+    webYearHint: '只采用发布时间落在该范围内的网页文章（本地资料不受此限）',
+    webYearInvalid: '年份区间无效（1990 至今年+1，且起 ≤ 止）',
+    webYearSaveFailed: '年份区间保存失败，已中止生成：{message}',
+    /* 2026-10-05（用户裁定 A）：区间规模预览从资料库面板搬到**任务里的年份控件下方**（选完即见） */
+    webYearPreview:
+      '该区间共 {inRange} 篇（占目录 {pct}%）；目录日期已定 {dated} 篇、未知 {unknown} 篇；预计抓取约 {minutes} 分钟',
+    webYearDistribution: '区间内分年：',
+    webYearPreviewNoDates: '⚠ 目录里没有可识别发布时间的文章：年份筛选暂时失效，会退化为按正文筛选',
+    webYearPreviewError: '（区间篇数统计失败：{message}）',
     webScanSiteErrors: '（注意：{count} 个站点同步失败，本轮网页材料可能不完整）',
-    webScanEmpty: '（本次未取得任何网页文章：标题未命中或正文未通过精过滤）',
-    webScanReused: '网页资料：复用已锁定的 {count} 篇材料',
-    webScanNewCandidates: '（站点上另有 {count} 篇新命中文章未纳入，可在生成面板点「纳入新材料」）',
-    webScanInvalidBody: '（另有 {count} 篇未取到正文——老文章链接已失效、站点返回的是通用页面，已丢弃不入库）',
-    /* 第三批 A1：网页材料集合首次落定后的提示与"纳入新材料"入口 */
-    webMaterialsPinned: '本任务已锁定 {count} 篇网页材料（重新生成将复用同一批）',
-    webMaterialsFetched: '本次新采用 {count} 篇网页材料',
-    webMaterialsNew: '站点上另有 {count} 篇新命中文章未纳入本次材料集合',
+    webScanEmpty: '（本次未取得任何网页文章：区间内无文章或正文均未通过相关性判定）',
+    webScanRelevanceDropped: '（另有 {count} 篇正文未通过相关性判定（只看正文，不看标题），正文已丢弃）',
+    webScanInvalidBody: '（另有 {count} 篇未取到正文——老文章链接已失效、站点返回的是通用模板页，已丢弃不入库）',
+    /* 2026-10-04：抓取失败与两类"空标题候选"丢弃也要如实告知（此前单篇失败完全静默） */
+    webScanFetchFailed: '（另有 {count} 篇抓取失败——网络中断/超时/服务器拒绝，已跳过）',
+    webScanTemplateRepeat: '（另有 {count} 篇与已抓文章的正文完全相同，判为站点通用页面，已丢弃）',
+    webScanShortBody: '（另有 {count} 篇正文过短，判为模板/失效页面，已丢弃）',
+    webScanBlocked: '（另有 {count} 篇因来源地址不在该站点的 http(s) 同域白名单内，未抓取（安全过滤））',
+    webScanCacheReused: '（其中 {count} 篇的正文来自本地缓存，未重新联网）',
+    /* 2026-10-05（用户要求）：抓取过程中可暂停/继续；暂停期间不发新请求，账本与缓存都保留 */
+    crawlPauseBtn: '暂停抓取',
+    crawlResumeBtn: '继续抓取',
+    crawlPausedHint: '已暂停：不再抓取新文章。已抓到的进度都已保存，点「继续抓取」将接着抓。',
+    crawlDowngraded: '（抓取节奏已自动降档 {count} 次——出现批量失败时为了保护站点会自动放慢；本次运行有效，下次生成仍用设置档位）',
+    /* 2026-10-05（用户要求）：抓取节奏档位 + 正文缓存（资料库 → 网页资料库） */
+    webCrawlTierTitle: '抓取节奏',
+    webCrawlTierSafe: '保守（每请求 120ms、并发 2）',
+    webCrawlTierStandard: '标准（每请求 60ms、并发 4）— 推荐',
+    webCrawlTierFast: '快速（每请求 40ms、并发 6）',
+    webCrawlTierHint: '标准档约比保守档快 2 倍。若站点出现批量失败（限流/超时），软件会自动降档并重抓失败的篇，降档只对本次运行有效。',
+    webCacheTitle: '正文缓存',
+    webCacheUsage: '已缓存 {entries} 篇正文，占用约 {mb} MB。',
+    webCacheHint: '正文只与文章本身有关，与撰写主题无关：缓存后，换任务或重新生成本区间时**不再重复下载**，只做本地重筛（秒级）。',
+    webCacheClearBtn: '清空缓存',
+    webCacheCleared: '已清空 {count} 篇正文缓存（不影响已有资料与目录）。',
+    webCacheEmpty: '暂无缓存。',
+    webMaterialsFetched: '本次采用 {count} 篇网页材料',
     /* 大模型修正（2026-09-08 引入）已随 Phase 7.7 整体移除：软件内不再有「修正记录」概念 */
     recycleBin: '回收站',
     recycleBinTitle: '回收站',

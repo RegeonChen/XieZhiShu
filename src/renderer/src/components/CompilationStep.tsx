@@ -143,36 +143,39 @@ interface Props {
   /** 生成中的状态文案（「正在生成资料汇编…」等） */
   generatingText?: string | null
   /** 生成进度（百分比 + 预计剩余） */
-  generateProgress?: { percent: number; etaSeconds?: number } | null
+  generateProgress?: { percent: number; etaSeconds?: number; fetch?: { active: boolean; paused: boolean } } | null
+  /** 2026-10-05（用户要求）：抓取是否已暂停 + 点击「暂停抓取 / 继续抓取」 */
+  fetchPaused?: boolean
+  onToggleFetchPause?: (paused: boolean) => void
   /** 大模型异常中断信息（必须能在面板里点「尝试继续」，否则中断后无法续跑） */
   generateInterrupt?: { stage: string; message: string; percent: number } | null
   /** 从断点继续生成汇编 */
   onRetryCompilation?: () => void
+  /** 资料年份范围（2026-10-04：在任务流程里选；由父组件持有任务对象后传入） */
+  webYears?: { from?: number; to?: number }
+  /** 年份变化回调（父组件负责落库到任务级 + 全局默认） */
+  onWebYearsChange?: (from: number, to: number) => void
+  /** 区间规模预览（2026-10-05 用户裁定 A：从资料库面板搬到年份控件下方；成品文案由父组件查主进程后传入） */
+  webYearsPreview?: { text: string; distribution?: string | null; warning?: string | null } | null
+  /** 年份输入合法时的防抖回调（`null` = 输入不合法，清掉预览） */
+  onWebYearsPreviewQuery?: (years: { from: number; to: number } | null) => void
   /** 首次生成汇编（提交标题与要求） */
   onGenerate?: (instruction: string) => void
-  /** 第三批 A1：最近一次生成的网页材料统计（已锁定篇数 / 站点新命中未纳入篇数） */
-  webScan?: { sites: number; siteErrors: number; hits: number; fetched: number; skippedByCap: number; chars: number; reused?: number; newCandidates?: number } | null
-  /** 本任务已锁定的网页材料篇数（持久化查询结果；重启后仍可显示） */
-  pinnedWebCount?: number
+  /** 「取消生成」后回填输入框的触发值（2026-10-05：取消不该把用户刚敲的撰写要求吞掉） */
+  restoreDraft?: { text: string; seq: number } | null
+  /** 最近一次生成的网页资料统计（站点数/命中/采用/字数） */
+  webScan?: { sites: number; siteErrors: number; hits: number; fetched: number; chars: number } | null
   /**
    * 来源位置（锚点）覆盖统计（Phase 9 / S4 补）：锚点是生成后**后台异步**写入的，
    * 这一行让"多少段有位置、多少段没有"可见（此前只能一条条点圆标才发现）。
    */
   anchorStats?: { total: number; anchored: number; withPage: number; ambiguous: number } | null
-  /**
-   * 「疑似超出范围」复核清单（Phase 9 补充，用户裁定「界面兜底」）：生成汇编后按撰写要求里的
-   * 范围线索（本地地名 / 是否排除上级）挑出"命中全省/省级/国家标记、且通篇不提本地地名"的段落，
-   * 由用户自己判断是否移出（移出 = kept=false，可撤销）。
+  /*
+   * 2026-10-05 用户裁定：「疑似超出范围」提示**无实际价值，已整体关闭**——原先的 `scopeCheck` /
+   * `onExcludeItems` 两个 prop 连同渲染、展开状态一并删除，被标记的段落**照常保留在汇编里**，
+   * 界面不再提供「移出汇编 / 全部移出」。主进程引擎与 IPC 通道保留不动（不影响导出导入与旧数据）。
    */
-  scopeCheck?: {
-    flagged: { id: string; position: number; text: string; sourceTitle?: string; markers: string[] }[]
-    checked: number
-    available: boolean
-    localities: string[]
-  } | null
-  /** 移出指定段落（主进程侧 kept=false） */
-  onExcludeItems?: (itemIds: string[]) => void
-  /** 重新生成汇编（按当前撰写要求重跑一遍生成管线；A1 会复用已锁定材料） */
+  /** 重新生成汇编（按当前撰写要求重跑一遍生成管线；网页资料按本任务年份区间**重新抓取并重筛**） */
   onRegenerateCompilation?: () => void
   /** 来源引用清单（消息内 #N 渲染为可点击来源） */
   sourceRefs?: SourceRefItem[]
@@ -236,22 +239,30 @@ function CompilationStep({
   onDocOpen,
   taskMessages,
   generating,
-  /** 第三批 A1：最近一次生成的网页材料情况（用于面板里的"已锁定 N 篇 / 新文章 M 篇"提示） */
+  /** 最近一次生成的网页资料情况（用于面板里的"本次新采用 N 篇"提示） */
   webScan,
-  pinnedWebCount,
   anchorStats,
-  scopeCheck,
-  onExcludeItems,
   onRegenerateCompilation,
   generatingText,
   generateProgress,
   generateInterrupt,
   onRetryCompilation,
   onGenerate,
-  sourceRefs
+  restoreDraft,
+  sourceRefs,
+  webYears,
+  onWebYearsChange,
+  webYearsPreview,
+  onWebYearsPreviewQuery,
+  fetchPaused,
+  onToggleFetchPause
 }: Props) {
   const t = zhCN.compilation
-  const webNew = webScan?.newCandidates ?? 0
+  /*
+   * 2026-10-04 用户裁定：**资料年份范围在任务流程里选**（新建任务、第一次发撰写要求时），不再去资料库面板。
+   * 年份值由父组件（持有任务对象）传入；这里只负责"发送过一次就收起"。
+   */
+  const [yearsSubmitted, setYearsSubmitted] = useState(false)
   /** 差异段按段 id 建索引（渲染时给段落上色 / 段内高亮） */
   const diffById = new Map((versionDiff?.segments ?? []).map((s) => [s.id, s]))
   /** 被删除的段落按 beforeId 归组：渲染时插回"它被删除前所在的位置"（用户 2026-09-10 要求） */
@@ -295,8 +306,6 @@ function CompilationStep({
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc')
   /** 矛盾窗口是否展开（默认展开，可收起） */
   const [contradictionsOpen, setContradictionsOpen] = useState(true)
-  /** 「疑似超出范围」复核条展开状态（Phase 9 补充） */
-  const [scopeOpen, setScopeOpen] = useState(false)
   /** 刚被「定位到该段」命中的卡片（短暂高亮，便于用户在下方列表中找到） */
   const [locatedId, setLocatedId] = useState<string | null>(null)
   /** 定位失败提示（该说法对应的卡片已不在当前列表中） */
@@ -336,9 +345,6 @@ function CompilationStep({
    * 生成完成后面板切到"与汇编对话"，这里把它作为**只读前段**显示，避免最初那次问答消失。
    */
   const taskHistory = taskMessages ?? []
-  /** 疑似超出范围的段落（Phase 9 补充：由 `WritingWorkspace` 按撰写要求算好传进来） */
-  const scopeFlags = scopeCheck?.flagged ?? []
-  const scopeLocalities = scopeCheck?.localities ?? []
   const canSend = chatInput.trim().length > 0 && docEditing !== true
   /** 复核态：对话修改完成后由父组件自动置上差异，用户「采纳 / 回退」后才退出 */
   const reviewing = versionDiff != null
@@ -587,23 +593,14 @@ function CompilationStep({
   )
 
   /**
-   * 第三批 A1：网页材料提示条。**两种模式都渲染**（重启后按持久化锁定篇数显示）。
-   * 数据来源：本次生成的统计（`webScan`）优先，其次取主进程查到的持久化锁定篇数。
+   * 网页材料提示条：**两种模式都渲染**。2026-10-05 P6 清理后只剩"本次新采用了 N 篇"一种口径 ——
+   * 旧的「已锁定 N 篇 / 另有 N 篇未纳入」（`task_web_materials` 锁定语义 + `newCandidates`）已随
+   * 「网页资料按任务全量重抓重筛」整体删除；恒定分支不再渲染。
    */
-  const pinnedCount = Math.max(webScan?.reused ?? 0, pinnedWebCount ?? 0)
   const webInfo =
-    pinnedCount > 0 || webNew > 0 ? (
+    webScan && webScan.fetched > 0 ? (
       <div className="compilation-webinfo">
-        {webScan && (webScan.reused ?? 0) > 0 ? (
-          <span>{t.webMaterialsPinned.replace('{count}', String(webScan.reused))}</span>
-        ) : webScan ? (
-          <span>{t.webMaterialsFetched.replace('{count}', String(webScan.fetched))}</span>
-        ) : (
-          <span>{t.webMaterialsPinned.replace('{count}', String(pinnedCount))}</span>
-        )}
-        {webNew > 0 ? (
-          <span className="compilation-webinfo__new">{t.webMaterialsNew.replace('{count}', String(webNew))}</span>
-        ) : null}
+        <span>{t.webMaterialsFetched.replace('{count}', String(webScan.fetched))}</span>
       </div>
     ) : null
 
@@ -626,11 +623,22 @@ function CompilationStep({
         onGenerate={(text) => onGenerate?.(text)}
         onChat={(text) => onGenerate?.(text)}
         primaryLabel={zhCN.compilation.generateBtn}
-        onPrimaryAction={(text) => onGenerate?.(text)}
+        onPrimaryAction={(text) => {
+          setYearsSubmitted(true)
+          onGenerate?.(text)
+        }}
         showPresetButton
         hasCompilation={false}
+        webYears={webYears}
+        showWebYears={!yearsSubmitted}
+        onWebYearsChange={onWebYearsChange}
+        webYearsPreview={webYearsPreview}
+        onWebYearsPreviewQuery={onWebYearsPreviewQuery}
+        fetchPaused={fetchPaused}
+        onToggleFetchPause={onToggleFetchPause}
         refs={sourceRefs}
         onOpenSource={onOpenSource}
+        restoreDraft={restoreDraft}
       />
     </div>
   )
@@ -717,7 +725,8 @@ function CompilationStep({
           {/*
             已有汇编的任务此前**没有任何重跑生成的入口**（「与汇编对话」模式只有对话修改），
             用户只能新建任务。这里补一个真正的「重新生成汇编」：走同一套生成管线，
-            网页材料沿用 A1 已锁定的那一批（`listPinnedWebMaterials`）。
+            网页资料按本任务的年份区间**重新抓取并按正文重筛**（2026-10-05 起：旧的
+            `task_web_materials`「锁定材料」语义与 `resetTaskFetch` 均已删除）。
           */}
           {onRegenerateCompilation ? (
             <button
@@ -847,66 +856,11 @@ function CompilationStep({
       </div>
 
       {/*
-        Phase 9 补充（用户裁定「界面兜底」）：疑似超出范围的段落复核条。
-        只做**确定性提示**（命中全省/省级/国家标记、且通篇不提撰写要求里点名的本地地名），
-        由用户判断是否移出（移出 = kept=false：不删数据、可撤销、有版本记录）。
-        撰写要求里没有范围线索（既没点名地名、也没写"排除上级"）→ 界面不出现这条，不添噪声。
+        2026-10-05 用户裁定：**这类提示无实际价值，已整体关闭**——
+        原先这里渲染「⚠ 疑似超出范围 N 段（点击复核）」复核条（含「定位到该段 / 移出汇编 / 全部移出」），
+        现整块删除，被标记的段落**照常保留在汇编里**（不做任何自动移出）。
+        主进程 `writing/scope-check.ts` 与 IPC（`compilation:scopeCheck` / `compilation:excludeItems`）保留不动。
       */}
-      {scopeFlags.length > 0 ? (
-        <div className="compilation-scope">
-          <button
-            type="button"
-            className="compilation-collapse-btn compilation-collapse-btn--bar"
-            onClick={() => setScopeOpen((o) => !o)}
-          >
-            <span>{t.scopeTitle.replace('{count}', String(scopeFlags.length))}</span>
-            <span aria-hidden="true">{scopeOpen ? '▲' : '▼'}</span>
-          </button>
-          {scopeOpen ? (
-            <div className="compilation-scope__list">
-              <p className="compilation-scope__hint">
-                {t.scopeHint.replace('{scope}', scopeLocalities.length > 0 ? scopeLocalities.join('、') : t.scopeHigherLevel)}
-              </p>
-              {scopeFlags.map((f) => (
-                <div key={f.id} className="compilation-scope__item">
-                  <div className="compilation-scope__text">{f.text.slice(0, 80)}</div>
-                  <div className="compilation-scope__meta">
-                    {t.scopeParagraph.replace('{n}', String(f.position + 1))}
-                    {t.scopeMarkers.replace('{markers}', f.markers.join('、'))}
-                    {f.sourceTitle ? t.scopeFrom.replace('{title}', f.sourceTitle) : ''}
-                  </div>
-                  <div className="compilation-scope__actions">
-                    <button type="button" className="source-list__btn" onClick={() => locateItem(f.id)}>
-                      {t.locate}
-                    </button>
-                    <button
-                      type="button"
-                      className="source-list__btn"
-                      disabled={busy}
-                      onClick={() => onExcludeItems?.([f.id])}
-                    >
-                      {t.scopeExclude}
-                    </button>
-                  </div>
-                </div>
-              ))}
-              <div className="compilation-scope__footer">
-                <button
-                  type="button"
-                  className="source-list__btn source-list__btn--primary"
-                  disabled={busy}
-                  onClick={() => onExcludeItems?.(scopeFlags.map((f) => f.id))}
-                >
-                  {t.scopeExcludeAll.replace('{count}', String(scopeFlags.length))}
-                </button>
-                <button type="button" className="source-list__btn" onClick={() => setScopeOpen(false)}>
-                  {t.collapse}
-                </button>
-              </div>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
 
       {/* 复核条（用户 2026-09-10 裁定）：每次对话修改后**自动**进入对比模式，
           用户只需点「采纳」或「回退」二选一，选完即退出对比模式。 */}

@@ -1,3 +1,5 @@
+import type { CacheBuildPlan } from '../shared/types'
+
 export interface ImportResult {
   path: string
   source?: { id: string; title: string; status: string; kind: string; createdAt: string }
@@ -19,6 +21,24 @@ export interface AppApi {
   removeWebSource(id: string): Promise<{ ok: boolean; data?: undefined; error?: { code: string; message: string } }>
   /** 修改网页资料库站点（名称/根网址） */
   updateWebSource(id: string, rootUrl: string, title: string): Promise<{ ok: boolean; data?: { site: unknown }; error?: { code: string; message: string } }>
+  /** Phase 10 P3：年份区间预览（目录日期统计 + 抓取耗时估算，只读、不抓正文）
+   *  2026-10-05：入口移到任务流程的年份控件（`ChatPanel`）。 */
+  webSourceDateStats(fromYear: number, toYear: number): Promise<{ ok: boolean; data?: { stats: unknown }; error?: { code: string; message: string } }>
+  /** Phase 10 P5：设置该任务的网页资料年份区间（null = 回退全局默认） */
+  setTaskWebYears(taskId: string, fromYear: number | null, toYear: number | null): Promise<{ ok: boolean; data?: { task: unknown }; error?: { code: string; message: string } }>
+  /* 2026-10-05 P6 已删除：webSourceCrawl / webSourceCrawlCancel / webSourceResetFetchState / onWebCrawlProgress */
+  /** 2026-10-05：暂停 / 继续正在进行的抓取（暂停期间不发新请求，点继续从原处接着跑） */
+  webSourceSetCrawlPaused(paused: boolean): Promise<{ ok: boolean; data?: { paused: boolean }; error?: { code: string; message: string } }>
+  /** 2026-10-05：正文缓存占用（多少篇 / 多少字节 / 三态计数） */
+  webSourceCacheStats(): Promise<{ ok: boolean; data?: { entries: number; bytes: number; byState: { ok: number; 'no-body': number; blocked: number } }; error?: { code: string; message: string } }>
+  /** 2026-10-05：清空正文缓存（只删缓存） */
+  webSourceClearCache(): Promise<{ ok: boolean; data?: { cleared: number }; error?: { code: string; message: string } }>
+  /**
+   * 2026-10-06（用户需求）：「建立缓存与索引」的**只读**规划——区间内共几篇 / 已有几篇 /
+   * 还要建几篇 / 几篇永远建不了 + 本地待索引数 + 是否已建齐（`ready`）。
+   * 省略年份时按默认区间 2005–2025；反向区间返回错误。
+   */
+  cacheBuildPlan(params?: { fromYear?: number; toYear?: number }): Promise<{ ok: boolean; data?: CacheBuildPlan; error?: { code: string; message: string } }>
   listSources(params?: { tagIds?: string[]; search?: string }): Promise<{ ok: boolean; data?: { items: unknown[] }; error?: { code: string; message: string } }>
   importFiles(paths: string[]): Promise<{ ok: boolean; data?: { results: ImportResult[] }; error?: { code: string; message: string } }>
   openFileDialog(): Promise<{ ok: boolean; data?: { paths: string[] }; error?: { code: string; message: string } }>
@@ -34,8 +54,37 @@ export interface AppApi {
   getTagSourceIds(tagId: string): Promise<{ ok: boolean; data?: { sourceIds: string[] }; error?: { code: string; message: string } }>
   listCompilations(taskId: string): Promise<{ ok: boolean; data?: { compilations: unknown[] }; error?: { code: string; message: string } }>
   getCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
-  generateCompilation(taskId: string, title: string): Promise<{ ok: boolean; data?: { compilation: unknown; interrupted?: { stage: string; message: string; percent: number } }; error?: { code: string; message: string } }>
+  /** 生成资料汇编；`skipConvergence` = 第二组 ⑤ 的逃生门（本轮不做收敛、全量送入） */
+  generateCompilation(taskId: string, title: string, skipConvergence?: boolean): Promise<{ ok: boolean; data?: { compilation: unknown; interrupted?: { stage: string; message: string; percent: number } }; error?: { code: string; message: string } }>
   continueCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown; interrupted?: { stage: string; message: string; percent: number } }; error?: { code: string; message: string } }>
+  /** 生成前的材料规模预检（只读，2026-10-05 用户要求 P1）：不落库、不抓网页、不调大模型，只提示不限制 */
+  estimateCompilationMaterials(
+    taskId: string,
+    instruction: string
+  ): Promise<{
+    ok: boolean
+    data?: {
+      segments: number
+      chars: number
+      localSegments: number
+      webSegments: number
+      estimatedWindows: number
+      estimatedMinutes: number
+      /** 第二组 ⑤：「全量送入」（不做收敛）口径的规模 */
+      fullSegments: number
+      fullChars: number
+      fullEstimatedWindows: number
+      fullEstimatedMinutes: number
+      droppedSegments: number
+      droppedChars: number
+      convergedSources: number
+      noSignalSources: number
+      converged: boolean
+      contextRange: number
+      reIncludedSegments: number
+    }
+    error?: { code: string; message: string }
+  }>
   reorderCompilation(compilationId: string, direction: 'asc' | 'desc'): Promise<{ ok: boolean; data?: { compilation: unknown }; error?: { code: string; message: string } }>
   undoCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown; undoAvailable: number; redoAvailable: number }; error?: { code: string; message: string } }>
   redoCompilation(compilationId: string): Promise<{ ok: boolean; data?: { compilation: unknown; undoAvailable: number; redoAvailable: number }; error?: { code: string; message: string } }>
@@ -74,7 +123,7 @@ export interface AppApi {
   deleteProvider(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   testProvider(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   getSettings(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
-  updateSettings(patch: { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string; keepAwake?: boolean; docScale?: 'small' | 'medium' | 'large'; onboardingDone?: boolean }): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
+  updateSettings(patch: { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string; keepAwake?: boolean; docScale?: 'small' | 'medium' | 'large'; onboardingDone?: boolean; webYearFrom?: number; webYearTo?: number }): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   getRagIndexStatus(): Promise<{ ok: boolean; data?: { total: number; ready: number; pending: number; indexing: number; failed: number; lastError: string | null; lastErrorAt: string | null; queued: number; rebuild: { status: 'running' | 'interrupted' | 'done'; startedAt: string | null; totalQueued: number; remaining: number; processed: number; percent: number; active: boolean }; engine?: { poolSize: number; livePool: number; workerThreads: number; workerErrors: number; directFallbacks: number; lastWorkerError: string | null } }; error?: { code: string; message: string } }>
   reindexRag(): Promise<{ ok: boolean; data?: { queued: number; reset: number }; error?: { code: string; message: string } }>
   getSourceSnapshot(id: string): Promise<{ ok: boolean; data?: { id: string; kind: 'file' | 'url'; title: string; url?: string; snapshotAt?: string; publishedAt?: string; text: string; totalChars: number; truncated: boolean; shortText: boolean }; error?: { code: string; message: string } }>
@@ -84,7 +133,6 @@ export interface AppApi {
     data?: { blocks: { blockIndex: number; charStart: number; charEnd: number; page: number | null }[] }
     error?: { code: string; message: string }
   }>
-  getWebMaterials(taskId: string): Promise<{ ok: boolean; data?: { pinned: number }; error?: { code: string; message: string } }>
   /** 来源位置（锚点）统计（只读，Phase 9 / S4 补） */
   getAnchorStats(compilationId: string): Promise<{
     ok: boolean
@@ -122,7 +170,7 @@ export interface AppApi {
   listTaskMessages(taskId: string): Promise<{ ok: boolean; data?: { items: { id: string; taskId: string; role: 'user' | 'assistant'; kind: 'chat' | 'instruction' | 'notice'; content: string; createdAt: string }[] }; error?: { code: string; message: string } }>
   addTaskMessage(taskId: string, role: 'user' | 'assistant', content: string, kind: 'chat' | 'instruction' | 'notice'): Promise<{ ok: boolean; data?: { message: unknown }; error?: { code: string; message: string } }>
   onDraftGenerateProgress(cb: (p: { taskId: string; stage: string; percent: number; etaSeconds?: number }) => void): () => void
-  onCompilationProgress(cb: (p: { taskId: string; stage: string; percent: number; etaSeconds?: number; candidateChunks?: number; candidateSources?: number }) => void): () => void
+  onCompilationProgress(cb: (p: { taskId: string; stage: string; percent: number; etaSeconds?: number; candidateChunks?: number; candidateSources?: number; fetch?: { active: boolean; paused: boolean } }) => void): () => void
   onCompilationAdvice(cb: (p: { taskId: string; kind: string }) => void): () => void
   onWritingStreamDelta(cb: (p: { taskId: string; text: string }) => void): () => void
   retrieveChunks(taskId: string): Promise<{ ok: boolean; data?: { chunks: unknown[] }; error?: { code: string; message: string } }>

@@ -10,8 +10,10 @@ interface WebSiteItem {
 }
 
 /**
- * 网页资料库（2026-08-11）：注册站点后，生成初稿时自动检索该网站中与撰写要求相关的文章并抓取正文，
- * 与本地文件同等参与资料粗筛、矛盾检测与来源溯源。此处提供站点的注册 / 列表 / 删除。
+ * 网页资料库（2026-08-11 起）：注册站点后，**生成汇编时**按任务自己的年份区间自动检索该网站的文章
+ * （发现清单 → 按发布时间抓取 → 只看正文判相关性），命中的落成该任务的网页来源参与检索/溯源。
+ * 2026-10-05（用户裁定 A）：面板**只保留站点注册与列表** —— 年份区间与"区间内 N 篇 / 预计抓取时长"
+ * 预览都在**任务流程里**（`ChatPanel` 的内联年份控件）；手动抓取入口连同其 IPC 一并删除。
  */
 function WebSourcePanel() {
   const t = zhCN.webSource
@@ -25,6 +27,16 @@ function WebSourcePanel() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editTitle, setEditTitle] = useState('')
   const [editUrl, setEditUrl] = useState('')
+
+  /*
+   * 2026-10-05（用户裁定 A）：本面板原来的「抓取并筛选」**整块已删除** ——
+   * ① 年份区间改到**任务流程里**设置（新建汇编任务、首次发送撰写要求时输入框上方的内联选择）；
+   * ② 「区间内 N 篇 / 占比 / 预计抓取时长」预览也搬到同一处（选完年份即可见），面板不再重复展示；
+   * ③ 手动抓取入口（绑定任务 / 主题关键词 / 开始抓取 / 重置抓取状态）删除：抓取由生成管线
+   *    按任务自己的年份区间自动完成（Phase 10 P5，用户零操作），手动路径只会带来
+   *    "两个口径谁为准"的歧义与误点几小时抓取的风险。
+   * 因此本面板现在只负责**站点注册与列表**（站点发现与清单同步见 `main/web-source/site-crawler.ts`）。
+   */
 
   const load = useCallback(async () => {
     const res = await window.api.listWebSources()
@@ -120,6 +132,8 @@ function WebSourcePanel() {
       <div className="web-source__head">
         <span className="web-source__hint">{t.hint}</span>
       </div>
+      {/* 2026-10-05（用户裁定 A）：原「抓取并筛选」整块已删除 —— 年份与区间预览改到任务流程里，
+          抓取由生成管线按任务自动完成（Phase 10 P5），面板只负责站点注册与列表。 */}
       <div className="web-source__add">
         <input
           type="url"

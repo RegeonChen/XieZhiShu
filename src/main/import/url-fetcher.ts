@@ -20,6 +20,12 @@ export interface FetchResult {
   etag?: string
   /** 响应头 Last-Modified（无条件刷新时可能为空） */
   lastModified?: string
+  /**
+   * 实际用于解码响应体的字符集（2026-10-04）。
+   * 老政务站大量使用 GBK/GB2312：此前一律按 UTF-8 解码 → **整篇乱码仍照常入库**（用户看不出原因）。
+   * 现在按 `Content-Type` 头 → `<meta charset>` → UTF-8 的顺序确定，并回传供日志/汇总如实告知。
+   */
+  charset?: string
 }
 
 export interface FetchUrlOptions {
@@ -100,7 +106,9 @@ export async function fetchUrl(url: string, opts: FetchUrlOptions = {}): Promise
     chunks.push(Buffer.from(value))
   }
 
-  const rawHtml = Buffer.concat(chunks).toString('utf-8')
+  const buf = Buffer.concat(chunks)
+  const charset = sniffCharset(response.headers.get('content-type'), buf)
+  const rawHtml = decodeBody(buf, charset)
 
   // 清洗：去标签 → 去多余空白 → 截取合理长度供检索
   const cleanedText = stripHtml(rawHtml)
@@ -111,7 +119,39 @@ export async function fetchUrl(url: string, opts: FetchUrlOptions = {}): Promise
     cleanedText,
     snapshotAt: new Date().toISOString(),
     etag: response.headers.get('etag') ?? undefined,
-    lastModified: response.headers.get('last-modified') ?? undefined
+    lastModified: response.headers.get('last-modified') ?? undefined,
+    charset
+  }
+}
+
+/**
+ * 确定响应体字符集（2026-10-04 新增）：`Content-Type` 头优先，其次文档头部的 `<meta charset>`，最后 UTF-8。
+ * GBK/GB2312 统一按 **GB18030** 解码（它是前两者的超集，能覆盖生僻字与全角符号）。
+ */
+export function sniffCharset(contentType: string | null, bytes: Buffer): string {
+  const fromHeader = /charset\s*=\s*["']?([\w-]+)/i.exec(contentType ?? '')?.[1]
+  if (fromHeader) return normalizeCharset(fromHeader)
+  // 头部 2KB 内找 <meta charset=…> / <meta http-equiv="Content-Type" content="…charset=…">（这些字节本身是 ASCII）
+  const head = bytes.subarray(0, 2048).toString('latin1')
+  const fromMeta = /<meta[^>]+charset\s*=\s*["']?([\w-]+)/i.exec(head)?.[1]
+  return normalizeCharset(fromMeta ?? 'utf-8')
+}
+
+/** 字符集名归一化：gb2312/gbk → gb18030；utf8 → utf-8；其余原样（未知标签会在解码时回退 UTF-8） */
+export function normalizeCharset(raw: string): string {
+  const c = (raw ?? '').trim().toLowerCase()
+  if (!c) return 'utf-8'
+  if (c === 'gb2312' || c === 'gbk' || c === 'gb18030') return 'gb18030'
+  if (c === 'utf8') return 'utf-8'
+  return c
+}
+
+/** 按字符集解码响应体；字符集不受支持时回退 UTF-8（绝不因为编码问题丢掉整篇文章） */
+export function decodeBody(bytes: Buffer, charset: string): string {
+  try {
+    return new TextDecoder(charset).decode(bytes)
+  } catch {
+    return bytes.toString('utf-8')
   }
 }
 
@@ -136,4 +176,31 @@ function stripHtml(html: string): string {
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+// ---- vitest inline test ----
+if (import.meta.vitest) {
+  const { describe, expect, it } = import.meta.vitest
+
+  describe('url-fetcher charset decoding (2026-10-04 GBK 乱码修复)', () => {
+    it('sniffs charset from Content-Type header first', () => {
+      expect(sniffCharset('text/html; charset=gb2312', Buffer.from('<html>'))).toBe('gb18030')
+      expect(sniffCharset('text/html; charset=GBK', Buffer.from('<html>'))).toBe('gb18030')
+      expect(sniffCharset('text/html; charset="utf-8"', Buffer.from('<html>'))).toBe('utf-8')
+    })
+
+    it('falls back to <meta charset> in the document head, then utf-8', () => {
+      const gbkMeta = Buffer.from('<html><head><meta http-equiv="Content-Type" content="text/html; charset=gb2312"></head>', 'latin1')
+      expect(sniffCharset(null, gbkMeta)).toBe('gb18030')
+      expect(sniffCharset(null, Buffer.from('<html><head><meta charset="utf-8"></head>'))).toBe('utf-8')
+      expect(sniffCharset(null, Buffer.from('<html>没有声明</html>'))).toBe('utf-8')
+    })
+
+    it('decodes GBK bytes correctly and never loses the page on an unknown charset', () => {
+      const gbkBytes = Buffer.from([0xc4, 0xe3, 0xba, 0xc3]) // "你好" 的 GBK 编码
+      expect(decodeBody(gbkBytes, 'gb18030')).toBe('你好')
+      expect(decodeBody(gbkBytes, 'utf-8')).not.toBe('你好') // 编码判断错了就是乱码（这正是此前的问题）
+      expect(decodeBody(Buffer.from('正文', 'utf-8'), 'not-a-real-charset')).toBe('正文') // 未知字符集回退 UTF-8
+    })
+  })
 }
