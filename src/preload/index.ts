@@ -65,7 +65,7 @@ const api = {
    * 2026-10-06（Phase 11 G）：**同步单个站点的清单**（注册后会自动同步一次；这里是失败后的重试入口）。
    * 同步可能要几秒~几十秒，请用 `webSourceSyncStatus()` 轮询状态（谁在同步、谁上次失败）。
    */
-  syncWebSource(id: string): Promise<ApiResult<{ added: number; error?: string }>> {
+  syncWebSource(id: string): Promise<ApiResult<{ added: number; error?: string; report?: import('../shared/types').WebDiscoveryReport }>> {
     return ipcRenderer.invoke(IPC.WEB_SOURCE_SYNC, { id })
   },
   webSourceSyncStatus(): Promise<ApiResult<{ syncing: string[]; errors: Record<string, string> }>> {
@@ -376,7 +376,7 @@ const api = {
     return ipcRenderer.invoke(IPC.SETTINGS_GET)
   },
   /** 更新本地设置 */
-  updateSettings(patch: { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string; keepAwake?: boolean; docScale?: 'small' | 'medium' | 'large'; onboardingDone?: boolean; webYearFrom?: number; webYearTo?: number; webCrawlTier?: 'safe' | 'standard' | 'fast' }): Promise<ApiResult<unknown>> {
+  updateSettings(patch: { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string; keepAwake?: boolean; docScale?: 'small' | 'medium' | 'large'; onboardingDone?: boolean; webYearFrom?: number; webYearTo?: number; webCrawlTier?: 'safe' | 'standard' | 'fast'; webDiscoveryMode?: 'auto' | 'manual'; webDiscoveryPages?: number; webDiscoveryDepth?: number }): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.SETTINGS_UPDATE, { patch })
   },
   /** 本地向量索引状态（语义检索是否可用、失败原因、后台队列剩余、重建进度） */

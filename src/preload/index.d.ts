@@ -19,7 +19,7 @@ export interface AppApi {
    * 2026-10-06（Phase 11 G）：**同步单个站点的清单**（注册后自动同步一次；这里是失败后的重试入口）。
    * 同步可能要几秒~几十秒，用 `webSourceSyncStatus()` 轮询。
    */
-  syncWebSource(id: string): Promise<{ ok: boolean; data?: { added: number; error?: string }; error?: { code: string; message: string } }>
+  syncWebSource(id: string): Promise<{ ok: boolean; data?: { added: number; error?: string; report?: { method: 'feed' | 'sitemap' | 'bfs'; pagesFetched: number; maxDepthReached: number; stopReason: string | null; stopText: string; discovered: number; freshArticles: number; added: number; dated: number; byYear: Record<string, number>; cellCount: number; depthPruned: number; seconds: number } }; error?: { code: string; message: string } }>
   webSourceSyncStatus(): Promise<{ ok: boolean; data?: { syncing: string[]; errors: Record<string, string> }; error?: { code: string; message: string } }>
   /** 注册网页资料库站点（生成初稿时自动检索该站点相关文章） */
   addWebSource(rootUrl: string, title?: string): Promise<{ ok: boolean; data?: { site: unknown }; error?: { code: string; message: string } }>
@@ -141,7 +141,7 @@ export interface AppApi {
   deleteProvider(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   testProvider(id: string): Promise<{ ok: boolean; error?: { code: string; message: string } }>
   getSettings(): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
-  updateSettings(patch: { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string; keepAwake?: boolean; docScale?: 'small' | 'medium' | 'large'; onboardingDone?: boolean; webYearFrom?: number; webYearTo?: number; webCrawlTier?: 'safe' | 'standard' | 'fast' }): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
+  updateSettings(patch: { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string; keepAwake?: boolean; docScale?: 'small' | 'medium' | 'large'; onboardingDone?: boolean; webYearFrom?: number; webYearTo?: number; webCrawlTier?: 'safe' | 'standard' | 'fast'; webDiscoveryMode?: 'auto' | 'manual'; webDiscoveryPages?: number; webDiscoveryDepth?: number }): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }>
   getRagIndexStatus(): Promise<{ ok: boolean; data?: { total: number; ready: number; pending: number; indexing: number; failed: number; lastError: string | null; lastErrorAt: string | null; queued: number; rebuild: { status: 'running' | 'interrupted' | 'done'; startedAt: string | null; totalQueued: number; remaining: number; processed: number; percent: number; active: boolean }; engine?: { poolSize: number; livePool: number; workerThreads: number; workerErrors: number; directFallbacks: number; lastWorkerError: string | null } }; error?: { code: string; message: string } }>
   reindexRag(): Promise<{ ok: boolean; data?: { queued: number; reset: number }; error?: { code: string; message: string } }>
   getSourceSnapshot(id: string): Promise<{ ok: boolean; data?: { id: string; kind: 'file' | 'url'; title: string; url?: string; snapshotAt?: string; publishedAt?: string; text: string; totalChars: number; truncated: boolean; shortText: boolean }; error?: { code: string; message: string } }>

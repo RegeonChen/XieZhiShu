@@ -44,6 +44,15 @@ export interface WebSite {
   createdAt: string
   updatedAt: string
   lastSyncedAt?: string // 上次同步（发现文章清单）时间
+  /**
+   * Phase 11 H（Migration 052）：上次发现**实际走了多少页 / 到了多少层**。
+   * 页/层数不再由人预设，而是发现算法的输出（走到收益饱和为止）；这两个数下次当**起点下限**，
+   * 避免一次偶发失败导致发现范围逐次退化。NULL = 该站有 feed/sitemap，从没走过列表页遍历。
+   */
+  discoveryPages?: number
+  discoveryDepth?: number
+  /** 上次发现规模的记录时间 */
+  discoveryAt?: string
 }
 
 // ============================================================
@@ -554,6 +563,17 @@ export interface AppSettings {
    * （用户明确要求："下一次任务还是默认按照标准的抓取节奏来"）。
    */
   webCrawlTier?: WebCrawlTier
+  /**
+   * Phase 11 H（2026-10-06 用户裁定）：站点清单发现的规模由**算法测出**（走到收益饱和为止），
+   * 默认 `auto`；切到 `manual` 才用下面两个值（页/层数硬顶）。
+   * 为什么留手动：自动有安全阀（300 页/6 层/3 分钟），撞阀时需要一个"放开"的地方；
+   * 但正常情况**不需要用户填**——算法会把实测规模记回站点行（`web_sites.discovery_pages/depth`）。
+   */
+  webDiscoveryMode?: 'auto' | 'manual'
+  /** 手动模式的页数上限（10–2000；缺省 300） */
+  webDiscoveryPages?: number
+  /** 手动模式的层数上限（1–8；缺省 6） */
+  webDiscoveryDepth?: number
 }
 
 /** Phase 10 P4：按年份区间全量抓取时的进度（渲染层据此显示进度与剩余时长） */
@@ -784,6 +804,11 @@ export interface CacheBuildSyncProgress {
   added: number
   /** 同步失败的站点数（失败不中断，界面如实报） */
   failed: number
+  /**
+   * 最后一个站点的**实测发现规模**（Phase 11 H）：走了多少页/层、为什么停。
+   * 页/层数由算法测出（走到收益饱和为止），这句话就是它的结论，直接可显示。
+   */
+  lastSummary?: string
 }
 
 /** 网页资料库的站点清单同步概况（Phase 11 G：让"有几个站、几个还没清单"看得见） */
@@ -793,6 +818,39 @@ export interface WebLibrarySiteStats {
   synced: number
   /** **从未同步过**清单的站点数（目录必为 0 —— 建立前会先同步） */
   neverSynced: number
+}
+
+/**
+ * 站点清单发现的**实测报告**（Phase 11 H，跨层契约：IPC 返回值 / 界面展示用）。
+ * 页数、层数**不是输入而是输出**——发现器走到"收益饱和"为止，停下来时的实际用量就是它。
+ * 主进程侧的 `DiscoveryReport`（`web-source/site-crawler.ts`）在此之上多带一个 `limits`。
+ */
+export interface WebDiscoveryReport {
+  /** 发现方式：feed / sitemap / bfs（前两者不遍历列表页） */
+  method: 'feed' | 'sitemap' | 'bfs'
+  /** 实际抓取的列表页数 */
+  pagesFetched: number
+  /** 实际到达的最大层数 */
+  maxDepthReached: number
+  /** 停止原因（'saturated' | 'frontier-empty' | 'page-cap' | 'time-budget' | 'depth-cap'；feed/sitemap 为 null） */
+  stopReason: string | null
+  /** 停止原因的**人话说明**（直接可显示，撞安全阀时会明说"还有列表页没走完"） */
+  stopText: string
+  /** 本次发现条数 */
+  discovered: number
+  /** 其中站内目录原本没有的条数（真正的新收益） */
+  freshArticles: number
+  /** 实际写入的新增条数（由 upsert 返回） */
+  added: number
+  /** 有发布日期的条数 */
+  dated: number
+  /** 发现的文章按年份分布 */
+  byYear: Record<string, number>
+  /** 发现到的"年-月"格子数（年份覆盖度的代理指标） */
+  cellCount: number
+  /** 因层数上限被剪掉的更深链接数（如实报，避免"以为抓全了"） */
+  depthPruned: number
+  seconds: number
 }
 
 

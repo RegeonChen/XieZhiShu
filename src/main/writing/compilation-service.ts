@@ -28,7 +28,8 @@ import { getProviderSecret } from '../llm/provider-store'
 import { safeStorageCodec } from '../llm/secret'
 import { chatCompletion, type ChatMessage } from '../llm/chat'
 import { logMain } from '../logger'
-import { extractTopicTerms, expandDomainHints, syncSite } from '../web-source/site-crawler'
+import { extractTopicTerms, expandDomainHints } from '../web-source/site-crawler'
+import { syncSiteTracked } from '../web-source/site-sync'
 import { sentenceRanges } from '../parse/anchors'
 import {
   assembleDocument,
@@ -1494,17 +1495,31 @@ export async function generateCompilation(
        */
       const sites = listWebSites()
       let syncedNew = 0
+      const discoveryNotes: string[] = []
       for (const site of sites) {
-        try {
-          const added = await syncSite(site.id)
-          syncedNew += added
-        } catch (err) {
+        /*
+         * Phase 11 H：走 `syncSiteTracked`（而不是裸 `syncSite`）——它负责按站解析发现限额
+         * （自动/手动 + 该站上次实测用量）、把"正在同步"状态暴露给资料库面板，并且**从不抛错**。
+         * 目标年份区间一并传下去：发现器据此优先走"还没发现任何文章的年份"相关页面。
+         */
+        const res = await syncSiteTracked(site.id, {}, { fromYear: yearFrom, toYear: yearTo })
+        if (res.error) {
           webStats.siteErrors++
-          logMain('compilation', `站点清单同步失败（继续）site=${site.rootUrl}：${String(err)}`)
+          logMain('compilation', `站点清单同步失败（继续）site=${site.rootUrl}：${res.error}`)
+          continue
+        }
+        syncedNew += res.added
+        if (res.report) {
+          discoveryNotes.push(
+            `${site.rootUrl} 走 ${res.report.pagesFetched} 页/${res.report.maxDepthReached} 层新增 ${res.added} 篇（${res.report.stopText}）`
+          )
         }
       }
       if (sites.length > 0) {
-        logMain('compilation', `网页资料清单已刷新：${sites.length} 个站点，新增文章 ${syncedNew} 篇（区间 ${yearFrom}-${yearTo}）`)
+        logMain(
+          'compilation',
+          `网页资料清单已刷新：${sites.length} 个站点，新增文章 ${syncedNew} 篇（区间 ${yearFrom}-${yearTo}）${discoveryNotes.length > 0 ? '；' + discoveryNotes.join('；') : ''}`
+        )
       }
       const crawl = await crawlAndScreenArticles({
         fromYear: yearFrom,
