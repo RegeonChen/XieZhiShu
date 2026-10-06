@@ -284,6 +284,47 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
 
 - `web_sites`：id PK、root_url NOT NULL UNIQUE（去尾部斜杠归一）、title、created_at/updated_at、last_synced_at。`keywords`（用户站点关键词，E11）已由 Migration 026 于 2026-09-01 移除。
 - `web_site_articles`：site_id（FK CASCADE）+ url 联合主键、title、discovered_at、etag/last_modified/body_hash/last_fetched_at（条件请求/正文去重，Migration 024）、published_at（解析到的发布时间，Migration 025）——站点文章 URL 清单缓存（生成初稿时先同步清单，再用撰写要求标题粗筛，命中文章增量抓取正文落库为 `sources`（kind='url'，task_id 绑定任务））。
+- **Phase 10 追加（Migration 045 / 046，2026-10-04）**——网页资料库 2.0 的"带日期的文章目录"：
+  - `published_date`：**归一化**发布日期（`YYYY-MM-DD` / `YYYY-MM` / `YYYY`）。年份区间筛选**只认这一列**；`published_at` 仍是页面抽取到的**原始值**，二者并存、互不覆盖。
+  - `date_source`：日期来自哪一级 —— `feed` / `sitemap-news` / `sitemap-lastmod` / `url` / `http` / `page`（对应 L1–L5，见 `src/main/web-source/article-date.ts`）。
+  - `date_confidence`：`high` / `medium` / `low`（L4 `Last-Modified` 只能算中；URL 日期只到年时算低）。
+  - `url_date` / `sitemap_lastmod` / `http_last_modified`：各级**原始证据**，用于互校与审计。
+  - `date_checked_at`：日期最后一次判定时间（换口径后可重算）。
+  - `fetch_state`（NULL=未处理 / `fetched` / `dropped` / `failed`）、`body_chars`、`screen_hit`、`screened_at`：抓取与本地粗筛状态（未命中粗筛的正文会被丢弃，只留 `body_hash` + 字数）。
+  - 索引 `idx_web_site_articles_date (site_id, published_date)`。
+  - Migration 046 为 **JS 回填**：只填 `published_date IS NULL` 的行（真实库 62,588/62,589 → `url`/`high`），不覆盖已有 feed/sitemap 级结果，幂等。
+- **Phase 10 P5 追加（Migration 047，2026-10-04）——抓取账本改为"任务级"**：
+  - `task_web_fetch`：主键 `(task_id, site_id, url)`；`task_id` FK → `writing_tasks(id) ON DELETE CASCADE`；`state` ∈ `fetched`/`dropped`/`failed`；
+    `hit`、`best_score`、`body_hash`、`body_chars`、`published_date`、`fetched_at`。索引 `idx_task_web_fetch_task_state(task_id, state)`。
+    **语义**：`fetched` = 该任务已采用该文章（正文落成 `sources`）、`dropped` = 该任务筛掉了它（正文已丢弃，只留哈希+字数）。
+    **新任务默认重新抓取并重跑筛选**——同一篇文章在别的任务里的处理结果不构成本任务的"已处理"。
+  - `writing_tasks.web_year_from / web_year_to`：**该任务**的网页资料年份区间（按发布时间筛）。新建任务**继承全局设置**里的默认值；
+    `NULL` 表示回退全局默认。由 IPC `writing:setWebYears` 维护（传 null 即清除任务级设置）。
+  - 站点级 `web_site_articles.fetch_state / screen_hit / body_hash / body_chars` **降级为最近一次抓取的诊断痕迹**，
+    **不再作为跳过依据**（旧列保留不删）。
+- **Phase 10 P5b-2 追加（Migration 048，2026-10-04）——候选材料的字符预算排队**：
+  - `compilation_material_queue`：`task_id` PK + FK → `writing_tasks(id) ON DELETE CASCADE`；`source_ids`（JSON 数组，**只存引用不存正文**）、
+    `chars`、`created_at`、`updated_at`。
+  - **语义**：每轮生成把"超字符预算（默认 **60 万字/轮**）没排上的来源"写进这里，**下一轮生成优先读取**——上限只落在"送大模型的字数"上，
+    **没有篇数上限、超预算只排队不丢弃**（用户裁定 ④/⑥）。队列读写**尽力而为**：任何异常只记日志，绝不阻断生成。
+  - **2026-10-05 起已被取代**：用户裁定"任何地方都不得设总量上限"，`material-budget.ts` / `db/material-queue.ts` **整体删除**；
+    本表**按项目惯例保留不删**（不再读写）。
+- **Phase 10 抓取提速追加（Migration 049，2026-10-05）——网页正文缓存**：
+  - `web_article_body`：`(site_id, url)` 联合主键、`site_id` FK → `web_sites(id) ON DELETE CASCADE`；
+    `body_z`（`deflateRaw` 压缩正文）、`body_hash`、`body_chars`、`probe_ok`（抓取当时的 A1 标题探针结论——缓存里没有原始 HTML，
+    重跑探针会误杀"标题只在 `<title>` 里"的正常文章）、`text_source`、`fetched_at`、`last_used_at`；索引 `idx_web_article_body_used(last_used_at)`。
+  - **语义**：站点级、**跨任务复用**。抓取前命中 → 本地重筛（零网络）；抓取后**一律写入**（命中与否都写——"未命中"只对当前主题成立）。
+    正文与撰写主题无关，因此"换任务不必重下"。实测平均 1,325 字/篇 ≈ 压缩后 1.3–1.8 KB（2005–2025 共 61,701 篇 ≈ 约 120 MB）。
+- **「建立缓存与索引」追加（Migration 050，2026-10-06，用户裁定「决策 3A」）——缓存的"尝试结论"三态**：
+  - `web_article_body.state TEXT NOT NULL DEFAULT 'ok' CHECK(state IN ('ok','no-body','blocked'))`。
+    旧行（真实库 10,876 条，全部是成功抓到的正文）语义上就是 `ok`，故本迁移**纯新增、不回填**。
+  - **为什么必须有它**：生成前的缓存闸门按"区间内还有没有没建立的资料"决定放不放行（用户裁定**严格阻断**、无逃生门）。
+    049 的表**只在成功抽到正文时写行** → 抓取失败 / 老文章失效 / 模板页 / 越权地址**不留任何痕迹** →
+    它们会被**永远**算作"待建立" → **闸门永远不放行**。
+  - `no-body` = 已尝试但没取到可用正文；`blocked` = URL 不在该站点 http(s) 同域白名单内（**永不可建**）。**两者都不计入缺口**。
+  - 写入接口：`putCachedBody(..., state)` 与 `putCacheMiss(siteId, url, state)`——后者用 **`ON CONFLICT DO NOTHING`**，
+    **绝不覆盖已有行**（曾经抓到过正文的文章，之后抓取失败也不能把已白抓一次的正文抹掉）；标记行**不存正文**（`body_chars = 0`），
+    因此不会被当成可用正文喂给筛选。
 
 ### 2.21 compilations（资料汇编，Migration 016，Phase 6.0，2026-08-25）
 
