@@ -40,6 +40,8 @@ import {
   type CompilationGenerateRes,
   type CompilationContinueReq,
   type CompilationContinueRes,
+  type CompilationEstimateMaterialsReq,
+  type CompilationEstimateMaterialsRes,
   type CompilationResolveContradictionReq,
   type CompilationResolveContradictionRes,
   type CompilationConfirmReq,
@@ -66,8 +68,6 @@ import {
   type RagReindexRes,
   type SourceSnapshotReq,
   type SourceSnapshotRes,
-  type CompilationWebMaterialsReq,
-  type CompilationWebMaterialsRes,
   type CompilationAnchorStatsReq,
   type CompilationAnchorStatsRes,
   type CompilationScopeCheckReq,
@@ -79,19 +79,23 @@ import {
   type SourceGetReq,
   type SourceBlocksRes
 } from '../shared/ipc'
-import type { ApiResult, Source, Tag, LlmProviderConfig, AppSettings, WritingTask, Draft, RetrievedChunk } from '../shared/types'
+import type { ApiResult, CacheBuildPlan, Source, Tag, LlmProviderConfig, AppSettings, WritingTask, Draft, RetrievedChunk } from '../shared/types'
 import { getDb } from './db/connection'
 import { listSourceBlocks } from './db/source-blocks'
 import { listSources, getSourceById, deleteSource, deleteSources, updateSourceTitle, updateSourceFingerprint } from './db/sources'
 import { listTags, createTag, updateTag, deleteTag, addTagToSource, removeTagFromSource, getTagsBySource, batchAddTags, searchTags, getSourceIdsByTag } from './db/tags'
 import { importFiles, importUrl } from './import'
 import { setPdfCmapsDir } from './import/file-parser'
-import { addWebSite, getWebSiteByRootUrl, listWebSites, removeWebSite, updateWebSite } from './db/web-sites'
+import { addWebSite, getSiteArticleDateStats, getWebSiteByRootUrl, listWebSites, removeWebSite, updateWebSite } from './db/web-sites'
+import { setTaskWebYears } from './db/tasks'
 import { createReadStream, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { safeStorageCodec } from './llm/secret'
 import { listProviders, saveProvider, deleteProvider } from './llm/provider-store'
 import { testProviderConnection } from './llm/test'
 import { getSettings, updateSettings } from './db/settings'
+import { bodyCacheStats, clearBodyCache } from './db/article-body-cache'
+import { buildCacheBuildPlan } from './web-source/cache-build-plan'
+import { requestFetchCancel, setFetchPaused } from './web-source/fetch-control'
 import { startKeepAwake, stopKeepAwake } from './power/keep-awake'
 import { createTask as createWritingTask, listTasks as listWritingTasks, getTaskById, deleteTask as deleteWritingTask, renameTask, updateTaskProvider, updateTaskInstruction, updateTaskModelText } from './db/tasks'
 import { getDraftById, getLatestDraftByTask, updateSegmentContent, replaceDraftSegments } from './db/drafts'
@@ -118,7 +122,7 @@ import {
   ensureDefaultStyleGuide
 } from './db/style-guides'
 import { ensureDemoTask } from './db/demo-task'
-import { generateCompilation, continueCompilation, type GenerateCompilationResult } from './writing/compilation-service'
+import { generateCompilation, continueCompilation, estimateCompilationMaterials, type GenerateCompilationResult } from './writing/compilation-service'
 import { buildCompilationFileName, renderCompilationDocx, serializeCompilationArchive } from './writing/compilation-export'
 import {
   pushUndo,
@@ -138,7 +142,6 @@ import { collectAnchorStats } from './writing/anchor-stats'
 import { flagOutOfScope } from './writing/scope-check'
 import { configureEmbedModel, getEmbedEngineStats, stopEmbedWorker } from './rag/embed'
 import { enqueueIndex, getIndexStatus, getQueueSize, getRebuildProgress, initIndexingState, requeuePendingIndexes } from './rag/indexer'
-import { listPinnedWebMaterials } from './db/web-materials'
 import { summarizeAllPending, getSourceSummary } from './rag/summarizer'
 import { getWorkspaceDir, type ReconcileProgress } from './workspace/reconcile'
 import { startWorkspaceWatcher, restartWorkspaceWatcher, stopWorkspaceWatcher } from './workspace/watcher'
@@ -147,10 +150,10 @@ import { setSourceRemovalNotify, listPendingSourceRemovals, decideSourceRemoval,
 import { trashSourceFile, renameSourceFile, resolveSourceFilePath } from './workspace/sync'
 import { migrateLegacyToWorkspace } from './workspace/migrate'
 import { loadWindowState, trackWindowState } from './window-state'
-import type { WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceUpdateReq, WebSourceUpdateRes, AppGetPdfCmapsUrlRes, LogAppendReq, LogExportRes, StyleGuideListRes, StyleGuideSaveReq, StyleGuideSaveRes, StyleGuideSetDefaultReq, StyleGuideSetDefaultRes, StyleGuideDeleteReq, CompilationExportDocxReq, CompilationExportDocxRes, CompilationExportArchiveReq, CompilationExportArchiveRes, CompilationImportArchiveReq, CompilationImportArchiveRes, CompilationImportFromTaskReq, CompilationImportFromTaskRes, CompilationListFinalizedForImportReq, CompilationListFinalizedForImportRes } from '../shared/ipc'
+import type { WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceUpdateReq, WebSourceUpdateRes, WebSourceDateStatsReq, WebSourceDateStatsRes, WritingSetWebYearsReq, WritingSetWebYearsRes, AppGetPdfCmapsUrlRes, LogAppendReq, LogExportRes, StyleGuideListRes, StyleGuideSaveReq, StyleGuideSaveRes, StyleGuideSetDefaultReq, StyleGuideSetDefaultRes, StyleGuideDeleteReq, CompilationExportDocxReq, CompilationExportDocxRes, CompilationExportArchiveReq, CompilationExportArchiveRes, CompilationImportArchiveReq, CompilationImportArchiveRes, CompilationImportFromTaskReq, CompilationImportFromTaskRes, CompilationListFinalizedForImportReq, CompilationListFinalizedForImportRes } from '../shared/ipc'
 import { logMain, logIpc, logRenderer, exportLogsText } from './logger'
 import { resolveFileDelivery } from './file-range'
-import type { WebBrowserOpenReq, WebBrowserSetBoundsReq, WebBrowserNavigateReq, WebBrowserActionReq, WebBrowserStateRes } from '../shared/ipc'
+import type { WebBrowserOpenReq, WebBrowserSetBoundsReq, WebBrowserNavigateReq, WebBrowserActionReq, WebBrowserStateRes, CacheBuildPlanReq } from '../shared/ipc'
 
 /** 长任务保持唤醒：开启则 start，任务结束/异常在 finally 中 stop（引用计数，重叠任务不提前释放） */
 function keepAwakeEnabled(): boolean {
@@ -622,6 +625,58 @@ handleLogged(IPC.WEB_SOURCE_UPDATE, (_event, params: WebSourceUpdateReq): ApiRes
   }
 })
 
+// Phase 10 P3：年份区间筛选预览（只读；只统计目录，不抓正文）
+handleLogged(IPC.WEB_SOURCE_DATE_STATS, (_event, params: WebSourceDateStatsReq): ApiResult<WebSourceDateStatsRes> => {
+  try {
+    const { fromYear, toYear } = params ?? { fromYear: 0, toYear: 0 }
+    const thisYear = new Date().getFullYear() + 1
+    if (
+      !Number.isInteger(fromYear) ||
+      !Number.isInteger(toYear) ||
+      fromYear < 1990 ||
+      toYear > thisYear ||
+      fromYear > toYear
+    ) {
+      return { ok: false, error: { code: 'INVALID_PARAM', message: '年份区间无效（应为 1990 至今年+1，且起始不大于结束）' } }
+    }
+    return { ok: true, data: { stats: getSiteArticleDateStats(fromYear, toYear) } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+/*
+ * 2026-10-05 P6 已删除三个**手动抓取** IPC（用户裁定 A）：
+ * `webSource:crawl` / `webSource:crawlCancel` / `webSource:resetFetchState` ——
+ * 抓取自 Phase 10 P5 起由生成管线按**任务自己的年份区间**自动完成（`compilation-service` 内直接调用
+ * `crawlAndScreenArticles`，不经 IPC），手动路径只会带来"两个口径谁为准"的歧义与误点几小时抓取的风险。
+ * 同时删除了 `webSource:crawlProgress` 事件与账本重置函数 `resetTaskFetch`。
+ */
+
+// Phase 10 P5：设置该任务的网页资料年份区间（按任务保存；null 表示回退全局默认）
+handleLogged(IPC.WRITING_SET_WEB_YEARS, (_event, params: WritingSetWebYearsReq): ApiResult<WritingSetWebYearsRes> => {
+  try {
+    if (!params?.taskId) return { ok: false, error: { code: 'INVALID_PARAM', message: '缺少任务 id' } }
+    const task = setTaskWebYears(params.taskId, params.fromYear ?? null, params.toYear ?? null)
+    if (!task) return { ok: false, error: { code: 'TASK_NOT_FOUND', message: '任务不存在' } }
+    /*
+     * 用户裁定 2026-10-04：年份区间改为**在任务流程里**选择（新建任务后第一次发撰写要求时），
+     * 所以这里在保存任务级区间的同时，把**全局默认**也更新为同一区间——
+     * 下一个新建任务会以"上一次用过的区间"预填，用户只需确认或直接发送。
+     */
+    if (params.fromYear != null && params.toYear != null) {
+      try {
+        updateSettings({ webYearFrom: params.fromYear, webYearTo: params.toYear })
+      } catch {
+        /* 默认值更新失败不影响任务级区间 */
+      }
+    }
+    return { ok: true, data: { task } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
 
 
 // Task 2.3 标签 CRUD
@@ -696,6 +751,20 @@ handleLogged(IPC.COMPILATION_GET, (_event, params: CompilationGetReq): ApiResult
   }
 })
 
+// 生成前的材料规模预检（2026-10-05 用户要求 P1）：**只读**估算，供界面在真正开始生成之前弹一次确认
+// （用户实测：材料规模只有跑完"召回 + 闸门"才知道，上次跑到一半才发现要 20 多分钟）。
+// 刻意**不加 withKeepAwake**（毫秒~秒级、不调用大模型、不抓网页），也不落库、不影响后续真实生成。
+handleLogged(IPC.COMPILATION_ESTIMATE_MATERIALS, async (_event, params: CompilationEstimateMaterialsReq): Promise<ApiResult<CompilationEstimateMaterialsRes>> => {
+  try {
+    if (!params.taskId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
+    const estimate = await estimateCompilationMaterials(params.taskId, params.instruction ?? '')
+    if (!estimate) return { ok: false, error: { code: 'INVALID_PARAM', message: '无法估算材料规模（任务不存在或撰写要求为空）' } }
+    return { ok: true, data: estimate }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
 // 生成资料汇编（Phase 6.1：本地宽召回宁多勿漏 + AI 细读 + 矛盾标注；无 Provider/失败降级本地候选）
 handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerateReq): Promise<ApiResult<CompilationGenerateRes>> => withKeepAwake(async () => {
   // 持久化用户撰写要求（供对话历史 / 重新生成汇编使用）
@@ -718,7 +787,10 @@ handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerate
   // 不让生成管线裸抛 reject 导致进度冻结/无反馈：任何异常都转成结构化错误
   let res: GenerateCompilationResult
   try {
-    res = await generateCompilation(params.taskId, params.title, onProgress, onAdvice)
+    res = await generateCompilation(params.taskId, params.title, onProgress, onAdvice, {
+      // 第二组 ⑤ 的逃生门：界面在预检确认框里勾了「本轮不做收敛（全量送入）」→ 跳过取段，行为回到今天
+      skipConvergence: params.skipConvergence === true
+    })
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
@@ -732,6 +804,9 @@ handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerate
       contradictionScan: res.contradictionScan,
       extractScan: res.extractScan,
       webScan: res.webScan,
+      // 第二组 ⑤：把"本轮送了多少段/字、多少段因无信号未送"透出给生成汇总
+      convergence: res.convergence,
+      candidateChunks: res.candidateChunks,
       interrupted: res.interrupted
     }
   }
@@ -1353,17 +1428,9 @@ handleLogged(IPC.RAG_REINDEX, (): ApiResult<RagReindexRes> => {
 })
 
 /*
- * 已锁定的网页材料篇数（只读）：让面板显示「本任务已锁定 N 篇」，重启软件后同样可见
- * （不依赖"本次会话生成过一次"）。
+ * 2026-10-05 P6 已删除：`COMPILATION_WEB_MATERIALS`（「本任务已锁定 N 篇网页材料」只读入口）——
+ * 网页材料改为**任务级全量重抓重筛**后，`task_web_materials` 的锁定语义不再参与生成。
  */
-handleLogged(IPC.COMPILATION_WEB_MATERIALS, (_event, params: CompilationWebMaterialsReq): ApiResult<CompilationWebMaterialsRes> => {
-  try {
-    if (!params.taskId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
-    return { ok: true, data: { pinned: listPinnedWebMaterials(params.taskId).length } }
-  } catch (err) {
-    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
-  }
-})
 
 // 来源位置（锚点）统计（只读，Phase 9 / S4 补）：锚点是后台异步写的，界面据此显示"多少段已记录位置"
 handleLogged(IPC.COMPILATION_ANCHOR_STATS, (_event, params: CompilationAnchorStatsReq): ApiResult<CompilationAnchorStatsRes> => {
@@ -1939,8 +2006,63 @@ app.on('window-all-closed', () => {
   }
 })
 
+// 2026-10-05（用户要求）：暂停 / 继续抓取 + 正文缓存占用 / 清空
+handleLogged(IPC.WEB_SOURCE_SET_CRAWL_PAUSED, (_event, params: { paused?: boolean }): ApiResult<{ paused: boolean }> => {
+  try {
+    const paused = setFetchPaused(params?.paused === true)
+    logMain('web', paused ? '用户暂停网页抓取' : '用户继续网页抓取')
+    return { ok: true, data: { paused } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.WEB_SOURCE_CACHE_STATS, (): ApiResult<{ entries: number; bytes: number }> => {
+  try {
+    return { ok: true, data: bodyCacheStats() }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.WEB_SOURCE_CLEAR_CACHE, (): ApiResult<{ cleared: number }> => {
+  try {
+    const cleared = clearBodyCache()
+    logMain('web', `已清空网页正文缓存：${cleared} 篇（sources / 目录 / 账本不受影响）`)
+    return { ok: true, data: { cleared } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+/*
+ * 2026-10-06（用户需求）：「建立缓存与索引」的**只读**规划。
+ * 生成前闸门（Phase E）与设置页面板（Phase D）共用同一个数；本接口**不写库、不抓网页、不调模型**。
+ */
+handleLogged(IPC.CACHE_BUILD_PLAN, (_event, params: CacheBuildPlanReq): ApiResult<CacheBuildPlan> => {
+  try {
+    const plan = buildCacheBuildPlan(params ?? {})
+    logMain(
+      'web',
+      `建立缓存与索引预检：区间 ${plan.web.fromYear}–${plan.web.toYear} 共 ${plan.web.total} 篇（已有 ${plan.web.cached} / 已尝试无正文 ${plan.web.noBody} / 永不可建 ${plan.web.blocked} / 待建立 ${plan.web.pending}；日期未知 ${plan.web.undatedArticles}），` +
+        `本地待索引 ${plan.local.pending + plan.local.indexing} 篇、失败 ${plan.local.failed} 篇、正文缺失 ${plan.local.bodyMissing} 篇；就绪=${plan.ready}${plan.reasons.length > 0 ? '（' + plan.reasons.join(',') + '）' : ''}`
+    )
+    return { ok: true, data: plan }
+  } catch (err) {
+    return {
+      ok: false,
+      error: { code: 'INVALID_PARAM', message: err instanceof Error ? err.message : String(err) }
+    }
+  }
+})
+
 app.on('will-quit', () => {
   logMain('app', '应用退出')
+  /*
+   * 2026-10-05（用户问题 1）：退出应用时**立刻终止抓取**——置取消标志，抓取池不再排新请求、尽快返回。
+   * 已抓到的篇都已写入正文缓存与账本，所以"退出 ≠ 白干"：下次生成会对同一区间全量重筛，缓存命中的篇零网络。
+   */
+  requestFetchCancel()
   stopWorkspaceWatcher()
   stopAutoSyncTimer()
   stopEmbedWorker()

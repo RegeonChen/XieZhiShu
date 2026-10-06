@@ -64,6 +64,69 @@ export function resolveAnchor(
   return { blockIndex: block.blockIndex, confidence: ranges.evidence ? 'exact' : 'weak' }
 }
 
+/**
+ * 段落是否落在块的字符区间内（用**生成期记录的区间**判定，2026-10-05 用户裁定 P0-2）。
+ *
+ * 与 `blockAtOffset` 的差别：这里用 `charStart`（该段在来源正文里的起点）落块，
+ * 而不是"用证据串去正文里找位置"。命中即 `exact`——区间是生成期算出来的，不是事后匹配猜的。
+ * 落在所有块之外（正文被重新解析过、区间比块表长）时返回 null，由调用方回退到逐字匹配。
+ */
+export function blockForRecordedRange(blocks: BlockRange[], charStart: number): BlockRange | null {
+  const hit = blocks.find((b) => charStart >= b.start && charStart < b.end)
+  if (hit) return hit
+  // 恰好落在最后一块的末端（区间右端点）→ 归最后一块；其余越界一律不猜
+  const last = blocks[blocks.length - 1]
+  return last && charStart === last.end ? last : null
+}
+
+/**
+ * 逐句切分并给出每句在原文里的**真实区间**（跳过空白、保留未去空白的字符数）。
+ * 与 `chunkByParagraphs` 里超长段落按句折分时用的是同一套拆分规则，因此两侧的字符区间口径一致。
+ */
+export function sentenceRanges(text: string, from: number, to: number): { text: string; start: number; end: number }[] {
+  const out: { text: string; start: number; end: number }[] = []
+  let start = from
+  for (let i = from; i < to; i++) {
+    if (!/[。！？；;]/.test(text[i])) continue
+    let rawFrom = start
+    let rawTo = i + 1
+    while (rawFrom < rawTo && /\s/.test(text[rawFrom])) rawFrom += 1
+    while (rawTo > rawFrom && /\s/.test(text[rawTo - 1])) rawTo -= 1
+    if (rawFrom < rawTo) out.push({ text: text.slice(rawFrom, rawTo), start: rawFrom, end: rawTo })
+    start = i + 1
+  }
+  // 收尾：末尾没有句末标点的残段也要算上（否则这段文字会在锚点里凭空少一截）
+  let rawFrom = start
+  let rawTo = to
+  while (rawFrom < rawTo && /\s/.test(text[rawFrom])) rawFrom += 1
+  while (rawTo > rawFrom && /\s/.test(text[rawTo - 1])) rawTo -= 1
+  if (rawFrom < rawTo) out.push({ text: text.slice(rawFrom, rawTo), start: rawFrom, end: rawTo })
+  return out
+}
+
+/**
+ * **唯一**一处"由文字得到字符区间"的生成期入口（2026-10-05 用户裁定 P0-2）。
+ *
+ * 什么时候用它、什么时候不该用它：
+ *  - 生成期：候选块已经在**切块时**自带区间（`chunkParagraphs` / `chunkByParagraphs` / `chunkText`），
+ *    卡片与段落**一路携带**即可，**不要**调用本函数做二次定位；
+ *  - 只有**旧路径/降级路径**（模型改写过的卡片、历史向量块、以及没有候选元数据的兜底）才在这里
+ *    把"逐字证据/段落正文"对回来源正文，取到一个区间。这一步仍然只是"把已知的逐字文字换算成下标"，
+ *    不是"搜一个大概像的位置"——找不到就返回 null，由调用方回退或如实留空。
+ */
+export function rangeOfRecordedText(
+  sourceText: string,
+  ...candidates: (string | undefined)[]
+): { start: number; end: number } | null {
+  for (const c of candidates) {
+    const t = (c ?? '').trim()
+    if (!t) continue
+    const r = findVerbatimRange(sourceText, t)
+    if (r) return r
+  }
+  return null
+}
+
 /* ------------------------------ 单测 ------------------------------ */
 
 if (import.meta.vitest) {
@@ -123,6 +186,42 @@ if (import.meta.vitest) {
     it('没有任何区间或没有块表时返回 null', () => {
       expect(resolveAnchor(blocks, {})).toBeNull()
       expect(resolveAnchor([], { evidence: { start: 1, end: 5 } })).toBeNull()
+    })
+  })
+
+  describe('anchors: 生成期记录的字符区间（2026-10-05 P0-2）', () => {
+    it('blockForRecordedRange 按区间落块，越界不猜', () => {
+      expect(blockForRecordedRange(blocks, 0)?.blockIndex).toBe(0)
+      expect(blockForRecordedRange(blocks, 99)?.blockIndex).toBe(0)
+      expect(blockForRecordedRange(blocks, 100)?.blockIndex).toBe(1)
+      expect(blockForRecordedRange(blocks, 299)?.blockIndex).toBe(2)
+      // 区间右端点落在最后一块末尾 → 归最后一块；再往外就是"正文与块表对不上"→ 不猜
+      expect(blockForRecordedRange(blocks, 300)?.blockIndex).toBe(2)
+      expect(blockForRecordedRange(blocks, 301)).toBeNull()
+      expect(blockForRecordedRange([], 0)).toBeNull()
+    })
+
+    it('sentenceRanges 给出每句在原文里的真实区间（跳过句首空白，不吞下一句）', () => {
+      const text = '甲甲甲。 乙乙乙。丙丙丙'
+      const rs = sentenceRanges(text, 0, text.length)
+      expect(rs.map((r) => r.text)).toEqual(['甲甲甲。', '乙乙乙。', '丙丙丙'])
+      // 区间取回原文必须与句子逐字一致（含"跳过句首空白"这一条）
+      for (const r of rs) expect(text.slice(r.start, r.end)).toBe(r.text)
+      expect(rs[1].start).toBe(text.indexOf('乙乙乙'))
+      // 从中间起算（模拟超长段落折分）时偏移正确
+      const half = sentenceRanges(text, 4, text.length)
+      expect(half[0].text).toBe('乙乙乙。')
+      expect(half[0].start).toBe(text.indexOf('乙乙乙'))
+    })
+
+    it('rangeOfRecordedText 把逐字文字换算成区间；找不到就 null（不猜）', () => {
+      const text = '前言与凡例。某区新增高中一所，招生 300 人。后记。'
+      const r = rangeOfRecordedText(text, undefined, '某区新增高中一所，招生 300 人。')
+      expect(r).not.toBeNull()
+      expect(text.slice(r!.start, r!.end)).toBe('某区新增高中一所，招生 300 人。')
+      // 证据优先于段落正文（更紧）
+      expect(rangeOfRecordedText(text, '招生 300 人', '某区新增高中一所')).toEqual({ start: text.indexOf('招生'), end: text.indexOf('招生') + '招生 300 人'.length })
+      expect(rangeOfRecordedText(text, undefined, '来源里根本没有的一段')).toBeNull()
     })
   })
 }

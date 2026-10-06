@@ -19,7 +19,7 @@ import { runMigrations } from '../db/migrate'
 import { getTaskById, resolveScopeSourceIds, getAllSourceIds, renameTask } from '../db/tasks'
 import { getSourceIdsByTag } from '../db/tags'
 import { getSourcesByIds } from '../db/sources'
-import { bigrams, chunkByParagraphs, scoreChunk } from '../rag/retrieval'
+import { bigrams, chunkByParagraphsFromBase, scoreChunk, type ParagraphChunk } from '../rag/retrieval'
 import { embedTexts } from '../rag/embed'
 import { vectorSearch } from '../rag/vector-store'
 import { ensureSourcesIndexed } from '../rag/indexer'
@@ -28,8 +28,17 @@ import { getProviderSecret } from '../llm/provider-store'
 import { safeStorageCodec } from '../llm/secret'
 import { chatCompletion, type ChatMessage } from '../llm/chat'
 import { logMain } from '../logger'
-import { fetchRelatedSiteSources, collectSiteCandidates, extractTopicTerms, expandDomainHints, type WebFetchStats } from '../web-source/site-crawler'
-import { assembleDocument, parseTimeLabel, stripSpaces, textSimilarity, type AssembledParagraph } from './compilation-document'
+import { extractTopicTerms, expandDomainHints, syncSite } from '../web-source/site-crawler'
+import { sentenceRanges } from '../parse/anchors'
+import {
+  assembleDocument,
+  formatSourceDate,
+  locateVerbatim,
+  parseTimeLabel,
+  stripSpaces,
+  textSimilarity,
+  type AssembledParagraph
+} from './compilation-document'
 import {
   emptyExtractStats,
   extractBatch,
@@ -52,8 +61,62 @@ import {
   type CompilationItemInput,
   type CompilationContradictionInput
 } from '../db/compilations'
-import { listPinnedWebMaterials, pinWebMaterials } from '../db/web-materials'
+import { listWebSites } from '../db/web-sites'
+import { listUrlSourceIdsByTask } from '../db/sources'
+import { crawlAndScreenArticles } from '../web-source/article-crawl'
+import { judgeBodyRelevance } from '../web-source/body-relevance'
+import { stripStructureNoise } from '../parse/structure-noise'
+import {
+  analyzeWritingRequirement,
+  analyzeWritingRequirementLocal,
+  lexiconExtraTerms,
+  type TopicLexiconAnalysis
+} from './topic-lexicon'
+/*
+ * 2026-10-05（用户裁定"任何地方不得设总量上限"）：原 `material-budget.ts`（60 万字/轮总预算 + 分池）
+ * 与 `db/material-queue.ts`（排队）**已整体删除**（用户明确指示"直接删掉即可"），本文件不再引用。
+ */
 import { attachAnchorsQuietly } from './source-anchors'
+/*
+ * 第二组 ⑤（2026-10-06）：**文章内取高信号段 ± 上下文**。
+ * 判据与离线回放（`.dbg/backtest.test.ts`）**共用同一份实现**（`article-segments.ts`），
+ * 产品侧只负责"按来源归组、把闸门放行的来源逐段判一遍、把保留的段按原顺序还原成候选块"。
+ */
+import {
+  ARTICLE_CONTEXT_RANGE,
+  planArticleSegments,
+  type ArticleConvergenceStats
+} from './article-segments'
+
+/**
+ * 网页资料抓取的汇总统计（Phase 10 P6：原定义在被删除的旧"标题粗筛"链路里，
+ * 这里保留为**生成汇总的展示口径**——新链路（按年份全量抓取 + 正文筛选）填同样的字段）。
+ */
+export interface WebFetchStats {
+  sites: number
+  siteErrors: number
+  /** 本轮**实际抓取**的篇数（2026-10-05 P6：口径统一为"抓取篇数"，不再含已删除的"标题命中"语义） */
+  hits: number
+  /** 通过正文相关性判定、落成该任务来源的篇数 */
+  fetched: number
+  chars: number
+  /** Phase 10 P4/P5 追加：各类丢弃与失败计数（如实汇报） */
+  /** **正文未通过相关性判定**而丢弃（= `crawl.dropped`）；与下面"没取到正文"是两回事 */
+  relevanceDropped?: number
+  /** A1 标题探针不过（老文章失效 → 站点返回通用模板页）而丢弃 */
+  invalidBody?: number
+  /** 空标题候选（sitemap）：正文过短 / 与同站别的 URL 正文逐字相同 */
+  shortBody?: number
+  templateRepeat?: number
+  fetchFailed?: number
+  /** 不在「http(s) + 同域白名单」内、**未发起请求**的篇数（安全过滤） */
+  blocked?: number
+  /** 2026-10-05：从正文缓存复用（零网络）的篇数 */
+  cacheHits?: number
+  /** 2026-10-05：本次运行触发的自适应降档次数 */
+  downgrades?: number
+}
+
 
 const COMPILATION_TIMEOUT_MS = 600000
 const WINDOW_MAX_CHARS = 30000
@@ -128,6 +191,11 @@ export interface CompilationProgress {
   etaSeconds?: number
   candidateChunks?: number
   candidateSources?: number
+  /**
+   * 2026-10-05：网页抓取阶段的**运行态**（渲染层据此只在抓取进行中显示「暂停抓取 / 继续抓取」按钮）。
+   * 抓取结束后后续阶段不再带该字段 → 按钮自动消失。
+   */
+  fetch?: { active: boolean; paused: boolean }
 }
 
 export type GenerateCompilationResult =
@@ -158,6 +226,11 @@ export type GenerateCompilationResult =
       interrupted?: CompilationInterrupt
       /** 网页资料本轮的抓取情况（2026-09-12 第二批：达上限时如实告知，避免"以为用了几百篇"） */
       webScan?: WebFetchStats
+      /**
+       * 第二组 ⑤：本轮的「文章内取高信号段 ± 上下文」统计（含"闸门口径"与"本轮送入"两个数）。
+       * 用户勾选「本轮不做收敛」时为 undefined；生成汇总气泡据此如实带一句。
+       */
+      convergence?: ArticleConvergenceStats
     }
   | { ok: false; error: { code: string; message: string } };
 
@@ -225,6 +298,8 @@ interface CompilationResumeState {
   secPerCharSamples: number[]
   /** 并发窗口数（窗口细读/矛盾扫描并行度，来自 Provider 配置） */
   concurrency: number
+  /** 第二组 ⑤ 的取段统计（随状态带着走，使中断/续跑时也能如实汇报"本轮送了多少"） */
+  convergence?: ArticleConvergenceStats
   interrupted?: CompilationInterrupt
 }
 
@@ -287,6 +362,18 @@ export function fallbackCoarseQuery(instruction: string): string {
   return q || instruction.trim()
 }
 
+/**
+ * 把「撰写要求现算词表」（第一组 ③）并入粗筛查询串。
+ *
+ * 为什么用**追加**而不是替换：粗筛查询串是 `scoreChunk` 的字面依据，替换会改变既有排序与闸门；
+ * 追加只是让"要求里出现过的说法"（如同义扩展出的 `普高/完全中学`）也参与字面命中——**只增不减**。
+ * 长整句词（>12 字）不进查询串（它不可能原样出现在正文里，只会稀释 bigram）。
+ */
+export function buildCoarseQuery(baseQuery: string, lexicon: TopicLexiconAnalysis, maxTermChars = 12): string {
+  const terms = [...lexicon.topicTerms, ...lexicon.keyPoints].filter((t) => t.length >= 2 && t.length <= maxTermChars)
+  return [...new Set([baseQuery.trim(), ...terms])].filter(Boolean).join(' ')
+}
+
 /** 调用大模型从完整撰写要求中提取标题与粗筛关键词（含近义词/专业词，理解方志语境） */
 async function extractKeywordSet(
   provider: ProviderInfo,
@@ -325,7 +412,7 @@ function sortChunksStable(chunks: RetrievedChunk[]): RetrievedChunk[] {
   return [...chunks].sort((a, b) => a.sourceId.localeCompare(b.sourceId) || a.position.localeCompare(b.position))
 }
 
-export function recallCandidateChunks(scopeIds: string[], query: string): RetrievedChunk[] {
+export function recallCandidateChunks(scopeIds: string[], query: string, extraTerms: string[] = []): RetrievedChunk[] {
   const q = query.trim()
   if (!q || scopeIds.length === 0) return []
   const sources = getSourcesByIds(scopeIds)
@@ -333,7 +420,7 @@ export function recallCandidateChunks(scopeIds: string[], query: string): Retrie
   const qTerms = q.split(/\s+/).filter(Boolean)
   const out: RetrievedChunk[] = []
   for (const s of sources) {
-    for (const c of chunkByParagraphs(s.cleanedText ?? '')) {
+    for (const c of chunksForSource(s)) {
       out.push({
         sourceId: s.id,
         sourceTitle: s.title,
@@ -341,16 +428,51 @@ export function recallCandidateChunks(scopeIds: string[], query: string): Retrie
         text: c.text,
         score: scoreChunk(q, c.text, s.title, qBigrams, qTerms),
         sourceKind: s.kind,
-        sourcePublishedAt: s.publishedAt
+        sourcePublishedAt: s.publishedAt,
+        charStart: c.charStart,
+        charEnd: c.charEnd
       })
     }
   }
+  // extraTerms 只影响分层判定（`judgeBodyRelevance`），这里保留参数是为了两处调用口径一致
+  void extraTerms
   return sortChunksStable(out)
 }
 
+/**
+ * 切段（**先剔结构性垃圾，再切段**；第一组 ④）。
+ *
+ * 为什么先剔再切：目录/版权页/导航尾部这些噪声会混进段落并参与词法打分与字数统计，
+ * 剔掉它们同时改善"判定"与"喂给模型的材料"。**库里 `sources.cleaned_text` 一字不动**——
+ * 剔除只发生在内存里，且 `charStart/charEnd` 用 `keptLineStarts` 基准保持在来源正文坐标系（见 `stripStructureNoise`）。
+ */
+export function chunksForSource(s: { kind?: string; cleanedText?: string }): ParagraphChunk[] {
+  const text = s.cleanedText ?? ''
+  const kind: 'file' | 'web' = s.kind === 'url' ? 'web' : 'file'
+  const stripped = stripStructureNoise(text, kind)
+  return chunkByParagraphsFromBase(stripped.text, stripped.keptLineStarts)
+}
+
 export interface CompilationRecallResult {
+  /** 本轮**实际送细读**的候选块（默认已做 ⑤ 文章内取段；逃生门时 = 闸门结果） */
   chunks: RetrievedChunk[]
   candidateSources: number
+  /**
+   * 闸门后、⑤ 之前的候选块（= 用户勾选「本轮不做收敛」时的口径，也是今天的行为）。
+   * 预检估算要同时报"收敛后 / 全量"两个数，靠它一次闸门跑完就都拿得到，不必把闸门跑两遍。
+   */
+  preConvergenceChunks: RetrievedChunk[]
+  /** ⑤ 的收敛统计；`converge: false`（逃生门）时为 null */
+  convergence: ArticleConvergenceStats | null
+}
+
+/** 闸门选项（第二组 ⑤ 的逃生门：`converge: false` = 本轮不做收敛，全量送入） */
+export interface CompilationRecallOptions {
+  /**
+   * 是否做"文章内取高信号段 ± 上下文"（⑤）。**默认 true**（用户已同意默认收敛）。
+   * 每次生成可由用户在预检确认框里单独选择，**不持久化**。
+   */
+  converge?: boolean
 }
 
 /**
@@ -361,23 +483,45 @@ export interface CompilationRecallResult {
  *  2) 来源内：标题含任一查询词（如"学前/幼儿园/园所/幼教"），或来源总长 ≤ RECALL_DEDICATED_MAX_LEN 且来源内最高词法分 ≥ RECALL_DEDICATED_MIN_LEX → 整篇保留；
  *     宽口径来源（如综合年鉴，仅有部分段落相关）→ 只保留有信号的分块（词法 score>0 或向量 ≥ RECALL_VEC_MIN），
  *     从而删掉综合文档里与主题无关的章节。
+ *  3) **闸门之后**（第二组 ⑤）：对放行的来源逐篇"文章内取高信号段 ± 上下文"，只把有信号的段（及其紧邻上下文）
+ *     送本轮细读；`options.converge === false` 时跳过这一步（= 今天的行为）。
  * 保证：相关来源不会被整篇丢弃；宽口径来源里"字面无关但语义相关"的段落由低阈值向量路径兜底（不会因无词法命中被误删）。
  */
 export function recallCompilationCandidates(
   scopeIds: string[],
   query: string,
-  queryVector?: number[]
+  queryVector?: number[],
+  extraTerms: string[] = [],
+  options: CompilationRecallOptions = {}
 ): CompilationRecallResult {
   const q = query.trim()
-  if (!q || scopeIds.length === 0) return { chunks: [], candidateSources: 0 }
+  if (!q || scopeIds.length === 0) {
+    return { chunks: [], candidateSources: 0, preConvergenceChunks: [], convergence: null }
+  }
   const sources = getSourcesByIds(scopeIds)
   const qBigrams = bigrams(q)
   const qTerms = q.split(/\s+/).filter(Boolean)
 
+  /*
+   * Phase 10 P5b-2：**网页来源在生成期也按同一套分层口径判定**（`judgeBodyRelevance`，只看正文、不看标题）。
+   * 抓取期已经把跑题正文丢弃了，这里再判一次是为了兜住两类情况：
+   * ① 老任务（用旧的"标题取前 N"路径抓的 600 篇里 84% 是噪声）；② 抓取期与生成期的要求文本不一样时。
+   * **本地文件来源不受此限**（年鉴/文档仍走原有闸门口径），避免改变既有的本地检索行为。
+   */
+  const urlRelevant = new Map<string, boolean>()
+  for (const s of sources) {
+    if (s.kind !== 'url') continue
+    // 第一组 ①②③：判定用"剔掉结构噪声后的正文" + 撰写要求现算词表（extraTerms，只升不降地并入分层）
+    const strippedBody = stripStructureNoise(s.cleanedText ?? '', 'web').text
+    urlRelevant.set(s.id, judgeBodyRelevance(strippedBody, q, s.title ?? '', extraTerms).relevant)
+  }
+  const usableSources = sources.filter((s) => s.kind !== 'url' || urlRelevant.get(s.id) === true)
+  const droppedUrlSources = sources.length - usableSources.length
+
   // 向量命中（position 级）：queryVector 缺省或无向量索引时为空
   const vecHitBySource = new Map<string, Set<string>>()
   if (queryVector && queryVector.length > 0) {
-    for (const h of vectorSearch(queryVector, scopeIds, 0)) {
+    for (const h of vectorSearch(queryVector, usableSources.map((s) => s.id), 0)) {
       if (h.score < RECALL_VEC_MIN) continue
       if (!vecHitBySource.has(h.sourceId)) vecHitBySource.set(h.sourceId, new Set())
       vecHitBySource.get(h.sourceId)!.add(h.position)
@@ -386,14 +530,14 @@ export function recallCompilationCandidates(
 
   const relevantSources = new Set<string>()
   const dedicatedSources = new Set<string>()
-  const indexed: { sourceId: string; sourceTitle: string; position: string; text: string; score: number; vecHit: boolean; inlineRelevant: boolean; paragraphKey: string; sourceKind?: 'file' | 'url'; sourcePublishedAt?: string }[] = []
+  const indexed: IndexedSegment[] = []
   const maxScoreBySource = new Map<string, number>()
   const totalLenBySource = new Map<string, number>()
   // 段级相关（Phase A/B：整段为一个保留/剔除单元——段内任一子块有信号 → 整段所有子块一起保留）
   const paragraphRelevant = new Set<string>() // key = sourceId|第N段
 
-  for (const s of sources) {
-    const chunks = chunkByParagraphs(s.cleanedText ?? '')
+  for (const s of usableSources) {
+    const chunks = chunksForSource(s)
     let maxScore = 0
     let totalLen = 0
     for (const c of chunks) {
@@ -405,7 +549,7 @@ export function recallCompilationCandidates(
       // "可能相关"；只剔除与标题完全无任何信号（score==0 且无向量命中）的"肯定无关"段。
       const inlineRelevant = score > RECALL_LEX_MIN || vecHit
       const paragraphKey = c.position.match(/第(\d+)段/)?.[0] ?? c.position
-      indexed.push({ sourceId: s.id, sourceTitle: s.title, position: c.position, text: c.text, score, vecHit, inlineRelevant, paragraphKey, sourceKind: s.kind, sourcePublishedAt: s.publishedAt })
+      indexed.push({ sourceId: s.id, sourceTitle: s.title, position: c.position, text: c.text, score, vecHit, inlineRelevant, paragraphKey, sourceKind: s.kind, sourcePublishedAt: s.publishedAt, charStart: c.charStart, charEnd: c.charEnd })
       if (inlineRelevant) {
         relevantSources.add(s.id)
         paragraphRelevant.add(s.id + '|' + paragraphKey)
@@ -424,15 +568,154 @@ export function recallCompilationCandidates(
     if (maxScore >= RECALL_DEDICATED_MIN_LEX && (totalLenBySource.get(id) ?? 0) <= RECALL_DEDICATED_MAX_LEN) dedicatedSources.add(id)
   }
 
-  const out: RetrievedChunk[] = []
+  const gatedOut: RetrievedChunk[] = []
   for (const it of indexed) {
     if (!relevantSources.has(it.sourceId)) continue
     // 整段级判定：专属来源整篇保留，否则仅保留“所在段”有任一子块信号的全部子块
     if (dedicatedSources.has(it.sourceId) || paragraphRelevant.has(it.sourceId + '|' + it.paragraphKey)) {
-      out.push({ sourceId: it.sourceId, sourceTitle: it.sourceTitle, position: it.position, text: it.text, score: it.score, sourceKind: it.sourceKind, sourcePublishedAt: it.sourcePublishedAt })
+      gatedOut.push(toRetrievedChunk(it))
     }
   }
-  return { chunks: sortChunksStable(out), candidateSources: relevantSources.size }
+  if (droppedUrlSources > 0) {
+    logMain(
+      'compilation',
+      `生成期正文相关性：${droppedUrlSources} 个网页来源未通过分层口径（只看正文），已排除在候选之外（本地文件来源不受此限）`
+    )
+  }
+  /*
+   * 第二组 ⑤：**闸门之后**再做一次"文章内取段"（有信号段 ± 上下文），再进入 `sliceChunks` 切窗。
+   * 逃生门（用户勾选「本轮不做收敛」）时 `converge: false` → 直接返回闸门结果，行为与今天完全一致。
+   */
+  const gatedChunks = sortChunksStable(gatedOut)
+  if (options.converge === false) {
+    return { chunks: gatedChunks, candidateSources: relevantSources.size, preConvergenceChunks: gatedChunks, convergence: null }
+  }
+  const converged = convergeArticleChunks(
+    indexed,
+    relevantSources,
+    (it) => dedicatedSources.has(it.sourceId) || paragraphRelevant.has(it.sourceId + '|' + it.paragraphKey),
+    q,
+    extraTerms
+  )
+  logMain(
+    'compilation',
+    `文章内取段（⑤，上下文 ±${ARTICLE_CONTEXT_RANGE} 段）：${converged.stats.sources} 个来源逐段判定后，` +
+      `本轮送 ${converged.stats.keptSegments} 段 / ${converged.stats.keptChars} 字（来自 ${converged.stats.sources - converged.stats.noSignalSources} 篇）；` +
+      `另有 ${converged.stats.droppedSegments} 段因无信号未送（仍在库中，可打开查看；整篇无信号来源 ${converged.stats.noSignalSources} 篇）`
+  )
+  return { chunks: converged.chunks, candidateSources: relevantSources.size, preConvergenceChunks: gatedChunks, convergence: converged.stats }
+}
+
+/** 闸门阶段的"一段"（内部账目；`RetrievedChunk` 是它的对外投影） */
+interface IndexedSegment {
+  sourceId: string
+  sourceTitle: string
+  position: string
+  text: string
+  score: number
+  vecHit: boolean
+  inlineRelevant: boolean
+  paragraphKey: string
+  sourceKind?: 'file' | 'url'
+  sourcePublishedAt?: string
+  charStart: number
+  charEnd: number
+}
+
+function toRetrievedChunk(it: IndexedSegment): RetrievedChunk {
+  return {
+    sourceId: it.sourceId,
+    sourceTitle: it.sourceTitle,
+    position: it.position,
+    text: it.text,
+    score: it.score,
+    sourceKind: it.sourceKind,
+    sourcePublishedAt: it.sourcePublishedAt,
+    charStart: it.charStart,
+    charEnd: it.charEnd
+  }
+}
+
+/**
+ * ⑤ 的落地：把闸门放行的**来源**逐篇取段（有信号段 ± 上下文），返回真正进本轮细读的候选块。
+ *
+ * 关键取舍与理由：
+ * 1. **输入是"该来源正文的全部切段"**（不是闸门逐段筛过的那批）——因为"紧邻上下文"必须按正文的段序取，
+ *    而闸门按 `score>0` 逐段筛过之后段序会出现空洞，±1 上下文就会取错段。且"有信号就留"要求以**信号**
+ *    为准，而不是以闸门那套词法分阈值为准（两者在"专指词不在撰写要求里"这类 corner 上并不一致）。
+ * 2. **只处理闸门放行的来源**（`relevantSources`）：来源级判据仍是闸门说了算，⑤ 只决定"来源里哪些段"。
+ * 3. **坐标一律沿用切段结果**（`chunksForSource` 已用 `keptLineStarts` 把 `charStart/charEnd` 锚在
+ *    来源正文坐标系），本函数只做"留 / 不留"，不重算任何偏移 → 来源定位不会错位。
+ * 4. 逐篇算完即弃（只留档位与保留标记），不做跨篇缓存：材料量级是几千到几万段，内存与 CPU 都可控。
+ */
+function convergeArticleChunks(
+  indexed: IndexedSegment[],
+  relevantSources: Set<string>,
+  isGated: (it: IndexedSegment) => boolean,
+  query: string,
+  extraTerms: string[]
+): { chunks: RetrievedChunk[]; stats: ArticleConvergenceStats } {
+  const bySource = new Map<string, IndexedSegment[]>()
+  for (const it of indexed) {
+    if (!relevantSources.has(it.sourceId)) continue
+    const list = bySource.get(it.sourceId)
+    if (list) list.push(it)
+    else bySource.set(it.sourceId, [it])
+  }
+  const out: RetrievedChunk[] = []
+  let gatedSegments = 0
+  let gatedChars = 0
+  let articleSegments = 0
+  let articleChars = 0
+  let keptSegments = 0
+  let keptChars = 0
+  let noSignalSources = 0
+  let reIncludedSegments = 0
+  for (const segs of bySource.values()) {
+    const plan = planArticleSegments(
+      segs.map((s) => s.text),
+      query,
+      segs[0]?.sourceTitle ?? '',
+      extraTerms
+    )
+    articleSegments += segs.length
+    let anyKept = false
+    for (let i = 0; i < segs.length; i++) {
+      const it = segs[i]
+      articleChars += it.text.length
+      // "闸门口径"= 今天（不做收敛）会送细读的那些段：专属来源整篇 + 段级有信号的段（与 `gatedOut` 同一判据）
+      const gated = isGated(it)
+      if (gated) {
+        gatedSegments += 1
+        gatedChars += it.text.length
+      }
+      if (!plan.kept[i]) continue
+      anyKept = true
+      keptSegments += 1
+      keptChars += it.text.length
+      // 闸门本来丢掉的段被 ⑤ 按"有信号 / 上下文"重新纳入 → 单独计数，便于事后审计口径差异
+      if (!gated) reIncludedSegments += 1
+      out.push(toRetrievedChunk(it))
+    }
+    if (segs.length > 0 && !anyKept) noSignalSources += 1
+  }
+  return {
+    chunks: sortChunksStable(out),
+    stats: {
+      contextRange: ARTICLE_CONTEXT_RANGE,
+      gatedSegments,
+      gatedChars,
+      sources: bySource.size,
+      articleSegments,
+      articleChars,
+      keptSegments,
+      keptChars,
+      droppedSegments: articleSegments - keptSegments,
+      droppedChars: articleChars - keptChars,
+      noSignalSources,
+      reIncludedSegments
+    }
+  }
 }
 
 export interface SourceRefEntry {
@@ -456,8 +739,21 @@ export function buildCompilationSourceRefs(chunks: RetrievedChunk[]): SourceRefE
   return list
 }
 
+/**
+ * 文件清单的一行：`3. 《标题》（网页，发布时间 2021-05-06）`。
+ *
+ * 2026-10-05 用户裁定（P0-1）：**来源类型与发布时间必须作为证据进入提示词**。
+ * 细读阶段此前只给「编号 + 《标题》」，模型看不到"这是网页、发布于某日"，于是正文写「近日」时它无处可依，
+ * 只能凭标题年份硬推（并因此套上年鉴 −1 惯例，实测出整片错年）。
+ * 页面没有发布时间就**如实不写**，绝不拿别的字段顶上。
+ */
 function refText(refs: SourceRefEntry[]): string {
-  return refs.map((r) => r.index + '. 《' + r.title + '》').join('\n')
+  return refs
+    .map((r) => {
+      const meta = r.kind === 'url' ? '（网页' + (r.publishedAt ? '，发布时间 ' + formatSourceDate(r.publishedAt) : '') + '）' : ''
+      return r.index + '. 《' + r.title + '》' + meta
+    })
+    .join('\n')
 }
 
 /** 窗口细读的系统提示词（导出供单测断言"用户要求全文必须完整入提示词"） */
@@ -498,11 +794,24 @@ export function buildSystemPrompt(instruction: string): string {
 
 /** 窗口细读的用户提示词（导出供单测断言"用户要求全文必须完整入提示词"） */
 export function buildUserPrompt(chunks: RetrievedChunk[], refs: SourceRefEntry[], instruction: string): string {
-  const bySource = new Map(refs.map((r) => [r.sourceId, r.index]))
+  const bySource = new Map(refs.map((r) => [r.sourceId, r]))
   const materials = chunks
     .map((c, i) => {
-      const ref = bySource.get(c.sourceId) ?? 0
-      return '[' + (i + 1) + ']（来源编号: #' + ref + '，标题：《' + c.sourceTitle + '》）\n' + c.text
+      const ref = bySource.get(c.sourceId)?.index ?? 0
+      return (
+        '[' +
+        (i + 1) +
+        ']（来源编号: #' +
+        ref +
+        '，标题：《' +
+        c.sourceTitle +
+        '》' +
+        // 逐条材料也带上来源类型/发布时间：模型是**整段照抄**成卡片的，
+        // 卡片一旦离开这一行，交付给下一步的就只剩「编号 + 标题」（2026-10-05 用户裁定）
+        (c.sourceKind === 'url' ? '，网页' + (c.sourcePublishedAt ? ' 发布时间 ' + formatSourceDate(c.sourcePublishedAt) : '') : '') +
+        '）\n' +
+        c.text
+      )
     })
     .join('\n\n')
   return [
@@ -525,6 +834,15 @@ export interface CompilationOutputItem {
   position: string
   excerpt: string
   ts: string | null
+  /**
+   * 这张卡片在**来源正文**里的字符区间（左闭右开；2026-10-05 用户裁定 P0-2）。
+   *
+   * 细读输出的卡片是"整段照抄候选材料"，所以读窗口时就能把它对回**候选块**并在切块时算好的区间上取偏移，
+   * 于是"卡片 → 段落 → 锚点"全程携带字符区间，落锚点时只做区间比较（不再拿文字去来源里回溯匹配）。
+   * 对不上任何候选块时**如实缺省**，由落锚点的 fallback 处理。
+   */
+  charStart?: number
+  charEnd?: number
 }
 
 export interface CompilationOutputVariant {
@@ -625,6 +943,62 @@ export function mergeCompilationOutputs(outputs: CompilationOutput[]): Compilati
     contradictions.push(...o.contradictions)
   }
   return { items, contradictions }
+}
+
+/**
+ * 把细读输出的一张卡片对回**候选块**，并把区间算成"来源正文里的绝对字符区间"（2026-10-05 P0-2）。
+ *
+ * 提示词要求模型**整段照抄**候选材料，所以这里先用逐字匹配（容忍空白差异）找出卡片落在哪个候选块里；
+ * 命中就用"块起点 + 块内偏移"得到绝对区间——块的区间是**切块时**算好的，这一层不重新扫正文。
+ * 三种情形如实降级（都不猜）：
+ *  - 卡片与某个块的文字仅差空白 → 用该块的区间（最常见的形态：PDF 排版空白）；
+ *  - 卡片跨了连续多个块（模型把相邻条目并成一张）→ 取这几块的**并集**；
+ *  - 完全对不上任何块（模型改写了文字）→ **不给区间**，落锚点时走逐字 fallback。
+ */
+export function locateCardRange(
+  excerpt: string,
+  windowChunks: RetrievedChunk[]
+): { charStart: number; charEnd: number } | undefined {
+  const needle = (excerpt ?? '').trim()
+  if (!needle) return undefined
+  const exact: { charStart: number; charEnd: number }[] = []
+  for (const c of windowChunks) {
+    if (c.charStart == null || c.charEnd == null) continue
+    const at = c.text.indexOf(needle)
+    if (at >= 0) {
+      exact.push({ charStart: c.charStart + at, charEnd: c.charStart + at + needle.length })
+      continue
+    }
+    // 卡片包含整块（合并相邻条目）→ 先记下这块，下面按"被包含的块"处理
+    if (needle.includes(c.text)) exact.push({ charStart: c.charStart, charEnd: c.charEnd })
+  }
+  if (exact.length === 1) return exact[0]
+  if (exact.length > 1) {
+    return {
+      charStart: Math.min(...exact.map((r) => r.charStart)),
+      charEnd: Math.max(...exact.map((r) => r.charEnd))
+    }
+  }
+  // 退一步：容忍空白差异（`locateVerbatim` 与卡片校验同一套口径）
+  for (const c of windowChunks) {
+    if (c.charStart == null || c.charEnd == null) continue
+    const r = locateVerbatim(c.text, needle)
+    if (r) return { charStart: c.charStart + r.start, charEnd: c.charStart + r.end }
+  }
+  return undefined
+}
+
+/** 给一批细读卡片补齐生成期字符区间（原地写回；读窗口成功后调用一次） */
+export function attachCardRanges(out: CompilationOutput | null, windowChunks: RetrievedChunk[]): void {
+  if (!out) return
+  for (const it of out.items) {
+    if (it.charStart != null) continue
+    const range = locateCardRange(it.excerpt, windowChunks)
+    if (range) {
+      it.charStart = range.charStart
+      it.charEnd = range.charEnd
+    }
+  }
 }
 
 /** 跨窗口/跨来源矛盾：细读产出最终卡片后，对精简后的卡片集再做一次矛盾扫描（2026-08-25 优化）。
@@ -880,11 +1254,169 @@ function sortItemsByTs(items: CompilationItemInput[]): CompilationItemInput[] {
   })
 }
 
+/**
+ * ⑤ 收敛的日志（**如实汇报**，用户明确要求）：本轮送多少段/字、来自多少篇、
+ * 另有段因无信号未送（并说明材料仍在库中）。
+ */
+function logConvergence(stats: ArticleConvergenceStats, skipped: boolean): void {
+  if (skipped) {
+    logMain('compilation', '本轮不做收敛（用户勾选「本轮不做收敛（全量送入）」）：跳过文章内取段，闸门结果全部送入细读')
+    return
+  }
+  logMain(
+    'compilation',
+    `文章内取段（⑤，上下文 ±${stats.contextRange} 段）：${stats.sources} 个来源逐段判定后，` +
+      `本轮送 ${stats.keptSegments} 段 / ${stats.keptChars} 字（来自 ${stats.sources - stats.noSignalSources} 篇）；` +
+      `另有 ${stats.droppedSegments} 段因无信号未送（仍在库中，可打开查看；整篇无信号来源 ${stats.noSignalSources} 篇）`
+  )
+  if (stats.reIncludedSegments > 0) {
+    // 闸门按词法分筛过之后，⑤ 会按"信号 + 上下文"把其中少量段重新纳入——如实说清，便于事后审计口径差异
+    logMain('compilation', `其中 ${stats.reIncludedSegments} 段是 ⑤ 按"有信号 / 紧邻上下文"从闸门之外重新纳入的（不设上限，有信号就留）`)
+  }
+}
+
+/** 生成前「材料规模预检」的结果（只读估算：段数 / 字数 / 本地与网页段数 / 细读窗口数 / 预计分钟数） */
+export interface MaterialEstimate {
+  segments: number
+  chars: number
+  localSegments: number
+  webSegments: number
+  estimatedWindows: number
+  estimatedMinutes: number
+}
+
+/**
+ * 预检的**完整**口径（第二组 ⑤，2026-10-06）：主字段（`segments/chars/estimatedWindows/estimatedMinutes`）
+ * 一律是「**收敛后**」的规模（否则确认框会虚高，用户正是为此提的 P1），同时再带一套「**全量**（不做收敛）」
+ * 的数与"因无信号未送"的量——界面据此把两个数都摆出来，并让复选框切换时口径不打架。
+ */
+export interface MaterialEstimateWithConvergence extends MaterialEstimate {
+  /** 不做收敛（= 用户勾选「本轮不做收敛」/ 今天的行为）时的段数 / 字数 / 窗口数 / 预计分钟 */
+  fullSegments: number
+  fullChars: number
+  fullEstimatedWindows: number
+  fullEstimatedMinutes: number
+  /** 本轮因无信号未送（仍在库中、仍可打开）的段数 / 字数 */
+  droppedSegments: number
+  droppedChars: number
+  /** 参与取段的来源数 / 其中整篇无信号（整篇不送）的来源数 */
+  convergedSources: number
+  noSignalSources: number
+  /** 是否真的做了收敛（闸门一个都没留下、退回宽召回时为 false） */
+  converged: boolean
+  /** 上下文半径（段） */
+  contextRange: number
+  /** ⑤ 从闸门已丢弃的段里按信号/上下文重新纳入的段数 */
+  reIncludedSegments: number
+}
+
+/**
+ * 由候选材料算出规模（纯函数，供 IPC 与单测复用）。
+ * 窗口数与耗时**复用生成管线的常量**（`WINDOW_MAX_CHARS` / `WINDOW_ETA_DEFAULT_S`），不另造一套口径。
+ */
+export function summarizeMaterialScale(chunks: RetrievedChunk[], webSourceIds: Iterable<string>): MaterialEstimate {
+  const webIdSet = new Set(webSourceIds)
+  const chars = chunks.reduce((n, c) => n + (c.text?.length ?? 0), 0)
+  const webSegments = chunks.filter((c) => webIdSet.has(c.sourceId)).length
+  const estimatedWindows = Math.max(1, Math.ceil(chars / Math.max(1, WINDOW_MAX_CHARS)))
+  return {
+    segments: chunks.length,
+    chars,
+    localSegments: chunks.length - webSegments,
+    webSegments,
+    estimatedWindows,
+    estimatedMinutes: Math.max(1, Math.round((estimatedWindows * WINDOW_ETA_DEFAULT_S) / 60))
+  }
+}
+
+/** 把「收敛后 / 全量」两次规模合成预检结果（纯函数，便于单测） */
+export function buildMaterialEstimate(
+  convergedChunks: RetrievedChunk[],
+  fullChunks: RetrievedChunk[],
+  webSourceIds: Iterable<string>,
+  convergence: ArticleConvergenceStats | null
+): MaterialEstimateWithConvergence {
+  const after = summarizeMaterialScale(convergedChunks, webSourceIds)
+  const full = summarizeMaterialScale(fullChunks, webSourceIds)
+  return {
+    ...after,
+    fullSegments: full.segments,
+    fullChars: full.chars,
+    fullEstimatedWindows: full.estimatedWindows,
+    fullEstimatedMinutes: full.estimatedMinutes,
+    droppedSegments: convergence?.droppedSegments ?? 0,
+    droppedChars: convergence?.droppedChars ?? 0,
+    convergedSources: convergence?.sources ?? 0,
+    noSignalSources: convergence?.noSignalSources ?? 0,
+    converged: convergence !== null,
+    contextRange: convergence?.contextRange ?? ARTICLE_CONTEXT_RANGE,
+    reIncludedSegments: convergence?.reIncludedSegments ?? 0
+  }
+}
+
+/**
+ * 生成前的**材料规模预检**（2026-10-05 用户要求，P1）。
+ * 动机（用户实测）：材料规模只有在主进程跑完「召回 + 闸门」之后才知道，上次**跑到一半**才发现要 20 多分钟；
+ * 因此界面在真正开始生成之前弹一次确认，把「多少段 / 多少字 / 几个细读窗口 / 约多少分钟」如实告诉用户。
+ *
+ * 口径与 `generateCompilation` **完全一致**（同一个 `recallCandidateChunks` + `recallCompilationCandidates`、
+ * 同一套「本地段 / 网页段」区分），但**只读**：
+ *  - 不落库（不建汇编、不写段落、不写版本、不碰 `resumeStore`）；
+ *  - 不抓网页（只算本任务**已纳入**的网页来源；生成时会先按年份区间抓取重筛，那部分量这里算不出来）；
+ *  - **不调用任何大模型**——生成管线里那次"大模型提取关键词"刻意跳过，只用本地兜底或已缓存的关键词；
+ *  - 仅用**本地**嵌入模型算查询向量（`allowRemoteModels=false`，不联网），失败即退回纯词法口径（与生成管线的降级一致）。
+ */
+export async function estimateCompilationMaterials(taskId: string, instruction: string): Promise<MaterialEstimateWithConvergence | null> {
+  const task = getTaskById(taskId)
+  if (!task) return null
+  const t = instruction.trim()
+  if (!t) return null
+
+  const scopeIds = resolveScopeSourceIds(task, { getSourceIdsByTag, getAllSourceIds })
+  // 本任务已纳入的网页来源（生成时会先抓一轮，那部分不计入只读估算）
+  const webIds = listUrlSourceIdsByTask(taskId)
+  const allScopeIds = Array.from(new Set([...scopeIds, ...webIds]))
+  if (allScopeIds.length === 0) return buildMaterialEstimate([], [], [], null)
+
+  // 粗筛关键词：与生成管线同口径（见 generateCompilation），但只用本地兜底 / 已缓存结果
+  const cached = keywordExtractionCache.get(t) ?? null
+  const baseQuery = cached
+    ? [...new Set([cached.title, ...cached.keywords])].filter(Boolean).join(' ') || fallbackCoarseQuery(t)
+    : fallbackCoarseQuery(t)
+  // 第一组 ③：**只读估算绝不调用大模型**，词表用纯本地解析（零成本、确定性）
+  const lexicon = analyzeWritingRequirementLocal(t)
+  const coarseQuery = buildCoarseQuery(baseQuery, lexicon)
+  const extraTerms = lexiconExtraTerms(lexicon)
+  const vecQuery = cached?.title || coarseQuery
+
+  const allChunks = recallCandidateChunks(allScopeIds, coarseQuery, extraTerms)
+  const vectors = await embedTexts([vecQuery]).catch(() => null)
+  const gated = recallCompilationCandidates(allScopeIds, coarseQuery, vectors ? vectors[0] : undefined, extraTerms)
+  /*
+   * 与生成管线一致：闸门一个都没留下时退回宽召回（否则会把规模低估成「0 段」）。
+   * 退回宽召回时 ⑤ 也没有生效（`gated.chunks` 为空 → `convergence.converged=false`），
+   * 于是"收敛后 / 全量"两个数会相同——这是**如实**的（那一轮确实没有收敛）。
+   */
+  const convergedChunks = gated.chunks.length > 0 ? gated.chunks : allChunks
+  const fullChunks = gated.preConvergenceChunks.length > 0 ? gated.preConvergenceChunks : allChunks
+  const convergence = gated.chunks.length > 0 ? gated.convergence : null
+  return buildMaterialEstimate(convergedChunks, fullChunks, webIds, convergence)
+}
+
+/**
+ * 生成选项（第二组 ⑤）：`skipConvergence = true` = 用户在本轮预检确认框里勾了「本轮不做收敛（全量送入）」，
+ * 跳过"文章内取段"，行为回到今天。**每次生成单独选择、不持久化**。
+ */
+export interface GenerateCompilationOptions {
+  skipConvergence?: boolean
+}
+
 export async function generateCompilation(
   taskId: string,
   title: string,
   onProgress?: (p: CompilationProgress) => void,
-  onAdvice?: (message: string) => void
+  onAdvice?: (message: string) => void,
+  options: GenerateCompilationOptions = {}
 ): Promise<GenerateCompilationResult> {
   const task = getTaskById(taskId)
   if (!task) return fail(ErrorCodes.TASK_NOT_FOUND, '撰写任务不存在')
@@ -911,18 +1443,29 @@ export async function generateCompilation(
     extracted = await extractKeywordSet(prov.provider, t, taskId).catch(() => null)
     if (extracted) keywordExtractionCache.set(t, extracted)
   }
+  /*
+   * 第一组 ③（2026-10-05）：撰写要求**现算词表 + 同义扩展**。
+   * 一次很便宜的调用（几百 token、输出限 400 token、同一要求按 hash 只算一次）；
+   * 无 Provider / 调用失败自动降级为本地词表，**绝不阻断生成**（见 topic-lexicon.ts）。
+   */
+  const lexicon = await analyzeWritingRequirement(t, { useLlm: prov.ok, taskId })
+  const extraTerms = lexiconExtraTerms(lexicon)
+  const baseQuery = extracted
+    ? [...new Set([extracted.title, ...extracted.keywords])].filter(Boolean).join(' ') || fallbackCoarseQuery(t)
+    : fallbackCoarseQuery(t)
+  coarseQuery = buildCoarseQuery(baseQuery, lexicon)
+  vecQuery = extracted?.title || coarseQuery
   if (extracted) {
-    coarseQuery = [...new Set([extracted.title, ...extracted.keywords])].filter(Boolean).join(' ') || fallbackCoarseQuery(t)
-    vecQuery = extracted.title || coarseQuery
     onProgress?.({ stage: '已提取标题：' + extracted.title + '；提取粗筛关键词 ' + extracted.keywords.length + ' 个', percent: 7, etaSeconds: preWindowEta(PHASE_WEB_ETA_S + PHASE_RECALL_ETA_S + PHASE_GATE_ETA_S) })
     // 首次由大模型提取出标题后，自动把任务标题从默认值改为该标题（用户仍可后续重命名）
     if (task.title === '新建任务' && extracted.title) {
-      try { renameTask(taskId, extracted.title) } catch { /* 重命名失败不影响汇编生成 */ }
+      try { renameTask(taskId, extracted.title) } catch { /* 重命名不影响汇编生成 */ }
     }
-  } else {
-    coarseQuery = fallbackCoarseQuery(t)
-    vecQuery = coarseQuery
   }
+  onProgress?.({
+    stage: `已理解撰写任务（词表：主题词 ${lexicon.topicTerms.length} / 要点词 ${lexicon.keyPoints.length} / 范围词 ${lexicon.scopeWords.length}${lexicon.source === 'llm' ? '，含大模型同义扩展' : '，本地词表'}）`,
+    percent: 7
+  })
 
   /*
    * 无 Provider → **跳过网页抓取**，直接用本地闸门收窄后的材料做降级汇编。
@@ -930,73 +1473,131 @@ export async function generateCompilation(
    * 而且明知不会调用大模型还白等近 10 分钟抓取（2026-09-12 第二批）。
    * 注意查询向量由**本地嵌入模型**生成，与是否配置 LLM Provider 无关。
    */
-  const webStats: WebFetchStats = { sites: 0, siteErrors: 0, hits: 0, fetched: 0, skippedByCap: 0, chars: 0, reused: 0, newCandidates: 0 }
+  const webStats: WebFetchStats = { sites: 0, siteErrors: 0, hits: 0, fetched: 0, chars: 0 }
   if (!prov.ok) {
     logMain('compilation', '未配置大模型：跳过网页资料抓取，改用本地闸门材料生成降级汇编')
   } else {
     /*
-     * 第三批 A1：网页材料集合在**首次生成**时落定，重新生成复用同一批。
-     * 这样同一任务连续生成的汇编材料一致（可复现、版本差异干净）；
-     * 期间站点有新文章时只统计数量并告知用户，由他点「纳入新材料」才抓取。
+     * Phase 10 P5（用户裁定 2026-10-04）：**年份区间 + 正文筛选**取代旧的"标题粗筛取前 300 篇"。
+     * 口径：任务自己的年份区间（新建任务继承全局默认）→ **先刷新站点文章清单** → 按发布时间抓取区间内**全部**文章 →
+     * **只看正文**粗筛（命中落成本任务来源，未命中只留哈希）→ 并入检索范围。
+     * 账本是**任务级**的（`task_web_fetch`）：新建任务/新主题**默认重新抓取并重跑筛选**，用户零操作。
+     * 没有年份区间时**不再回退标题路径**（该路径已删除），如实告知并只用本地资料。
      */
-    const pinned = listPinnedWebMaterials(taskId)
-    if (pinned.length > 0) {
-      const stillThere = new Set(getSourcesByIds(pinned.map((p) => p.sourceId)).map((s) => s.id))
-      const usable = pinned.filter((p) => stillThere.has(p.sourceId))
-      scopeIds = Array.from(new Set([...scopeIds, ...usable.map((p) => p.sourceId)]))
-      webStats.reused = usable.length
-      onProgress?.({ stage: `正在核对网页材料（复用已锁定的 ${usable.length} 篇）…`, percent: 8, etaSeconds: preWindowEta(PHASE_RECALL_ETA_S + PHASE_GATE_ETA_S) })
-      const collected = await collectSiteCandidates(coarseQuery, new Set(pinned.map((p) => p.url ?? ''))).catch(() => null)
-      if (collected) {
-        Object.assign(webStats, {
-          sites: collected.stats.sites,
-          siteErrors: collected.stats.siteErrors,
-          hits: collected.stats.hits,
-          newCandidates: collected.candidates.length
-        })
-        if (collected.candidates.length > 0) {
-          logMain('compilation', `网页材料已锁定：复用 ${usable.length} 篇；另有 ${collected.candidates.length} 篇新命中文章未纳入（用户可在面板点「纳入新材料」）`)
+    const yearFrom = task.webYearFrom ?? getSettings().webYearFrom
+    const yearTo = task.webYearTo ?? getSettings().webYearTo
+    if (yearFrom && yearTo) {
+      /*
+       * Phase 10 P6 补齐：**抓取前先同步站点文章清单**（P5 的流水线只读库里的清单，漏了这一步——
+       * 站点新发的文章永远不会被发现）。逐站 `syncSite`（sitemap/RSS/BFS 发现 + 增量写入 + 日期阶梯），
+       * 单站失败只记日志、不阻断（其余站点照常）。
+       */
+      const sites = listWebSites()
+      let syncedNew = 0
+      for (const site of sites) {
+        try {
+          const added = await syncSite(site.id)
+          syncedNew += added
+        } catch (err) {
+          webStats.siteErrors++
+          logMain('compilation', `站点清单同步失败（继续）site=${site.rootUrl}：${String(err)}`)
         }
       }
-    } else {
-      onProgress?.({ stage: '正在检索网页资料库…', percent: 8, etaSeconds: preWindowEta(PHASE_RECALL_ETA_S + PHASE_GATE_ETA_S) })
-      const web = await fetchRelatedSiteSources(coarseQuery, taskId).catch(() => ({ ids: [] as string[], stats: webStats }))
-      Object.assign(webStats, web.stats)
-      if (web.ids.length > 0) {
-        scopeIds = Array.from(new Set([...scopeIds, ...web.ids]))
-        // A1：把本轮实际采用的网页来源**锁定**到该任务（重新生成默认复用这一批）
-        const sources = getSourcesByIds(web.ids)
-        const pinnedCount = pinWebMaterials(
-          taskId,
-          sources.map((s) => ({ sourceId: s.id, url: s.url, title: s.title }))
-        )
-        logMain('compilation', `网页材料首次落定：锁定 ${pinnedCount} 篇（本任务后续生成默认复用）`)
-        /*
-         * 网页文章必须先进入向量索引，否则保守闸门查不到它们的向量，只能靠词法命中——
-         * "字面无关但语义相关"的网页段落会被整篇丢掉（本地资料库一直有索引兜底，网页此前没有）。
-         * 索引以预算为上限，超预算或个别失败都不阻断生成（只是少一层向量兜底）。
-         */
+      if (sites.length > 0) {
+        logMain('compilation', `网页资料清单已刷新：${sites.length} 个站点，新增文章 ${syncedNew} 篇（区间 ${yearFrom}-${yearTo}）`)
+      }
+      const crawl = await crawlAndScreenArticles({
+        fromYear: yearFrom,
+        toYear: yearTo,
+        query: coarseQuery,
+        extraTerms,
+        taskId,
+        onProgress: (p) => {
+          // 把抓取进度如实映射到生成进度（含实测速度、剩余时长、是否有缓存复用与降档）
+          const etaText = p.etaSeconds > 0 ? `，剩余约 ${Math.max(1, Math.round(p.etaSeconds / 60))} 分钟` : ''
+          const cacheText = p.cacheHits && p.cacheHits > 0 ? `、缓存复用 ${p.cacheHits} 篇（未联网）` : ''
+          onProgress?.({
+            stage:
+              `正在抓取网页资料（${p.done}/${p.total} 篇：采用 ${p.hits}、筛除 ${p.dropped}` +
+              (p.failed > 0 ? `、失败 ${p.failed}` : '') +
+              `${cacheText}${etaText}）…` +
+              (p.paused ? '　⏸ 已暂停' : ''),
+            percent: 8,
+            etaSeconds: p.etaSeconds,
+            candidateSources: p.hits,
+            fetch: { active: true, paused: p.paused === true }
+          })
+        }
+      }).catch((err) => {
+        logMain('compilation', `网页抓取失败（不阻断生成）：${String(err)}`)
+        return null
+      })
+      // 抓取结束：清掉"抓取进行中"标记 → 界面上的「暂停抓取」按钮随之消失
+      onProgress?.({ stage: '正在整理网页资料…', percent: 8, fetch: { active: false, paused: false } })
+      // 该任务已采用的网页来源（含本次新抓的与之前抓的）并入检索范围
+      const urlSourceIds = listUrlSourceIdsByTask(taskId)
+      if (urlSourceIds.length > 0) scopeIds = Array.from(new Set([...scopeIds, ...urlSourceIds]))
+      webStats.sites = crawl?.sites ?? 0
+      webStats.fetched = crawl?.hits ?? 0
+      webStats.chars = crawl?.chars ?? 0
+      // 2026-10-05（P0 兜底回归）：三类"有效正文"判定与"相关性未命中"分开计数 —— 语义不同，文案也不同
+      webStats.relevanceDropped = crawl?.dropped ?? 0
+      webStats.invalidBody = crawl?.invalidBody ?? 0
+      webStats.shortBody = crawl?.shortBody ?? 0
+      webStats.templateRepeat = crawl?.templateRepeat ?? 0
+      webStats.fetchFailed = crawl?.failed ?? 0
+      webStats.blocked = crawl?.blocked ?? 0
+      // 2026-10-05：缓存复用篇数与自适应降档次数（如实汇报"为什么这次这么快/为什么变慢了"）
+      webStats.cacheHits = crawl?.cacheHits ?? 0
+      webStats.downgrades = crawl?.downgrades ?? 0
+      webStats.hits = (crawl?.hits ?? 0) + (crawl?.dropped ?? 0)
+      logMain(
+        'compilation',
+        `网页资料（年份 ${yearFrom}-${yearTo}）：本次抓取 ${crawl?.done ?? 0}/${crawl?.total ?? 0} 篇，` +
+          `采用 ${crawl?.hits ?? 0}、相关性未命中丢弃 ${crawl?.dropped ?? 0}、失败 ${crawl?.failed ?? 0}；` +
+          `有效正文判定：标题探针不过 ${crawl?.invalidBody ?? 0}、空标题过短 ${crawl?.shortBody ?? 0}、同站重复 ${crawl?.templateRepeat ?? 0}；` +
+          `安全过滤跳过 ${crawl?.blocked ?? 0} 篇；本任务网页来源合计 ${urlSourceIds.length} 篇`
+      )
+      if (urlSourceIds.length > 0) {
+        // 网页文章必须先有向量索引，否则"字面无关但语义相关"的段落会被闸门整篇丢掉
         onProgress?.({ stage: '正在为网页资料建立检索索引…', percent: 9, etaSeconds: preWindowEta(PHASE_GATE_ETA_S) })
-        const idx = await ensureSourcesIndexed(web.ids).catch(() => ({ indexed: 0, failed: 0, skipped: 0 }))
+        const idx = await ensureSourcesIndexed(urlSourceIds).catch(() => ({ indexed: 0, failed: 0, skipped: 0 }))
         if (idx.failed > 0 || idx.skipped > 0) {
           logMain('compilation', `网页资料索引 就绪=${idx.indexed} 失败=${idx.failed} 超预算跳过=${idx.skipped}（这些文章本轮只能靠词法命中）`)
         }
       }
+    } else {
+      /*
+       * Phase 10 P6（2026-10-04 用户裁定）：**删除旧的"标题粗筛取前 N 篇"路径**。
+       * 理由：① 它按**标题**判断相关性，直接违反用户裁定 ⑦（标题永不作为相关性判据）；
+       * ② 真实库取证显示它把 600 篇材料里的 84% 变成了噪声（"长乐区"这种范围词在标题里几乎人人都有）。
+       * 现在没有年份区间时**不再猜**，如实告知并跳过网页资料（本地资料照常参与）。
+       */
+      logMain('compilation', '未指定网页资料年份区间：本次不使用网页资料（旧的标题粗筛路径已删除；请在资料库面板设定年份）')
+      onProgress?.({
+        stage: '未指定网页资料年份区间：本次只用本地资料（请到「资料库」设定年份后重新生成）…',
+        percent: 8,
+        etaSeconds: preWindowEta(0)
+      })
+      webStats.sites = 0
     }
   }
 
   onProgress?.({ stage: '正在本地召回资料（宁多勿漏）…', percent: 10, etaSeconds: preWindowEta(PHASE_GATE_ETA_S) })
-  const allChunks = recallCandidateChunks(scopeIds, coarseQuery)
+  const allChunks = recallCandidateChunks(scopeIds, coarseQuery, extraTerms)
   if (allChunks.length === 0) return fail(ErrorCodes.LLM_NO_CANDIDATES, '资料库中没有可召回的资料')
 
   // 无 Provider → 本地降级：**用保守闸门收窄后的材料**（而不是宽召回全量），避免降级产物被无关内容淹没
   if (!prov.ok) {
     onProgress?.({ stage: '正在按主题收敛候选材料（保守闸门）…', percent: 11, etaSeconds: preWindowEta(0) })
     const localVectors = await embedTexts([vecQuery]).catch(() => null)
-    const gated = recallCompilationCandidates(scopeIds, coarseQuery, localVectors ? localVectors[0] : undefined)
+    const gated = recallCompilationCandidates(scopeIds, coarseQuery, localVectors ? localVectors[0] : undefined, extraTerms, {
+      converge: !options.skipConvergence
+    })
     const localChunks = gated.chunks.length > 0 ? gated.chunks : allChunks
     logMain('compilation', `本地降级材料：宽召回 ${allChunks.length} 段 → 闸门后 ${gated.chunks.length} 段（来源 ${gated.candidateSources} 个）`)
-    return finalizeCompilationLocal(taskId, title, localChunks, webStats)
+    if (gated.convergence) logConvergence(gated.convergence, options.skipConvergence === true)
+    return finalizeCompilationLocal(taskId, title, localChunks, webStats, gated.convergence)
   }
 
   // 2026-08-25 优化：调用大模型前用保守本地闸门收窄提交物——把"任务范围内全部段落"收敛为
@@ -1005,8 +1606,60 @@ export async function generateCompilation(
   onProgress?.({ stage: '正在按主题收敛候选材料（保守闸门）…', percent: 11, etaSeconds: preWindowEta(0) })
   const vectors = await embedTexts([vecQuery]).catch(() => null)
   const queryVector = vectors ? vectors[0] : undefined
-  const recall = recallCompilationCandidates(scopeIds, coarseQuery, queryVector)
-  const chunks = recall.chunks.length > 0 ? recall.chunks : allChunks
+  /*
+   * 第二组 ⑤（2026-10-06）：闸门之后、`sliceChunks` 切窗之前做「文章内取高信号段 ± 上下文」。
+   * `skipConvergence` = 用户在预检确认框里勾了「本轮不做收敛（全量送入）」→ 跳过 ⑤，行为回到今天。
+   * 判据与离线回放共用 `article-segments.ts`（同一函数），此处不重复实现任何判定逻辑。
+   */
+  const recall = recallCompilationCandidates(scopeIds, coarseQuery, queryVector, extraTerms, {
+    converge: !options.skipConvergence
+  })
+  const gatedChunks = recall.chunks.length > 0 ? recall.chunks : allChunks
+
+  /*
+   * 2026-10-05（**用户裁定，取代 Phase 10 P5b-2 的"60 万字/轮上限 + 排队"**）：
+   * **任何地方都不得设"总量上限"** —— 本地/网页资料库中**所有通过闸门的文段都必须被提取**；
+   * 只有**单个窗口的大小**（细读窗口 `WINDOW_MAX_CHARS`、提取批次）可以指定，**总窗口规模绝不设限**。
+   *
+   * 因此这里不做任何取舍、也不排队：闸门给出的**全部**材料都进入本轮细读与提取。
+   * 代价明确（用户已确认接受）：材料越多，细读窗口与提取批次按比例增加，耗时与额度消耗随之上升。
+   * 原总预算模块（`material-budget.ts`）与排队模块（`material-queue.ts`）已按用户指示**整体删除**；
+   * Migration 048 的 `compilation_material_queue` 表按项目惯例**保留不删**（历史数据留在库中，不再读写）。
+   *
+   * ⚠ 与 ⑤ 的关系（避免误读）：⑤ **只决定"本轮细读窗口里放哪些段"**，不是"总量上限"——
+   * 取舍完全由信号决定（有信号就留，不设每篇段数/总字数上限），且被跳过的段**一字不动地留在库里**
+   * （`sources.cleaned_text` 未被触碰），仍可打开查看、仍参与来源询问与定位。
+   */
+  const chunks = gatedChunks
+  const allChars = chunks.reduce((n, c) => n + (c.text?.length ?? 0), 0)
+  // 该任务的网页来源 id（查询很轻）：仅用于日志/进度里如实区分"本地段 / 网页段"，**不参与任何取舍**
+  const webIdSet = new Set(listUrlSourceIdsByTask(taskId))
+  const localSegs = chunks.filter((c) => !webIdSet.has(c.sourceId)).length
+  const estimatedWindows = Math.max(1, Math.ceil(allChars / Math.max(1, WINDOW_MAX_CHARS)))
+  const convergence = recall.convergence
+  if (convergence) logConvergence(convergence, false)
+  else {
+    logMain(
+      'compilation',
+      options.skipConvergence
+        ? `材料（无总量上限、本轮**不做收敛**）：闸门后全部 ${chunks.length} 段 / ${allChars} 字进入本轮（用户勾选了「本轮不做收敛（全量送入）」）` +
+            `（本地 ${localSegs} 段 / 网页 ${chunks.length - localSegs} 段）；细读约 ${estimatedWindows} 个窗口`
+        : `材料（无总量上限）：闸门后**全部** ${chunks.length} 段 / ${allChars} 字进入本轮` +
+            `（本地 ${localSegs} 段 / 网页 ${chunks.length - localSegs} 段）；细读约 ${estimatedWindows} 个窗口`
+    )
+  }
+  // 进度文案：如实写清「本轮送 X 段 / Y 字（来自 N 篇）；另有 Z 段因无信号未送（仍在库中，可打开查看）」
+  const convergedNote = convergence
+    ? `本轮送 ${convergence.keptSegments} 段 / ${convergence.keptChars} 字（来自 ${convergence.sources - convergence.noSignalSources} 篇）；` +
+      `另有 ${convergence.droppedSegments} 段因无信号未送（仍在库中，可打开查看）`
+    : `本轮不做收敛，闸门后全部 ${chunks.length} 段 / ${allChars} 字送入`
+  onProgress?.({
+    stage:
+      `候选材料 ${Math.round(allChars / 10000)} 万字已就绪（${convergedNote}；` +
+      `本地 ${localSegs} 段 + 网页 ${chunks.length - localSegs} 段，约 ${estimatedWindows} 个细读窗口）…`,
+    percent: 11,
+    etaSeconds: preWindowEta(0)
+  })
 
   const refs = buildCompilationSourceRefs(chunks)
 
@@ -1037,7 +1690,9 @@ export async function generateCompilation(
     scanGroups: [],
     avgSecPerChar: 0,
     secPerCharSamples: [],
-    concurrency: prov.provider.concurrency
+    concurrency: prov.provider.concurrency,
+    // ⑤ 统计随状态走：中断续跑时 summary 仍能如实说"本轮送 X 段 / Y 字"
+    ...(convergence ? { convergence } : {})
   }
   onProgress?.({
     stage: '正在由 AI 细读资料（0/' + windows.length + ' 个窗口）…',
@@ -1058,7 +1713,7 @@ export async function generateCompilation(
   if (merged.items.length === 0) {
     // AI 未产出有效卡片 → 本地降级（用全量集合，不丢材料）；复用已创建的汇编
     resumeStore.delete(state.compilationId)
-    return finalizeCompilationLocalInto(state.compilationId, allChunks)
+    return finalizeCompilationLocalInto(state.compilationId, allChunks, undefined, state.convergence ?? null)
   }
 
   // 整合提取（Phase 7.2：取代原「提纯 + 修正」，允许大模型裁剪/补全/整合，产出可直接写进志稿的段落）
@@ -1105,7 +1760,8 @@ export async function generateCompilation(
       message: state.extractIncomplete?.message,
       ...(state.extractStats ?? {})
     },
-    onProgress
+    onProgress,
+    state.convergence ?? null
   )
 }
 
@@ -1120,14 +1776,35 @@ function sliceChunks(chunks: RetrievedChunk[], maxChars: number): RetrievedChunk
     // 单块超过窗口上限（极少见）：按句切成 ≤maxChars 的小块，避免上下文溢出；普通整段仍整块投喂。
     if (c.text.length > maxChars) {
       flush()
-      const sentences = c.text.split(/(?<=[。！？；;])/).map((s) => s.trim()).filter(Boolean)
+      // 子块必须带上**自己的**字符区间（P0-2）：按句边界推算，块起点加句内偏移；
+      // 原块没有区间时如实不带（落锚点回退逐字匹配）
+      const subRanges = c.charStart != null && c.charEnd != null ? sentenceRanges(c.text, c.charStart, c.charEnd) : []
       let buf = ''
+      let subStart: number | undefined
+      let subEnd: number | undefined
       const flushSub = (): void => {
-        if (buf) { windows.push([{ ...c, text: buf }]); buf = '' }
+        if (buf) {
+          windows.push([{ ...c, text: buf, charStart: subStart, charEnd: subEnd }])
+          buf = ''
+        }
       }
-      for (const s of sentences) {
-        if (buf.length + s.length > maxChars) flushSub()
-        buf += s
+      for (const s of subRanges) {
+        if (buf.length + s.text.length > maxChars) flushSub()
+        if (!buf) {
+          subStart = s.start
+        }
+        buf += s.text
+        subEnd = s.end
+      }
+      // 原块没有区间（或句子切分与切块口径不一致）时退回旧行为：按原块文字切，不带子区间
+      if (subRanges.length === 0) {
+        subStart = undefined
+        subEnd = undefined
+        const sentences = c.text.split(/(?<=[。！？；;])/).map((s) => s.trim()).filter(Boolean)
+        for (const s of sentences) {
+          if (buf.length + s.length > maxChars) flushSub()
+          buf += s
+        }
       }
       flushSub()
       continue
@@ -1175,7 +1852,11 @@ async function readWindow(
       continue
     }
     const parsed = parseCompilationOutput(result.text)
-    if (parsed) return { out: parsed, failed: false }
+    if (parsed) {
+      // 卡片落库前就把"来自哪个候选块"记下来（P0-2：生成期记录，不做事后回溯）
+      attachCardRanges(parsed, windowChunks)
+      return { out: parsed, failed: false }
+    }
   }
   // 全部温度要么调用失败、要么无可解析输出：调用失败视为「异常中断」，可继续；无可解析输出视为正常（无卡片）
   return failedMsg ? { out: null, failed: true, message: failedMsg, rateLimited } : { out: null, failed: false }
@@ -1185,11 +1866,19 @@ function finalizeCompilationLocal(
   taskId: string,
   title: string,
   chunks: RetrievedChunk[],
-  webScan?: WebFetchStats
+  webScan?: WebFetchStats,
+  convergence?: ArticleConvergenceStats | null
 ): GenerateCompilationResult {
   const compilation = createCompilation({ taskId, title })
   persistLocalFallback(compilation.id, localFallbackParagraphs(chunks))
-  return { ok: true, compilationId: compilation.id, candidateChunks: chunks.length, contradictions: 0, webScan }
+  return {
+    ok: true,
+    compilationId: compilation.id,
+    candidateChunks: chunks.length,
+    contradictions: 0,
+    webScan,
+    convergence: convergence ?? undefined
+  }
 }
 
 /**
@@ -1269,6 +1958,9 @@ function persistDocument(
           sourceId: it.sourceId,
           excerpt: it.excerpt,
           evidence: it.evidence,
+          // 生成期记录的字符区间随候选一起带到锚点阶段（P0-2）：有它就直接映射块表，不做文本回溯
+          charStart: paragraphs[i].charStart,
+          charEnd: paragraphs[i].charEnd,
           candidates: paragraphs[i].anchorCandidates
         }))
       : items.map((it) => ({ id: it.id, sourceId: it.sourceId, excerpt: it.excerpt, evidence: it.evidence }))
@@ -1290,7 +1982,14 @@ async function persistPartialCompilation(state: CompilationResumeState): Promise
 
 /** 大模型异常中断时的结果（ok: true，含部分卡片与中断信息） */
 function interruptedResult(state: CompilationResumeState): GenerateCompilationResult {
-  return { ok: true, compilationId: state.compilationId, candidateChunks: state.chunks.length, contradictions: 0, interrupted: state.interrupted }
+  return {
+    ok: true,
+    compilationId: state.compilationId,
+    candidateChunks: state.chunks.length,
+    contradictions: 0,
+    interrupted: state.interrupted,
+    convergence: state.convergence
+  }
 }
 
 /** 窗口细读（可中断/可续跑）：只读未完成的窗口；任一窗口大模型异常 → 置中断标志，返回 'interrupted' */
@@ -1414,7 +2113,10 @@ async function runExtractPhase(
       excerpt: it.excerpt,
       ts: it.ts ?? undefined,
       sourceKind: sourceMetaByRef.get(it.sourceRef)?.kind,
-      sourcePublishedAt: sourceMetaByRef.get(it.sourceRef)?.publishedAt
+      sourcePublishedAt: sourceMetaByRef.get(it.sourceRef)?.publishedAt,
+      // 卡片在来源正文里的字符区间（读窗口时对回候选块得到的，P0-2）
+      charStart: it.charStart,
+      charEnd: it.charEnd
     }))
     state.extractBatches = splitExtractBatches(state.extractCandidates)
     state.extractDrafts = state.extractDrafts ?? []
@@ -1452,7 +2154,14 @@ async function runExtractPhase(
           sourceTitle: titleByRef.get(ref),
           evidence: d.evidence,
           origin: 'generate' as const,
-          parentIndex: d.parentIndex
+          parentIndex: d.parentIndex,
+          /*
+           * 生成期记录的字符区间（P0-2）：优先用提取阶段算出的（`d.charStart`，这一段的区间最准），
+           * 其次退到它所属卡片的区间（卡片是"整段照抄候选材料"，区间来自切块；模型改写时 `d.charStart` 会缺省）。
+           * 两者都没有就如实缺省 → 落锚点时走逐字 fallback，**旧数据与降级路径都不受影响**。
+           */
+          charStart: d.charStart ?? candidate?.charStart,
+          charEnd: d.charEnd ?? candidate?.charEnd
         }
       })
     )
@@ -1789,7 +2498,9 @@ export async function finalizeCompilationInto(
     containmentMerged?: number
   },
   /** 生成进度回调：锚点阶段会推一条「正在记录来源位置…」（用户实测反馈的修复，见 9.15） */
-  onProgress?: (p: CompilationProgress) => void
+  onProgress?: (p: CompilationProgress) => void,
+  /** 第二组 ⑤：本轮的取段统计（供生成汇总如实带一句）；未做收敛时为 null */
+  convergence?: ArticleConvergenceStats | null
 ): Promise<GenerateCompilationResult> {
   const { itemIdByText, anchors } = persistDocument(compilationId, output.paragraphs, refs)
 
@@ -1836,7 +2547,8 @@ export async function finalizeCompilationInto(
     candidateChunks,
     contradictions: contradictions.length,
     contradictionScan,
-    extractScan
+    extractScan,
+    convergence: convergence ?? undefined
   }
 }
 
@@ -1847,12 +2559,13 @@ const ANCHOR_ATTACH_TIMEOUT_MS = 120_000
 async function finalizeCompilationLocalInto(
   compilationId: string,
   chunks: RetrievedChunk[],
-  onProgress?: (p: CompilationProgress) => void
+  onProgress?: (p: CompilationProgress) => void,
+  convergence?: ArticleConvergenceStats | null
 ): Promise<GenerateCompilationResult> {
   const paragraphs = localFallbackParagraphs(chunks)
   onProgress?.({ stage: '正在记录来源位置（点击来源圆标可直达页码）…', percent: 99, etaSeconds: 2 })
   await persistLocalFallback(compilationId, paragraphs)
-  return { ok: true, compilationId, candidateChunks: chunks.length, contradictions: 0 }
+  return { ok: true, compilationId, candidateChunks: chunks.length, contradictions: 0, convergence: convergence ?? undefined }
 }
 
 /** 本地降级：来源块整段保留，年份直接从正文抓（无大模型可用，不做裁剪与整合） */
@@ -1880,7 +2593,11 @@ function localFallbackParagraphs(chunks: RetrievedChunk[]): AssembledParagraph[]
       revision: 1,
       kind: 'paragraph',
       kept: true,
-      parentIndex: paragraphs.length
+      parentIndex: paragraphs.length,
+      // 本地降级的段落就是候选块**逐字原文**，因此它天然带着生成期字符区间（P0-2）：直接落锚点，零文本回溯
+      charStart: c.charStart,
+      charEnd: c.charEnd,
+      anchorCandidates: [{ sourceId: c.sourceId, excerpt: c.text, charStart: c.charStart, charEnd: c.charEnd }]
     })
   }
   return paragraphs
@@ -1929,6 +2646,8 @@ function persistLocalFallback(compilationId: string, paragraphs: AssembledParagr
           sourceId: it.sourceId,
           excerpt: it.excerpt,
           evidence: it.evidence,
+          charStart: paragraphs[i].charStart,
+          charEnd: paragraphs[i].charEnd,
           candidates: paragraphs[i].anchorCandidates
         }))
       : items.map((it) => ({ id: it.id, sourceId: it.sourceId, excerpt: it.excerpt, evidence: it.evidence }))
@@ -2002,7 +2721,8 @@ export async function continueCompilation(compilationId: string, onProgress?: (p
       message: state.extractIncomplete?.message,
       ...(state.extractStats ?? {})
     },
-    onProgress
+    onProgress,
+    state.convergence ?? null
   )
 }
 
@@ -2033,6 +2753,64 @@ if (import.meta.vitest) {
       expect(user).toContain(REQUIREMENT)
       expect(user).toContain('【用户的撰写要求（原文，必须逐条遵守）】')
       expect(user).toContain('范围之外的内容')
+    })
+
+    /*
+     * 2026-10-05 用户裁定（P0-1）：**来源发布时间必须作为证据进入细读提示词**。
+     * 旧提示词只给「编号 + 《标题》」，模型看不到"这是网页、发布于某日"，正文写「近日」时就无处可依。
+     */
+    it('窗口细读：文件清单与逐条材料都带上「网页 + 发布时间」，没有发布时间的如实不写', () => {
+      const refs: SourceRefEntry[] = [
+        { index: 1, sourceId: 's1', title: '长乐年鉴2019', kind: 'file' },
+        { index: 2, sourceId: 's2', title: '全区教育工作会议召开', kind: 'url', publishedAt: '2021-05-06T00:00:00.000Z' },
+        { index: 3, sourceId: 's3', title: '没有日期的网页', kind: 'url' }
+      ]
+      const chunks: RetrievedChunk[] = [
+        { sourceId: 's2', sourceTitle: '全区教育工作会议召开', position: '第1段', text: '甲段', score: 1, sourceKind: 'url', sourcePublishedAt: '2021-05-06T00:00:00.000Z' },
+        { sourceId: 's3', sourceTitle: '没有日期的网页', position: '第1段', text: '乙段', score: 1, sourceKind: 'url' }
+      ]
+      const user = buildUserPrompt(chunks, refs, REQUIREMENT)
+      // 文件清单（来源级）
+      expect(user).toContain('1. 《长乐年鉴2019》\n')
+      expect(user).toContain('2. 《全区教育工作会议召开》（网页，发布时间 2021-05-06）')
+      expect(user).toContain('3. 《没有日期的网页》（网页）')
+      // 逐条材料（块级）：卡片是整段照抄的，所以元数据必须落在每一行上
+      expect(user).toContain('标题：《全区教育工作会议召开》，网页 发布时间 2021-05-06')
+      expect(user).toContain('标题：《没有日期的网页》，网页）')
+      // 本地文件不写「网页/发布时间」（文件没有"发布时间"这个概念）
+      expect(user).not.toContain('《长乐年鉴2019》（网页')
+    })
+
+    /*
+     * P0-2：卡片 → 候选块的字符区间（生成期记录）。读窗口时把模型卡片对回候选块，
+     * 拿"块起点 + 块内偏移"，**不重新扫正文**。
+     */
+    it('locateCardRange：整段照抄 → 块内偏移；空白差异也能对上；跨块取并集；对不上就不给区间', () => {
+      const chunks: RetrievedChunk[] = [
+        { sourceId: 's1', sourceTitle: '年鉴', position: '第1段', text: '前言与凡例。', score: 1, charStart: 0, charEnd: 6 },
+        {
+          sourceId: 's1',
+          sourceTitle: '年鉴',
+          position: '第2段',
+          text: '2018 年，全区普通高中招生录取 4123 人。',
+          score: 1,
+          charStart: 100,
+          charEnd: 125
+        }
+      ]
+      // 卡片是第 2 段的头 9 个字（`2018 年，全区`）→ 区间 = 块起点 100 .. 100 + 9
+      expect(locateCardRange('2018 年，全区', chunks)).toEqual({ charStart: 100, charEnd: 109 })
+      // 卡片含排版空格差异 → 仍能命中：区间覆盖**原文**整块（块长 25 字，取回原文即整段原文）
+      expect(locateCardRange('2018年，全区普通高中招生录取4123人。', chunks)).toEqual({ charStart: 100, charEnd: 125 })
+      // 卡片合并了两个连续块 → 取并集（覆盖两块的完整区间）
+      expect(locateCardRange('前言与凡例。2018 年，全区普通高中招生录取 4123 人。', chunks)).toEqual({
+        charStart: 0,
+        charEnd: 125
+      })
+      // 模型改写过的卡片对不上任何块 → **不给区间**（落锚点时回退逐字匹配）
+      expect(locateCardRange('该区高中招生人数创下新高。', chunks)).toBeUndefined()
+      // 没有区间的候选块也参与不了（老链路）→ 同样如实缺省
+      expect(locateCardRange('甲段', [{ sourceId: 's1', sourceTitle: 'x', position: '第1段', text: '甲段', score: 1 }])).toBeUndefined()
     })
   })
 
@@ -2092,6 +2870,52 @@ if (import.meta.vitest) {
         .all() as { blockIndex: number; page: number | null }[]
       expect(rows).toHaveLength(1)
       expect(rows[0]).toEqual({ blockIndex: 0, page: 216 })
+    })
+
+    /*
+     * 2026-10-05 用户裁定（P0-2 端到端）：段落带着**生成期记录的字符区间**一路走到落库，
+     * 即使它的 `evidence` 无法在来源正文里逐字命中（真实故障形态：证据串混进页眉噪声），
+     * 仍然必须给出页码——这正是用户实测"2/86 段未记录来源位置、要自己翻 PDF"要根治的那一条。
+     */
+    it('段落带生成期字符区间时，即使证据串命中不了也能说出页码', async () => {
+      db.prepare(
+        "INSERT INTO sources (id, kind, title, cleaned_text, status) VALUES ('s2','file','年鉴乙','2021 年，长乐区新增公办高中学位 800 个。','ready')"
+      ).run()
+      // 块表：整段属于第 88 页
+      db.prepare(
+        "INSERT INTO source_blocks (source_id, block_index, char_start, char_end, page, label, created_at) VALUES ('s2',0,0,25,88,NULL,'2026-10-05')"
+      ).run()
+      const paragraphs: AssembledParagraph[] = [
+        {
+          text: '2021 年，长乐区新增公办高中学位 800 个。',
+          sourceId: 's2',
+          ordinal: 1,
+          // 证据串里插了页眉噪声字符 → 逐字与归一化都命中不了
+          evidence: '长乐区新增公办高中学位 800 ★ 个',
+          charStart: 5,
+          charEnd: 20,
+          timeLabel: '2021 年',
+          timeConfidence: 'exact',
+          origin: 'generate',
+          revision: 0,
+          kind: 'paragraph',
+          kept: true,
+          parentIndex: 0
+        }
+      ]
+      await finalizeCompilationInto('c1', { paragraphs, contradictions: [] }, [{ index: 1, sourceId: 's2', title: '长乐年鉴乙' }], 0, {
+        ok: true
+      })
+      const row = db
+        .prepare(
+          `SELECT a.confidence AS confidence, b.page AS page
+             FROM compilation_item_anchors a
+             JOIN compilation_items i ON i.id = a.item_id
+             LEFT JOIN source_blocks b ON b.source_id = a.source_id AND b.block_index = a.block_index
+            WHERE i.compilation_id = 'c1' AND i.source_id = 's2'`
+        )
+        .get() as { confidence: string; page: number | null } | undefined
+      expect(row).toEqual({ confidence: 'exact', page: 88 })
     })
   })
 }

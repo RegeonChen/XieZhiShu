@@ -11,7 +11,7 @@ import { getSettings } from '../db/settings'
 import { getProviderSecret } from '../llm/provider-store'
 import { safeStorageCodec } from '../llm/secret'
 import { chatCompletion } from '../llm/chat'
-import { getSourceById, getSourcesByIds } from '../db/sources'
+import { getSourceById, getSourcesByIds, listUrlSourceIdsByTask } from '../db/sources'
 import {
   dedupeSourceIds,
   ensureCompilationSources,
@@ -29,7 +29,7 @@ import { buildParagraphSnapshot, sortParagraphsByTime } from './compilation-docu
 import { diffParagraphVersions, summarizeParagraphDiff, type ParagraphDiffSegment } from './compilation-diff'
 import { getTaskById, resolveScopeSourceIds, getAllSourceIds } from '../db/tasks'
 import { getSourceIdsByTag } from '../db/tags'
-import { listPinnedWebMaterials } from '../db/web-materials'
+// Phase 10 P5：网页材料以「任务已采用的网页来源」为准（见 listNavigableSources）——不再使用 task_web_materials 的锁定语义
 import { attachAnchorsQuietly } from './source-anchors'
 import type { CatalogSource } from './catalog'
 import { navigateSources, type NavOutcome } from './source-navigator'
@@ -88,7 +88,8 @@ export function listNavigableSources(taskId: string, compilationId: string): Cat
   const compSourceIds = listCompilationSources(compilationId)
     .map((s) => s.sourceId)
     .filter((id): id is string => !!id)
-  const pinnedIds = listPinnedWebMaterials(taskId).map((m) => m.sourceId)
+  // Phase 10 P5：网页材料改为**该任务已采用的网页来源**（`sources.task_id`），不再依赖 `task_web_materials` 的"锁定"语义
+  const pinnedIds = listUrlSourceIdsByTask(taskId)
   const ids = Array.from(new Set([...scopeIds, ...compSourceIds, ...pinnedIds]))
   if (ids.length === 0) return []
   const out: CatalogSource[] = []

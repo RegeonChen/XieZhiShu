@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC, IPC_EVENTS } from '../shared/ipc'
 import type { WorkspaceSourceRemovalPending, WebBrowserRect, WebBrowserStateRes, WebBrowserAction } from '../shared/ipc'
-import type { ApiResult } from '../shared/types'
+import type { ApiResult, CacheBuildPlan } from '../shared/types'
 
 interface ImportResults {
   results: { path: string; source?: unknown; error?: string }[]
@@ -73,6 +73,43 @@ const api = {
   updateWebSource(id: string, rootUrl: string, title: string): Promise<ApiResult<{ site: unknown }>> {
     return ipcRenderer.invoke(IPC.WEB_SOURCE_UPDATE, { id, rootUrl, title })
   },
+  /**
+   * Phase 10 P3：年份区间筛选预览（只读）——返回目录的日期统计与抓取耗时估算，**不抓正文**。
+   * 用于界面上"选完年份立刻看到这个区间里有多少篇、预计抓多久"。
+   */
+  webSourceDateStats(fromYear: number, toYear: number): Promise<ApiResult<{ stats: unknown }>> {
+    return ipcRenderer.invoke(IPC.WEB_SOURCE_DATE_STATS, { fromYear, toYear })
+  },
+  /* 2026-10-05 P6 已删除三个手动抓取方法（webSourceCrawl / webSourceCrawlCancel /
+     webSourceResetFetchState）与抓取进度订阅 onWebCrawlProgress —— 抓取由生成管线按任务自动完成。 */
+  /**
+   * 2026-10-05（用户要求）：暂停 / 继续正在进行的抓取。
+   * 暂停期间不发起新请求（已抓到的篇都已入缓存与账本），点「继续」从原处接着跑。
+   */
+  webSourceSetCrawlPaused(paused: boolean): Promise<ApiResult<{ paused: boolean }>> {
+    return ipcRenderer.invoke(IPC.WEB_SOURCE_SET_CRAWL_PAUSED, { paused })
+  },
+  /** 2026-10-05：正文缓存占用（资料库面板显示；`byState` = Migration 050 的三态计数） */
+  webSourceCacheStats(): Promise<
+    ApiResult<{ entries: number; bytes: number; byState: { ok: number; 'no-body': number; blocked: number } }>
+  > {
+    return ipcRenderer.invoke(IPC.WEB_SOURCE_CACHE_STATS, {})
+  },
+  /** 2026-10-05：清空正文缓存（只删缓存，不动 sources / 目录 / 账本） */
+  webSourceClearCache(): Promise<ApiResult<{ cleared: number }>> {
+    return ipcRenderer.invoke(IPC.WEB_SOURCE_CLEAR_CACHE, {})
+  },
+  /**
+   * 2026-10-06（用户需求）：「建立缓存与索引」的**只读**规划（不写库、不抓网页、不调模型）。
+   * 生成前闸门与设置页面板共用同一个数。省略年份时按默认区间 2005–2025。
+   */
+  cacheBuildPlan(params?: { fromYear?: number; toYear?: number }): Promise<ApiResult<CacheBuildPlan>> {
+    return ipcRenderer.invoke(IPC.CACHE_BUILD_PLAN, params ?? {})
+  },
+  /** Phase 10 P5：设置该任务的网页资料年份区间（null = 回退全局默认） */
+  setTaskWebYears(taskId: string, fromYear: number | null, toYear: number | null): Promise<ApiResult<{ task: unknown }>> {
+    return ipcRenderer.invoke(IPC.WRITING_SET_WEB_YEARS, { taskId, fromYear, toYear })
+  },
   /** 更新标签 */
   updateTag(id: string, name?: string): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.TAGS_UPDATE, { id, name })
@@ -142,9 +179,37 @@ const api = {
   getCompilation(compilationId: string): Promise<ApiResult<{ compilation: unknown }>> {
     return ipcRenderer.invoke(IPC.COMPILATION_GET, { compilationId })
   },
-  /** 生成资料汇编（AI 服务 Phase 6.1 实现） */
-  generateCompilation(taskId: string, title: string): Promise<ApiResult<{ compilation: unknown; interrupted?: { stage: string; message: string; percent: number } }>> {
-    return ipcRenderer.invoke(IPC.COMPILATION_GENERATE, { taskId, title })
+  /** 生成资料汇编（AI 服务 Phase 6.1 实现）；`skipConvergence` = 第二组 ⑤ 的逃生门（本轮不做收敛，全量送入） */
+  generateCompilation(taskId: string, title: string, skipConvergence = false): Promise<ApiResult<{ compilation: unknown; interrupted?: { stage: string; message: string; percent: number } }>> {
+    return ipcRenderer.invoke(IPC.COMPILATION_GENERATE, { taskId, title, skipConvergence })
+  },
+  /** 生成前的材料规模预检（只读，2026-10-05 用户要求 P1）：不落库、不抓网页、不调大模型，只提示不限制 */
+  estimateCompilationMaterials(
+    taskId: string,
+    instruction: string
+  ): Promise<
+    ApiResult<{
+      segments: number
+      chars: number
+      localSegments: number
+      webSegments: number
+      estimatedWindows: number
+      estimatedMinutes: number
+      /** 第二组 ⑤：「全量送入」（不做收敛）口径的规模，供确认框同时展示两个数 */
+      fullSegments: number
+      fullChars: number
+      fullEstimatedWindows: number
+      fullEstimatedMinutes: number
+      droppedSegments: number
+      droppedChars: number
+      convergedSources: number
+      noSignalSources: number
+      converged: boolean
+      contextRange: number
+      reIncludedSegments: number
+    }>
+  > {
+    return ipcRenderer.invoke(IPC.COMPILATION_ESTIMATE_MATERIALS, { taskId, instruction })
   },
   /** 中断续跑（Phase 6.x：大模型异常中断后，从断点继续生成资料汇编） */
   continueCompilation(compilationId: string): Promise<ApiResult<{ compilation: unknown; interrupted?: { stage: string; message: string; percent: number } }>> {
@@ -280,7 +345,7 @@ const api = {
     return ipcRenderer.invoke(IPC.SETTINGS_GET)
   },
   /** 更新本地设置 */
-  updateSettings(patch: { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string; keepAwake?: boolean; docScale?: 'small' | 'medium' | 'large'; onboardingDone?: boolean }): Promise<ApiResult<unknown>> {
+  updateSettings(patch: { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string; keepAwake?: boolean; docScale?: 'small' | 'medium' | 'large'; onboardingDone?: boolean; webYearFrom?: number; webYearTo?: number }): Promise<ApiResult<unknown>> {
     return ipcRenderer.invoke(IPC.SETTINGS_UPDATE, { patch })
   },
   /** 本地向量索引状态（语义检索是否可用、失败原因、后台队列剩余、重建进度） */
@@ -303,10 +368,6 @@ const api = {
   /** 来源本地快照（第三批 C）：读库里已存的正文，不联网；用于"网站改版后仍能核对原文" */
   getSourceSnapshot(id: string): Promise<ApiResult<{ id: string; kind: 'file' | 'url'; title: string; url?: string; snapshotAt?: string; publishedAt?: string; text: string; totalChars: number; truncated: boolean; shortText: boolean }>> {
     return ipcRenderer.invoke(IPC.SOURCES_GET_SNAPSHOT, { id })
-  },
-  /** 已锁定的网页材料篇数（只读）：面板据此显示「本任务已锁定 N 篇」 */
-  getWebMaterials(taskId: string): Promise<ApiResult<{ pinned: number }>> {
-    return ipcRenderer.invoke(IPC.COMPILATION_WEB_MATERIALS, { taskId })
   },
   /** 来源位置（锚点）统计（只读）：锚点是后台异步写的，界面据此显示"多少段已记录位置" */
   getAnchorStats(

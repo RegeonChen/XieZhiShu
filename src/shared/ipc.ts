@@ -5,6 +5,7 @@
 import type {
   ApiResult,
   AppSettings,
+  CacheBuildPlan,
   Compilation,
   CompilationContradiction,
   CompilationInterrupt,
@@ -18,6 +19,7 @@ import type {
   Segment,
   Source,
   Tag,
+  WebArticleDateStats,
   WebSite,
   WritingTask,
   TaskMode
@@ -59,6 +61,12 @@ export const IPC = {
   COMPILATION_GET: 'compilation:get',
   COMPILATION_GENERATE: 'compilation:generate',
   COMPILATION_CONTINUE: 'compilation:continue',
+  /**
+   * 生成前的**材料规模预检**（只读，2026-10-05 用户要求 P1）：界面在真正开始生成之前弹一次确认，
+   * 显示预计规模与耗时（只提示、不限制）。主进程侧只跑与生成同一条「候选召回 + 保守闸门」路径，
+   * **不落库、不抓网页、不调大模型**——因此本轮将要抓取的网页资料不计入估算。
+   */
+  COMPILATION_ESTIMATE_MATERIALS: 'compilation:estimateMaterials',
   COMPILATION_RESOLVE_CONTRADICTION: 'compilation:resolveContradiction',
   COMPILATION_CONFIRM: 'compilation:confirm',
   COMPILATION_REORDER: 'compilation:reorder',
@@ -143,12 +151,14 @@ export const IPC = {
   /** 后退 / 前进 / 重新加载 */
   WEB_BROWSER_ACTION: 'web:browserAction',
 
-  /* 纳入新网页材料（第三批 A1：材料集合首次落定后，新文章由用户显式纳入） */
-  /** 查询本任务已锁定的网页材料篇数（只读；供面板显示"已锁定 N 篇"） */
-  COMPILATION_WEB_MATERIALS: 'compilation:webMaterials',
+  /* 2026-10-05 P6 已删除：`COMPILATION_WEB_MATERIALS`（旧的「本任务已锁定 N 篇网页材料」只读计数）。
+     网页材料自 Phase 10 P5 起改为**任务级全量重抓重筛**（`task_web_fetch` 账本），表 `task_web_materials`
+     的"锁定"语义已不再参与生成，连同该只读入口一并删除（表本身按项目约定保留不删）。 */
   // 来源位置（锚点）统计（只读，Phase 9 / S4 补）
   COMPILATION_ANCHOR_STATS: 'compilation:anchorStats',
   // 疑似超出范围的段落复核（Phase 9 补充：界面兜底）
+  // 2026-10-05 用户裁定：这类提示无实际价值，**界面入口已整体关闭**（越界段落直接保留）；
+  // 通道与主进程实现**保留不动**，避免影响导出导入与旧数据。
   COMPILATION_SCOPE_CHECK: 'compilation:scopeCheck',
   COMPILATION_EXCLUDE_ITEMS: 'compilation:excludeItems',
 
@@ -180,6 +190,24 @@ export const IPC = {
   WEB_SOURCE_ADD: 'webSource:add',
   WEB_SOURCE_REMOVE: 'webSource:remove',
   WEB_SOURCE_UPDATE: 'webSource:update',
+  /** Phase 10 P3：目录的日期统计（年份区间预览：区间内 N 篇 / 占比 / 预计抓取时长；只读、不抓取）。
+   *  2026-10-05（用户裁定 A）：入口从资料库面板移到**任务流程的年份控件**，此通道保留。 */
+  WEB_SOURCE_DATE_STATS: 'webSource:dateStats',
+  /* 2026-10-05 P6 已删除三个手动抓取通道：WEB_SOURCE_CRAWL / WEB_SOURCE_CRAWL_CANCEL /
+     WEB_SOURCE_RESET_FETCH_STATE（抓取由生成管线按任务自动完成，见 `compilation-service`）。 */
+  /** 2026-10-05（用户要求）：**暂停/继续抓取**——暂停期间不发新请求，账本与缓存都保留，点「继续」从原处接着跑 */
+  WEB_SOURCE_SET_CRAWL_PAUSED: 'webSource:setCrawlPaused',
+  /** 2026-10-05：正文缓存占用（多少篇 / 多少字节），资料库面板显示用 */
+  WEB_SOURCE_CACHE_STATS: 'webSource:cacheStats',
+  /** 2026-10-05：清空正文缓存（只删缓存；sources / 目录 / 账本都不动） */
+  WEB_SOURCE_CLEAR_CACHE: 'webSource:clearCache',
+  /**
+   * 2026-10-06（用户需求）：「建立缓存与索引」的**只读规划**——区间内共几篇 / 已有几篇 /
+   * 还要建几篇 / 几篇永远建不了（越权地址）+ 本地待索引几篇。**只读**：不写库、不抓网页、不调模型。
+   */
+  CACHE_BUILD_PLAN: 'cacheBuild:plan',
+  /** Phase 10 P5：设置该任务的网页资料年份区间（按任务保存；新建任务继承全局默认） */
+  WRITING_SET_WEB_YEARS: 'writing:setWebYears',
 
   /* 窗口 */
   WINDOW_FOCUS: 'window:focus',
@@ -203,6 +231,7 @@ export const IPC_EVENTS = {
   COMPILATION_ADVICE: 'compilation:advice',
   /** 工作区文件被移除且已被资料汇编引用：需用户确认是否删除该来源的卡片（2026-08-28） */
   WORKSPACE_SOURCE_REMOVED: 'workspace:sourceRemoved'
+  /* 2026-10-05 P6 已删除：WEB_CRAWL_PROGRESS（手动抓取进度事件，随手动抓取入口一起删除） */
 } as const
 
 // ============================================================
@@ -245,6 +274,30 @@ export interface WebSourceUpdateReq {
   title?: string
 }
 export type WebSourceUpdateRes = { site: WebSite }
+
+/** Phase 10 P3：年份区间筛选预览（只读；只统计目录，不抓正文） */
+export interface WebSourceDateStatsReq {
+  fromYear: number
+  toYear: number
+}
+export type WebSourceDateStatsRes = { stats: WebArticleDateStats }
+
+/**
+ * 2026-10-06（用户需求）：「建立缓存与索引」的**只读规划**。
+ * 省略年份时按需求默认区间（2005–2025）计算；反向/非法年份返回错误而不是静默采用。
+ */
+export interface CacheBuildPlanReq {
+  fromYear?: number
+  toYear?: number
+}
+
+/** Phase 10 P5：设置**该任务**的网页资料年份区间（null = 清除任务级设置、回退全局默认） */
+export interface WritingSetWebYearsReq {
+  taskId: string
+  fromYear: number | null
+  toYear: number | null
+}
+export type WritingSetWebYearsRes = { task: WritingTask }
 
 export interface SourceGetReq {
   id: string
@@ -367,16 +420,6 @@ export type SourceSnapshotRes = {
 }
 
 /**
- * 已锁定的网页材料篇数（只读）：面板据此显示「本任务已锁定 N 篇」
- * （重启软件后同样可见——不依赖"本次会话生成过"）。
- */
-export interface CompilationWebMaterialsReq {
-  taskId: string
-}
-export type CompilationWebMaterialsRes = {
-  pinned: number
-}
-/**
  * 来源位置（锚点）的统计（只读，Phase 9 / S4 补：锚点是生成后台异步写的，此前完全看不见）。
  * `ambiguous` = 该段的证据/正文在来源里出现**多处**（主来源按此检查），说明位置可能不是唯一那处。
  */
@@ -489,6 +532,77 @@ export type CompilationGetRes = { compilation: Compilation }
 export interface CompilationGenerateReq {
   taskId: string
   title: string
+  /**
+   * 第二组 ⑤ 的**逃生门**（2026-10-06 用户已同意）：`true` = 本轮**不做收敛**（全量送入），
+   * 跳过"文章内取高信号段 ± 上下文"，行为回到今天。**每次生成单独选择、不持久化**。
+   */
+  skipConvergence?: boolean
+}
+/**
+ * 生成前的「材料规模预检」（只读，2026-10-05 用户要求 P1）。
+ * `instruction` 就是本次的撰写要求原文——估算要用它取粗筛关键词（与生成同口径），
+ * 但**不用它调用大模型**（只用本地兜底关键词或已缓存结果）。
+ */
+export interface CompilationEstimateMaterialsReq {
+  taskId: string
+  instruction: string
+}
+/**
+ * 第二组 ⑤：**文章内取高信号段 ± 上下文**的统计（随生成结果/预检透出，用于如实汇报）。
+ * 取舍只由信号决定（有信号就留），**不设每篇段数或总字数上限**；被跳过的段仍留在库里。
+ */
+export interface CompilationConvergence {
+  /** 上下文半径（单位：段） */
+  contextRange: number
+  /** 闸门后（= 勾选「本轮不做收敛」时的口径）的段数 / 字数 */
+  gatedSegments: number
+  gatedChars: number
+  /** 参与取段的来源数（= 闸门放行的来源里有切段的那些） */
+  sources: number
+  /** 这些来源正文的全部切段与字数 */
+  articleSegments: number
+  articleChars: number
+  /** ⑤ 收敛后（**本轮真正送细读**）的段数 / 字数 */
+  keptSegments: number
+  keptChars: number
+  /** 因无信号未送（**仍在库中、仍可打开**）的段数 / 字数 */
+  droppedSegments: number
+  droppedChars: number
+  /** 整篇无信号、本轮整篇不送的来源数 */
+  noSignalSources: number
+  /** ⑤ 按"有信号 / 紧邻上下文"从闸门之外重新纳入的段数 */
+  reIncludedSegments: number
+}
+export type CompilationEstimateMaterialsRes = {
+  /** **收敛后**进入本轮细读的段落数（= 界面确认框默认展示的口径） */
+  segments: number
+  /** 这些段落的正文总字数 */
+  chars: number
+  /** 其中本地文件来源的段数 */
+  localSegments: number
+  /** 其中网页来源的段数（只含本任务**已纳入**的网页来源，不含本轮将要抓取的量） */
+  webSegments: number
+  /** 预计细读窗口数（= ceil(chars / WINDOW_MAX_CHARS)，与生成管线同一常量） */
+  estimatedWindows: number
+  /** 预计耗时（分钟，按单窗口 ETA 先验折算，仅用于提示） */
+  estimatedMinutes: number
+  /** 「本轮不做收敛（全量送入）」口径的段数 / 字数 / 窗口数 / 预计分钟 */
+  fullSegments: number
+  fullChars: number
+  fullEstimatedWindows: number
+  fullEstimatedMinutes: number
+  /** 本轮因无信号未送（仍在库中）的段数 / 字数 */
+  droppedSegments: number
+  droppedChars: number
+  /** 参与取段的来源数 / 其中整篇无信号（整篇不送）的来源数 */
+  convergedSources: number
+  noSignalSources: number
+  /** 是否真的做了收敛（闸门一个都没留下、退回宽召回时为 false） */
+  converged: boolean
+  /** 上下文半径（段） */
+  contextRange: number
+  /** ⑤ 从闸门已丢弃的段里按信号/上下文重新纳入的段数 */
+  reIncludedSegments: number
 }
 /**
  * 生成管线内各「后置阶段」的结果摘要（供渲染层在生成汇总里提示/统计）：
@@ -532,31 +646,41 @@ export type CompilationExtractScan = CompilationStageScan & {
   conflictsKept?: number
 }
 /**
- * 网页资料库本轮抓取情况（2026-09-12 第二批）：
- * 抓取设有篇数/字数上限，达上限时在生成汇总里如实告知，避免用户误以为"几百篇都用上了"。
+ * 网页资料库本轮抓取情况（**2026-10-05 P6 对齐 Phase 10 P4/P5 口径**）：
+ * 「按发布时间全量抓取 → 只看正文判相关性 → 未命中的正文丢弃」——**不再有篇数上限**，
+ * 因此 `skippedByCap` / `reused` / `newCandidates`（旧的"锁定 300 篇 / 上限截断"语义）已删除。
  */
 export type CompilationWebScan = {
   sites: number
   /** 同步失败的站点数（>0 = 本轮网页材料可能不完整） */
   siteErrors: number
-  /** 标题级命中的候选文章数 */
+  /** 本轮**实际抓取**的篇数（= 采用 + 未命中丢弃） */
   hits: number
-  /** 实际抓取落库的文章数 */
+  /** 通过正文相关性判定、落成该任务来源的篇数 */
   fetched: number
-  /** 因上限被跳过的候选数 */
-  skippedByCap: number
   /** 落库正文总字数 */
   chars: number
-  /** 本轮**复用**已锁定网页材料的篇数（第三批 A1；>0 = 本次是重新生成，沿用首次落定的集合） */
-  reused?: number
-  /** 站点上检测到、但未纳入的新命中文章数（由用户点「纳入新材料」决定是否抓取） */
-  newCandidates?: number
+  /** 正文**未通过相关性判定**而丢弃的篇数（正文按裁定丢弃，只留哈希与字数） */
+  relevanceDropped?: number
+  /** A1 标题探针不过（老文章失效 → 站点返回通用模板页）而丢弃的篇数（2026-10-05 由 `article-crawl` 计数） */
+  invalidBody?: number
+  /** 空标题候选（sitemap）判为模板/失效页 / 与同站其它 URL 正文逐字相同的篇数 */
+  shortBody?: number
+  templateRepeat?: number
+  /** 单篇抓取失败（网络/超时/非 2xx）的篇数 */
+  fetchFailed?: number
+  /** 不在「http(s) + 同域白名单」内、未发起请求的篇数（安全过滤，2026-10-05） */
+  blocked?: number
 }
 export type CompilationGenerateRes = {
   compilation: Compilation
   contradictionScan?: CompilationStageScan
   extractScan?: CompilationExtractScan
   webScan?: CompilationWebScan
+  /** 第二组 ⑤：本轮的取段统计（勾选「本轮不做收敛」时为 undefined） */
+  convergence?: CompilationConvergence
+  /** 本轮**真正送细读**的候选块数（勾选「本轮不做收敛」时 = 闸门后的全部段数） */
+  candidateChunks?: number
   interrupted?: CompilationInterrupt
 }
 /** 中断续跑（Phase 6.x：会话内断点续传） */
@@ -968,6 +1092,16 @@ export interface IpcMapping {
   [IPC.WEB_SOURCE_ADD]: { _req: WebSourceAddReq; _res: ApiResult<WebSourceAddRes> }
   [IPC.WEB_SOURCE_REMOVE]: { _req: WebSourceRemoveReq; _res: ApiResult<void> }
   [IPC.WEB_SOURCE_UPDATE]: { _req: WebSourceUpdateReq; _res: ApiResult<WebSourceUpdateRes> }
+  [IPC.WEB_SOURCE_DATE_STATS]: { _req: WebSourceDateStatsReq; _res: ApiResult<WebSourceDateStatsRes> }
+  ,
+  [IPC.WEB_SOURCE_SET_CRAWL_PAUSED]: { _req: { paused: boolean }; _res: ApiResult<{ paused: boolean }> },
+  [IPC.WEB_SOURCE_CACHE_STATS]: {
+    _req: Record<string, never>
+    _res: ApiResult<{ entries: number; bytes: number; byState: { ok: number; 'no-body': number; blocked: number } }>
+  },
+  [IPC.WEB_SOURCE_CLEAR_CACHE]: { _req: Record<string, never>; _res: ApiResult<{ cleared: number }> },
+  [IPC.CACHE_BUILD_PLAN]: { _req: CacheBuildPlanReq; _res: ApiResult<CacheBuildPlan> }
+  [IPC.WRITING_SET_WEB_YEARS]: { _req: WritingSetWebYearsReq; _res: ApiResult<WritingSetWebYearsRes> }
   [IPC.SOURCES_GET]: { _req: SourceGetReq; _res: ApiResult<{ source: Source; tags: Tag[] }> }
   [IPC.SOURCES_RENDER_HTML]: { _req: SourceRenderHtmlReq; _res: ApiResult<SourceRenderHtmlRes> }
   [IPC.SOURCES_GET_FILE_URL]: { _req: SourceGetReq; _res: ApiResult<SourceGetFileUrlRes> }
@@ -992,6 +1126,7 @@ export interface IpcMapping {
   [IPC.COMPILATION_GET]: { _req: CompilationGetReq; _res: ApiResult<CompilationGetRes> }
   [IPC.COMPILATION_GENERATE]: { _req: CompilationGenerateReq; _res: ApiResult<CompilationGenerateRes> }
   [IPC.COMPILATION_CONTINUE]: { _req: CompilationContinueReq; _res: ApiResult<CompilationContinueRes> }
+  [IPC.COMPILATION_ESTIMATE_MATERIALS]: { _req: CompilationEstimateMaterialsReq; _res: ApiResult<CompilationEstimateMaterialsRes> }
   [IPC.COMPILATION_RESOLVE_CONTRADICTION]: { _req: CompilationResolveContradictionReq; _res: ApiResult<CompilationResolveContradictionRes> }
   [IPC.COMPILATION_CONFIRM]: { _req: CompilationConfirmReq; _res: ApiResult<CompilationConfirmRes> }
   [IPC.COMPILATION_REORDER]: { _req: CompilationReorderReq; _res: ApiResult<CompilationReorderRes> }
@@ -1050,8 +1185,6 @@ export interface IpcMapping {
   [IPC.WEB_BROWSER_CLOSE]: { _req: void; _res: ApiResult<{ ok: true }> }
   [IPC.WEB_BROWSER_NAVIGATE]: { _req: WebBrowserNavigateReq; _res: ApiResult<WebBrowserStateRes> }
   [IPC.WEB_BROWSER_ACTION]: { _req: WebBrowserActionReq; _res: ApiResult<WebBrowserStateRes> }
-  // 纳入新网页材料
-  [IPC.COMPILATION_WEB_MATERIALS]: { _req: CompilationWebMaterialsReq; _res: ApiResult<CompilationWebMaterialsRes> }
   [IPC.COMPILATION_ANCHOR_STATS]: { _req: CompilationAnchorStatsReq; _res: ApiResult<CompilationAnchorStatsRes> }
   [IPC.COMPILATION_SCOPE_CHECK]: { _req: CompilationScopeCheckReq; _res: ApiResult<CompilationScopeCheckRes> }
   [IPC.COMPILATION_EXCLUDE_ITEMS]: { _req: CompilationExcludeItemsReq; _res: ApiResult<CompilationExcludeItemsRes> }

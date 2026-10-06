@@ -10,6 +10,7 @@ import type { RetrievedChunk, Source } from '../../shared/types'
 import { setDb } from '../db/connection'
 import { runMigrations } from '../db/migrate'
 import { getSourcesByIds } from '../db/sources'
+import { stripStructureNoise } from '../parse/structure-noise'
 import { vectorSearch } from './vector-store'
 import { vectorToBuffer } from './indexer'
 
@@ -37,6 +38,16 @@ export function isTitleLikeLine(text: string): boolean {
 interface Chunk {
   text: string
   position: string
+  /**
+   * 该块在**来源正文（`sources.cleaned_text`）**里的字符区间（左闭右开；2026-10-05 用户裁定 P0-2）。
+   *
+   * 为什么要在**切块时**就算：切块本身就是对来源正文的一次切片，"这段文字在原文的哪个位置"在切的那一刻
+   * 就已经确定了。事后拿段落的逐字证据去来源里 `indexOf` 回溯（旧做法）会因为页眉噪声/改写/重复出现而失败，
+   * 实测约 2/86 段落拿不到来源位置、只能让用户自己翻页。带上区间后，"段落 → 块 → 页码"全程只做区间比较。
+   * 这两字段与 `source_blocks.char_start/char_end` **同一坐标系**（都相对 `cleaned_text`），因此可以直接比较。
+   */
+  charStart: number
+  charEnd: number
 }
 
 /**
@@ -61,38 +72,58 @@ function chunkSourceText(source: Source): Chunk[] {
   return chunks
 }
 
-/** 按段落切分；超长段落按句读（。！？；）折分成 ≤ CHUNK_MAX 的块 */
+/**
+ * 按段落切分；超长段落按句读（。！？；）折分成 ≤ CHUNK_MAX 的块。
+ *
+ * 每块都带上它在原文里的字符区间（见 `Chunk.charStart`）：行内位置由"物理行起点 + 去空白后的偏移"算出，
+ * 句读折分时按累计字符数推进，**不做任何事后回溯匹配**。
+ */
 export function chunkText(text: string): Chunk[] {
-  const paras = text
-    .split(/\r?\n+/)
-    .map((p) => p.trim())
-    .filter(Boolean)
   const chunks: Chunk[] = []
-  paras.forEach((p, i) => {
-    const pos = `第${i + 1}段`
+  let lineStart = 0
+  let paraIndex = 0
+  // 逐物理行扫描：自己在行里取偏移，因此不需要事后 text.indexOf（重复段落也不会串位）
+  for (const line of text.split(/\r?\n/)) {
+    const raw = line
+    const nextLineStart = lineStart + raw.length + 1
+    let from = 0
+    let to = raw.length
+    while (from < to && /\s/.test(raw[from])) from += 1
+    while (to > from && /\s/.test(raw[to - 1])) to -= 1
+    const base = lineStart
+    lineStart = nextLineStart
+    if (from >= to) continue
+    const p = raw.slice(from, to)
+    paraIndex += 1
+    const pos = `第${paraIndex}段`
     // 跳过标题行：志书/年鉴中章节标题独立成段，无实质内容（Task 3.4.4）
-    if (isTitleLikeLine(p)) return
+    if (isTitleLikeLine(p)) continue
     if (p.length <= CHUNK_MAX) {
-      chunks.push({ text: p, position: pos })
-      return
+      chunks.push({ text: p, position: pos, charStart: base + from, charEnd: base + to })
+      continue
     }
     // 按句切分
     const sentences = p.split(/(?<=[。！？；;])/).map((s) => s.trim()).filter(Boolean)
     let buf = ''
     let sub = 1
-    const flush = () => {
+    let cursor = base + from
+    let bufStart = cursor
+    const flush = (): void => {
       if (buf) {
-        chunks.push({ text: buf, position: `${pos}（片段${sub}）` })
+        chunks.push({ text: buf, position: `${pos}（片段${sub}）`, charStart: bufStart, charEnd: cursor })
         sub += 1
         buf = ''
+        bufStart = cursor // 下一块从当前游标起（切分点正好落在句末标点之后）
       }
     }
     for (const s of sentences) {
-      if (buf.length + s.length > CHUNK_MAX) flush()
+      // 先判"加上这一句会超限"→ 先把已有内容成块，再让这一句自己起一块
+      if (buf.length > 0 && buf.length + s.length > CHUNK_MAX) flush()
       buf += s
+      cursor += s.length
     }
     flush()
-  })
+  }
   return chunks
 }
 
@@ -102,16 +133,25 @@ export function chunkText(text: string): Chunk[] {
  * 由 AI 细读时再按时间/事实/条目等做更细的切分。仅剔除标题行。
  */
 export function chunkParagraphs(text: string): Chunk[] {
-  const paras = text
-    .split(/\r?\n+/)
-    .map((p) => p.trim())
-    .filter(Boolean)
   const chunks: Chunk[] = []
-  paras.forEach((p, i) => {
-    const pos = `第${i + 1}段`
-    if (isTitleLikeLine(p)) return
-    chunks.push({ text: p, position: pos })
-  })
+  let lineStart = 0
+  let paraIndex = 0
+  for (const line of text.split(/\r?\n/)) {
+    const raw = line
+    const nextLineStart = lineStart + raw.length + 1
+    let from = 0
+    let to = raw.length
+    while (from < to && /\s/.test(raw[from])) from += 1
+    while (to > from && /\s/.test(raw[to - 1])) to -= 1
+    const base = lineStart
+    lineStart = nextLineStart
+    if (from >= to) continue
+    const p = raw.slice(from, to)
+    paraIndex += 1
+    const pos = `第${paraIndex}段`
+    if (isTitleLikeLine(p)) continue
+    chunks.push({ text: p, position: pos, charStart: base + from, charEnd: base + to })
+  }
   return chunks
 }
 
@@ -120,50 +160,178 @@ export function chunkParagraphs(text: string): Chunk[] {
  *  段 ≤ maxChars（默认 1000）→ 一块；超长段按句（。！？；;）折成 ≤maxChars 的子块，共享同一 paragraphIndex（“段级保留/剔除”）。
  *  位置记 “第N段” 或 “第N段（片段M）”。 */
 export const CHUNK_PARAGRAPH_MAX = 1000
-export interface ParagraphChunk { text: string; position: string; paragraphIndex: number }
+export interface ParagraphChunk {
+  text: string
+  position: string
+  paragraphIndex: number
+  /** 该块在来源正文里的字符区间（左闭右开）：与 `source_blocks.char_start/char_end` 同一坐标系（2026-10-05 P0-2） */
+  charStart: number
+  charEnd: number
+}
 export function chunkByParagraphs(text: string, maxChars: number = CHUNK_PARAGRAPH_MAX): ParagraphChunk[] {
+  return chunkByParagraphsInner(text, maxChars, null)
+}
+
+/**
+ * 与 `chunkByParagraphs` 完全同口径，但**行起点用调用方给的基准下标**（`baseLineStarts`）。
+ *
+ * 用途（第一组 ④，2026-10-05）：`stripStructureNoise` 先剔掉目录/版权页/导航尾部等**整行**噪声，
+ * 再由本函数切段。如果仍按"剔除后文本"自己算偏移，返回的 `charStart/charEnd` 就不再指向**来源正文**
+ * （`sources.cleaned_text` / `source_blocks` 的坐标系），段落定位会整体前移。
+ * `baseLineStarts[i]` = 剔除后第 i 行在**来源原文**里的起点（`stripStructureNoise` 返回值里现成带出）。
+ */
+export function chunkByParagraphsFromBase(
+  text: string,
+  baseLineStarts?: number[],
+  maxChars: number = CHUNK_PARAGRAPH_MAX
+): ParagraphChunk[] {
+  return chunkByParagraphsInner(text, maxChars, baseLineStarts ?? null)
+}
+
+/**
+ * **剔结构噪声 + 切段**（第一组 ④，2026-10-05）：本地文件与网页共用一条入口。
+ * `kind` 取 `file` / `web`（与 `stripStructureNoise` 同口径）；`charStart/charEnd` 仍指向**来源正文**。
+ */
+export function chunkByParagraphsNoiseStripped(
+  text: string,
+  kind: 'file' | 'web',
+  maxChars: number = CHUNK_PARAGRAPH_MAX
+): { chunks: ParagraphChunk[]; removedChars: number; removals: ReturnType<typeof stripStructureNoise>['removals'] } {
+  const stripped = stripStructureNoise(text ?? '', kind)
+  return {
+    chunks: chunkByParagraphsInner(stripped.text, maxChars, stripped.keptLineStarts),
+    removedChars: stripped.removedChars,
+    removals: stripped.removals
+  }
+}
+
+function chunkByParagraphsInner(text: string, maxChars: number, baseLineStarts: number[] | null): ParagraphChunk[] {
   // 方案 C（上下文感知）：两类合并——①【/条目起始行里，把同一条目的多句/多行合并为整条（保留主语/上文，避免“其中…”缺上下文）；
   // ②非【 的普通文本仍按句末标点断段（保证“保守本地闸门”能按段剔除无关内容）。过滤明确噪声（页标记/纯页码/目录点线）。
   // 索引/数据行（如“高中 个 183”）不在此过滤，保留交给细读模型判断。
-  const lines = text.split(/\r?\n+/).map((p) => p.trim())
-  const merged: string[] = []
-  let buf = ''
-  let inEntry = false
-  const flush = () => { if (buf) { merged.push(buf); buf = '' } }
-  for (const L of lines) {
-    if (!L) { flush(); inEntry = false; continue }        // 空行 = 段边界
-    if (isPdfNoiseLine(L)) continue                        // 噪声直接跳过
-    if (startsNewEntry(L)) { flush(); buf = L; inEntry = true; continue } // 新条目：保留头部并整段合并
-    if (isTitleLikeLine(L)) { flush(); inEntry = false; continue }       // 副标题/章节标题 = 段边界（丢弃）
-    if (!buf) { buf = L; inEntry = false; continue }
-    if (inEntry) { buf = joinLine(buf, L); continue }      // 条目内多句/多行合并，保留完整上下文
-    if (endsSentencePunct(buf)) { flush(); buf = L }       // 普通文本：句末标点处断段（保留闸门粒度）
-    else buf = joinLine(buf, L)
+  //
+  // 位置口径（2026-10-05 P0-2）：逐物理行自己算偏移（行起点 + 行内去空白偏移），合并出来的段取首行起点、
+  // 末行终点——**不做任何事后 text.indexOf 回溯**，重复段落也不会串位。
+  // 2026-10-05 第一组 ④：`baseLineStarts` 提供时，行起点改用它（见 `chunkByParagraphsFromBase`）。
+  const lines: string[] = []
+  const lineStarts: number[] = []
+  /** 每行**去掉首尾空白后**的终点（原文下标；用它算区间就不必反推 joinLine 插进来的空格） */
+  const lineEnds: number[] = []
+  /** 逐行扫描游标（上一段换行之后的第一个字符） */
+  let scan = 0
+  let lineNo = 0
+  const pushLine = (segFrom: number, segTo: number, segment: string, base: number): void => {
+    lines.push(segment.slice(segFrom, segTo))
+    lineStarts.push(base + segFrom)
+    lineEnds.push(base + segTo)
   }
+  for (const m of text.matchAll(/\r?\n+/g)) {
+    const at = m.index ?? 0
+    const segment = text.slice(scan, at)
+    let segFrom = 0
+    let segTo = segment.length
+    while (segFrom < segTo && /\s/.test(segment[segFrom])) segFrom += 1
+    while (segTo > segFrom && /\s/.test(segment[segTo - 1])) segTo -= 1
+    pushLine(segFrom, segTo, segment, baseLineStarts ? (baseLineStarts[lineNo] ?? scan) : scan)
+    /*
+     * 行号必须按**换行符个数**前进，不能按"分段次数"前进（2026-10-06 修，⑤ 落地时用真实库抽查发现）：
+     * `stripStructureNoise` 的 `keptLineStarts` 是**逐行**记账的——空行也是一个"保留行"、也占一个下标；
+     * 而本函数的 `/\r?\n+/` 会把连续换行（正文里极常见的空行分段）**并成一次匹配**。
+     * 旧实现每次只 +1，于是每遇到一处空行，`lineNo` 就比真实行号小 1，`baseLineStarts[lineNo]` 取到**上一行**
+     * 的起点 → `charStart` 一路向前漂（实测某网页来源抽查 8 段只有 1 段坐标正确、第 2 段直接指到上一行的
+     * "申报条件"）。按换行符个数前进即与 `keptLineStarts` 的记账完全一致。
+     */
+    lineNo += Math.max(1, m[0].match(/\n/g)?.length ?? 0)
+    scan = at + m[0].length
+  }
+  {
+    const segment = text.slice(scan)
+    let segFrom = 0
+    let segTo = segment.length
+    while (segFrom < segTo && /\s/.test(segment[segFrom])) segFrom += 1
+    while (segTo > segFrom && /\s/.test(segment[segTo - 1])) segTo -= 1
+    pushLine(segFrom, segTo, segment, baseLineStarts ? (baseLineStarts[lineNo] ?? scan) : scan)
+  }
+  const merged: { text: string; charStart: number; charEnd: number }[] = []
+  let buf = ''
+  let bufStart = 0
+  let bufEnd = 0
+  let inEntry = false
+  /**
+   * 本条目的**正文**已经合并了几行（不含【…】标题行本身）。
+   *
+   * 为什么需要这个计数：条目首行常以句末标点结尾（`【华侨中学新疆高中班】…预科班 39 人。`），
+   * 而它的正文往往还有下一行（`在 2014 年高考中，首届 37 位新疆班毕业生全部被录取。`）。
+   * 只按"`buf` 以句末标点结尾就不再合并"会把这条正文切掉（旧实现就是这样，与"整条合并"的设计意图不符）。
+   * 允许再合并**一行**，既保住条目的完整上下文，又不会把后面独立成段的句子吞进来。
+   */
+  let entryMerged = 0
+  const flush = (): void => {
+    if (buf) {
+      merged.push({ text: buf, charStart: bufStart, charEnd: bufEnd })
+      buf = ''
+    }
+    entryMerged = 0
+  }
+  lines.forEach((L, li) => {
+    if (!L) { flush(); inEntry = false; return }        // 空行 = 段边界
+    if (isPdfNoiseLine(L)) return                       // 噪声直接跳过
+    if (startsNewEntry(L)) {                            // 新条目：保留头部并整段合并
+      flush()
+      buf = L
+      bufStart = lineStarts[li]
+      bufEnd = lineEnds[li]
+      inEntry = true
+      return
+    }
+    if (isTitleLikeLine(L)) { flush(); inEntry = false; return }       // 副标题/章节标题 = 段边界（丢弃）
+    if (!buf) { buf = L; bufStart = lineStarts[li]; bufEnd = lineEnds[li]; inEntry = false; return }
+    if (inEntry && entryMerged < 1) {                   // 条目正文（最多再一行）
+      buf = joinLine(buf, L)
+      bufEnd = lineEnds[li]
+      entryMerged += 1
+      if (endsSentencePunct(buf)) flush()
+      return
+    }
+    if (endsSentencePunct(buf)) {                       // 普通文本：句末标点处断段（保留闸门粒度）
+      flush()
+      buf = L
+      bufStart = lineStarts[li]
+      bufEnd = lineEnds[li]
+    } else {
+      buf = joinLine(buf, L)
+      bufEnd = lineEnds[li]
+    }
+  })
   flush()
 
   const out: ParagraphChunk[] = []
   merged.forEach((p, i) => {
     const pos = `第${i + 1}段`
-    if (p.length <= maxChars) {
-      out.push({ text: p, position: pos, paragraphIndex: i })
+    if (p.text.length <= maxChars) {
+      out.push({ text: p.text, position: pos, paragraphIndex: i, charStart: p.charStart, charEnd: p.charEnd })
       return
     }
-    const sentences = p.split(/(?<=[。！？；;])/).map((s) => s.trim()).filter(Boolean)
+    const sentences = p.text.split(/(?<=[。！？；;])/).map((s) => s.trim()).filter(Boolean)
     let b = ''
     let sub = 1
-    const flush = () => {
+    let cursor = p.charStart
+    let bStart = cursor
+    const flushSub = (): void => {
       if (b) {
-        out.push({ text: b, position: `第${i + 1}段（片段${sub}）`, paragraphIndex: i })
+        out.push({ text: b, position: `第${i + 1}段（片段${sub}）`, paragraphIndex: i, charStart: bStart, charEnd: cursor })
         sub += 1
         b = ''
+        bStart = cursor
       }
     }
     for (const s of sentences) {
-      if (b.length + s.length > maxChars) flush()
+      // 先判"加上这一句会超限"→ 先把已有内容成块，再让这一句自己起一块（与旧行为一致）
+      if (b.length > 0 && b.length + s.length > maxChars) flushSub()
       b += s
+      cursor += s.length
     }
-    flush()
+    flushSub()
   })
   return out
 }
@@ -265,14 +433,27 @@ export function retrieveChunks(params: RetrieveParams): RetrievedChunk[] {
   const qTerms = q.split(/\s+/).filter(Boolean)
 
   // 词法路：score > 0 保留（score === 0 = 与标题完全无字面/字符对关联 → 非常确定无关，剔除）
+  // 顺手登记"position → 字符区间"：向量路的块来自历史索引，没有区间时可据此按位置回填（只在本次已切出的块里查，不查库）
+  const rangeByPosition = new Map<string, { charStart: number; charEnd: number }>()
   for (const s of sources) {
     for (const c of chunkSourceText(s)) {
       const score = scoreChunk(q, c.text, s.title, qBigrams, qTerms)
-      if (score <= 0) continue
       const key = `${s.id}|${c.position}`
+      if (!rangeByPosition.has(key)) rangeByPosition.set(key, { charStart: c.charStart, charEnd: c.charEnd })
+      if (score <= 0) continue
       if (seen.has(key)) continue
       seen.add(key)
-      out.push({ sourceId: s.id, sourceTitle: s.title, position: c.position, text: c.text, score })
+      out.push({
+        sourceId: s.id,
+        sourceTitle: s.title,
+        position: c.position,
+        text: c.text,
+        score,
+        sourceKind: s.kind,
+        sourcePublishedAt: s.publishedAt,
+        charStart: c.charStart,
+        charEnd: c.charEnd
+      })
     }
   }
 
@@ -286,12 +467,19 @@ export function retrieveChunks(params: RetrieveParams): RetrievedChunk[] {
       if (seen.has(key)) continue
       seen.add(key)
       const srcTitle = sourceById.get(h.sourceId)?.title ?? ''
+      const src = sourceById.get(h.sourceId)
+      const range = rangeByPosition.get(key)
       out.push({
         sourceId: h.sourceId,
         sourceTitle: srcTitle,
         position: h.position,
         text: h.text,
-        score: Math.round(h.score * 100) // 向量补入块的展示分（0-100 量纲）
+        score: Math.round(h.score * 100), // 向量补入块的展示分（0-100 量纲）
+        sourceKind: src?.kind,
+        sourcePublishedAt: src?.publishedAt,
+        // 历史索引块与当前切块对得上就带上区间；对不上就如实缺省（落锚点时回退逐字匹配）
+        charStart: range?.charStart,
+        charEnd: range?.charEnd
       })
     }
   }
@@ -323,6 +511,78 @@ if (import.meta.vitest) {
       expect(chunks[0].text).toContain('第一段')
       expect(chunks[0].position).toBe('第1段')
       expect(chunks.length).toBeGreaterThanOrEqual(2)
+    })
+
+    /*
+     * 2026-10-05 用户裁定（P0-2）：切块时**就算出字符区间**，作为"这一段在来源正文的哪里"的生成期依据。
+     * 不变量：区间取回原文 = 块文字（补上块内被 joinLine 插进的分隔空格），且与 `source_blocks` 同坐标系。
+     */
+    it('chunkText 给每块带上字符区间：区间取回原文与块文字一致（含句中折分）', () => {
+      const text = '前言。\n\n' + '甲'.repeat(501) + '。乙。\n\n后记。'
+      const chunks = chunkText(text)
+      const a = chunks.find((c) => c.text.startsWith('甲'))!
+      // 首块：从"甲"开始，到第一句句末标点为止（500 字上限 + 句读吸附）
+      expect(text.slice(a.charStart, a.charEnd)).toBe(a.text)
+      expect(a.charStart).toBe(text.indexOf('甲'))
+      // 第二块（片段）：起点接着上一块的终点，取回原文同样一致
+      const b = chunks.find((c) => c.text.includes('乙'))!
+      expect(b.charStart).toBe(a.charEnd)
+      expect(text.slice(b.charStart, b.charEnd)).toBe(b.text)
+      expect(b.text).toContain('乙。')
+    })
+
+    it('chunkText / chunkParagraphs 的区间跳过行首空白且与段落一一对应', () => {
+      const text = '  第一段。  \n第二段。\n\n第三段。'
+      const lineChunks = chunkText(text)
+      expect(lineChunks.map((c) => [c.position, c.text])).toEqual([
+        ['第1段', '第一段。'],
+        ['第2段', '第二段。'],
+        ['第3段', '第三段。']
+      ])
+      for (const c of lineChunks) expect(text.slice(c.charStart, c.charEnd)).toBe(c.text)
+      expect(lineChunks[0].charStart).toBe(text.indexOf('第一段'))
+    })
+
+    /*
+     * 2026-10-06（⑤ 落地时用**真实库**抽查发现的既有坐标缺陷，回归用例）：
+     * `stripStructureNoise` 的 `keptLineStarts` 逐行记账（空行也占一个下标），而切段器用 `/\r?\n+/`
+     * 一次吃掉整串换行——旧实现按"分段次数"递增行号，于是**每遇到一处空行，行号就少 1**、
+     * `baseLineStarts[lineNo]` 取到上一行的起点，`charStart` 一路向前漂（真实网页抽查 8 段仅 1 段正确）。
+     * 不变量：给的 `baseLineStarts` 正确时，`charStart/charEnd` 取回**原文**必须等于段文字（忽略 joinLine 插入的空格）。
+     */
+    it('chunkByParagraphsFromBase 遇空行后行号仍与 baseLineStarts 对齐（坐标不向前漂）', () => {
+      const src = ['甲甲甲甲甲甲甲甲甲甲。', '', '乙乙乙乙乙乙乙乙乙乙。', '丙丙丙丙丙丙丙丙丙丙。'].join('\n')
+      const st = stripStructureNoise(src, 'web')
+      const chunks = chunkByParagraphsFromBase(st.text, st.keptLineStarts)
+      expect(chunks.map((c) => c.text)).toEqual(['甲甲甲甲甲甲甲甲甲甲。', '乙乙乙乙乙乙乙乙乙乙。', '丙丙丙丙丙丙丙丙丙丙。'])
+      for (const c of chunks) expect(src.slice(c.charStart, c.charEnd)).toBe(c.text)
+      // 第二段起点必须落在"乙"上——旧实现在这里会指到上一段的尾部（空行使行号少 1）
+      expect(chunks[1].charStart).toBe(src.indexOf('乙'))
+      expect(chunks[2].charStart).toBe(src.indexOf('丙'))
+    })
+
+    it('chunkByParagraphs 合并行时区间覆盖整段（首行起点 → 末行终点）', () => {      const text = '【概况】普通高中录取 2599 人，参加\n高考学生 2940 人。\n\n第二段内容。'
+      const chunks = chunkByParagraphs(text)
+      const first = chunks[0]
+      // 合并后的段：区间从"【"起，到"人。"之后止（不含换行与段间空行）
+      expect(text.slice(first.charStart, first.charEnd)).toBe('【概况】普通高中录取 2599 人，参加\n高考学生 2940 人。')
+      expect(first.text).toBe('【概况】普通高中录取 2599 人，参加高考学生 2940 人。')
+      const second = chunks[1]
+      expect(text.slice(second.charStart, second.charEnd)).toBe('第二段内容。')
+    })
+
+    it('chunkByParagraphs 超长段落折分：子块区间首尾相接、取回原文一致', () => {      const sentence = '园所数量逐年增加。'
+      const long = sentence.repeat(30) // 240 字，按 100 字上限折成 3 块
+      const full = '教育\n\n' + long
+      const chunks = chunkByParagraphs(full, 100)
+      expect(chunks.length).toBe(3)
+      // 区间取回**全文**必须与块文字逐字一致（这就是"生成期记录的区间"的可信度来源）
+      for (const c of chunks) expect(full.slice(c.charStart, c.charEnd)).toBe(c.text)
+      // 第一块从正文首字起（标题行"教育"被丢弃，但它的 4 个字符仍占着原文位置）
+      expect(chunks[0].charStart).toBe(full.indexOf('园所'))
+      for (let i = 1; i < chunks.length; i++) expect(chunks[i].charStart).toBe(chunks[i - 1].charEnd)
+      // 每块都是整句，不把句子切一半
+      for (const c of chunks) expect(c.text.endsWith('。')).toBe(true)
     })
 
     it('chunkParagraphs keeps whole original paragraphs without splitting sentences (Phase 6.1)', () => {
@@ -380,8 +640,7 @@ if (import.meta.vitest) {
       expect(joined).toContain('高中个 2645')
     })
 
-    it('chunkByParagraphs keeps a whole entry even with sentence-final punctuation inside (方案C整段上下文)', () => {
-      const text = [
+    it('chunkByParagraphs keeps a whole entry even with sentence-final punctuation inside (方案C整段上下文)', () => {      const text = [
         '【华侨中学新疆高中班】2014 年，长乐华侨中学新疆高中班有 4 个班级，学生 146 人，其中预科班 39 人。',
         '在 2014 年高考中，首届 37 位新疆班毕业生全部被录取。',
         '【达标高中建设】长乐二中、七中晋级“省二级达标校”。'

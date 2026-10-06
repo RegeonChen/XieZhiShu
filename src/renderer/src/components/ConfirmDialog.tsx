@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, type ReactNode } from 'react'
 import { zhCN } from '../i18n/zh-CN'
 
 interface ConfirmDialogProps {
@@ -10,6 +10,11 @@ interface ConfirmDialogProps {
   busy?: boolean
   busyText?: string
   error?: string
+  /**
+   * 可选附加区（消息与按钮之间）：例如「本轮不做收敛（全量送入）」复选框。
+   * 做成插槽是为了让通用确认框不认识具体业务，同时不必把文案硬编码在组件里。
+   */
+  children?: ReactNode
   onConfirm: () => void
   onCancel: () => void
 }
@@ -24,6 +29,7 @@ function ConfirmDialog({
   busy,
   busyText,
   error,
+  children,
   onConfirm,
   onCancel
 }: ConfirmDialogProps) {
@@ -41,6 +47,7 @@ function ConfirmDialog({
       <div className="confirm-dialog" role="dialog" aria-modal="true" aria-label={title}>
         <h4 className="confirm-dialog__title">{title}</h4>
         <p className="confirm-dialog__message">{message}</p>
+        {children}
         {error ? <p className="confirm-dialog__error">{error}</p> : null}
         <div className="confirm-dialog__actions">
           <button type="button" className="source-list__btn" onClick={onCancel} disabled={busy} autoFocus>

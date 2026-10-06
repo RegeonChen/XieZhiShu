@@ -1,54 +1,34 @@
-/**
- * site-crawler.ts —— 网页资料库：站点发现 / 标题粗筛 / 增量导入正文（2026-08-11）。
- *
- * 生成初稿流程中的角色：
- *   1. 对每个注册站点同步文章清单（抓栏目/列表页提取同域 .htm 文章链接，增量 upsert 到 web_site_articles）。
- *   2. 用撰写要求（query）对文章标题做粗筛（bigram 命中），得到"与本次撰写相关的文件"。
- *   3. 命中文章增量抓取正文落库为 kind='url' 的 sources（已抓过则跳过），并入生成 scope。
- * 与本地文件完全一致：后续 RAG 检索 / 矛盾扫描 / 来源溯源复用现有逻辑。
- * 抓取使用 Electron net（url-fetcher.fetchUrl），遵循 http/https 白名单。
- */
-import type { Source } from '../../shared/types'
-import { fetchUrl } from '../import/url-fetcher'
-import { logMain } from '../logger'
-import { bigrams } from '../rag/retrieval'
-import { enqueueIndex } from '../rag/indexer'
-import { getSourceByUrl, getAnySourceByUrl, insertSource, updateSourcePublishedAt } from '../db/sources'
-import {
-  getWebSiteById,
-  getSiteArticle,
-  listSiteArticles,
-  listWebSites,
-  updateWebSiteLastSynced,
-  updateSiteArticleFetched,
-  updateSiteArticlePublished,
-  upsertSiteArticles
-} from '../db/web-sites'
 
+/** * site-crawler.ts —— 网页资料库：**站点发现 + 文章清单同步 + 检索词分层**（2026-08-11 起，2026-10-05 清理）。 * * 生成流程中的角色（2026-10-04 Phase 10 P4/P5 起，**抓正文已不在本文件**）： *   1. `syncSite` 对每个注册站点同步文章清单（feed → sitemap → BFS 列表页），增量 upsert 到 `web_site_articles`， *      并在发现期用 L1–L5 日期阶梯（`article-date.ts`）给每条清单项定发布时间； *   2. `classifyTopicTerm` / `scanTopicLexicon` 提供**检索词分层词表**（specific/weak/generic/scope）， *      **排序**（本文件已删除的旧排序）与**正文相关性判定**（`body-relevance.ts`）共用同一套词表； *   3. robots.txt（`Crawl-delay` 秒→毫秒）+ 礼貌限速（`awaitPoliteDelay`，先占位再等待）。 * **按年份区间抓正文 + 抓取账本**已迁到 `article-crawl.ts`（P4/P5）；旧的"标题粗筛 + 增量导入正文" * （`filterArticlesByQuery` / `importSiteArticle` 及其纯函数与单测）已于 **2026-10-05 P6 删除**。 * 抓取使用 Electron net（url-fetcher.fetchUrl），遵循 http/https 白名单。 */
+import { fetchUrl }
+ from '../import/url-fetcher'
+import { logMain }
+ from '../logger'
+import { parseUrlDate, pickArticleDate, type ArticleDateSource }
+ from './article-date'
+import { getWebSiteById,  updateWebSiteLastSynced,  upsertSiteArticles}
+ from '../db/web-sites'
 /** 政务网站常见的静态文章后缀 */
-const ARTICLE_SUFFIX_RE = /\.(?:htm|html|shtml|aspx?)\b/i
-
-/** 单次站点同步最多抓取列表页数（首页 + 栏目/分页），控制耗时 */
-const SYNC_MAX_PAGES = 20
-/** 站点发现 BFS 最大深度（0=仅首页） */
-const SYNC_MAX_DEPTH = 2
-/** 增量导入正文的串行延迟（毫秒），降低对目标站点的压力 */
-const IMPORT_DELAY_MS = 120
-
+const ARTICLE_SUFFIX_RE = /\.(?:htm|html|shtml|aspx?)\b/i/** 单次站点同步最多抓取列表页数（首页 + 栏目/分页），控制耗时 */
+const SYNC_MAX_PAGES = 20/** 站点发现 BFS 最大深度（0=仅首页） */
+const SYNC_MAX_DEPTH = 2/** 增量导入正文的串行延迟（毫秒），降低对目标站点的压力 */
+const IMPORT_DELAY_MS = 120/** Phase 10 P4：同一站点两次请求之间的**最小**间隔（毫秒）——抓取流水线据此计算 ETA 的物理下限 */
+export const WEB_FETCH_MIN_INTERVAL_MS = IMPORT_DELAY_MS/** * robots.txt 里 `Crawl-delay` 的上限（毫秒）。 * **2026-10-04 修正的单位缺陷**：`parseRobotsTxt` 原先按**秒**解析、`politeDelay` 按**毫秒**使用， * 于是站点声明 `Crawl-delay: 10` 时我们仍按 120ms 连发（快约 83 倍）——站点声明的限速被完全忽略， * 而且看不出来。现在统一在解析处换算为毫秒；另设上限，避免个别站点声明 `Crawl-delay: 3600` * 让一次生成卡死数小时（超上限时记日志说明）。 */
+const CRAWL_DELAY_MAX_MS = 10000/** * 空标题候选（sitemap 发现，`title === ''`）的正文长度下限。 * 这类候选取不到"抓取前就知道的标题"，A1 的标题探针必然命中页面自己的 `<title>` → 形同不存在； * 改用两条可判定的兜底：① 清洗后正文短于此长度；② 同站点**别的 URL** 已抓到完全相同的正文（模板页成群出现）。 */
 /** 简单 HTML → 纯文本（标签/实体/空白清理，供提取链接文本） */
 /** 成熟正文提取（D8）：优先取 article/main/内容容器，去导航/页脚/广告噪音，并保留表格单元格（如志书数据表）。纯函数、可测试。 */
 export function extractArticleText(html: string): string {
   let doc = html
   const article = /<article[^>]*>([\s\S]*?)<\/article>/i.exec(html)
-  const main = /<main[^>]*>([\s\S]*?)<\/main>/i.exec(html)
-  if (article) {
-    doc = article[1]
-  } else if (main) {
-    doc = main[1]
-  } else {
-    const content = /<(?:div|section)[^>]*class=["'][^"']*(?:content|article|news|detail|body|text)[^"']*["'][^>]*>([\s\S]*?)<\/(?:div|section)>/i.exec(html)
-    if (content) doc = content[1]
-  }
+        const main = /<main[^>]*>([\s\S]*?)<\/main>/i.exec(html)
+        if (article) { doc = article[1]  }
+ 
+else if (main) { doc = main[1]  }
+ 
+else {
+  const content = /<(?:div|section)[^>]*class=["'][^"']*(?:content|article|news|detail|body|text)[^"']*["'][^>]*>([\s\S]*?)<\/(?:div|section)>/i.exec(html)
+        if (content)
+  doc = content[1]  }
   // 表格保留：单元格→制表符，行→换行
   doc = doc.replace(/<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi, (_, c: string) => c.trim() + '\t')
   doc = doc.replace(/<tr[^>]*>/gi, '\n').replace(/<\/tr>/gi, '\n')
@@ -56,1256 +36,754 @@ export function extractArticleText(html: string): string {
   doc = doc.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
   doc = doc.replace(/<(?:nav|footer|aside)\b[^>]*>[\s\S]*?<\/(?:nav|footer|aside)>/gi, '')
   doc = doc.replace(/<[^>]+>/g, ' ')
-  doc = doc
-    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"').replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)))
-    .replace(/[ \t]+/g, ' ').replace(/[ \t]*\n[ \t]*/g, '\n').replace(/\n{3,}/g, '\n\n')
-  return doc.trim()
-}
-
-/** 从 URL 生成可读的兜底标题（E2）：页面没有 <title> 时不再把整条 URL 当标题（导出附录/来源小卡里很难看，
- *  而且 URL 里的 `t20251203` 这类数字会被年份兜底误读成 2025）。 */
-export function fallbackTitleFromUrl(url: string): string {
-  let host = url
-  try {
-    host = new URL(url).host
-  } catch {
-    /* 非法 URL：原样返回 */
-  }
-  return host + '（页面无标题）'
-}
-
-/** 匹配用归一化：去掉空白与全角空格（纯函数） */
-function stripSpaces(value: string | undefined): string {
-  return (value ?? '').replace(/[\s\u3000]/g, '')
-}
-
-/**
- * 抓回来的页面**是否真的包含这篇文章**（纯函数，A1）。
- *
- * 动因（2026-09-12 用户实测）：站点对**已失效的老文章 URL 返回 HTTP 200 + 一份通用模板页**
- * （导航 + 其他文章列表 + 页脚）。此前我们只看状态码就把整页模板文本当正文入库——
- * 最新任务 208 篇里 119 篇（57%）是这样，正文完全相同且不含该文章标题；
- * 这些"材料"随后被当成素材送进大模型，产出「长乐新添一所普通高中，将于9月开学。」这类只剩标题的段落。
- *
- * 判定：标题核心片段（去空白后前 8 字）必须出现在**提取正文**或**原始 HTML** 里。
- * 标题过短（<4 字）时不判定（避免误杀）；原始 HTML 命中即可通过（防止结构化提取器输出的正文不含标题）。
- */
-export function pageContainsArticle(rawHtml: string | undefined, text: string | undefined, title: string): boolean {
-  const t = stripSpaces(title)
-  if (t.length < 4) return true
-  const probe = t.slice(0, Math.min(8, t.length))
-  return stripSpaces(text).includes(probe) || stripSpaces(rawHtml).includes(probe)
-}
-
-/**
- * 正文清洗（A2）：去掉模板页噪音——前部导航/面包屑、后部「相关新闻/更多>>」列表与页脚备案。
- * 真实站点实测：正文回退为整页文本时，90 行里有 40 行是导航、40 行是推荐列表，真正的正文只有 1 行。
- * 纯函数、可测试；只做**保守裁剪**（找不到标记就原样返回），绝不改动正文内容本身。
- */
-export function cleanArticleText(text: string, title?: string): string {
-  const raw = (text ?? '').replace(/\r/g, '')
-  if (!raw.trim()) return ''
-  const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean)
-  const FOOTER_RE = /(版权所有|违法和不良信息|ICP备|公网安备|互联网新闻信息服务许可证|关于我们网络实名)/
-  const LIST_TAIL_RE = /(更多>>|更多»|相关新闻|相关阅读|相关推荐)/
-  let end = lines.length
-  for (let i = 0; i < lines.length; i++) {
-    if (FOOTER_RE.test(lines[i]) || LIST_TAIL_RE.test(lines[i])) {
-      end = i
-      break
-    }
-  }
-  // 起点：面包屑（您的位置）之后，或标题行处（标题通常紧跟在导航之后）
-  let start = 0
-  const t = stripSpaces(title)
-  const probe = t.length >= 4 ? t.slice(0, Math.min(8, t.length)) : ''
-  let breadcrumb = -1
-  let titleLine = -1
-  for (let i = 0; i < end; i++) {
-    if (breadcrumb < 0 && lines[i].includes('您的位置')) breadcrumb = i
-    if (titleLine < 0 && probe && stripSpaces(lines[i]).includes(probe)) titleLine = i
-  }
-  if (breadcrumb >= 0) start = breadcrumb + 1
-  else if (titleLine > 0) start = titleLine
-  const kept: string[] = []
-  const seen = new Set<string>()
-  for (const line of lines.slice(start, end)) {
-    // 导航/栏目是短行且重复出现，去重（正文长行一律保留，避免误删同句）
-    if (line.length <= 12) {
-      if (seen.has(line)) continue
-      seen.add(line)
-    }
-    kept.push(line)
-  }
-  return kept.join('\n').trim()
-}
-
-/**
- * 从 HTML 提取发布日期（E10）：meta property/name 的 published_time/publishdate/pubdate，或 <time datetime>，或可见日期文本。纯函数、可测试。 */
-export function extractPublishedDate(html: string): string | null {
-  const metas = [
-    /<meta[^>]+(?:property|name)=["'](?:article:published_time|publishdate|pubdate|date)["'][^>]+content=["']([^"']+)["']/i,
-    /<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["'](?:article:published_time|publishdate|pubdate|date)["']/i
-  ]
-  for (const re of metas) {
-    const m = re.exec(html)
-    if (m && m[1]) return m[1].trim().slice(0, 20) || null
-  }
-  const time = /<time[^>]*datetime=["']([^"']+)["']/i.exec(html)
-  if (time && time[1]) return time[1].trim().slice(0, 20)
-  /*
-   * 可见日期文本。**日/月的候选必须长在前**（`3[01]|[12]\d|0?[1-9]`）：
-   * 原写法把 `0?[1-9]` 放在最前，而结尾没有强制分隔符，于是 "2016-06-22" 只匹配到 "2016-06-2"，
-   * 实测把库里 477 篇网页的发布时间全部截掉了最后一位（2026-09-12 真实数据核对）。
-   */
-  const text = /(20\d{2}\s*[年./-]\s*(?:1[0-2]|0?[1-9])\s*[月./-]\s*(?:3[01]|[12]\d|0?[1-9])\s*日?)/.exec(html)
-  return text ? text[1].trim() : null
-}
-
+  doc = doc    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')    .replace(/&quot;/g, '"').replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)))    .replace(/[ \t]+/g, ' ').replace(/[ \t]*\n[ \t]*/g, '\n').replace(/\n{3,}/g, '\n\n')
+        return doc.trim()}
 export function stripTags(html: string): string {
-  return html
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)))
-    .replace(/[ \t\r\n]+/g, ' ')
-    .trim()
-}
-
-/**
- * 从 HTML 中提取全部超链接（绝对 URL + 链接文本），供发现文章清单用（纯函数、可测试）。
- */
-export function extractLinks(html: string, baseUrl: string): { href: string; text: string }[] {
+  return html    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')    .replace(/<[^>]+>/g, '')    .replace(/&nbsp;/g, ' ')    .replace(/&amp;/g, '&')    .replace(/&lt;/g, '<')    .replace(/&gt;/g, '>')    .replace(/&quot;/g, '"')    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)))    .replace(/[ \t\r\n]+/g, ' ')    .trim()}
+/** * 从 HTML 中提取全部超链接（绝对 URL + 链接文本），供发现文章清单用（纯函数、可测试）。 */
+export function extractLinks(html: string, baseUrl: string): { href: string;
+  text: string }[] {
   const out: { href: string; text: string }[] = []
   const anchorRe = /<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi
   let m: RegExpExecArray | null
   while ((m = anchorRe.exec(html)) !== null) {
-    const href = m[1].trim()
-    if (!href || href.startsWith('#') || href.startsWith('javascript:')) continue
-    let abs: URL
-    try {
-      abs = new URL(href, baseUrl)
-    } catch {
-      continue
-    }
-    if (abs.protocol !== 'http:' && abs.protocol !== 'https:') continue
-    const text = stripTags(m[2])
-    out.push({ href: abs.toString(), text })
+  const href = m[1].trim()
+        if (!href || href.startsWith('#') || href.startsWith('javascript:'))
+  continue
+      let abs: URL
+  try { abs = new URL(href, baseUrl)
   }
-  return out
-}
-
+ catch {
+  continue    }
+  if (abs.protocol !== 'http:' && abs.protocol !== 'https:')
+  continue
+      const text = stripTags(m[2])
+  out.push({ href: abs.toString(), text })
+  }
+  return out}
 /** 常用"栏目/列表/频道页"的 basename（去掉扩展名后）——这些几乎不可能是单篇文章页。 */
-const LIST_PAGE_BASENAMES = new Set(['list', 'index', 'default', 'channel', 'category', 'column', 'col', 'lm', 'more', 'news_list'])
-
-/**
- * 是否为"栏目/列表页"链接（纯函数、可测试、强特征、低误伤）：
- * 只用 URL 的 basename 判断主流列表/栏目页命名（list/index/default/channel/category/column/col/lm/more/news_list）。
- * 真实文章页的 basename 通常是日期/文章 ID/数字字母串（如 t20250101_xxx.htm、20250101.htm、a.htm），不在名单内，不会被误伤。
- */
+const LIST_PAGE_BASENAMES = new Set(['list', 'index', 'default', 'channel', 'category', 'column', 'col', 'lm', 'more', 'news_list'])/** * 是否为"栏目/列表页"链接（纯函数、可测试、强特征、低误伤）： * 只用 URL 的 basename 判断主流列表/栏目页命名（list/index/default/channel/category/column/col/lm/more/news_list）。 * 真实文章页的 basename 通常是日期/文章 ID/数字字母串（如 t20250101_xxx.htm、20250101.htm、a.htm），不在名单内，不会被误伤。 */
 export function isListPageUrl(url: string): boolean {
   let u: URL
-  try { u = new URL(url) } catch { return false }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false
+  try { u = new URL(url) }
+ catch {
+  return false }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:')
+        return false
   const path = u.pathname.replace(/\/+$/, '')
-  const seg = path.split('/').filter(Boolean)
-  const last = seg.length > 0 ? seg[seg.length - 1] : ''
+        const seg = path.split('/').filter(Boolean)
+        const last = seg.length > 0 ? seg[seg.length - 1] : ''
   const base = last.replace(/\.(?:htm|html|shtml|aspx?)$/i, '').toLowerCase()
-  if (LIST_PAGE_BASENAMES.has(base)) return true
-  // 路径段命中列表关键词（如 /more/<栏目ID>.shtml 这类"更多"列表页）且 basename 为纯数字 → 视为列表页。
+        if (LIST_PAGE_BASENAMES.has(base))
+        return true  // 路径段命中列表关键词（如 /more/<栏目ID>.shtml 这类"更多"列表页）且 basename 为纯数字 → 视为列表页。
   // 真实文章页的 basename 通常含日期/文章 ID（含字母）或不带列表关键词的路径段，不会被命中，避免误伤相关文章。
-  if (/^\d+$/.test(base) && seg.some((s) => LIST_PAGE_BASENAMES.has(s.toLowerCase()))) return true
-  return false
-}
-
+  if (/^\d+$/.test(base) && seg.some((s) => LIST_PAGE_BASENAMES.has(s.toLowerCase())))
+        return true
+  return false}
 /** 是否为"文章页"链接（静态后缀判定；纯函数、可测试） */
-export function isArticleUrl(url: string): boolean {
-  // ① 排除常见栏目/列表页（如 .../list.shtml、.../index.html），避免列表页被当作单篇文章收录
-  if (isListPageUrl(url)) return false
-  return ARTICLE_SUFFIX_RE.test(url.split('?')[0].split('#')[0])
-}
-
-/**
- * 领域下位词兜底表（2026-08-13）：
- * 政务新闻标题是"下位概念"（如"配建幼儿园""新学年校历""学校拟招生"），
- * 与撰写章节标题"学前教育"几乎没有字面/字符对重叠，纯标题 bigram 永远对不上。
- * 当撰写关键词命中某领域的 key（如"教育"）时，把该领域的高区分度下位词一并纳入候选与精过滤。
- *
- * 收窄原则（2026-08-13 实测修正；2026-08-14 再次收窄）：
- * 1. 不含宽泛的 key 本身（"教育"），避免"政绩观学习教育""警示教育"政治学习文章误召回。
- * 2. 剔除"入学"——它作为子串会命中"深**入学**习贯彻"（"深入"+"学习"跨词拼接），
- *    导致大量"学习教育"类政治新闻被误判为教育相关（test1 实测 5 篇误召回的直接根因）。
- * 3. 剔除"教学/小学/中学/大学/义务/教师/学生/课程/普惠"等泛教育词——
- *    它们会召回"重庆中新大学""兰州教育信息化""厦门大学"等外地/高等教育新闻，与本地学前教育志书无关。
- * 4. 2026-08-14 再剔除"招生/校历/学位"：这三词过宽，会命中"中招计划""普高自主招生""义务教育招生"
- *    "小学剩余学位抽签"等大量中小学/高中新闻，正文精过滤仅因含"招生/学位"就落库，
- *    使网页召回的无关文章膨胀到 300+ 篇，矛盾扫描被噪音淹没（test2 漏检 test1 矛盾的主因之一）。
- *    学前教育真正的招生/学位类新闻，其正文必含"幼儿园/学前/幼儿/保育/入园"等核心词，仍会被保留。
- * 只保留学前教育高区分度核心词（学前/幼儿园/幼儿/保育/托育/入园/幼教），后续可按需扩展其他门类。
- */
-const DOMAIN_HINTS: { key: string; words: string[] }[] = [
-  {
-    key: '教育',
-    words: ['学前', '幼儿园', '幼儿', '保育', '托育', '入园', '幼教']
-  }
-]
-
-/** 从撰写指令中提取用于粗筛的短关键词（标题/子标题），避免整句长文本稀释 bigram（纯函数、可测试） */
+export function isArticleUrl(url: string): boolean { // ① 排除常见栏目/列表页（如 .../list.shtml、.../index.html），避免列表页被当作单篇文章收录
+  if (isListPageUrl(url))
+        return false
+  return ARTICLE_SUFFIX_RE.test(url.split('?')[0].split('#')[0])}
+/** * 领域下位词兜底表（2026-08-13）： * 政务新闻标题是"下位概念"（如"配建幼儿园""新学年校历""学校拟招生"）， * 与撰写章节标题"学前教育"几乎没有字面/字符对重叠，纯标题 bigram 永远对不上。 * 当撰写关键词命中某领域的 key（如"教育"）时，把该领域的高区分度下位词一并纳入候选与精过滤。 * * 收窄原则（2026-08-13 实测修正；2026-08-14 再次收窄）： * 1. 不含宽泛的 key 本身（"教育"），避免"政绩观学习教育""警示教育"政治学习文章误召回。 * 2. 剔除"入学"——它作为子串会命中"深**入学**习贯彻"（"深入"+"学习"跨词拼接）， *    导致大量"学习教育"类政治新闻被误判为教育相关（test1 实测 5 篇误召回的直接根因）。 * 3. 剔除"教学/小学/中学/大学/义务/教师/学生/课程/普惠"等泛教育词—— *    它们会召回"重庆中新大学""兰州教育信息化""厦门大学"等外地/高等教育新闻，与本地学前教育志书无关。 * 4. 2026-08-14 再剔除"招生/校历/学位"：这三词过宽，会命中"中招计划""普高自主招生""义务教育招生" *    "小学剩余学位抽签"等大量中小学/高中新闻，正文精过滤仅因含"招生/学位"就落库， *    使网页召回的无关文章膨胀到 300+ 篇，矛盾扫描被噪音淹没（test2 漏检 test1 矛盾的主因之一）。 *    学前教育真正的招生/学位类新闻，其正文必含"幼儿园/学前/幼儿/保育/入园"等核心词，仍会被保留。 * 只保留学前教育高区分度核心词（学前/幼儿园/幼儿/保育/托育/入园/幼教），后续可按需扩展其他门类。 */
+const DOMAIN_HINTS: { key: string; words: string[] }[] = [  { key: '教育', words: ['学前', '幼儿园', '幼儿', '保育', '托育', '入园', '幼教']  }
+]/** 从撰写指令中提取用于粗筛的短关键词（标题/子标题），避免整句长文本稀释 bigram（纯函数、可测试） */
 export function extractTopicTerms(query: string): string[] {
   const out: string[] = []
   const add = (t: string): void => {
-    const v = t.trim()
-    if (v && v.length >= 2 && v.length <= 20 && !out.includes(v)) out.push(v)
+  const v = t.trim()
+        if (v && v.length >= 2 && v.length <= 20 && !out.includes(v))
+  out.push(v)
   }
   // 1) 引号内短文本（标题/子标题）：'…' "…" 「…」 “…” 『…』
-  for (const m of query.matchAll(/[「『“"']([^」』”"']{2,20})[」』”"']/g)) {
-    add(m[1])
+  for (const m of query.matchAll(/[「『“"']([^」』”"']{2,20})[」』”"']/g)) { add(m[1])
   }
   // 2) "标题为/标题是/标题：…" 后的短词（无引号时的兜底）。`主题` 同样计入：
-  //    预设提示词已改为「本次资料收集的主题为 ……」，用户若删掉引号，这一步才兜得住。
-  //    2026-08-14 容错：捕获组前允许一个可选的引号字符，兼容"标题为“学前教育“"这类
-  //    引号不配对（结尾误用左引号）的输入——否则会因紧跟引号而提取失败、回退整句，
-  //    导致矛盾扫描/网页检索的主题词不稳定（test3 漏检矛盾的直接根因）。
+
+  //     预设提示词已改为「本次资料收集的主题为 ……」，用户若删掉引号，这一步才兜得住。
+  //     2026-08-14 容错：捕获组前允许一个可选的引号字符，兼容"标题为“学前教育“"这类
+  //     引号不配对（结尾误用左引号）的输入——否则会因紧跟引号而提取失败、回退整句，
+  //     导致矛盾扫描/网页检索的主题词不稳定（test3 漏检矛盾的直接根因）。
   const titled = query.match(/(?:标题|题目|主题)[为是]?\s*[:：]?\s*[「『“"'」』”]?([^\s，。；、,.「『』」“”"']+)/)
-  if (titled) add(titled[1])
-  // 3) 引号/引导语都没取到时，若检索词本身就是**关键词列表**（生成管线把大模型提取的
-  //    「标题 + 关键词」用空格拼成 coarseQuery），必须逐词当作检索词，不能抹掉词间空格拼成一整句——
-  //    否则 `title.includes(整串)` 永远不成立。2026-09-12 实测：正是这一步把
-  //    「高中学校设置 高中 新建 扩建 …」压成一个长串，导致抓取上限的"按相关度排序"全部 0 分、
-  //    退化成按清单顺序截断（丢掉 478 篇里的切题材料，汇编网页段落 77 → 4 段）。
+        if (titled) add(titled[1])  // 3) 引号/引导语都没取到时，若检索词本身就是**关键词列表**（生成管线把大模型提取的
+
+  //     「标题 + 关键词」用空格拼成 coarseQuery），必须逐词当作检索词，不能抹掉词间空格拼成一整句——
+  //     否则 `title.includes(整串)` 永远不成立。2026-09-12 实测：正是这一步把
+  //     「高中学校设置 高中 新建 扩建 …」压成一个长串，导致抓取上限的"按相关度排序"全部 0 分、
+  //     退化成按清单顺序截断（丢掉 478 篇里的切题材料，汇编网页段落 77 → 4 段）。
   if (out.length === 0) {
-    const tokens = query.split(/\s+/).map((s) => s.trim()).filter(Boolean)
-    if (tokens.length >= 2) for (const tk of tokens) add(tk)
+  const tokens = query.split(/\s+/).map((s) => s.trim()).filter(Boolean)
+        if (tokens.length >= 2)
+        for (const tk of tokens) add(tk)
   }
   // 4) 仍提取不到任何短词时回退整句（兼容"无标题、纯要求"的指令）
   if (out.length === 0) {
-    const fallback = query.replace(/\s+/g, '')
-    if (fallback) out.push(fallback)
+  const fallback = query.replace(/\s+/g, '')
+        if (fallback)
+  out.push(fallback)
   }
-  return out
-}
-
+  return out}
 /** 依据关键词命中领域 key，扩展出该领域的高区分度下位词（纯函数、可测试） */
 export function expandDomainHints(terms: string[]): string[] {
   const out = new Set<string>()
-  for (const t of terms) {
-    for (const d of DOMAIN_HINTS) {
-      if (t.includes(d.key)) for (const w of d.words) out.add(w)
-    }
+        for (const t of terms) {
+  for (const d of DOMAIN_HINTS) {
+  if (t.includes(d.key))
+        for (const w of d.words)
+  out.add(w)
   }
-  return [...out]
-}
-
-/**
- * 文本与关键词集合的匹配（纯函数、可测试）：任一关键词完整子串命中，或任一关键词的任一 bigram 命中。
- * 阈值从早期"≥2 个共同 bigram"放宽为"≥1"——标题/正文只要与关键词有一个双字重叠即视为相关，
- * 粗筛阶段宁多勿漏，交由后续正文级精过滤兜底。
- */
-export function matchesAny(text: string, terms: string[]): boolean {
-  const corpus = (text ?? '').replace(/\s+/g, '')
-  if (!corpus) return false
-  for (const term of terms) {
-    if (!term) continue
-    if (corpus.includes(term)) return true
   }
-  const corpusBigrams = new Set(bigrams(corpus))
-  for (const term of terms) {
-    for (const b of bigrams(term)) {
-      if (corpusBigrams.has(b)) return true
-    }
-  }
-  return false
-}
-
-/**
- * 精确子串匹配（纯函数、可测试）：用于正文级精过滤。
- * 只做"完整关键词子串"命中，**不做 bigram 模糊**。原因：bigram 会把"学前教育"拆成"学前/前教/教育"，
- * 其中"教育"过于宽泛，会导致"政绩观学习教育""警示教育"这类政治学习文章仅因含"教育"二字就命中精过滤；
- * 完整子串匹配则要求正文出现"学前教育/学前/幼儿园/保育"等高区分度词，能真正把无关文章挡在库外。
- */
-export function matchesExact(text: string, terms: string[]): boolean {
-  const corpus = (text ?? '').replace(/\s+/g, '')
-  if (!corpus) return false
-  return terms.some((t) => t && corpus.includes(t))
-}
-
-/**
- * 正文精过滤的匹配语料（纯函数、可测试）：**标题 + 正文全文**。
- *
- * 2026-10-02（7.11 遗留 B 的 A 方案，用户裁定）：
- * - **不再截断前 12,000 字**。原实现的截断是一个**静默失败点**：主题词出现在正文更靠后位置的长文
- *   （年鉴式/政府工作报告式网页）会被判"不切题"直接丢弃，且用户从任何界面都看不出来。
- *   实测当前站点正文最长 10,419 字（中位数 2,511 字），所以截断从未咬到过——它只会在**将来登记了
- *   长文类站点**时咬人，因此按"零成本保险"处理。匹配成本可忽略：单篇约 1 万字 × 十来个词的 `indexOf`。
- * - **标题仍参与匹配**（不做 B-1）。实测依据：本轮采用的 300 篇材料里"仅标题命中、正文不命中"的
- *   **一篇都没有**（0 收益）；而标题是作者对主题的概括，去掉它会让精过滤对措辞更敏感、有丢切题材料
- *   的风险（与"宁多勿漏"冲突）。真正的噪声来源是**泛词**（新建/扩建/改建/规模/招生…）而不是标题，
- *   这件事留待 §PLAN 7.11 的后续项单独裁定。
- */
-export function buildBodyMatchText(pageTitle: string, cleanedText: string): string {
-  return (pageTitle ?? '') + '\n' + (cleanedText ?? '')
-}
-
+  return [...out]}
 /** 常见跟踪参数（URL 规范化时移除，避免同一文章多入口重复抓取/入库） */
-const TRACKING_QUERY_KEYS = new Set([
-  'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'spm', 'from', 'ref', 'share', 'source', 'redirect'
-])
-
-/**
- * URL 规范化（纯函数、可测试）：小写主机、去默认端口、去 fragment、去跟踪参数、去尾部斜杠。
- * 用于文章去重（A3），使 `?utm_*`、`http/https`、尾斜杠等差异归并为同一篇。
- */
+const TRACKING_QUERY_KEYS = new Set([  'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'spm', 'from', 'ref', 'share', 'source', 'redirect'])/** * URL 规范化（纯函数、可测试）：小写主机、去默认端口、去 fragment、去跟踪参数、去尾部斜杠。 * 用于文章去重（A3），使 `?utm_*`、`http/https`、尾斜杠等差异归并为同一篇。 */
 export function normalizeArticleUrl(raw: string, baseUrl?: string): string {
   let u: URL
-  try { u = new URL(raw, baseUrl) } catch { return raw }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:') return raw
+  try { u = new URL(raw, baseUrl) }
+ catch {
+  return raw }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:')
+        return raw
   u.host = u.host.toLowerCase()
-  if ((u.protocol === 'http:' && u.port === '80') || (u.protocol === 'https:' && u.port === '443')) u.port = ''
+        if ((u.protocol === 'http:' && u.port === '80') || (u.protocol === 'https:' && u.port === '443'))
+  u.port = ''
   u.hash = ''
   const keep = new URLSearchParams()
-  for (const [k, v] of u.searchParams.entries()) {
-    if (!TRACKING_QUERY_KEYS.has(k.toLowerCase())) keep.append(k, v)
+        for (const [k, v] of u.searchParams.entries()) {
+  if (!TRACKING_QUERY_KEYS.has(k.toLowerCase()))
+  keep.append(k, v)
   }
   u.search = keep.toString()
   u.pathname = u.pathname.replace(/\/+$/, '')
-  return u.toString()
-}
-
+        return u.toString()}
 /** 文章 URL 去重键（纯函数、可测试）：基于规范化 URL，去掉协议与尾部斜杠，使 http/https/跟踪参数/尾斜杠归并为同一篇 */
 export function dedupeArticleKey(url: string): string {
   const n = normalizeArticleUrl(url)
-  const i = n.indexOf('://')
-  return i >= 0 ? n.slice(i + 3) : n
-}
-
-/** 解析 sitemap（xml）为 { url, lastmod? } 列表（纯函数、可测试）：兼容 sitemap index（子 sitemap）与 urlset。 */
-export function parseSiteMap(html: string, baseUrl: string): { url: string; lastmod?: string }[] {
-  const out: { url: string; lastmod?: string }[] = []
+        const i = n.indexOf('://')
+        return i >= 0 ? n.slice(i + 3) : n}
+/** * 解析 sitemap（xml）为 `{ url, lastmod?, publicationDate? }`（纯函数、可测试）：兼容 sitemap index（子 sitemap）与 urlset。 * `publicationDate` 取 Google News 扩展的 `<news:publication_date>`——它比 `lastmod` 更贴"发布时间"（Phase 10 日期阶梯 L2 的 a/b 两级）。 */
+export function parseSiteMap(  html: string, baseUrl: string): { url: string;
+  lastmod?: string;
+  publicationDate?: string }[] {
+  const out: { url: string; lastmod?: string;
+  publicationDate?: string }[] = []
   const locs = [...html.matchAll(/<loc>([^<]+)/gi)].map((m) => m[1].trim())
-  const lastmodByLoc = new Map<string, string>()
-  const blockRe = /<url>([\s\S]*?)<\/url>/gi
+        const metaByLoc = new Map<string, { lastmod?: string;
+  publicationDate?: string }
+>()
+        const blockRe = /<url>([\s\S]*?)<\/url>/gi
   let b: RegExpExecArray | null
   while ((b = blockRe.exec(html)) !== null) {
-    const loc = /<loc>([^<]+)/i.exec(b[1])?.[1]?.trim()
-    const lm = /<lastmod>([^<]+)/i.exec(b[1])?.[1]?.trim()
-    if (loc) lastmodByLoc.set(loc, lm ?? '')
+  const loc = /<loc>([^<]+)/i.exec(b[1])?.[1]?.trim()
+        const lm = /<lastmod>([^<]+)/i.exec(b[1])?.[1]?.trim()    // 命名空间前缀可能是 news:/n:/没有前缀
+  const pd = /<(?:[\w-]+:)?publication_date>([^<]+)/i.exec(b[1])?.[1]?.trim()
+        if (loc)
+  metaByLoc.set(loc, { lastmod: lm || undefined, publicationDate: pd || undefined })
   }
   for (const loc of locs) {
-    let abs: string
-    try { abs = new URL(loc, baseUrl).toString() } catch { continue }
-    out.push({ url: abs, lastmod: lastmodByLoc.get(loc) || undefined })
+  let abs: string
+  try { abs = new URL(loc, baseUrl).toString() }
+ catch {
+  continue }
+  const meta = metaByLoc.get(loc)
+  out.push({ url: abs, lastmod: meta?.lastmod, publicationDate: meta?.publicationDate })
   }
-  return out
-}
-
-
+  return out}
 /** 解析 RSS/Atom 订阅源为 { url, title, lastmod? } 列表（纯函数、可测试）：支持 RSS2 `<item>` 与 Atom `<entry>` */
-export function parseFeed(xml: string, baseUrl: string): { url: string; title: string; lastmod?: string }[] {
-  const out: { url: string; title: string; lastmod?: string }[] = []
+export function parseFeed(xml: string, baseUrl: string): { url: string;
+  title: string;
+  lastmod?: string }[] {
+  const out: { url: string; title: string;
+  lastmod?: string }[] = []
   const itemRe = /<item>([\s\S]*?)<\/item>/gi
   let m: RegExpExecArray | null
   while ((m = itemRe.exec(xml)) !== null) {
-    const b = m[1]
-    const loc = /<link>([^<]+)<\/link>/i.exec(b)?.[1]?.trim()
-    if (!loc) continue
-    let abs: string
-    try { abs = new URL(loc, baseUrl).toString() } catch { continue }
-    const title = /<title>([^<]+)<\/title>/i.exec(b)?.[1]?.trim() ?? ''
-    const pub = /<pubDate>([^<]+)<\/pubDate>/i.exec(b)?.[1]?.trim()
-    out.push({ url: abs, title, lastmod: pub || undefined })
+  const b = m[1]
+  const loc = /<link>([^<]+)<\/link>/i.exec(b)?.[1]?.trim()
+        if (!loc)
+  continue
+      let abs: string
+  try { abs = new URL(loc, baseUrl).toString() }
+ catch {
+  continue }
+  const title = /<title>([^<]+)<\/title>/i.exec(b)?.[1]?.trim() ?? ''
+  const pub = /<pubDate>([^<]+)<\/pubDate>/i.exec(b)?.[1]?.trim()
+  out.push({ url: abs, title, lastmod: pub || undefined })
   }
   const entryRe = /<entry>([\s\S]*?)<\/entry>/gi
   while ((m = entryRe.exec(xml)) !== null) {
-    const b = m[1]
-    const loc = /<link[^>]*href="([^"]+)"/i.exec(b)?.[1]?.trim()
-    if (!loc) continue
-    let abs: string
-    try { abs = new URL(loc, baseUrl).toString() } catch { continue }
-    const title = /<title[^>]*>([^<]+)<\/title>/i.exec(b)?.[1]?.trim() ?? ''
-    const upd = /<updated>([^<]+)<\/updated>/i.exec(b)?.[1]?.trim()
-    out.push({ url: abs, title, lastmod: upd || undefined })
+  const b = m[1]
+  const loc = /<link[^>]*href="([^"]+)"/i.exec(b)?.[1]?.trim()
+        if (!loc)
+  continue
+      let abs: string
+  try { abs = new URL(loc, baseUrl).toString() }
+ catch {
+  continue }
+  const title = /<title[^>]*>([^<]+)<\/title>/i.exec(b)?.[1]?.trim() ?? ''
+  const upd = /<updated>([^<]+)<\/updated>/i.exec(b)?.[1]?.trim()
+  out.push({ url: abs, title, lastmod: upd || undefined })
   }
-  return out
-}
-
+  return out}
 /** 从站点首页 HTML 检测 RSS/Atom 订阅源链接（纯函数、可测试）：`<link rel=alternate type=application/rss|atom+xml href=...>` */
 export function detectFeedUrls(html: string, baseUrl: string): string[] {
   const out = new Set<string>()
-  const re = /<link\b[^>]*type=["']application\/(rss|atom)\+xml["'][^>]*href=["']([^"']+)["']/gi
+        const re = /<link\b[^>]*type=["']application\/(rss|atom)\+xml["'][^>]*href=["']([^"']+)["']/gi
   let m: RegExpExecArray | null
   while ((m = re.exec(html)) !== null) {
-    try { out.add(new URL(m[2], baseUrl).toString()) } catch { /* ignore */ }
+  try { out.add(new URL(m[2], baseUrl).toString()) }
+ catch {
+ 
+/* ignore */
+ }
   }
-  return [...out]
-}
-
-/** 尝试抓取并解析 RSS/Atom 订阅源（A2）：先检测首页 `<link>`，再尝试常见 feed 路径；无结果返回空（由 sitemap/BFS 兜底）。 */
-async function fetchFeedArticles(rootUrl: string): Promise<{ url: string; title: string }[]> {
+  return [...out]}
+/** * 尝试抓取并解析 RSS/Atom 订阅源（A2）：先检测首页 `<link>`，再尝试常见 feed 路径；无结果返回空（由 sitemap/BFS 兜底）。 * `feedDate` 即 feed 里的 `pubDate`/`updated`（`parseFeed` 目前把它放在 `lastmod` 字段里返回）——它是日期阶梯的 **L1**。 */
+async function fetchFeedArticles(  rootUrl: string): Promise<{ url: string;
+  title: string;
+  feedDate?: string }[]> {
   const base = new URL(rootUrl)
-  const origin = base.origin
+        const origin = base.origin
   const feedUrls = new Set<string>()
   try {
-    const home = (await fetchUrl(base.toString())).rawHtml
-    for (const u of detectFeedUrls(home, origin)) feedUrls.add(u)
-  } catch { /* ignore */ }
-  for (const p of ['/rss.xml', '/atom.xml', '/feed.xml', '/index.xml', '/rss', '/feed', '/rss/', '/feed/']) feedUrls.add(origin + p)
-  const found = new Map<string, { url: string; title: string; lastmod?: string }>()
-  for (const f of feedUrls) {
-    let xml: string
-    try { xml = (await fetchUrl(f)).rawHtml } catch { continue }
-    const items = parseFeed(xml, origin)
-    if (items.length === 0) continue
-    for (const it of items) if (isArticleUrl(it.url) && !found.has(dedupeArticleKey(it.url))) found.set(dedupeArticleKey(it.url), it)
-    if (found.size > 0) break
+  const home = (await fetchUrl(base.toString())).rawHtml
+  for (const u of detectFeedUrls(home, origin))
+  feedUrls.add(u)
   }
-  return [...found.values()].map(({ url, title }) => ({ url, title }))
-}
-/** 解析 robots.txt（User-agent: * 段落，简单尽力解析）：返回 crawl-delay 与 disallow 路径（纯函数、可测试） */
-export function parseRobotsTxt(text: string): { crawlDelay?: number; disallow: string[] } {
+ catch {
+ 
+/* ignore */
+ }
+  for (const p of ['/rss.xml', '/atom.xml', '/feed.xml', '/index.xml', '/rss', '/feed', '/rss/', '/feed/'])
+  feedUrls.add(origin + p)
+        const found = new Map<string, { url: string;
+  title: string;
+  lastmod?: string }
+>()
+        for (const f of feedUrls) {
+  let xml: string
+  try { xml = (await fetchUrl(f)).rawHtml }
+ catch {
+  continue }
+  const items = parseFeed(xml, origin)
+        if (items.length === 0)
+  continue
+      for (const it of items)
+        if (isArticleUrl(it.url) && !found.has(dedupeArticleKey(it.url)))
+  found.set(dedupeArticleKey(it.url), it)
+        if (found.size > 0)
+  break  }
+  return [...found.values()].map(({ url, title, lastmod }) => ({ url, title, feedDate: lastmod }))}
+/** * 解析 robots.txt（User-agent: * 段落，简单尽力解析）：返回 **crawl-delay（毫秒）** 与 disallow 路径（纯函数、可测试）。 * `Crawl-delay` 在 robots.txt 里的单位是**秒**，本模块对外一律用毫秒（`crawlDelayMs`），避免再次出现单位混用。 */
+export function parseRobotsTxt(text: string): { crawlDelayMs?: number;
+  disallow: string[] } {
   let agentStar = false
-  let crawlDelay: number | undefined
+  let crawlDelayMs: number | undefined
   const disallow: string[] = []
   for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim()
-    if (!line || line.startsWith('#')) continue
-    const m = /^(user-agent|disallow|allow|crawl-delay)\s*:\s*(.*)$/i.exec(line)
-    if (!m) continue
-    const key = m[1].toLowerCase()
-    const val = m[2].trim()
-    if (key === 'user-agent') agentStar = val.toLowerCase() === '*'
-    else if (key === 'crawl-delay') { const d = parseFloat(val); if (!isNaN(d) && d > 0) crawlDelay = d }
-    else if (key === 'disallow' && agentStar && val !== '') disallow.push(val)
+  const line = raw.trim()
+        if (!line || line.startsWith('#'))
+  continue
+      const m = /^(user-agent|disallow|allow|crawl-delay)\s*:\s*(.*)$/i.exec(line)
+        if (!m)
+  continue
+      const key = m[1].toLowerCase()
+        const val = m[2].trim()
+        if (key === 'user-agent')
+  agentStar = val.toLowerCase() === '*'
+    else if (key === 'crawl-delay') {
+  const d = parseFloat(val)      // 秒 → 毫秒（原先漏了这一步，等于完全不限速）；超过上限按上限执行
+  if (!isNaN(d) && d > 0)
+  crawlDelayMs = Math.min(Math.round(d * 1000), CRAWL_DELAY_MAX_MS)
   }
-  return { crawlDelay, disallow }
+    else if (key === 'disallow' && agentStar && val !== '')
+  disallow.push(val)
+  }
+  return { crawlDelayMs, disallow }
 }
-
 /** 抓取站点 robots.txt（失败视为未限制）。 */
-export async function fetchRobotsTxt(rootUrl: string): Promise<{ crawlDelay?: number; disallow: string[] }> {
+export async function fetchRobotsTxt(rootUrl: string): Promise<{ crawlDelayMs?: number;
+  disallow: string[] } > {
   try {
-    const base = new URL(rootUrl)
-    const robots = new URL('/robots.txt', base.origin).toString()
-    const res = await fetchUrl(robots)
-    return parseRobotsTxt(res.rawHtml)
-  } catch {
-    return { crawlDelay: undefined, disallow: [] }
+  const base = new URL(rootUrl)
+        const robots = new URL('/robots.txt', base.origin).toString()
+        const res = await fetchUrl(robots)
+        return parseRobotsTxt(res.rawHtml)
+  }
+ catch {
+  return { crawlDelayMs: undefined, disallow: [] }
   }
 }
-
 /** 判断 URL 的 path 是否命中 robots 的 Disallow 规则（纯函数、可测试）。 */
 export function isPathDisallowed(url: string, disallow: string[]): boolean {
-  if (disallow.length === 0) return false
+  if (disallow.length === 0)
+        return false
   let u: URL
-  try { u = new URL(url) } catch { return false }
+  try { u = new URL(url) }
+ catch {
+  return false }
   const p = u.pathname
-  return disallow.some((d) => d && (p === d || p.startsWith(d)))
-}
-
-/** 从 HTML 提取 <title>（纯函数、可测试）：sitemap 发现的文章没有标题，导入正文时用页面标题补齐。 */
-export function extractPageTitle(html: string): string {
-  const m = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)
-  return m ? stripTags(m[1]) : ''
-}
-
-/** 正文哈希（djb2，十六进制字符串）——用于正文级去重（A3 辅助）。 */
-function hashText(text: string): string {
-  let h = 5381
-  for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) >>> 0
-  return h.toString(16)
-}
-
-function delay(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)) }
-
-/**
- * 站点点对点礼貌限速：按站点 host 维护最近一次请求时间，保证相邻请求间隔 >= crawlDelay（或默认最小间隔）。
- */
+  return disallow.some((d) => d && (p === d || p.startsWith(d)))}
+function delay(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms)) }
+/** 站点点对点礼貌限速：按站点 host 维护最近一次请求时间，保证相邻请求间隔 >= `crawlDelayMs`（或默认最小间隔）。 * `crawlDelayMs` 由 `parseRobotsTxt` 从 robots.txt 的秒换算而来（2026-10-04 修单位错），站点声明的限速从此真正生效。 */
 const lastRequestByHost = new Map<string, number>()
 async function politeDelay(host: string, crawlDelayMs?: number): Promise<void> {
   const minMs = Math.max(IMPORT_DELAY_MS, crawlDelayMs ?? 0)
-  const last = lastRequestByHost.get(host) ?? 0
-  const wait = last + minMs - Date.now()
-  if (wait > 0) await delay(wait)
-  lastRequestByHost.set(host, Date.now())
-}
-
+        const now = Date.now()
+        const last = lastRequestByHost.get(host) ?? 0  /*   * **先占位、再等待**（2026-10-04 P4 修竞态）：原实现是"读 last → 等待 → 写 last"，   * 多个 worker 会同时读到同一个过期值、同时醒来、**同时发请求**——实测并发 2 时达到 12.5 篇/秒，   * 超过 120ms 间隔允许的 8.3 篇/秒，等于对站点超发。现在把"下一个可用时刻"同步写回，   * 并发调用者各自拿到**互不重叠的时间片**，真实请求间隔严格 ≥ minMs。   */
+  const fireAt = Math.max(now, last + minMs)
+  lastRequestByHost.set(host, fireAt)
+        const wait = fireAt - now
+  if (wait > 0) await delay(wait)}
+/** * Phase 10 P4：把礼貌限速开放给抓取流水线复用（`article-crawl.ts`）。 * **两条抓取路径（旧的导入路径与新的按年份抓取）必须共用同一份限速状态**——各自维护会导致同一站点被并发翻倍。 */
+export async function awaitPoliteDelay(host: string, crawlDelayMs?: number): Promise<void> {
+  return politeDelay(host, crawlDelayMs)}
+/** 站点发现产出的文章条目（Phase 10：目录里必须带日期，见 `article-date.ts`） */
+export interface DiscoveredArticle { url: string; title: string  /** 归一化发布日期（`YYYY-MM-DD` / `YYYY-MM` / `YYYY`）——年份区间筛选**只认它** */
+  publishedDate?: string  /** 日期来自哪一级（feed / sitemap-news / sitemap-lastmod / url） */
+  dateSource?: ArticleDateSource; dateConfidence?: 'high' | 'medium' | 'low'  /** URL 内嵌日期（L3 的原始证据，供互校与模板日期检测） */
+  urlDate?: string  /** sitemap 的 `lastmod` 原始值（L2b 证据） */
+  sitemapLastmod?: string}
+/** 发现期的中间结构：把各级日期"原材料"带上，最后统一走 `pickArticleDate` */
+interface RawDiscovered { url: string; title: string; feedDate?: string; sitemapLastmod?: string; sitemapPublication?: string}
+/** 中间结构 → 落库条目：按 L1→L5 挑日期（发现期只有 L1/L2/L3，L4/L5 在抓取阶段回填） */
+function toDiscovered(list: RawDiscovered[]): DiscoveredArticle[] {
+  return list.map((a) => {
+  const picked = pickArticleDate({ feed: a.feedDate, sitemapPublication: a.sitemapPublication, sitemapLastmod: a.sitemapLastmod,
+  url: a.url    })
+        return { url: a.url, title: a.title, publishedDate: picked?.date,
+  dateSource: picked?.source, dateConfidence: picked?.confidence, urlDate: parseUrlDate(a.url)?.date, sitemapLastmod: a.sitemapLastmod    }
+  })}
+/** 发现结果的日期覆盖情况（写进日志，便于"为什么某站筛不出文章"这类排查） */
+function logDiscovery(host: string, method: string, list: DiscoveredArticle[]): void {
+  const bySource = new Map<string, number>()
+        let noDate = 0
+  for (const a of list) {
+  if (!a.publishedDate) noDate++
+    else bySource.set(a.dateSource ?? '?', (bySource.get(a.dateSource ?? '?') ?? 0) + 1)
+  }
+  const detail = [...bySource.entries()].map(([k, v]) => `${k}=${v}`).join(' ')
+        logMain(    'web',    `站点发现 host=${host} 方式=${method} 文章=${list.length} 有日期=${list.length - noDate} 无日期=${noDate}${detail ? ' ' + detail : ''}`  )}
 /** 尝试用站点 sitemap 发现文章清单 (sitemap-first, A1)：无可用 sitemap 时返回空数组（由 BFS 兜底）。 */
-async function fetchSiteMapArticles(rootUrl: string): Promise<{ url: string; title: string }[]> {
+async function fetchSiteMapArticles(rootUrl: string): Promise<RawDiscovered[]> {
   const base = new URL(rootUrl)
-  const origin = base.origin
+        const origin = base.origin
   const candidates = ['/sitemap_index.xml', '/sitemap.xml']
-  const found = new Map<string, { url: string; lastmod?: string }>()
-  for (const path of candidates) {
-    const sitemapUrl = new URL(path, origin).toString()
-    let html: string
-    try { html = (await fetchUrl(sitemapUrl)).rawHtml } catch { continue }
-    const entries = parseSiteMap(html, origin)
-    if (entries.length === 0) continue
-    const childSitemaps = entries.filter((e) => /[a-z0-9_].*\.xml$/i.test(new URL(e.url).pathname) || /sitemap/i.test(new URL(e.url).pathname))
-    if (childSitemaps.length > 0) {
-      for (const cs of childSitemaps) {
-        let r: string
-        try { r = (await fetchUrl(cs.url)).rawHtml } catch { continue }
-        for (const e of parseSiteMap(r, cs.url)) {
-          if (isArticleUrl(e.url) && !found.has(dedupeArticleKey(e.url))) found.set(dedupeArticleKey(e.url), { url: e.url, lastmod: e.lastmod })
-        }
-      }
-    } else {
-      for (const e of entries) {
-        if (isArticleUrl(e.url) && !found.has(dedupeArticleKey(e.url))) found.set(dedupeArticleKey(e.url), { url: e.url, lastmod: e.lastmod })
+  const found = new Map<string, { url: string;
+  lastmod?: string;
+  publicationDate?: string }
+>()
+        for (const path of candidates) {
+  const sitemapUrl = new URL(path, origin).toString()
+        let html: string
+  try { html = (await fetchUrl(sitemapUrl)).rawHtml }
+ catch {
+  continue }
+  const entries = parseSiteMap(html, origin)
+        if (entries.length === 0)
+  continue
+      const childSitemaps = entries.filter((e) => /[a-z0-9_].*\.xml$/i.test(new URL(e.url).pathname) || /sitemap/i.test(new URL(e.url).pathname))
+        if (childSitemaps.length > 0) {
+  for (const cs of childSitemaps) {
+  let r: string
+  try { r = (await fetchUrl(cs.url)).rawHtml }
+ catch {
+  continue }
+  for (const e of parseSiteMap(r, cs.url)) {
+  if (isArticleUrl(e.url) && !found.has(dedupeArticleKey(e.url)))
+  found.set(dedupeArticleKey(e.url), e)
+  }
       }
     }
-    if (found.size > 0) break
+ 
+else {
+  for (const e of entries) {
+  if (isArticleUrl(e.url) && !found.has(dedupeArticleKey(e.url)))
+  found.set(dedupeArticleKey(e.url), e)
   }
-  return [...found.values()].map((v) => ({ url: v.url, title: '' }))
-}
-
-/**
- * 站点发现（BFS）：从 rootUrl 开始抓列表页，提取同域文章链接清单；
- * 栏目/分页链接入队继续（限深度与页数）。返回 { url, title }[]（URL 去重，按发现顺序）。
- */
-export async function discoverSiteArticles(
-  rootUrl: string,
-  opts: { maxPages?: number; maxDepth?: number } = {}
-): Promise<{ url: string; title: string }[]> {
-  const { maxPages = SYNC_MAX_PAGES, maxDepth = SYNC_MAX_DEPTH } = opts
+    }
+  if (found.size > 0)
+  break  }
+  return [...found.values()].map((v) => ({ url: v.url, title: '', sitemapLastmod: v.lastmod,
+  sitemapPublication: v.publicationDate  }))}
+/** * 站点发现（BFS）：从 rootUrl 开始抓列表页，提取同域文章链接清单； * 栏目/分页链接入队继续（限深度与页数）。返回 `DiscoveredArticle[]`（URL 去重，按发现顺序，**带日期**）。 * * Phase 10：目录必须在建立时就带上发布日期（用户裁定 ①），因此每条都走一遍日期阶梯的 L1/L2/L3 * （L4 `Last-Modified`、L5 页面日期要抓正文才有，放在抓取阶段回填）。 */
+export async function discoverSiteArticles(  rootUrl: string, opts: { maxPages?: number; maxDepth?: number }
+ = {
+}): Promise<DiscoveredArticle[]> {
+  const { maxPages = SYNC_MAX_PAGES, maxDepth = SYNC_MAX_DEPTH }
+ = opts
   let base: URL
-  try {
-    base = new URL(rootUrl)
-  } catch {
-    return []
+  try { base = new URL(rootUrl)
   }
+ catch {
+  return []  }
   const host = base.host
-  const robots = await fetchRobotsTxt(rootUrl).catch(() => ({ crawlDelay: undefined, disallow: [] }))
-  const found = new Map<string, { url: string; title: string }>() // dedupeKey -> 文章
-
+  const robots = await fetchRobotsTxt(rootUrl).catch(() => ({ crawlDelayMs: undefined, disallow: [] }))
+        const found = new Map<string, RawDiscovered>() // dedupeKey -> 文章
   // A2: RSS/Atom 订阅源优先（最稳、带标题/日期）；无订阅源则回退 sitemap/BFS
   const feedArticles = await fetchFeedArticles(rootUrl).catch(() => [])
-  for (const a of feedArticles) {
-    if (!found.has(dedupeArticleKey(a.url))) found.set(dedupeArticleKey(a.url), { url: a.url, title: a.title })
+        for (const a of feedArticles) {
+  if (!found.has(dedupeArticleKey(a.url)))
+  found.set(dedupeArticleKey(a.url), a)
   }
   if (found.size > 0) {
-    logMain('web', `站点发现 host=${host} 方式=feed 文章=${found.size}`)
-    return [...found.values()]
-  }
-
+  const list = toDiscovered([...found.values()])
+  logDiscovery(host, 'feed', list)
+        return list  }
   // A1: sitemap 优先发现（更全、省翻页；标题需在导入正文时从页面 <title> 补齐）
   const sitemapArticles = await fetchSiteMapArticles(rootUrl).catch(() => [])
-  for (const a of sitemapArticles) {
-    if (!found.has(dedupeArticleKey(a.url))) found.set(dedupeArticleKey(a.url), { url: a.url, title: a.title })
+        for (const a of sitemapArticles) {
+  if (!found.has(dedupeArticleKey(a.url)))
+  found.set(dedupeArticleKey(a.url), a)
   }
   if (found.size > 0) {
-    logMain('web', `站点发现 host=${host} 方式=sitemap 文章=${found.size}`)
-    return [...found.values()]
-  }
-
+  const list = toDiscovered([...found.values()])
+  logDiscovery(host, 'sitemap', list)
+        return list  }
   // 无 RSS/sitemap → 回退 BFS（限深度与页数；遵守 robots + 礼貌延迟）
   const visited = new Set<string>()
-  const queue: { url: string; depth: number }[] = [{ url: base.toString(), depth: 0 }]
+        const queue: { url: string; depth: number }[] = [{ url: base.toString(), depth: 0 }
+]
   let pages = 0
-
   while (queue.length > 0 && pages < maxPages) {
-    const { url, depth } = queue.shift()!
-    if (visited.has(url) || depth > maxDepth) continue
-    if (isPathDisallowed(url, robots.disallow)) continue
-    visited.add(url)
-    await politeDelay(host, robots.crawlDelay)
-    let html: string
-    try {
-      html = (await fetchUrl(url)).rawHtml
-    } catch {
-      continue // 列表页抓取失败则跳过该页
+  const { url, depth }
+ = queue.shift()!
+  if (visited.has(url) || depth > maxDepth)
+  continue
+      if (isPathDisallowed(url, robots.disallow))
+  continue
+      visited.add(url)
+        await politeDelay(host, robots.crawlDelayMs)
+        let html: string
+  try { html = (await fetchUrl(url)).rawHtml    }
+ catch {
+  continue // 列表页抓取失败则跳过该页
     }
     pages++
-    for (const { href, text } of extractLinks(html, url)) {
-      let u: URL
-      try {
-        u = new URL(href)
-      } catch {
-        continue
-      }
-      if (u.host !== host) continue // 只在本站内
-      const abs = u.toString()
-      if (isArticleUrl(abs)) {
-        const key = dedupeArticleKey(abs)
-        if (!found.has(key)) found.set(key, { url: abs, title: text || abs })
-      } else if (depth + 1 <= maxDepth) {
-        queue.push({ url: abs, depth: depth + 1 })
-      }
+  for (const { href, text }
+ of extractLinks(html, url)) {
+  let u: URL
+  try { u = new URL(href)
+  }
+ catch {
+  continue      }
+  if (u.host !== host)
+  continue // 只在本站内
+  const abs = u.toString()
+        if (isArticleUrl(abs)) {
+  const key = dedupeArticleKey(abs)
+        if (!found.has(key))
+  found.set(key, { url: abs, title: text || abs })
+  }
+ 
+else if (depth + 1 <= maxDepth) { queue.push({ url: abs, depth: depth + 1 })
+  }
     }
   }
-  logMain('web', `站点发现 host=${host} 方式=bfs 文章=${found.size}`)
-  return [...found.values()]
-}
-
-/**
- * 标题粗筛（纯函数、可测试）：把撰写要求 query 提取为标题/子标题短关键词，
- * 并扩展领域下位词兜底后，对站点文章标题做"宽召回"（任一关键词子串或任一 bigram 命中）。
- * 宁多勿漏：命中仅代表"候选"，最终是否落库由正文级精过滤判定。
- */
-export function filterArticlesByQuery(
-  articles: { url: string; title: string }[],
-  query: string
-): { url: string; title: string }[] {
-  const terms = extractTopicTerms(query)
-  if (terms.length === 0) return []
-  const allTerms = [...new Set([...terms, ...expandDomainHints(terms)])]
-  return articles.filter((a) => {
-    const title = (a.title ?? '').trim()
-    // 无标题（如 sitemap 发现）→ 保守保留为候选，交由正文级精过滤决定是否落库
-    if (!title) return true
-    return matchesAny(title, allTerms)
-  })
-}
-
-
-/**
- * 增量导入单篇文章正文（幂等）：sources 中 (url, taskId) 已存在则直接返回已有，不重复抓取。
- * 传入 terms（关键词 + 领域下位词）时做**正文级精过滤**：抓取正文后，仅当标题+正文与关键词相关才落库，
- * 无关文章直接丢弃（不入资料库）。taskId 非空时落库为"任务绑定的网页缓存文章"（不进资料库、删任务时清理）。
- *
- * 2026-09-12（A1/A2）新增两道关卡：
- * - **A1 正文有效性**：页面必须真的包含这篇文章（标题核心片段在正文或原始 HTML 里），否则判为
- *   "老文章已失效、站点返回通用模板页" → 丢弃并回调 `onInvalidBody`（此前会把整页模板当正文入库）；
- * - **A2 正文清洗**：去掉前部导航/面包屑与后部推荐列表/页脚，并把正文来源（结构化提取器 / 整页回退）
- *   落库到 `text_source`，便于日后排查"为什么这篇材料质量差"。
- */
-export async function importSiteArticle(
-  url: string,
-  title: string,
-  terms: string[] = [],
-  taskId?: string,
-  siteId?: string,
-  hooks?: { onInvalidBody?: () => void }
-): Promise<Source | null> {
-  // ② 列表页兜底：栏目/列表页（URL 强模式）绝不当作单篇文章正文落库，避免"打开来源跳到列表页"
-  if (isListPageUrl(url)) {
-    logMain('web', '列表页误判，丢弃 url=' + url)
-    return null
-  }
-  const existing = getSourceByUrl(url, taskId)
-  const existingMeta = siteId ? getSiteArticle(siteId, url) : null
-  if (existing) {
-    // 老库升级后（Migration 037 之前抓的）该行没有发布时间：顺手从 web_site_articles 补齐，
-    // 否则同一任务重新生成时，这些网页段落仍然拿不到年份兜底的依据。
-    if (!existing.publishedAt && existingMeta?.publishedAt) {
-      updateSourcePublishedAt(existing.id, existingMeta.publishedAt)
-      return { ...existing, publishedAt: existingMeta.publishedAt }
-    }
-    return existing
-  }
-  try {
-    // B4: 条件请求——带上上次抓取该页面时的 ETag / Last-Modified，内容未变则 304 复用已有正文
-    const meta = existingMeta
-    const result = await fetchUrl(url, {
-      ifNoneMatch: meta?.etag,
-      ifModifiedSince: meta?.lastModified
-    })
-    let cleanedText = result.cleanedText
-    let snapshotAt = result.snapshotAt
-    let pageTitle = title || ''
-    let textSource: 'extractor' | 'full-page' = 'full-page'
-    /** 文章发布时间（E10 解析）：落库到 sources 供段首年份兜底使用（网页不能用年鉴 −1 规则） */
-    let publishedAt: string | undefined = meta?.publishedAt
-    if (result.notModified) {
-      // 304：内容未变——若同一 URL 已抓过正文（任意任务）则复用，否则放弃该篇
-      const reused = getAnySourceByUrl(url)
-      if (!reused?.cleanedText) {
-        logMain('web', '304 但无已有正文可复用，放弃 url=' + url)
-        return null
-      }
-      cleanedText = reused.cleanedText
-      snapshotAt = reused.urlSnapshotAt ?? new Date().toISOString()
-      pageTitle = title || reused.title || fallbackTitleFromUrl(url)
-      publishedAt = reused.publishedAt ?? publishedAt
-      textSource = reused.textSource ?? 'full-page'
-      logMain('web', '条件请求 304 复用正文 url=' + url + ' 标题=' + pageTitle + ' 正文字数=' + cleanedText.length)
-    } else {
-      pageTitle = title || extractPageTitle(result.rawHtml) || fallbackTitleFromUrl(url)
-      // D8：用成熟正文提取器提升中文正文/表格质量；提取过短时回退浏览器净化的 cleanedText
-      const extracted = extractArticleText(result.rawHtml)
-      const richText = extracted || result.cleanedText
-      textSource = extracted ? 'extractor' : 'full-page'
-      // A1：页面必须真的包含这篇文章（老文章失效时站点会返回 200 + 通用模板页）
-      if (!pageContainsArticle(result.rawHtml, richText, pageTitle)) {
-        logMain('web', '未取到正文（页面为模板/该文章已失效），丢弃 url=' + url + ' 标题=' + pageTitle)
-        hooks?.onInvalidBody?.()
-        return null
-      }
-      // A2：清洗正文（去导航/面包屑/推荐列表/页脚）
-      const cleaned = cleanArticleText(richText, pageTitle)
-      cleanedText = cleaned || richText
-      // 正文级精过滤：标题 + **正文全文**（2026-10-02 起不再截断前 12,000 字，见 buildBodyMatchText 注释）
-      if (terms.length > 0 && !matchesExact(buildBodyMatchText(pageTitle, cleanedText), terms)) {
-        logMain('web', '正文精过滤未命中，丢弃 url=' + url + ' 标题=' + pageTitle)
-        return null
-      }
-      // E10：从正文/元数据解析发布时间并记录（供文章清单按时间排序 + 段落年份兜底）
-      publishedAt = extractPublishedDate(result.rawHtml) ?? publishedAt
-      // 记录抓取元数据（ETag / Last-Modified / 正文哈希），供条件请求与正文去重用
-      if (siteId) {
-        updateSiteArticleFetched(siteId, url, {
-          etag: result.etag,
-          lastModified: result.lastModified,
-          bodyHash: hashText(cleanedText),
-          fetchedAt: new Date().toISOString()
-        })
-        if (publishedAt) updateSiteArticlePublished(siteId, url, publishedAt)
-      }
-      logMain(
-        'web',
-        '抓取并落库 url=' + url + ' 标题=' + pageTitle + ' 正文字数=' + cleanedText.length +
-          (publishedAt ? ' 发布时间=' + publishedAt : '') +
-          ' 提取器=' + textSource +
-          (richText.length !== cleanedText.length ? '（已清洗 ' + (richText.length - cleanedText.length) + ' 字模板噪音）' : '')
-      )
-    }
-    const source: Source = {
-      id: crypto.randomUUID(),
-      kind: 'url',
-      title: pageTitle,
-      url,
-      urlSnapshotAt: snapshotAt,
-      publishedAt,
-      cleanedText,
-      status: 'ready',
-      taskId,
-      textSource,
-      bodyMissing: false,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    }
-    const inserted = insertSource(source)
-    /*
-     * 向量索引：手工添加网址与文件导入都会 enqueue（index.ts），网页资料库此前漏了这一步，
-     * 导致网页文章 index_state 一直是 pending、chunk_embeddings 为空——保守闸门里
-     * "字面无关但语义相关"的向量兜底对网页完全失效。这里补上，并在生成前等待就绪。
-     */
-    enqueueIndex(inserted.id)
-    return inserted
-  } catch {
-    return null // 单篇抓取失败跳过，不阻断整体
-  }
-}
-
-/**
- * 同步站点：发现文章清单 → 增量写入 web_site_articles → 更新 last_synced_at。
- * 返回本次**新增**文章数（首次同步为全量，之后仅新增）。
- */
+  const list = toDiscovered([...found.values()])
+  logDiscovery(host, 'bfs', list)
+        return list}
+/** * 同步站点：发现文章清单 → 增量写入 web_site_articles → 更新 last_synced_at。 * 返回本次**新增**文章数（首次同步为全量，之后仅新增）。 */
 export async function syncSite(siteId: string): Promise<number> {
   const site = getWebSiteById(siteId)
-  if (!site) return 0
+        if (!site)
+        return 0
   const articles = await discoverSiteArticles(site.rootUrl)
-  const added = upsertSiteArticles(siteId, articles)
+        const added = upsertSiteArticles(siteId, articles)
   updateWebSiteLastSynced(siteId, new Date().toISOString())
-  return added
-}
-
-/**
- * 单次生成最多抓取多少篇网页文章（2026-09-12 第二批，实测教训）：
- * 真实库里一次生成曾抓 **477 篇**、耗时 **9 分 43 秒**（占整次生成 26.9 分钟的 36%），
- * 而且每篇都要解析+入向量索引。上限按"标题相关度"优先保留，超出部分记入 `skippedByCap` 并在生成汇总里告知。
- */
-/**
- * 单次生成抓取的文章篇数上限（成本保险丝，**不承担相关性取舍**）。
- * 2026-09-12 实测：从 80 提到 300。80 篇时切题网页正文只剩 9.4 万字（无上限那次为 94.1 万字），
- * 汇编网页段落 77 → 4 段、69 段网页内容整段消失。**注意**：只要上限小于标题粗筛后的候选数
- * （真实站点同一主题实测 495–3,293 篇），按标题排序总归会丢掉"标题不含主题词、正文却切题"的文章
- * （如《融侨国际双语学校奠基仪式举行》《福州长乐多所名校合力助滨海新城办学》）——
- * 相关性取舍最终靠**正文**：抓取时的正文精过滤 + 保守闸门 + 细读窗口。上限只保证成本可控。
- * A1 材料集合锁定让这笔抓取代价**每个任务只付一次**（重新生成复用），故可以放宽。
- */
-export const WEB_FETCH_MAX_ARTICLES = 300
-/** 单次生成所有站点合计的正文抓取量上限（防止个别站点命中过多） */
-export const WEB_FETCH_MAX_CHARS = 1500000
-
-/** 完整检索词命中标题的额外加权（远强于零星 bigram 重叠） */
-const FULL_TERM_BONUS = 10
-
-/**
- * 按"标题与主题词的匹配度"给候选文章排序（纯函数）：命中越多越靠前，同分保持原顺序（清单本身按发布时间倒序）。
- * 用于抓取上限下优先保留最相关的文章——原来只按清单顺序取前 N 篇，等于按时间新旧决定取舍。
+        return added}
+/** 专指词（机构 / 学段）：真正指示"写的是哪一类学校" */
+const SPECIFIC_TERMS = [  '高中', '完中', '中学', '初中', '小学', '幼儿园', '学前', '保育', '托育', '入园', '幼教',  '校区', '一中', '侨中', '附中', '高级中学', '职业中学', '职专', '中学部', '高中部', '双语',  '名校', '学考', '教育局', '大学', '学院', '附小',
+  /*
+   * 2026-10-05 补词（用户实测的第一大漏检来源）：**校名简称与学段词**。
+   * 同一所学校，正文写「福州第三中学滨海校区」会被判 specific 通过，模型输出写「福州三中滨海校区」却落 scope-only
+   * 被剔除——真实库回放里 13/38 网页漏检全部属于这一类（三中/六中/一中/二中/五中…）。
+   * 这里只补"多字、不会误配"的写法；`X中` 那种单字数量的简称由 NUM_ZHONG_RE 三件套处理（见下）。
+   */
+  '普高', '独立高中', '达标高中', '省一级达标', '三级达标', '二级达标', '一级达标', '示范性高中', '示范高中',
+  '集团化办学', '教育集团']/** 弱专指：教育领域通名——比泛词强，但不足以单独判定主题（党校 / 家长学校 / "政绩观学习教育"都会命中） */
+const WEAK_TERMS = ['学校', '教育',
+  /*
+   * 2026-10-05 补：`校园`/`校舍`（**校园设施类通名**）。
+   * 为什么要补：回放里 2 条正样本漏检就是「校园占地面积约142亩…」「学校地处鹤上镇…」这类段落——
+   * 它们是**同一篇切题文章里描述这所学校的那一段**，但既没有"高中/中学"，也没有"学校"以外的任何词。
+   * 收进**弱词档**（不是专指），所以单独出现仍不足以放行（需 弱词≥2 或 弱词+泛词≥2），不会把噪声放进来。
+   */
+  '校园', '校舍']/** 泛词：动作 / 属性 / 指标——只影响排序，不能单独放行 */
+const GENERIC_TERMS = [  '新建', '扩建', '改建', '合并', '规模', '招生', '人数', '分布', '新增', '撤销', '设置', '建设',  '改造', '提升', '达标', '晋级', '评估', '学位', '师资', '课程', '教学楼', '竣工', '开工', '项目',  '投资', '搬迁', '整合', '办学', '规划', '用地', '面积',
+  /*
+   * 2026-10-05 补"动态要点词"（用户指定）：撰写要求里点名的动作/事件词。
+   * 它们只进**泛词档**——泛词单独不足以放行（需 弱词≥1 且 泛词≥2），因此只会**提高**召回，不会降低既有判定。
+   */
+  '新办', '新设', '落成', '投用', '启用', '扩班', '增设', '更名', '并入', '招生计划', '录取', '扩容', '复办', '办班']/** 范围词：地理 / 层级限定——只能作 AND 约束，**排序中不加权、不贡献 bigram 分** */
+const SCOPE_TERMS = [  '全区', '全省', '全市', '全国', '长乐区', '长乐', '福州新区', '省市', '区级', '市级', '省级',  '国家级', '乡镇', '街道', '社区', '园区']
+const SCOPE_SUFFIX_RE = /(省|市|区|县|镇|乡|街道|新区|开发区)$/
+/*
+ * —— 校名简称「X中」的**模式 + 白名单 + 否定词**三件套（2026-10-05）——
  *
- * **打分口径必须与 `matchesAny` 一致（bigram 重叠）**，否则会出现"筛进来了、却全部 0 分"：
- * 2026-09-12 实测真实站点的 477 篇候选、以及上限截断后的 80 篇，标题打分**全部为 0**
- * （旧实现用 `title.includes(term)`，而检索词是长词/整串），排序完全失效、退化成按清单顺序截断——
- * 正是本函数要修掉的那个问题。改为 bigram 重叠计数后，「高中」「中学」「学校」「新建」等
- * 与主题直接相关的标题才会排到前面。
+ * 项目里踩过的坑：用 `[一二三四五六七八九十]中` 通配识别校名，把「三中路」「中亭街」这类地名也算成学校。
+ * 这里的三件套口径：
+ *   ① **模式**：汉字数字 + `中`，且**前一个字不是** 初/高/完/附/侨 —— `初中`/`高中`/`完中`/`附中`/`侨中`
+ *      本身就是专指词，不必也不该由这条规则"再认"一次（它们已由 SPECIFIC_TERMS 命中）；
+ *   ② **否定词**：`中` 后面紧跟 路/街/巷/里/弄/站/桥/村/厝/境/洲/铺/亭 时，判定为地名（三中路、中亭街），不升档；
+ *   ③ **白名单**：`中` 后面紧跟 学/校/滨海/校/部/新/小/高/初 等学校语境字（三中滨海校区、三中、三中学、三中部）→ 升档。
  *
- * 领域下位词（`expandDomainHints`）**不参与排序**：它服务召回（宁多勿漏），用于排序会把
- * 同为教育、却不是本主题的下位领域（如"教育"带出的幼儿园词）顶到前面。
+ * 为什么还要白名单：真实文本里 90% 的「三中」都不带任何后缀（如「长乐三中复办」），
+ * 若要求必须有后缀，等于这条规则几乎不生效；而**否定词**已经挡住了已知的误配，所以"无后缀"也放行，
+ * 只把命中的子串（`三中`）当专指词。
+ *
+ * 口径保证：这条规则**只允许提高**档位（`upgradeTopicClass` 只做 specific > weak > generic > scope 的升档），
+ * 绝不降低任何既有判定。
  */
-export function rankArticlesByQuery<T extends { url: string; title: string }>(
-  articles: T[],
-  query: string
-): (T & { matchScore: number })[] {
-  const terms = extractTopicTerms(query)
-  const termBigrams = new Set<string>()
-  for (const t of terms) for (const g of bigrams(t)) termBigrams.add(g)
-  const scored = articles.map((a, i) => {
-    const title = (a.title ?? '').trim()
-    // 无标题（sitemap 发现）给 0 分：保守保留为候选，但排序靠后
-    let matchScore = 0
-    if (title && termBigrams.size > 0) {
-      const seen = new Set<string>()
-      for (const g of bigrams(title)) {
-        if (termBigrams.has(g) && !seen.has(g)) {
-          seen.add(g)
-          matchScore += 1
-        }
-      }
-      for (const t of terms) if (t.length >= 2 && title.includes(t)) matchScore += FULL_TERM_BONUS
-    }
-    return { article: a, matchScore, originalIndex: i }
-  })
-  scored.sort((a, b) => b.matchScore - a.matchScore || a.originalIndex - b.originalIndex)
-  return scored.map((s) => ({ ...s.article, matchScore: s.matchScore }))
-}
-
-export interface WebFetchStats {
-  /** 注册站点数 */
-  sites: number
-  /** 同步（发现文章清单）失败的站点数：>0 说明本轮网页材料可能不完整（此前只在日志里） */
-  siteErrors: number
-  /** 标题级命中的候选文章数（所有站点合计） */
-  hits: number
-  /** 实际落库成功的文章数 */
-  fetched: number
-  /** 因上限而跳过的候选数 */
-  skippedByCap: number
-  /** 落库正文总字数 */
-  chars: number
-  /** 本轮**复用**已锁定网页材料的篇数（>0 说明本次是重新生成，材料集合沿用首次落定） */
-  reused?: number
-  /** 站点里检测到、但未纳入的新命中文章数（由用户点「纳入新材料」决定是否抓取） */
-  newCandidates?: number
-  /** 抓回来发现"没取到正文"（老文章失效、站点返回通用模板页）而丢弃的篇数（A1） */
-  invalidBody?: number
-}
-
-export interface WebCandidate {
-  url: string
-  title: string
-  siteId: string
-  siteTitle: string
-}
+const NUM_ZHONG_RE = /([一二三四五六七八九十])中/g
+/** 模式里的前字否定：这些字与"数字+中"连读时是**别的词**（初中/高中/完中/附中/侨中），不是校名简称 */
+const NUM_ZHONG_PREV_DENY = new Set(['初', '高', '完', '附', '侨', '小'])
+/** 否定词（后字）：`三中路`/`中亭街` 这类地名——命中即不升档 */
+const NUM_ZHONG_PLACE_FOLLOW = new Set(['路', '街', '巷', '里', '弄', '站', '桥', '村', '厝', '境', '洲', '铺', '亭', '社'])
+/** 白名单（后字 / 后词）：明确的学校语境，即使同时出现地名后缀也以白名单为准 */
+const NUM_ZHONG_SCHOOL_FOLLOW = ['学校', '学', '校区', '滨海', '校部', '部', '新', '小', '高', '初', '附', '党', '团', '总']
 
 /**
- * 只做"发现 + 标题命中 + 排序"，**不抓正文**（第三批 A1）：
- * - 用于「本次将采用哪些网页文章」的判断与"检测到 N 篇新文章"的提示；
- * - 把这些网络动作与正文抓取分开，复用同一条路径，避免两处各写一遍 robots/限速/上限逻辑。
+ * 在**一段文本**（要求文本或正文）里找出所有"校名简称"命中（`三中`/`六中`…），返回命中的子串。
+ * 纯函数、可测试；三件套齐备（模式 + 白名单 + 否定词）。
  */
-export async function collectSiteCandidates(
-  query: string,
-  excludeUrls: Set<string> = new Set()
-): Promise<{ candidates: WebCandidate[]; stats: WebFetchStats }> {
-  const sites = listWebSites()
-  const stats: WebFetchStats = { sites: sites.length, siteErrors: 0, hits: 0, fetched: 0, skippedByCap: 0, chars: 0 }
-  const candidates: WebCandidate[] = []
-  if (sites.length === 0) return { candidates, stats }
-  const terms = extractTopicTerms(query)
-  const allTerms = [...new Set([...terms, ...expandDomainHints(terms)])]
-  if (allTerms.length === 0) return { candidates, stats }
-  for (const site of sites) {
-    try {
-      await syncSite(site.id)
-    } catch (err) {
-      // E1：站点同步失败会让本轮网页材料不完整，必须计数并在汇总里如实告知（此前只有日志）
-      stats.siteErrors += 1
-      logMain('web', `网页资料检索 站点同步失败 站点=${site.title || site.rootUrl}：${String(err)}`)
-      continue
-    }
-    const articles = listSiteArticles(site.id)
-    const hits = rankArticlesByQuery(filterArticlesByQuery(articles, query), query)
-    stats.hits += hits.length
-    for (const h of hits) {
-      if (excludeUrls.has(h.url)) continue
-      candidates.push({ url: h.url, title: h.title, siteId: site.id, siteTitle: site.title ?? site.rootUrl })
-    }
-    logMain('web', `网页资料检索 站点=${site.title || site.rootUrl} 文章清单=${articles.length} 标题命中=${hits.length}`)
+export function findSchoolAbbrevHits(text: string): string[] {
+  const t = text ?? ''
+  if (!t.includes('中')) return []
+  const chars = Array.from(t)
+  const hits = new Set<string>()
+  for (const m of t.matchAll(NUM_ZHONG_RE)) {
+    const at = m.index ?? 0
+    // 注意：中文数字与「中」都是单 code unit，可直接按下标取前后字
+    const prev = at > 0 ? t[at - 1] : ''
+    if (NUM_ZHONG_PREV_DENY.has(prev)) continue
+    const after = t.slice(at + m[0].length, at + m[0].length + 2) // 取两个字足够判断白名单
+    const next = chars[at + 2] ?? ''
+    const isSchool = NUM_ZHONG_SCHOOL_FOLLOW.some((w) => after.startsWith(w))
+    const isPlace = NUM_ZHONG_PLACE_FOLLOW.has(next)
+    // 白名单优先于否定词（「三中学」「三中滨海校区」都要认）
+    if (!isSchool && isPlace) continue
+    hits.add(m[0])
   }
-  return { candidates, stats }
+  return [...hits]
 }
 
-/**
- * 抓取并落库一批候选文章（受篇数/字数上限约束 + robots 礼貌限速）。
- * 落库为"任务绑定的网页缓存文章"（`sources.task_id`）。
- */
-export async function importSiteCandidates(
-  candidates: WebCandidate[],
-  query: string,
-  taskId: string
-): Promise<{ ids: string[]; stats: WebFetchStats }> {
-  const terms = [...new Set([...extractTopicTerms(query), ...expandDomainHints(extractTopicTerms(query))])]
-  const stats: WebFetchStats = { sites: 0, siteErrors: 0, hits: candidates.length, fetched: 0, skippedByCap: 0, chars: 0, invalidBody: 0 }
-  const ids: string[] = []
-  let budgetChars = WEB_FETCH_MAX_CHARS
-  const siteMeta = new Map<string, { host: string; crawlDelay?: number; disallow: string[] }>()
-  for (const c of candidates) {
-    let meta = siteMeta.get(c.siteId)
-    if (!meta) {
-      const site = getWebSiteById(c.siteId)
-      const rootUrl = site?.rootUrl ?? c.url
-      let host = rootUrl
-      try { host = new URL(rootUrl).host } catch { /* 非法 URL：原样使用 */ }
-      const robots = await fetchRobotsTxt(rootUrl).catch(() => ({ crawlDelay: undefined, disallow: [] }))
-      meta = { host, crawlDelay: robots.crawlDelay, disallow: robots.disallow }
-      siteMeta.set(c.siteId, meta)
-    }
-    if (isPathDisallowed(c.url, meta.disallow)) continue
-    // 上限（篇数 / 字数）：命中太多时按相关度优先保留（候选已排序），其余记入 skippedByCap
-    if (stats.fetched >= WEB_FETCH_MAX_ARTICLES || budgetChars <= 0) {
-      stats.skippedByCap += 1
-      continue
-    }
-    await politeDelay(meta.host, meta.crawlDelay)
-    const src = await importSiteArticle(c.url, c.title, terms, taskId, c.siteId, {
-      onInvalidBody: () => {
-        stats.invalidBody = (stats.invalidBody ?? 0) + 1
-      }
-    })
-    if (src) {
-      ids.push(src.id)
-      stats.fetched += 1
-      stats.chars += src.cleanedText?.length ?? 0
-      budgetChars -= src.cleanedText?.length ?? 0
-    }
+/** 档位强弱（升档用）：数字越大越强。**只用于升档，绝不用于降档。** */
+const CLASS_RANK: Record<TopicTermClass, number> = { specific: 3, weak: 2, generic: 1, scope: 0 }
+
+/** 把一个词按"只升不降"的口径与目标档位合并（2026-10-05：新增词表/规则一律不得降低既有判定） */
+export function upgradeTopicClass(current: TopicTermClass, target: TopicTermClass): TopicTermClass {
+  return CLASS_RANK[target] > CLASS_RANK[current] ? target : current
+}/** 检索词分层（纯函数、可测试）：specific > weak > generic > scope；判定顺序不可颠倒（`校区` 不能被"（区）$"吃成范围词） */
+export type TopicTermClass = 'specific' | 'weak' | 'generic' | 'scope'
+export function classifyTopicTerm(term: string): TopicTermClass {
+  const t = (term ?? '').trim()
+        if (!t)
+        return 'generic'
+  if (SPECIFIC_TERMS.some((w) => t.includes(w)))
+        return 'specific'
+  if (WEAK_TERMS.some((w) => t.includes(w)))
+        return 'weak'
+  if (GENERIC_TERMS.some((w) => t.includes(w)))
+        return 'generic'
+  if (SCOPE_TERMS.some((w) => t.includes(w)) || SCOPE_SUFFIX_RE.test(t))
+        return 'scope'  // 认不出来的词按泛词处理：给一点权重（弱于专指），但不倒扣——避免把用户自定义的主题词打进冷宫
+  return 'generic'}
+/** * **词表扫描**（Phase 10 P5b）：在一段文字里按四层词表逐个找出现过的词。 * * 为什么需要它：`extractTopicTerms` 面向"短查询串"，遇到**整段撰写要求**（真实例子："标题为"高中学校设置"，包括学校的 * 新建、扩建、改建、合并、规模、招生人数、地理分布等等，注意，这只能包含长乐区的内容…"）时只提出一个整句词 * 「高中学校设置」，分层表里 weak/generic 全空——用它做正文判定会把 **600 篇全部误杀**（真实库副本回放实测）。 * 词表扫描直接按已知词表取词，长短文本都稳；整句词只留给词法兜底，不作字面命中要求。 */
+export function scanTopicLexicon(text: string): { specific: string[]; weak: string[]; generic: string[]; scope: string[]}
+ {
+  const t = text ?? ''
+  const pick = (list: string[]): string[] => [...new Set(list.filter((w) => t.includes(w)))]
+  // 校名简称（三中/六中…）由三件套单独识别，一律进**专指层**——正文里出现即是最强证据
+  return { specific: [...new Set([...pick(SPECIFIC_TERMS), ...findSchoolAbbrevHits(t)])], weak: pick(WEAK_TERMS), generic: pick(GENERIC_TERMS),
+  scope: pick(SCOPE_TERMS)
   }
-  if ((stats.invalidBody ?? 0) > 0) {
-    logMain('web', `网页正文未取到：${stats.invalidBody} 篇判为模板/失效页面（老文章 URL 返回 200 + 通用页），已丢弃不入库`)
-  }
-  if (stats.skippedByCap > 0) {
-    logMain('web', `网页资料抓取达上限：落库 ${stats.fetched} 篇 / ${stats.chars} 字，跳过 ${stats.skippedByCap} 篇（上限 ${WEB_FETCH_MAX_ARTICLES} 篇 / ${WEB_FETCH_MAX_CHARS} 字）`)
-  }
-  return { ids, stats }
 }
 
-/**
- * 生成时的网页资料检索入口（首次生成走这里）：
- * 发现 → 排序 → 抓取落库（含上限），返回命中的 sourceIds 与统计。
- * 重新生成时不再走这里，而是复用 `task_web_materials` 里锁定的材料（见第三批 A1）。
- */
-export async function fetchRelatedSiteSources(
-  query: string,
-  taskId: string,
-  onSite?: (siteTitle: string) => void
-): Promise<{ ids: string[]; stats: WebFetchStats }> {
-  const collected = await collectSiteCandidates(query)
-  if (collected.candidates.length > 0) onSite?.(collected.candidates[0].siteTitle)
-  const imported = await importSiteCandidates(collected.candidates, query, taskId)
-  const stats: WebFetchStats = {
-    ...imported.stats,
-    sites: collected.stats.sites,
-    siteErrors: collected.stats.siteErrors,
-    hits: collected.stats.hits
-  }
-  if (stats.siteErrors > 0) {
-    logMain('web', `网页资料检索：${stats.siteErrors}/${stats.sites} 个站点同步失败，本轮网页材料可能不完整`)
-  }
-  return { ids: imported.ids, stats }
-}
-
-// ---- vitest inline test ----
 if (import.meta.vitest) {
-  const { describe, expect, it } = import.meta.vitest
-
-  describe('site-crawler utils (web source library)', () => {
-    it('extracts absolute links with anchor text', () => {
-      const html = `
-        <a href="/xxgk/ztzl/xqnj/202512/t20251203_5239523.htm">福州新区年鉴（2025）</a>
-        <a href="https://example.com/other.htm">外部链接</a>
-        <a href="#anchor">锚点</a>
-        <a href="javascript:void(0)">脚本</a>
-        <a href="../rel/202608/t20260811_5357559.htm">相对链接</a>
-      `
-      const links = extractLinks(html, 'https://fzxq.fuzhou.gov.cn/xxgk/ztzl/')
-      expect(links).toHaveLength(3)
-      expect(links[0].href).toBe('https://fzxq.fuzhou.gov.cn/xxgk/ztzl/xqnj/202512/t20251203_5239523.htm')
-      expect(links[0].text).toBe('福州新区年鉴（2025）')
-      expect(links[1].href).toBe('https://example.com/other.htm')
-    })
-
-    it('detects article urls by suffix', () => {
-      expect(isArticleUrl('https://fzxq.fuzhou.gov.cn/a.htm')).toBe(true)
-      expect(isArticleUrl('https://fzxq.fuzhou.gov.cn/a.htm?page=2')).toBe(true)
-      expect(isArticleUrl('https://fzxq.fuzhou.gov.cn/xxgk/ztzl/xqnj/')).toBe(false)
-      expect(isArticleUrl('https://fzxq.fuzhou.gov.cn/sitemap.xml')).toBe(false)
-      expect(isArticleUrl('https://www.clnews.com.cn/html/22/list.shtml')).toBe(false)
-      expect(isArticleUrl('https://www.clnews.com.cn/index.html')).toBe(false)
-      expect(isArticleUrl('https://www.clnews.com.cn/more/22.shtml')).toBe(false)
-    })
-
-    it('detects list/channel pages but never real article pages', () => {
-      expect(isListPageUrl('https://www.clnews.com.cn/html/22/list.shtml')).toBe(true)
-      expect(isListPageUrl('https://www.clnews.com.cn/index.html')).toBe(true)
-      expect(isListPageUrl('https://x.gov.cn/channel/index.shtml')).toBe(true)
-      expect(isListPageUrl('https://www.clnews.com.cn/more/22.shtml')).toBe(true)
-      expect(isListPageUrl('http://www.clnews.com.cn/html/428/2019-01-28/083810141991.shtml')).toBe(false)
-      expect(isListPageUrl('https://fzxq.fuzhou.gov.cn/a.htm')).toBe(false)
-      expect(isListPageUrl('https://fzxq.fuzhou.gov.cn/a.htm?page=2')).toBe(false)
-      expect(isListPageUrl('https://fzxq.fuzhou.gov.cn/xxgk/ztzl/xqnj/202512/t20251203_5239523.htm')).toBe(false)
-      expect(isListPageUrl('https://x.gov.cn/news/123.html')).toBe(false)
-      expect(isListPageUrl('https://x.gov.cn/html/2025/t20250101_abc.htm')).toBe(false)
-    })
-
-    it('filters articles by query bigrams', () => {
-      const articles = [
-        { url: 'https://x.gov.cn/a.htm', title: '2021年全区教育工作总结' },
-        { url: 'https://x.gov.cn/b.htm', title: '台湾事务交往工作动态' },
-        { url: 'https://x.gov.cn/c.htm', title: '全区教育系统党建会议召开' }
-      ]
-      const hits = filterArticlesByQuery(articles, '2021年全区教育')
-      expect(hits.map((h) => h.url)).toEqual(['https://x.gov.cn/a.htm', 'https://x.gov.cn/c.htm'])
-    })
-
-    it('returns empty when query is empty; keeps empty-title as candidate (sitemap-first, 2026-08-28)', () => {
-      expect(filterArticlesByQuery([{ url: 'https://x.gov.cn/a.htm', title: '教育' }], '')).toEqual([])
-      // 无标题文章（sitemap 发现）保守保留为候选，交由正文精过滤决定
-      expect(filterArticlesByQuery([{ url: 'https://x.gov.cn/a.htm', title: '' }], '教育')).toEqual([{ url: 'https://x.gov.cn/a.htm', title: '' }])
-    })
-
-    it('extracts title/subtitle terms from instruction', () => {
-      const query = '这次撰写任务的标题为“学前教育”，分为两个子标题“教育与保育”和“园所设置”。注意按照时间顺序展开'
-      expect(extractTopicTerms(query)).toEqual(['学前教育', '教育与保育', '园所设置'])
-      // 无引号无标题引导语 → 回退整句
+  const { describe, expect, it }
+ = import.meta.vitest
+  describe('site-crawler utils (web source library)', () => { it('extracts absolute links with anchor text', () => {
+  const html = `        <a href="/xxgk/ztzl/xqnj/202512/t20251203_5239523.htm">福州新区年鉴（2025）</a>        <a href="https://example.com/other.htm">外部链接</a>        <a href="#anchor">锚点</a>        <a href="javascript:void(0)">脚本</a>        <a href="../rel/202608/t20260811_5357559.htm">相对链接</a>      `
+  const links = extractLinks(html, 'https://fzxq.fuzhou.gov.cn/xxgk/ztzl/')
+  expect(links).toHaveLength(3)
+  expect(links[0].href).toBe('https://fzxq.fuzhou.gov.cn/xxgk/ztzl/xqnj/202512/t20251203_5239523.htm')
+  expect(links[0].text).toBe('福州新区年鉴（2025）')
+  expect(links[1].href).toBe('https://example.com/other.htm')
+  })
+  it('detects article urls by suffix', () => { expect(isArticleUrl('https://fzxq.fuzhou.gov.cn/a.htm')).toBe(true)
+  expect(isArticleUrl('https://fzxq.fuzhou.gov.cn/a.htm?page=2')).toBe(true)
+  expect(isArticleUrl('https://fzxq.fuzhou.gov.cn/xxgk/ztzl/xqnj/')).toBe(false)
+  expect(isArticleUrl('https://fzxq.fuzhou.gov.cn/sitemap.xml')).toBe(false)
+  expect(isArticleUrl('https://www.clnews.com.cn/html/22/list.shtml')).toBe(false)
+  expect(isArticleUrl('https://www.clnews.com.cn/index.html')).toBe(false)
+  expect(isArticleUrl('https://www.clnews.com.cn/more/22.shtml')).toBe(false)
+  })
+  it('detects list/channel pages but never real article pages', () => { expect(isListPageUrl('https://www.clnews.com.cn/html/22/list.shtml')).toBe(true)
+  expect(isListPageUrl('https://www.clnews.com.cn/index.html')).toBe(true)
+  expect(isListPageUrl('https://x.gov.cn/channel/index.shtml')).toBe(true)
+  expect(isListPageUrl('https://www.clnews.com.cn/more/22.shtml')).toBe(true)
+  expect(isListPageUrl('http://www.clnews.com.cn/html/428/2019-01-28/083810141991.shtml')).toBe(false)
+  expect(isListPageUrl('https://fzxq.fuzhou.gov.cn/a.htm')).toBe(false)
+  expect(isListPageUrl('https://fzxq.fuzhou.gov.cn/a.htm?page=2')).toBe(false)
+  expect(isListPageUrl('https://fzxq.fuzhou.gov.cn/xxgk/ztzl/xqnj/202512/t20251203_5239523.htm')).toBe(false)
+  expect(isListPageUrl('https://x.gov.cn/news/123.html')).toBe(false)
+  expect(isListPageUrl('https://x.gov.cn/html/2025/t20250101_abc.htm')).toBe(false)
+  })
+  it('extracts title/subtitle terms from instruction', () => {
+  const query = '这次撰写任务的标题为“学前教育”，分为两个子标题“教育与保育”和“园所设置”。注意按照时间顺序展开'
+  expect(extractTopicTerms(query)).toEqual(['学前教育', '教育与保育', '园所设置'])      // 无引号无标题引导语 → 回退整句
       expect(extractTopicTerms('2021年全区教育')).toEqual(['2021年全区教育'])
-    })
-
-    it('tolerates unpaired quotes when extracting title (test3 regression, 2026-08-14)', () => {
-      // 结尾误用左引号“而非右引号”，仍应提取出标题短词，而非回退整句
+  })
+  it('tolerates unpaired quotes when extracting title (test3 regression, 2026-08-14)', () => { // 结尾误用左引号“而非右引号”，仍应提取出标题短词，而非回退整句
       expect(extractTopicTerms('这次撰写任务的标题为“学前教育“')).toEqual(['学前教育'])
-      expect(extractTopicTerms('这次撰写任务的标题为“学前教育”')).toEqual(['学前教育'])
-    })
-
-    it('extracts the term after 主题为 as well (preset wording, 2026-09-10)', () => {
-      // 预设提示词已改为「本次资料收集的主题为 ……」——用户删掉引号后，本地兜底要认得「主题为」
+  expect(extractTopicTerms('这次撰写任务的标题为“学前教育”')).toEqual(['学前教育'])
+  })
+  it('extracts the term after 主题为 as well (preset wording, 2026-09-10)', () => { // 预设提示词已改为「本次资料收集的主题为 ……」——用户删掉引号后，本地兜底要认得「主题为」
       expect(extractTopicTerms('本次资料收集的主题为 高中教育')).toEqual(['高中教育'])
-      expect(extractTopicTerms('本次资料收集的主题是：高中教育')).toEqual(['高中教育'])
-      // 带引号的预设原样（占位符未替换）与替换后都应取到内容
+  expect(extractTopicTerms('本次资料收集的主题是：高中教育')).toEqual(['高中教育'])      // 带引号的预设原样（占位符未替换）与替换后都应取到内容
       expect(extractTopicTerms('本次资料收集的主题为「高中教育」，具体包括「课程与升学」')).toEqual(['高中教育', '课程与升学'])
-    })
-
-    it('expands education domain hints from topic term', () => {
-      const terms = extractTopicTerms('标题为“学前教育”')
-      const hints = expandDomainHints(terms)
-      expect(hints).toContain('幼儿园')
-      expect(hints).toContain('保育')
-      expect(hints).toContain('幼儿')
-      // 宽泛的 key 本身（"教育"）不进兜底表，避免误召回"政绩观学习教育"
-      expect(hints).not.toContain('教育')
-      // 收窄后剔除跨词误匹配与泛教育词（2026-08-13 test1 误召回回归）
+  })
+  it('expands education domain hints from topic term', () => {
+  const terms = extractTopicTerms('标题为“学前教育”')
+        const hints = expandDomainHints(terms)
+  expect(hints).toContain('幼儿园')
+  expect(hints).toContain('保育')
+  expect(hints).toContain('幼儿')      // 宽泛的 key 本身（"教育"）不进兜底表，避免误召回"政绩观学习教育"
+  expect(hints).not.toContain('教育')      // 收窄后剔除跨词误匹配与泛教育词（2026-08-13 test1 误召回回归）
       expect(hints).not.toContain('入学') // "入学" 会命中"深**入学**习"
-      expect(hints).not.toContain('大学') // 避免召回"重庆中新大学"等外地新闻
+  expect(hints).not.toContain('大学') // 避免召回"重庆中新大学"等外地新闻
       expect(hints).not.toContain('教学')
-      expect(hints).not.toContain('学生')
-      // 2026-08-14 再收窄：剔除招生/校历/学位，避免召回中小学/高中招生新闻（test2 漏检矛盾主因）
+  expect(hints).not.toContain('学生')      // 2026-08-14 再收窄：剔除招生/校历/学位，避免召回中小学/高中招生新闻（test2 漏检矛盾主因）
       expect(hints).not.toContain('招生')
-      expect(hints).not.toContain('校历')
-      expect(hints).not.toContain('学位')
-    })
-
-    it('does not mis-match "入学" inside "深入学习" (test1 误召回回归)', () => {
-      const query = '这次撰写任务的标题为“学前教育”'
-      const terms = [...extractTopicTerms(query), ...expandDomainHints(extractTopicTerms(query))]
-      expect(terms).not.toContain('入学')
-      expect(matchesExact('要深入学习贯彻习近平总书记重要讲话精神', terms)).toBe(false)
-      expect(matchesExact('长乐区幼儿园开展入学报名', terms)).toBe(true)
-    })
-
-    it('matches the whole article body, not just the first 12,000 chars (7.11 遗留 B / 方案 A)', () => {
-      const terms = ['高中']
-      const longBody = 'x'.repeat(12500) + '高中' + 'y'.repeat(500)
-      /*
-       * 回归护栏：原实现 `(标题 + 正文).slice(0, 12000)` 会把主题词在第 12,000 字之后出现的长文
-       * 判成"不切题"直接丢弃，而且界面上看不出来（静默丢材料）。这里钉住"不再截断"。
-       */
-      expect(buildBodyMatchText('某篇长文', longBody).length).toBe('某篇长文'.length + 1 + longBody.length)
-      expect(matchesExact(buildBodyMatchText('某篇长文', longBody), terms)).toBe(true)
-      // 反向：正文确实不含主题词时仍要挡掉（放宽窗口不等于放水）
-      expect(matchesExact(buildBodyMatchText('某篇长文', 'x'.repeat(20000)), terms)).toBe(false)
-      // 标题仍参与匹配（B-1 明确不做）：标题命中即可过闸门
-      expect(matchesExact(buildBodyMatchText('我区高中改扩建工程', '与主题用词不同的正文'), terms)).toBe(true)
-    })
-
-    it('treats a space-joined keyword list as separate terms (2026-09-12 修正)', () => {
-      // 生成管线的 coarseQuery = 大模型提取的「标题 + 关键词」用空格拼接，此前会被压成一个长串
-      expect(extractTopicTerms('高中学校设置 高中 新建 扩建 合并 规模 招生人数')).toEqual([
-        '高中学校设置',
-        '高中',
-        '新建',
-        '扩建',
-        '合并',
-        '规模',
-        '招生人数'
-      ])
-      // 单条长句（无空格）仍回退整句，保持既有行为
+  expect(hints).not.toContain('校历')
+  expect(hints).not.toContain('学位')
+  })
+  it('does not mis-match "入学" inside "深入学习" (test1 误召回回归)', () => {
+  const query = '这次撰写任务的标题为“学前教育”'
+  const terms = [...extractTopicTerms(query), ...expandDomainHints(extractTopicTerms(query))]
+  expect(terms).not.toContain('入学')
+  })
+  it('treats a space-joined keyword list as separate terms (2026-09-12 修正)', () => { // 生成管线的 coarseQuery = 大模型提取的「标题 + 关键词」用空格拼接，此前会被压成一个长串
+      expect(extractTopicTerms('高中学校设置 高中 新建 扩建 合并 规模 招生人数')).toEqual([        '高中学校设置',        '高中',        '新建',        '扩建',        '合并',        '规模',        '招生人数'      ])      // 单条长句（无空格）仍回退整句，保持既有行为
       expect(extractTopicTerms('请把学校建设情况整理成汇编')).toEqual(['请把学校建设情况整理成汇编'])
-    })
-
-    it('ranks candidate articles by title relevance for the fetch cap (2026-09-12 第二批；同日修正打分口径)', () => {
-      const articles = [
-        { url: 'https://x.gov.cn/a.htm', title: '关于组织学习的通知' },
-        { url: 'https://x.gov.cn/b.htm', title: '福州新区年鉴（2025）' },
-        { url: 'https://x.gov.cn/c.htm', title: '' }, // sitemap 发现的无标题候选：保留但排最后
-        { url: 'https://x.gov.cn/d.htm', title: '高中学校设置与达标高中建设情况' }
-      ]
-      const ranked = rankArticlesByQuery(articles, '本次资料收集的主题为「高中学校设置」')
-      // 标题命中主题词的排前面；无标题/无关的排后面；同分保持原顺序（清单本身按发布时间倒序）
-      expect(ranked[0].title).toBe('高中学校设置与达标高中建设情况')
-      expect(ranked[ranked.length - 1].title).toBe('')
-      expect(ranked[0].matchScore).toBeGreaterThan(0)
-      expect(ranked[0].matchScore).toBeGreaterThan(ranked[ranked.length - 1].matchScore)
-      // 不丢项
-      expect(ranked.map((a) => a.url).sort()).toEqual(articles.map((a) => a.url).sort())
-    })
-
-    it('still separates relevant titles when the query is a long keyword list (真实站点 477 篇全 0 分回归)', () => {
-      // 回归根因：旧打分用 title.includes(term)，而 coarseQuery 是一个长关键词串 → 所有标题 0 分、排序失效
-      const ranked = rankArticlesByQuery(
-        [
-          { url: 'a', title: '长乐将新增幼儿学位4500个' },
-          { url: 'b', title: '融侨国际双语学校奠基仪式举行' },
-          { url: 'c', title: '福建将扩大普通高中教育资源 试点中职和普高互融互通' }
-        ],
-        '高中学校设置 高中 新建 扩建 合并 规模 招生人数 地理分布'
-      )
-      // 与主题直接相关（含「高中」「学校」）的排前面；同分的（均为 1 个 bigram 命中）保持原清单顺序
-      expect(ranked[0].title).toContain('普通高中')
-      expect(ranked[1].title).toContain('融侨国际双语学校')
-      expect(ranked[2].title).toContain('幼儿学位')
-      expect(ranked[0].matchScore).toBeGreaterThan(ranked[2].matchScore)
-    })
-
-    it('dedupes http/https article urls to the same key', () => {
-      expect(dedupeArticleKey('https://fzxq.fuzhou.gov.cn/a.htm')).toBe('fzxq.fuzhou.gov.cn/a.htm')
-      expect(dedupeArticleKey('http://fzxq.fuzhou.gov.cn/a.htm')).toBe('fzxq.fuzhou.gov.cn/a.htm')
-      expect(dedupeArticleKey('https://fzxq.fuzhou.gov.cn/b.htm/')).toBe('fzxq.fuzhou.gov.cn/b.htm')
-    })
-
-    it('rejects pages that do not contain the article (老文章失效→模板页，A1)', () => {
-      const title = '长乐新添一所普通高中！将于9月开学！'
-      // 正常文章页：原始 HTML 里有标题（哪怕提取出的正文不含标题）→ 通过
-      expect(pageContainsArticle('<html><title>长乐新添一所普通高中！将于9月开学！</title></html>', '正文', title)).toBe(true)
-      expect(pageContainsArticle('', '长乐新添一所普通高中！将于9月开学！\n福州市福外高级中学…', title)).toBe(true)
-      // 老文章 URL 返回的通用模板页（导航 + 其他文章列表，既无标题也无正文）→ 丢弃
-      const template = '长乐新闻网_长乐区互联网新闻中心 长乐要闻 长乐时讯 乡镇风采 八闽风物正当时 | 读懂福州，从一朵茉莉花开始'
-      expect(pageContainsArticle('<html><title>长乐新闻网</title></html>', template, title)).toBe(false)
-      // 标题过短（<4 字）不判定，避免误杀
-      expect(pageContainsArticle(undefined, '随便什么正文', '教育')).toBe(true)
-    })
-
-    it('cleans nav/breadcrumb/related-list/footer from a full-page body (A2)', () => {
-      const title = '福建省普通高中学业水平考试开考　三年共考14门'
-      const raw = [
-        '福建省普通高中学业水平考试开考　三年共考14门_正文_福建新闻_长乐新闻网',
-        '长乐要闻',
-        '长乐时讯',
-        '乡镇风采',
-        '部门动态',
-        '长乐要闻',
-        '您的位置: 长乐新闻网 >> 福建新闻 >> 正文',
-        title,
-        'http://www.clnews.com.cn 　2019-01-14 09:31:47 　 来源：厦门日报 　【字号 大 中 小】',
-        '厦门网讯 本周末新旧高中会考举行，其中新会考昨日开考。',
-        '相关新闻',
-        '全省首家“医中办养”居家社区养老服务照料中心开放(2019-01-14 09:31:14)',
-        '关于我们网络实名:长乐新闻网 闽ICP备2021012933号'
-      ].join('\n')
-      const cleaned = cleanArticleText(raw, title)
-      expect(cleaned).toContain('厦门网讯')
-      expect(cleaned).toContain('来源：厦门日报')
-      expect(cleaned).not.toContain('长乐要闻')
-      expect(cleaned).not.toContain('相关新闻')
-      expect(cleaned).not.toContain('闽ICP备')
-      // 正文长行一律保留（不做短行去重之外的删改）
-      expect(cleanArticleText('只有一行正文。', '标题')).toBe('只有一行正文。')
-    })
-
-    it('keeps both digits of the publish day (2026-09-12 实测截断回归)', () => {
-      // 真实数据里 477 篇网页的发布时间全被截掉最后一位（"2016-06-2" / "2017-08-3"），
-      // 根因是日/月候选把单位数放在最前且结尾无强制分隔符 → 前缀即算匹配
-      expect(extractPublishedDate('<span>2016-06-22</span>')).toBe('2016-06-22')
-      expect(extractPublishedDate('<div>2017-08-30 10:32</div>')).toBe('2017-08-30')
-      expect(extractPublishedDate('发布时间：2022-09-30')).toBe('2022-09-30')
-      expect(extractPublishedDate('2015年3月8日')).toBe('2015年3月8日')
-      expect(extractPublishedDate('2015 年 12 月 25 日')).toBe('2015 年 12 月 25 日')
-      // 单位数日期不受影响
-      expect(extractPublishedDate('2014-03-1 发布')).toBe('2014-03-1')
-      // 优先 meta 与 <time>，且都不是日期文本时才回退
-      expect(extractPublishedDate('<meta property="article:published_time" content="2021-03-05T08:00:00+08:00">')).toBe('2021-03-05T08:00:00+')
-      expect(extractPublishedDate('<time datetime="2020-11-09"></time>')).toBe('2020-11-09')
-      expect(extractPublishedDate('<p>没有日期</p>')).toBeNull()
-    })
-
-    it('recalls kindergarten news and rejects politics-study news via exact prefilter (test1 regression)', () => {
-      const query = '这次撰写任务的标题为“学前教育”，分为两个子标题“教育与保育”和“园所设置”。注意按照时间顺序展开'
-      const articles = [
-        { url: 'https://fzxq.fuzhou.gov.cn/a.htm', title: '长乐首占安置房配建幼儿园 共有1346套下月部分完工' },
-        { url: 'https://fzxq.fuzhou.gov.cn/b.htm', title: '福州新区党工委（长乐区委）树立和践行正确政绩观学习教育专题党课暨全区警示教育会举行' }
-      ]
-      // 标题粗筛（宽召回）：两篇都进候选（幼儿园=领域词命中；政绩观学习=含"教育"bigram）
-      const hits = filterArticlesByQuery(articles, query)
-      expect(hits.map((h) => h.url)).toEqual(['https://fzxq.fuzhou.gov.cn/a.htm', 'https://fzxq.fuzhou.gov.cn/b.htm'])
-
-      // 正文精过滤（精确子串）：幼儿园正文保留，政绩观学习正文挡掉
-      const terms = [...extractTopicTerms(query), ...expandDomainHints(extractTopicTerms(query))]
-      expect(matchesExact('长乐首占安置房配建幼儿园，共有1346套下月部分完工。', terms)).toBe(true)
-      expect(matchesExact('树立和践行正确政绩观学习教育，开展全区警示教育。', terms)).toBe(false)
-    })
-    it('normalizes article urls: host lowercase, strips http/https, tracking params, trailing slash (A3, 2026-08-28)', () => {
-      expect(normalizeArticleUrl('https://FZXQ.fuzhou.gov.cn/a.htm?utm_source=x&b=1#sec')).toBe('https://fzxq.fuzhou.gov.cn/a.htm?b=1')
-      expect(normalizeArticleUrl('http://fzxq.fuzhou.gov.cn/a.htm/')).toBe('http://fzxq.fuzhou.gov.cn/a.htm')
-      expect(dedupeArticleKey('https://fzxq.fuzhou.gov.cn/a.htm?utm_medium=x')).toBe('fzxq.fuzhou.gov.cn/a.htm')
-    })
-
-    it('parses sitemap xml (sitemap index + urlset) (A1, 2026-08-28)', () => {
-      const index = '<?xml version="1.0"?><sitemapindex><sitemap><loc>https://x.gov.cn/news.xml</loc></sitemap><sitemap><loc>https://x.gov.cn/zs.xml</loc></sitemap></sitemapindex>'
-      const i = parseSiteMap(index, 'https://x.gov.cn')
-      expect(i.map((e) => e.url)).toEqual(['https://x.gov.cn/news.xml', 'https://x.gov.cn/zs.xml'])
-      const urlset = '<urlset><url><loc>https://x.gov.cn/a.htm</loc><lastmod>2025-01-01</lastmod></url></urlset>'
-      const u = parseSiteMap(urlset, 'https://x.gov.cn')
-      expect(u[0].url).toBe('https://x.gov.cn/a.htm')
-      expect(u[0].lastmod).toBe('2025-01-01')
-    })
-
-    it('parses robots.txt crawl-delay + disallow (C6, 2026-08-28)', () => {
-      const robots = 'User-agent: *\nDisallow: /admin/\nDisallow: /search\nCrawl-delay: 2\nAllow: /public/'
-      const r = parseRobotsTxt(robots)
-      expect(r.crawlDelay).toBe(2)
-      expect(r.disallow).toEqual(['/admin/', '/search'])
-      expect(isPathDisallowed('https://x.gov.cn/admin/a.htm', r.disallow)).toBe(true)
-      expect(isPathDisallowed('https://x.gov.cn/a.htm', r.disallow)).toBe(false)
-    })
-
-    it('extracts <title> from html (B4/title fallback, 2026-08-28)', () => {
-      expect(extractPageTitle('<html><head><title>长乐区学前教育</title></head></html>')).toBe('长乐区学前教育')
-      expect(extractPageTitle('<html></html>')).toBe('')
-    })
-
-    it('parses RSS2 feed items (A2, 2026-08-28)', () => {
-      const rss = '<?xml?><rss><channel><item><title>长乐区幼儿园</title><link>https://x.gov.cn/a.htm</link><pubDate>Fri, 01 Jan 2025 00:00:00 GMT</pubDate></item></channel></rss>'
-      const items = parseFeed(rss, 'https://x.gov.cn')
-      expect(items).toHaveLength(1)
-      expect(items[0].url).toBe('https://x.gov.cn/a.htm')
-      expect(items[0].title).toBe('长乐区幼儿园')
-      expect(items[0].lastmod).toContain('2025')
-    })
-
-    it('parses Atom feed entries (A2, 2026-08-28)', () => {
-      const atom = '<?xml?><feed><entry><title>学前教育进展</title><link href="https://x.gov.cn/b.htm"/><updated>2025-02-01T00:00:00Z</updated></entry></feed>'
-      const items = parseFeed(atom, 'https://x.gov.cn')
-      expect(items).toHaveLength(1)
-      expect(items[0].url).toBe('https://x.gov.cn/b.htm')
-      expect(items[0].title).toBe('学前教育进展')
-    })
-
-    it('detects rss/atom feed link in homepage (A2, 2026-08-28)', () => {
-      const html = '<html><head><link rel="alternate" type="application/rss+xml" href="/rss.xml"/></head></html>'
-      expect(detectFeedUrls(html, 'https://x.gov.cn')).toEqual(['https://x.gov.cn/rss.xml'])
-    })
+  })
+      it('dedupes http/https article urls to the same key', () => { expect(dedupeArticleKey('https://fzxq.fuzhou.gov.cn/a.htm')).toBe('fzxq.fuzhou.gov.cn/a.htm')
+  expect(dedupeArticleKey('http://fzxq.fuzhou.gov.cn/a.htm')).toBe('fzxq.fuzhou.gov.cn/a.htm')
+  expect(dedupeArticleKey('https://fzxq.fuzhou.gov.cn/b.htm/')).toBe('fzxq.fuzhou.gov.cn/b.htm')
+  })
+  it('classifies topic terms into specific / weak / generic / scope (2026-10-04 P1 分层排序)', () => { expect(classifyTopicTerm('高中')).toBe('specific')
+  expect(classifyTopicTerm('高中学校设置')).toBe('specific')
+  expect(classifyTopicTerm('校区')).toBe('specific') // 不能被"（区）$"吃成范围词：判定顺序不可颠倒
+      expect(classifyTopicTerm('长乐区教育局')).toBe('specific')
+  expect(classifyTopicTerm('学校')).toBe('weak')
+  expect(classifyTopicTerm('教育')).toBe('weak')
+  expect(classifyTopicTerm('新建')).toBe('generic')
+  expect(classifyTopicTerm('招生人数')).toBe('generic')
+  expect(classifyTopicTerm('长乐区')).toBe('scope')
+  expect(classifyTopicTerm('福州新区')).toBe('scope')
+  expect(classifyTopicTerm('全区')).toBe('scope')
+  expect(classifyTopicTerm('玉田镇')).toBe('scope')      // 认不出来的词给泛词档（弱加权、不倒扣），避免把用户自定义主题词打进冷宫
+      expect(classifyTopicTerm('甲乙丙')).toBe('generic')
+  expect(classifyTopicTerm('')).toBe('generic')
+  })
+  it('认出校名简称与学段词（2026-10-05 补词表：本次漏检第一大来源）', () => { // 学段/机构类新词
+  expect(classifyTopicTerm('普高')).toBe('specific')
+  expect(classifyTopicTerm('独立高中')).toBe('specific')
+  expect(classifyTopicTerm('省一级达标')).toBe('specific')
+  expect(classifyTopicTerm('达标高中')).toBe('specific')
+  expect(classifyTopicTerm('集团化办学')).toBe('specific')
+  // 动态要点词只进泛词（单独不足以放行，只提高召回）
+  expect(classifyTopicTerm('新办')).toBe('generic')
+  expect(classifyTopicTerm('投用')).toBe('generic')
+  expect(classifyTopicTerm('更名')).toBe('generic')
+  expect(classifyTopicTerm('招生计划')).toBe('generic')
+  expect(classifyTopicTerm('录取')).toBe('generic')
+  // 校名简称：正文里"福州三中滨海校区"必须与"福州第三中学滨海校区"同档
+  const hits = scanTopicLexicon('福州三中滨海校区等学校建成招生')
+  expect(hits.specific).toContain('三中')
+  expect(hits.specific).toContain('校区')
+  expect(hits.weak).toContain('学校')
+  })
+  it('校名简称三件套：能升档、不误配地名（2026-10-05）', () => { // ① 能升档
+  expect(findSchoolAbbrevHits('福州三中滨海校区')).toEqual(['三中'])
+  expect(findSchoolAbbrevHits('长乐六中新校区')).toEqual(['六中'])
+  expect(findSchoolAbbrevHits('长乐一中首占校区新增体艺特长生招生')).toEqual(['一中'])
+  expect(findSchoolAbbrevHits('长乐二中、长乐五中扩容')).toEqual(['二中', '五中'])
+  // 「侨中」是**词**不是"数字+中"，由 SPECIFIC_TERMS 命中，不由本条模式再认（避免两条规则互相干扰）
+  expect(findSchoolAbbrevHits('长乐侨中侨港澳台生班')).toEqual([])
+  expect(scanTopicLexicon('长乐侨中侨港澳台生班').specific).toContain('侨中')
+  // 无后缀的"X中"（真实文本里最常见：长乐三中复办）必须能认出来。
+  // 「第三中学」里的"三中"也会被命中——这是**故意**的：它同样指福州三中系，升档方向与需求一致（宁可多升、不可漏升）。
+  expect(findSchoolAbbrevHits('2024年，福建省长乐第三中学复办')).toEqual(['三中'])
+  expect(scanTopicLexicon('2024年，福建省长乐第三中学复办').specific).toContain('中学')
+  expect(findSchoolAbbrevHits('长乐八中滨海校区')).toEqual(['八中'])
+  // ② 明显误配不升档：地名（三中路 / 中亭街）与"初中/高中/完中/附中"（已由词表命中，不由本条再认）
+  expect(findSchoolAbbrevHits('三中路口的红绿灯')).toEqual([])
+  expect(findSchoolAbbrevHits('中亭街商业区')).toEqual([])
+  expect(findSchoolAbbrevHits('长乐四中巷')).toEqual([])
+  expect(findSchoolAbbrevHits('初中部')).toEqual([])
+  expect(findSchoolAbbrevHits('高中三个年级')).toEqual([])
+  expect(findSchoolAbbrevHits('完中校')).toEqual([])
+  // 白话里"中"字极多，但没有"数字+中"就不该有任何命中
+  expect(findSchoolAbbrevHits('在群众中开展集中学习')).toEqual([])
+  // ③ 升档方向：只升不降
+  expect(upgradeTopicClass('scope', 'specific')).toBe('specific')
+  expect(upgradeTopicClass('specific', 'scope')).toBe('specific')
+  expect(upgradeTopicClass('generic', 'weak')).toBe('weak')
+  expect(upgradeTopicClass('weak', 'generic')).toBe('weak')
+  })
+  it('normalizes article urls: host lowercase, strips http/https, tracking params, trailing slash (A3, 2026-08-28)', () => { expect(normalizeArticleUrl('https://FZXQ.fuzhou.gov.cn/a.htm?utm_source=x&b=1#sec')).toBe('https://fzxq.fuzhou.gov.cn/a.htm?b=1')
+  expect(normalizeArticleUrl('http://fzxq.fuzhou.gov.cn/a.htm/')).toBe('http://fzxq.fuzhou.gov.cn/a.htm')
+  expect(dedupeArticleKey('https://fzxq.fuzhou.gov.cn/a.htm?utm_medium=x')).toBe('fzxq.fuzhou.gov.cn/a.htm')
+  })
+  it('parses sitemap xml (sitemap index + urlset) (A1, 2026-08-28)', () => {
+  const index = '<?xml version="1.0"?><sitemapindex><sitemap><loc>https://x.gov.cn/news.xml</loc></sitemap><sitemap><loc>https://x.gov.cn/zs.xml</loc></sitemap></sitemapindex>'
+  const i = parseSiteMap(index, 'https://x.gov.cn')
+  expect(i.map((e) => e.url)).toEqual(['https://x.gov.cn/news.xml', 'https://x.gov.cn/zs.xml'])
+        const urlset = '<urlset><url><loc>https://x.gov.cn/a.htm</loc><lastmod>2025-01-01</lastmod></url></urlset>'
+  const u = parseSiteMap(urlset, 'https://x.gov.cn')
+  expect(u[0].url).toBe('https://x.gov.cn/a.htm')
+  expect(u[0].lastmod).toBe('2025-01-01')
+  })
+  it('parses news:publication_date from sitemap (Phase 10 日期阶梯 L2a)', () => { // Google News 扩展比 lastmod 更贴"发布时间"，阶梯里要优先用它
+  const withNews =        '<urlset><url><loc>https://x.gov.cn/a.htm</loc><lastmod>2025-01-05</lastmod>' +        '<news:publication_date>2024-12-31</news:publication_date></url>' +        '<url><loc>https://x.gov.cn/b.htm</loc><lastmod>2025-01-06</lastmod></url></urlset>'
+  const s = parseSiteMap(withNews, 'https://x.gov.cn')
+  expect(s[0].publicationDate).toBe('2024-12-31')
+  expect(s[0].lastmod).toBe('2025-01-05')
+  expect(s[1].publicationDate).toBeUndefined()
+  expect(s[1].lastmod).toBe('2025-01-06')      // 无命名空间前缀的写法也要认
+      expect(parseSiteMap('<urlset><url><loc>https://x.gov.cn/c.htm</loc><publication_date>2024-11-30</publication_date></url></urlset>', 'https://x.gov.cn')[0].publicationDate).toBe('2024-11-30')
+  })
+  it('parses robots.txt crawl-delay (seconds → milliseconds) + disallow (C6, 2026-08-28 / 单位修正 2026-10-04)', () => {
+  const robots = 'User-agent: *\nDisallow: /admin/\nDisallow: /search\nCrawl-delay: 2\nAllow: /public/'
+  const r = parseRobotsTxt(robots)      // robots.txt 的 Crawl-delay 单位是秒，模块内一律用毫秒（原先按秒解析、按毫秒使用 → 站点限速被完全忽略）
+      expect(r.crawlDelayMs).toBe(2000)
+  expect(r.disallow).toEqual(['/admin/', '/search'])
+  expect(isPathDisallowed('https://x.gov.cn/admin/a.htm', r.disallow)).toBe(true)
+  expect(isPathDisallowed('https://x.gov.cn/a.htm', r.disallow)).toBe(false)      // 声明过大的间隔按上限截断，避免一次生成卡死数小时
+      expect(parseRobotsTxt('User-agent: *\nCrawl-delay: 3600').crawlDelayMs).toBe(10000)      // 未声明 / 非法值 → 不设间隔（由默认 120ms 兜底）
+      expect(parseRobotsTxt('User-agent: *\nDisallow: /x').crawlDelayMs).toBeUndefined()
+  expect(parseRobotsTxt('User-agent: *\nCrawl-delay: abc').crawlDelayMs).toBeUndefined()
+  })
+  it('parses RSS2 feed items (A2, 2026-08-28)', () => {
+  const rss = '<?xml?><rss><channel><item><title>长乐区幼儿园</title><link>https://x.gov.cn/a.htm</link><pubDate>Fri, 01 Jan 2025 00:00:00 GMT</pubDate></item></channel></rss>'
+  const items = parseFeed(rss, 'https://x.gov.cn')
+  expect(items).toHaveLength(1)
+  expect(items[0].url).toBe('https://x.gov.cn/a.htm')
+  expect(items[0].title).toBe('长乐区幼儿园')
+  expect(items[0].lastmod).toContain('2025')
+  })
+  it('parses Atom feed entries (A2, 2026-08-28)', () => {
+  const atom = '<?xml?><feed><entry><title>学前教育进展</title><link href="https://x.gov.cn/b.htm"/><updated>2025-02-01T00:00:00Z</updated></entry></feed>'
+  const items = parseFeed(atom, 'https://x.gov.cn')
+  expect(items).toHaveLength(1)
+  expect(items[0].url).toBe('https://x.gov.cn/b.htm')
+  expect(items[0].title).toBe('学前教育进展')
+  })
+  it('detects rss/atom feed link in homepage (A2, 2026-08-28)', () => {
+  const html = '<html><head><link rel="alternate" type="application/rss+xml" href="/rss.xml"/></head></html>'
+  expect(detectFeedUrls(html, 'https://x.gov.cn')).toEqual(['https://x.gov.cn/rss.xml'])
+  })
   })
 }

@@ -98,6 +98,12 @@ export interface WritingTask {
   currentVersion: number
   createdAt: string
   updatedAt: string
+  /**
+   * Phase 10 P5：**该任务**的网页资料年份区间（按发布时间筛选）。
+   * 新建任务时继承全局默认值（设置里的 `webYearFrom/webYearTo`）；为空表示"回退全局默认"。
+   */
+  webYearFrom?: number
+  webYearTo?: number
 }
 
 // ============================================================
@@ -144,6 +150,15 @@ export interface RetrievedChunk {
   /** 来源类型与发布时间（供段首时间的年份兜底：网页不能用「年鉴 −1」规则） */
   sourceKind?: 'file' | 'url'
   sourcePublishedAt?: string
+  /**
+   * 该块在来源正文（`sources.cleaned_text`）里的字符区间（左闭右开；2026-10-05 用户裁定 P0-2）。
+   *
+   * 用途：**生成期就记下"这段话来自哪个字符区间"**，落来源锚点时直接映射 `source_blocks` 得到块号与页码，
+   * 不再依赖事后拿逐字证据去来源里 `indexOf` 回溯（那会因页眉噪声/改写而拿不到位置）。
+   * 与 `source_blocks.char_start/char_end` 同一坐标系；历史向量块对不上当前切块时**如实缺省**，由 fallback 兜。
+   */
+  charStart?: number
+  charEnd?: number
 }
 
 // ============================================================
@@ -525,10 +540,181 @@ export interface AppSettings {
    * 落库后两种运行方式共用同一标记。localStorage 仍保留作为快速路径。
    */
   onboardingDone?: boolean
+  /**
+   * Phase 10 P3：网页资料库的**发布时间筛选区间**（年份，含端点）。
+   * 这是新流程的第一步筛选条件——只有发布时间落在区间内的文章才进入后续的抓取与正文筛选。
+   * 缺省（未设置）表示不按年份筛。非法/越界值一律当作缺省处理（见 `db/settings.ts`）。
+   */
+  webYearFrom?: number
+  webYearTo?: number
+  /**
+   * 2026-10-05（用户裁定）：网页抓取**节奏档位**。默认 `standard`（间隔 60ms / 并发 4）。
+   * `safe` = 120ms / 并发 2（Phase 10 P4 的原始礼貌口径）；`fast` = 40ms / 并发 6（对站点最激进）。
+   * 抓取中若批量失败，会**自动降档**（间隔翻倍）并重抓本轮失败文章，但**不写回本设置**
+   * （用户明确要求："下一次任务还是默认按照标准的抓取节奏来"）。
+   */
+  webCrawlTier?: WebCrawlTier
+}
+
+/** Phase 10 P4：按年份区间全量抓取时的进度（渲染层据此显示进度与剩余时长） */
+export interface WebCrawlProgress {
+  phase: 'fetching' | 'done' | 'cancelled'
+  /** 本次待处理篇数（已剔除已完成/跳过项） */
+  total: number
+  done: number
+  hits: number
+  dropped: number
+  failed: number
+  chars: number
+  /** 实测速度（篇/秒） */
+  ratePerSec: number
+  /** 预计剩余秒数（由 `EtaEstimator` 给出：中位数+截尾均值取大、含礼貌限速下限） */
+  etaSeconds: number
+  /** 是否仍为预热期的"初估"（样本不足 20 篇时用实测先验 75ms/篇） */
+  provisional: boolean
+  currentTitle?: string
+  /** 2026-10-05：是否处于「暂停抓取」状态（界面据此把按钮切成「继续抓取」并显示提示） */
+  paused?: boolean
+  /** 2026-10-05：本次从**正文缓存**复用（未联网）的篇数 */
+  cacheHits?: number
+  /** 2026-10-05：当前生效的请求间隔（毫秒）——自适应降档后会变大 */
+  intervalMs?: number
+}
+
+/** Phase 10 P4：一次抓取的结果汇总 */
+export interface WebCrawlResult {
+  total: number
+  done: number
+  hits: number
+  dropped: number
+  failed: number
+  chars: number
+  cancelled: boolean
+  elapsedMs: number
+  /** 本次命中的站点限速声明（毫秒；用于解释 ETA 的物理下限） */
+  crawlDelayMs?: number
+  /** 本次涉及的站点数 */
+  sites?: number
+  /**
+   * 2026-10-05（P0 兜底回归）：三类"有效正文"判定的计数 —— 之前 P4 管线缺失这些兜底，
+   * 界面上 `webScanInvalidBody` / `webScanShortBody` / `webScanTemplateRepeat` 三条提示恒为 0。
+   * ① `invalidBody`：候选带标题但页面不含该文章（老文章失效 → 站点返回通用模板页）；
+   * ② `shortBody`：空标题候选（sitemap）清洗后正文过短；③ `templateRepeat`：与同站别的 URL 正文逐字相同。
+   */
+  invalidBody?: number
+  shortBody?: number
+  templateRepeat?: number
+  /** 2026-10-05（安全加固）：因不在「http(s) + 同域白名单」内而被跳过、**未发起请求**的篇数 */
+  blocked?: number
+  /** 2026-10-05：从**正文缓存**复用（零网络）的篇数 */
+  cacheHits?: number
+  /** 2026-10-05：本次运行触发的自适应降档次数（0 = 节奏合适） */
+  downgrades?: number
+  /** 2026-10-05：因为「暂停抓取」而额外耗费的等待毫秒数（诊断用） */
+  pausedMs?: number
+}
+
+/**
+ * 2026-10-05（用户裁定）：网页抓取的**节奏档位**。
+ * `safe` = 120ms / 并发 2（Phase 10 P4 的原始礼貌口径）；`standard` = 60ms / 并发 4（默认）；`fast` = 40ms / 并发 6。
+ * 抓取中若出现批量失败会**自动降档**（只影响本次运行），下一次生成仍从设置档位开始。
+ */
+export type WebCrawlTier = 'safe' | 'standard' | 'fast'
+
+/**
+ * Phase 10 P3：网页资料库目录的日期统计（年份区间筛选的预览数据）。
+ * 用于在界面上如实告诉用户"这个区间里有多少篇、其中多少篇日期未知、预计要抓多久"。
+ */
+export interface WebArticleDateStats {
+  /** 目录总条数 */
+  total: number
+  /** 有发布日期（`published_date` 非空）的条数 */
+  dated: number
+  /** 日期未知（五级阶梯全部失败）的条数——**不丢弃**，界面如实显示 */
+  unknown: number
+  /** 发布时间落在所选区间内的条数 */
+  inRange: number
+  /** 全部有日期文章的按年分布（升序） */
+  byYear: { year: string; count: number }[]
+  /** 区间内文章的按年分布（升序） */
+  inRangeByYear: { year: string; count: number }[]
+  /** 按"同站并发 2 + 每请求 ≥120ms"的实测口径估算的抓取耗时（分钟） */
+  estimatedMinutes: number
 }
 
 /** 资料汇编查看器字号档位 */
 export type DocScale = 'small' | 'medium' | 'large'
+
+/* ============================================================
+ * 「建立缓存与索引」（2026-10-06 用户需求）
+ * ============================================================
+ * 需求口径（用户裁定）：
+ *   ① 设置页那块「本地检索索引」改为「建立缓存与索引」，一次把**网页正文缓存**（按年份区间）
+ *      与**本地资料库索引**建立起来，带进度与预计剩余时间；
+ *   ② 生成汇编前若发现区间内有资料没建立 → **严格阻断**（不给"仍然生成"的逃生门），
+ *      提示去设置页建立；
+ *   ③ 已建立的不重复建立（幂等）；
+ *   ④ 资料被删除时对应缓存/索引同步删除。
+ * 本节类型是 `web-source/cache-build-plan.ts`（只读规划）与 Phase C 的建立引擎共用的契约。
+ */
+
+/** 「建立缓存与索引」按年份的建立情况 */
+export interface BuildYearBucket {
+  year: number
+  /** 该年目录条数 */
+  total: number
+  /** 已有可用正文（`state='ok'`） */
+  cached: number
+  /** 已尝试但没取到可用正文（`state='no-body'`）——**不算缺口** */
+  noBody: number
+  /** URL 不在该站点同域白名单内（`state='blocked'` 或按白名单预判）——**永不可建、也不算缺口** */
+  blocked: number
+  /** 仍需联网建立 */
+  pending: number
+}
+
+/** 网页正文缓存的建立计划（只读统计；`pending === 0` 才允许生成汇编） */
+export interface WebBuildPlan {
+  fromYear: number
+  toYear: number
+  /** 区间内目录条数 */
+  total: number
+  cached: number
+  noBody: number
+  blocked: number
+  /** **唯一**决定闸门放不放行的数 */
+  pending: number
+  byYear: BuildYearBucket[]
+  /** 按项目既有口径（`fetch-estimate.ts`，75ms/篇）估算的建立耗时 */
+  estimatedMinutes: number
+  /** 日期未知、因此不参与任何年份区间的目录条数（如实报，不静默） */
+  undatedArticles: number
+}
+
+/** 本地资料库索引的建立情况 */
+export interface LocalBuildPlan {
+  total: number
+  ready: number
+  /** 待索引（**已排除**正文缺失的来源——那些永远建不了，不该卡住生成） */
+  pending: number
+  indexing: number
+  /** 索引失败的来源数（引擎异常等；见 `ready` 判定策略） */
+  failed: number
+  /** 正文缺失（模板页/失效），既不参与检索也不参与建立 */
+  bodyMissing: number
+}
+
+/** 生成前被拦住的原因（界面据此给出"缺什么"） */
+export type BuildNotReadyReason = 'web-pending' | 'local-pending' | 'local-index-failed'
+
+/** 「建立缓存与索引」的完整计划（只读预检 + 设置页面板共用） */
+export interface CacheBuildPlan {
+  web: WebBuildPlan
+  local: LocalBuildPlan
+  /** 是否已"建齐"（可以生成汇编） */
+  ready: boolean
+  reasons: BuildNotReadyReason[]
+}
 
 // ============================================================
 // 统一错误返回

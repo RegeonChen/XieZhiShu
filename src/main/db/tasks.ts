@@ -5,6 +5,7 @@ import Database from 'better-sqlite3'
 import type { TaskMode, WritingScope, WritingTask } from '../../shared/types'
 import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
+import { readSetting } from './settings'
 
 interface TaskRow {
   id: string
@@ -20,6 +21,9 @@ interface TaskRow {
   current_version: number
   created_at: string
   updated_at: string
+  // Phase 10 P5（Migration 047）：该任务的网页资料年份区间；为空 = 用全局默认
+  web_year_from: number | null
+  web_year_to: number | null
 }
 
 function parseSkillIds(raw: string | null): string[] | undefined {
@@ -52,8 +56,31 @@ function rowToTask(row: TaskRow): WritingTask {
     modelText: row.model_text ?? undefined,
     currentVersion: row.current_version,
     createdAt: row.created_at,
-    updatedAt: row.updated_at
+    updatedAt: row.updated_at,
+    // Phase 10 P5：任务级年份区间（缺省由调用方回退到全局设置）
+    webYearFrom: row.web_year_from ?? undefined,
+    webYearTo: row.web_year_to ?? undefined
   }
+}
+
+/**
+ * Phase 10 P5：设置**该任务**的网页资料年份区间。
+ * 传 `null`（或非法区间）表示"清除任务级设置、回退全局默认"。校验口径与全局设置一致（1990 ~ 今年+1、起 ≤ 止）。
+ */
+export function setTaskWebYears(taskId: string, from: number | null, to: number | null): WritingTask | null {
+  const db = getDb()
+  const valid =
+    typeof from === 'number' && typeof to === 'number' &&
+    Number.isInteger(from) && Number.isInteger(to) &&
+    from >= 1990 && to <= new Date().getFullYear() + 1 && from <= to
+  db.prepare('UPDATE writing_tasks SET web_year_from = ?, web_year_to = ?, updated_at = ? WHERE id = ?').run(
+    valid ? from : null,
+    valid ? to : null,
+    new Date().toISOString(),
+    taskId
+  )
+  const row = getTaskRowById(taskId)
+  return row ? rowToTask(row) : null
 }
 
 function getTaskRowById(id: string): TaskRow | undefined {
@@ -84,10 +111,28 @@ export function createTask(input: CreateTaskInput = {}): WritingTask {
   const db = getDb()
   const id = crypto.randomUUID()
   const now = new Date().toISOString()
+  /*
+   * Phase 10 P5：新建任务**继承全局的网页资料年份默认值**（用户裁定：按任务保存、新建时继承、可单独改）。
+   * 全局值来自设置（`web_year_from/to`）；用户没设过则两个都为 NULL → 生成时不按年份筛（并如实告知）。
+   */
+  const globalFrom = Number(readSetting('web_year_from') ?? NaN)
+  const globalTo = Number(readSetting('web_year_to') ?? NaN)
+  const inheritYears =
+    Number.isInteger(globalFrom) && Number.isInteger(globalTo) && globalFrom >= 1990 && globalFrom <= globalTo
   db.prepare(
-    `INSERT INTO writing_tasks (id, title, mode, scope_json, template_book_id, llm_provider_id, current_version, created_at, updated_at)
-     VALUES (?, ?, ?, ?, NULL, ?, 0, ?, ?)`
-  ).run(id, title, mode, JSON.stringify(scope), input.llmProviderId ?? null, now, now)
+    `INSERT INTO writing_tasks (id, title, mode, scope_json, template_book_id, llm_provider_id, current_version, created_at, updated_at, web_year_from, web_year_to)
+     VALUES (?, ?, ?, ?, NULL, ?, 0, ?, ?, ?, ?)`
+  ).run(
+    id,
+    title,
+    mode,
+    JSON.stringify(scope),
+    input.llmProviderId ?? null,
+    now,
+    now,
+    inheritYears ? globalFrom : null,
+    inheritYears ? globalTo : null
+  )
   const row = getTaskRowById(id)
   return rowToTask(row!)
 }

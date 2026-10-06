@@ -25,6 +25,9 @@ interface TaskItem {
   articleTitle?: string
   userInstruction?: string
   currentVersion: number
+  /** Phase 10 P5：该任务的网页资料年份区间（新建任务继承全局默认；为空 = 回退全局默认） */
+  webYearFrom?: number
+  webYearTo?: number
 }
 interface SegmentItem {
   id: string
@@ -77,13 +80,38 @@ function buildGeneratedSummary(
       siteErrors: number
       hits: number
       fetched: number
-      skippedByCap: number
       chars: number
-      reused?: number
-      newCandidates?: number
-      /** A1（2026-09-12）：未取到正文（模板/失效页面）而被丢弃的篇数 */
+      /** 正文未通过相关性判定而丢弃的篇数 */
+      relevanceDropped?: number
+      /** A1 标题探针不过（老文章失效 → 模板页）而丢弃的篇数 */
       invalidBody?: number
+      /** 空标题候选（sitemap）：正文过短 / 与同站别的 URL 正文逐字相同 */
+      shortBody?: number
+      templateRepeat?: number
+      fetchFailed?: number
+      /** 不在 http(s) + 同域白名单内、未发起请求的篇数（安全过滤） */
+      blocked?: number
+      /** 2026-10-05：正文缓存复用（未联网）与自适应降档次数 */
+      cacheHits?: number
+      downgrades?: number
     }
+    /**
+     * 第二组 ⑤：本轮的「文章内取高信号段 ± 上下文」统计（用户勾选「本轮不做收敛」时为 undefined）。
+     * 生成汇总要**如实带一句**：本轮送了多少段/字、有多少段因无信号未送（仍在库中）。
+     */
+    convergence?: {
+      contextRange: number
+      gatedSegments: number
+      gatedChars: number
+      sources: number
+      keptSegments: number
+      keptChars: number
+      droppedSegments: number
+      droppedChars: number
+      noSignalSources: number
+    }
+    /** 本轮真正送细读的候选块数（勾选「本轮不做收敛」时 = 闸门后的全部段数） */
+    candidateChunks?: number
   }
 ): string {
   const pendingCount = comp.contradictions.filter((c) => c.status === 'pending').length
@@ -122,31 +150,58 @@ function buildGeneratedSummary(
     if (ps.timeUnsupported) parts.push(zhCN.compilation.extractTimeUnsupported.replace('{count}', String(ps.timeUnsupported)))
     if (ps.conflictsKept) parts.push(zhCN.compilation.extractConflictsKept.replace('{count}', String(ps.conflictsKept)))
   }
-  // 网页资料本轮抓取情况（含上限截断）：让用户知道"这次用上了多少网页材料"
+  // 网页资料本轮抓取情况：让用户知道"这次用上了多少网页材料"
   const ws = scans.webScan
   if (ws && ws.sites > 0) {
-    if (ws.reused && ws.reused > 0) {
-      // A1：复用已锁定材料时本轮**没有新抓取**，不能报"实际采用 0 篇"（会读成一篇都没用上）
-      parts.push(zhCN.compilation.webScanReused.replace('{count}', String(ws.reused)))
-      if (ws.newCandidates && ws.newCandidates > 0) {
-        parts.push(zhCN.compilation.webScanNewCandidates.replace('{count}', String(ws.newCandidates)))
-      }
-    } else {
-      parts.push(
-        zhCN.compilation.webScan
-          .replace('{hits}', String(ws.hits))
-          .replace('{fetched}', String(ws.fetched))
-          .replace('{chars}', String(ws.chars))
-      )
-      if (ws.skippedByCap > 0) parts.push(zhCN.compilation.webScanCapped.replace('{count}', String(ws.skippedByCap)))
-      // A1：抓回来发现"没取到正文"（老文章失效、站点返回模板页）→ 如实告知，别让用户以为材料本来就少
-      if (ws.invalidBody && ws.invalidBody > 0) {
-        parts.push(zhCN.compilation.webScanInvalidBody.replace('{count}', String(ws.invalidBody)))
-      }
-      if (ws.fetched === 0 && ws.siteErrors === 0) parts.push(zhCN.compilation.webScanEmpty)
+    parts.push(
+      zhCN.compilation.webScan
+        .replace('{hits}', String(ws.hits))
+        .replace('{fetched}', String(ws.fetched))
+        .replace('{chars}', String(ws.chars))
+    )
+    if (ws.cacheHits && ws.cacheHits > 0) parts.push(zhCN.compilation.webScanCacheReused.replace('{count}', String(ws.cacheHits)))
+    if (ws.downgrades && ws.downgrades > 0) parts.push(zhCN.compilation.crawlDowngraded.replace('{count}', String(ws.downgrades)))
+    // 抓回来发现"没取到正文"（老文章失效、站点返回模板页）→ 如实告知，别让用户以为材料本来就少
+    if (ws.relevanceDropped && ws.relevanceDropped > 0) {
+      parts.push(zhCN.compilation.webScanRelevanceDropped.replace('{count}', String(ws.relevanceDropped)))
     }
+    if (ws.invalidBody && ws.invalidBody > 0) {
+      parts.push(zhCN.compilation.webScanInvalidBody.replace('{count}', String(ws.invalidBody)))
+    }
+    // 2026-10-05（P0 兜底回归）：两类"空标题候选"丢弃现在真的会计数（此前恒为 0、分支不可达）
+    if (ws.shortBody && ws.shortBody > 0) {
+      parts.push(zhCN.compilation.webScanShortBody.replace('{count}', String(ws.shortBody)))
+    }
+    if (ws.templateRepeat && ws.templateRepeat > 0) {
+      parts.push(zhCN.compilation.webScanTemplateRepeat.replace('{count}', String(ws.templateRepeat)))
+    }
+    if (ws.fetchFailed && ws.fetchFailed > 0) {
+      parts.push(zhCN.compilation.webScanFetchFailed.replace('{count}', String(ws.fetchFailed)))
+    }
+    if (ws.blocked && ws.blocked > 0) {
+      parts.push(zhCN.compilation.webScanBlocked.replace('{count}', String(ws.blocked)))
+    }
+    if (ws.fetched === 0 && ws.siteErrors === 0) parts.push(zhCN.compilation.webScanEmpty)
     // E1：站点同步失败 → 明确告知，别让用户以为"网页资料没用上是因为没内容"
     if (ws.siteErrors > 0) parts.push(zhCN.compilation.webScanSiteErrors.replace('{count}', String(ws.siteErrors)))
+  }
+  /*
+   * 第二组 ⑤（2026-10-06）：生成汇总气泡里如实带一句"本轮送了多少段/字、多少段因无信号未送"。
+   * 用户明确要求汇报口径如此——被跳过的材料**仍在库中**，必须在同一句里说清，避免被读成"资料被删了"。
+   */
+  const cv = scans.convergence
+  if (cv) {
+    parts.push(
+      zhCN.compilation.convergenceSummary
+        .replace('{segments}', String(cv.keptSegments))
+        .replace('{wan}', (cv.keptChars / 10000).toFixed(1))
+        .replace('{sources}', String(Math.max(0, cv.sources - cv.noSignalSources)))
+        .replace('{dropped}', String(cv.droppedSegments))
+    )
+  } else {
+    parts.push(
+      zhCN.compilation.convergenceSummaryOff.replace('{segments}', String(scans.candidateChunks ?? 0))
+    )
   }
   parts.push(pendingCount > 0 ? pendingCount + ' 组矛盾待处理' : '无未处理矛盾')
   let text = parts.join('，') + '。请审阅' + (pendingCount > 0 ? '并处理后' : '后') + '点击「确认汇编」。'
@@ -164,7 +219,7 @@ interface WritingTransient {
   busy: BusyState
   busyText: string | null
   progress: { percent: number; etaSeconds?: number } | null
-  compilationProgress: { percent: number; etaSeconds?: number } | null
+  compilationProgress: { percent: number; etaSeconds?: number; fetch?: { active: boolean; paused: boolean } } | null
   compilationInterrupt: { stage: string; message: string; percent: number } | null
   streamText: string | null
 }
@@ -210,7 +265,16 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   const [compilationMeta, setCompilationMeta] = useState<{ candidateChunks?: number; candidateSources?: number } | null>(null)
   const [undoAvailable, setUndoAvailable] = useState(0)
   const [redoAvailable, setRedoAvailable] = useState(0)
-  const [compilationProgress, setCompilationProgress] = useState<{ percent: number; etaSeconds?: number } | null>(null)
+  const [compilationProgress, setCompilationProgress] = useState<{ percent: number; etaSeconds?: number; fetch?: { active: boolean; paused: boolean } } | null>(null)
+  /**
+   * 2026-10-05（用户要求）：抓取暂停态。渲染层自己记一份 → 点按钮后**立刻**反馈（按钮文字与提示文本立即切换），
+   * 同时通知主进程让抓取池在下一篇之前等待；点「继续抓取」再由主进程接着跑。
+   */
+  const [fetchPaused, setFetchPaused] = useState(false)
+  const handleToggleFetchPause = useCallback((paused: boolean): void => {
+    setFetchPaused(paused)
+    void window.api.webSourceSetCrawlPaused(paused)
+  }, [])
   const [compilationInterrupt, setCompilationInterrupt] = useState<{ stage: string; message: string; percent: number; retryable?: boolean } | null>(null)
   const [compilationInstruction, setCompilationInstruction] = useState('')
   /* ---- Phase 7.4/7.5：版本（对话修改后自动进入复核态） ---- */
@@ -226,8 +290,6 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   const [docChangedIds, setDocChangedIds] = useState<string[]>([])
   /** 第三批 A1：最近一次生成的网页材料情况（面板据此提示"已锁定 N 篇 / 新文章 M 篇"） */
   const [lastWebScan, setLastWebScan] = useState<CompilationWebScan | null>(null)
-  /** 本任务已锁定的网页材料篇数（持久化；重启软件后也能显示） */
-  const [pinnedWebCount, setPinnedWebCount] = useState(0)
   /** 「重新生成汇编」二次确认（会替换当前汇编为新的一版） */
   const [regenConfirmOpen, setRegenConfirmOpen] = useState(false)
 
@@ -410,29 +472,17 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   useEffect(() => { load() }, [load])
 
   /**
-   * 加载本任务已锁定的网页材料篇数（第三批 A1 补强）：让「重新检索网页材料」入口
-   * 不依赖"本次会话生成过一次"，重启软件后照样能换材料集合。
-   */
-  const loadPinnedWebCount = useCallback(async (): Promise<void> => {
-    const res = await window.api.getWebMaterials(taskId)
-    if (res.ok && res.data) setPinnedWebCount(res.data.pinned)
-  }, [taskId])
-
-  useEffect(() => { void loadPinnedWebCount() }, [loadPinnedWebCount, reloadKey])
-
-  /**
    * 加载「来源位置」覆盖情况（Phase 9 / S4 补）：锚点是生成后台**异步**算的，
    * 不查一次就完全看不见（用户只能一条条点圆标才发现"有的段没位置"）。
    * 汇编切换 / 生成完成 / 重新生成后刷新；锚点是断点式写入，界面顺手延迟一拍再取。
    */
   const [anchorStats, setAnchorStats] = useState<{ total: number; anchored: number; withPage: number; ambiguous: number } | null>(null)
-  /** 「疑似超出范围」复核清单（Phase 9 补充：界面兜底）；null = 还没查/不适用 */
-  const [scopeCheck, setScopeCheck] = useState<{
-    flagged: { id: string; position: number; text: string; sourceTitle?: string; markers: string[] }[]
-    checked: number
-    available: boolean
-    localities: string[]
-  } | null>(null)
+  /*
+   * 2026-10-05 用户裁定：「疑似超出范围 N 段」这类提示**无实际价值，已整体关闭**——
+   * 越界段落直接保留在汇编里（不做任何自动移出）。原先在这里的 `scopeCheck` 状态、查询 effect、
+   * `refreshScopeCheck` 与 `handleExcludeItems`（移出汇编）全部删除，不再调用 `compilation:scopeCheck` /
+   * `compilation:excludeItems`；主进程引擎与通道保留不动，以免影响导出导入与旧数据。
+   */
   useEffect(() => {
     if (!compilation?.id) {
       setAnchorStats(null)
@@ -452,49 +502,6 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     }
   }, [compilation?.id, busy, reloadKey])
 
-  /** 复核清单刷新（撤销/恢复/移出后都要重算，否则计数会停在旧值） */
-  const refreshScopeCheck = useCallback(async (compilationId: string): Promise<void> => {
-    const res = await window.api.scopeCheck(compilationId)
-    if (res.ok && res.data) setScopeCheck(res.data)
-  }, [])
-
-  useEffect(() => {
-    if (!compilation?.id) {
-      setScopeCheck(null)
-      return
-    }
-    let alive = true
-    void (async () => {
-      const res = await window.api.scopeCheck(compilation.id)
-      if (alive && res.ok && res.data) setScopeCheck(res.data)
-    })()
-    return () => {
-      alive = false
-    }
-  }, [compilation?.id, reloadKey])
-
-  /**
-   * 把"疑似超出范围"的段落**移出汇编**（Phase 9 补充：界面兜底）。
-   * 主进程侧是 `kept=false`：不删数据、可撤销、有版本记录；移出后刷新汇编与复核清单。
-   */
-  const handleExcludeItems = async (itemIds: string[]): Promise<void> => {
-    if (!compilation || itemIds.length === 0) return
-    try {
-      const res = await window.api.excludeCompilationItems(compilation.id, itemIds)
-      if (res.ok && res.data) {
-        setCompilation(res.data.compilation as CompilationView)
-        setMessages((prev) => [...prev, { role: 'assistant', content: res.data!.message }])
-        await refreshScopeCheck(compilation.id)
-        void refreshUndoState(compilation.id)
-        void window.api.addTaskMessage(taskId, 'assistant', res.data.message, 'notice')
-      } else {
-        appendAssistant('移出失败：' + (res.error?.message ?? ''))
-      }
-    } catch {
-      appendAssistant('移出失败：请确认应用已完整重启')
-    }
-  }
-
   useEffect(() => {
     const off = window.api.onDraftGenerateProgress?.((p) => {
       if (p.taskId === taskId) {
@@ -509,7 +516,7 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     const off = window.api.onCompilationProgress?.((p) => {
       if (p.taskId === taskId) {
         setBusyText(p.stage)
-        setCompilationProgress({ percent: p.percent, etaSeconds: p.etaSeconds })
+        setCompilationProgress({ percent: p.percent, etaSeconds: p.etaSeconds, fetch: p.fetch })
         if (p.candidateChunks != null) {
           setCompilationMeta({ candidateChunks: p.candidateChunks, candidateSources: p.candidateSources })
         }
@@ -572,7 +579,6 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
         setCompilation(res.data.compilation as CompilationView)
         setUndoAvailable(res.data.undoAvailable)
         setRedoAvailable(res.data.redoAvailable)
-        await refreshScopeCheck(compilation.id)
       } else {
         appendAssistant('撤销失败：' + (res.error?.message ?? ''))
       }
@@ -589,7 +595,6 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
         setCompilation(res.data.compilation as CompilationView)
         setUndoAvailable(res.data.undoAvailable)
         setRedoAvailable(res.data.redoAvailable)
-        await refreshScopeCheck(compilation.id)
       } else {
         appendAssistant('恢复失败：' + (res.error?.message ?? ''))
       }
@@ -608,10 +613,197 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
 
   // ---- 资料汇编（Phase 6.2）----
 
+  /*
+   * 资料年份范围（2026-10-05 用户裁定）：**在任务流程里**选——新建任务、第一次发撰写要求时，
+   * 输入框上方内联选择；每个任务各存一份（`writing_tasks.web_year_from/to`）。
+   * 这里用 ref 记「控件刚改成什么」，生成前会**再等一次写库**（见 handleGenerateCompilation）：
+   * 主进程抓取时按任务级区间筛目录，若写库还在路上就会按旧区间抓一整轮。
+   */
+  const pendingWebYearsRef = useRef<{ from: number; to: number } | null>(null)
+  /** 年份区间规模预览（"区间内 N 篇 / 占比 / 预计抓取时长"）——文案在这里拼好，控件只呈现 */
+  const [webYearsPreview, setWebYearsPreview] = useState<{ text: string; distribution?: string | null; warning?: string | null } | null>(null)
+  /** 预览请求自增序号：只认最后一次请求的响应（防旧响应覆盖新结果） */
+  const webYearsPreviewSeqRef = useRef(0)
+  /**
+   * 只读统计"该区间有多少篇、预计抓多久"（主进程查目录，不抓正文）。
+   * 年份控件在输入两个合法年份后按 400ms 防抖回调到这里；`null` = 输入不合法 → 清掉预览。
+   * 说明：年份与预览从资料库面板搬到任务流程（2026-10-05 用户裁定 A），原先在面板里的 `loadStats`/`yearPreview` 即此逻辑。
+   */
+  const handleWebYearsPreviewQuery = useCallback(async (years: { from: number; to: number } | null): Promise<void> => {
+    if (!years) {
+      // 递增序号 → 之前已发出的请求回来时会被丢弃，避免"清空后又被旧结果填回"
+      webYearsPreviewSeqRef.current += 1
+      setWebYearsPreview((cur) => (cur === null ? cur : null))
+      return
+    }
+    /*
+     * 竞态防护（2026-10-05 P6 复查补）：用户快速改年（2005→2012→2015）时会并发发出多个统计请求，
+     * 主进程返回顺序不保证 → 旧响应可能后到，把预览覆盖成上一个区间的数字（界面出现"框里 2012、预览写 2005–2020"）。
+     * 用自增序号只认**最后一次**请求的结果。
+     */
+    webYearsPreviewSeqRef.current += 1
+    const seq = webYearsPreviewSeqRef.current
+    const res = await window.api.webSourceDateStats(years.from, years.to)
+    if (seq !== webYearsPreviewSeqRef.current) return
+    if (!res.ok || !res.data) {
+      setWebYearsPreview({ text: zhCN.compilation.webYearPreviewError.replace('{message}', res.error?.message ?? '') })
+      return
+    }
+    const s = res.data.stats as {
+      total: number
+      dated: number
+      unknown: number
+      inRange: number
+      inRangeByYear: { year: string; count: number }[]
+      estimatedMinutes: number
+    }
+    const pct = s.total > 0 ? ((s.inRange / s.total) * 100).toFixed(1) : '0.0'
+    setWebYearsPreview({
+      text: zhCN.compilation.webYearPreview
+        .replace('{from}', String(years.from))
+        .replace('{to}', String(years.to))
+        .replace('{inRange}', String(s.inRange))
+        .replace('{pct}', pct)
+        .replace('{dated}', String(s.dated))
+        .replace('{unknown}', String(s.unknown))
+        .replace('{minutes}', String(s.estimatedMinutes)),
+      distribution:
+        s.inRangeByYear.length > 0
+          ? zhCN.compilation.webYearDistribution + s.inRangeByYear.map((r) => `${r.year}(${r.count})`).join(' ')
+          : null,
+      warning: s.dated === 0 && s.total > 0 ? zhCN.compilation.webYearPreviewNoDates : null
+    })
+  }, [])
+
+  const handleWebYearsChange = (from: number, to: number): void => {
+    if (!task) return
+    pendingWebYearsRef.current = { from, to }
+    setTask((cur) => (cur ? { ...cur, webYearFrom: from, webYearTo: to } : cur))
+    // 即时保存（主进程同时把全局默认更新为同一区间 → 下个新任务据此预填）
+    void window.api.setTaskWebYears(task.id, from, to)
+  }
+
+  /**
+   * 「取消生成」后把刚提交的文字回填输入框（2026-10-05 用户要求）。
+   * `ChatPanel` 的输入框是它自己的 state，父组件只能靠这个**自增触发值**回填——用 `seq` 而不是
+   * 直接比文本，是为了让「同一段文字被取消两次」也能回填（见 `ChatPanel` 的 `restoreDraft`）。
+   */
+  const [restoreDraft, setRestoreDraft] = useState<{ text: string; seq: number } | null>(null)
+  const requestRestoreDraft = useCallback((text: string): void => {
+    setRestoreDraft((cur) => ({ text, seq: (cur?.seq ?? 0) + 1 }))
+  }, [])
+
+  /**
+   * 材料规模确认框的正文（2026-10-05 P1）：成品文案在 `zh-CN` 里，这里只做占位替换。
+   * `{wan}` 用"万字"（1 位小数）——用户是按"多少万字"估耗时的。
+   */
+  const buildMaterialEstimateMessage = (est: {
+    segments: number
+    chars: number
+    localSegments: number
+    webSegments: number
+    estimatedWindows: number
+    estimatedMinutes: number
+    fullSegments?: number
+    fullChars?: number
+    fullEstimatedWindows?: number
+    fullEstimatedMinutes?: number
+    droppedSegments?: number
+    converged?: boolean
+  }, skipConvergence: boolean): string => {
+    const text = zhCN.compilation.materialEstimateBody
+      .replace('{segments}', String(est.segments))
+      .replace('{wan}', (est.chars / 10000).toFixed(1))
+      .replace('{local}', String(est.localSegments))
+      .replace('{web}', String(est.webSegments))
+      .replace('{windows}', String(est.estimatedWindows))
+      .replace('{minutes}', String(est.estimatedMinutes))
+      .replace('{dropped}', String(est.droppedSegments ?? 0))
+      .replace('{fullSegments}', String(est.fullSegments ?? est.segments))
+      .replace('{fullWan}', ((est.fullChars ?? est.chars) / 10000).toFixed(1))
+      .replace('{fullWindows}', String(est.fullEstimatedWindows ?? est.estimatedWindows))
+      .replace('{fullMinutes}', String(est.fullEstimatedMinutes ?? est.estimatedMinutes))
+    // 勾上"全量送入"时，正文要说清这一轮按哪个口径来（估算两套数都在，别让用户以为数字对不上）
+    return skipConvergence ? text + '\n' + zhCN.compilation.materialEstimateConvergeSkipNote : text
+  }
+
+  /** 预检估算里界面要用到的字段（与 IPC `CompilationEstimateMaterialsRes` 同形） */
+  type MaterialEstimateView = Parameters<typeof buildMaterialEstimateMessage>[0]
+
+  /**
+   * 生成前的「材料规模」确认（2026-10-05 用户要求 P1）：非空 = 弹窗打开。
+   * 动机（用户实测）：材料规模只有跑完"召回 + 闸门"才知道，上次**跑到一半**才发现要 20 多分钟；
+   * 因此真正开始生成之前先把预计规模与耗时报出来。**只提示、不限制**：确认后走原生成流程，取消则什么都不生成。
+   */
+  const [materialEstimate, setMaterialEstimate] = useState<{
+    instruction: string
+    message: string
+    error?: string
+    /** 估算原始数据（勾选/取消"全量送入"时用它重算正文，两个口径都摆得出来） */
+    data?: MaterialEstimateView
+  } | null>(null)
+
+  /**
+   * 第二组 ⑤ 的**逃生门**（2026-10-06 用户已同意）：勾选则本轮不做收敛（全量送入），跳过"文章内取段"。
+   * **每次生成单独选择、不持久化**：每次打开确认框都复位为 false（默认收敛）。
+   */
+  const [skipConvergence, setSkipConvergence] = useState(false)
+
+  /** 生成入口：先**只读**估算材料规模（不消耗额度、不落库）→ 弹一次确认 → 才开始原来的生成流程 */
   const handleGenerateCompilation = async (instruction: string) => {
     if (busy) return
     const inst = instruction.trim()
     if (!inst) return
+    // 生成前确保年份区间已落库（用户可能刚改完就按了发送）
+    const pendingYears = pendingWebYearsRef.current
+    if (pendingYears) {
+      const yRes = await window.api.setTaskWebYears(taskId, pendingYears.from, pendingYears.to)
+      if (!yRes.ok) {
+        setErr(zhCN.compilation.webYearSaveFailed.replace('{message}', yRes.error?.message ?? ''))
+        // 没能开始生成 → 把刚提交的要求放回输入框，不让用户重敲一遍
+        requestRestoreDraft(instruction)
+        return
+      }
+      pendingWebYearsRef.current = null
+      setTask((cur) => (cur ? { ...cur, webYearFrom: pendingYears.from, webYearTo: pendingYears.to } : cur))
+    }
+    /*
+     * 估算期间用 busy 如实显示"正在估算…"，估完**立刻**清掉再弹框——界面既不会看起来没反应，
+     * 也不会卡在「生成中」。估算失败**不阻断**（只提示不限制）：照常弹确认框，由用户决定要不要继续。
+     */
+    setBusy('generating')
+    setBusyText(zhCN.compilation.estimating)
+    let message: string = zhCN.compilation.materialEstimateUnavailable
+    let estError: string | undefined
+    let estData: MaterialEstimateView | undefined
+    try {
+      const est = await window.api.estimateCompilationMaterials(taskId, inst)
+      if (est.ok && est.data) {
+        estData = est.data
+        message = buildMaterialEstimateMessage(est.data, false)
+      } else estError = zhCN.compilation.materialEstimateError.replace('{message}', est.error?.message ?? '')
+    } catch (e) {
+      estError = zhCN.compilation.materialEstimateError.replace('{message}', String(e))
+    } finally {
+      setBusy(null)
+      setBusyText(null)
+    }
+    // 每次进入确认框都回到"默认收敛"（逃生门是**单次**选择，不持久化、不跨轮继承）
+    setSkipConvergence(false)
+    setMaterialEstimate({
+      instruction: inst,
+      message,
+      ...(estData ? { data: estData } : {}),
+      ...(estError ? { error: estError } : {})
+    })
+  }
+
+  /**
+   * 真正开始生成资料汇编（在材料规模确认框里点「继续生成」之后调用；主体与原来的生成流程一致）
+   * `skipConvergence` = 第二组 ⑤ 的逃生门（本轮不做收敛、全量送入），**每次生成单独选择**。
+   */
+  const startCompilationGeneration = async (instruction: string, skipConvergence = false) => {
+    const inst = instruction.trim()
     setCompilationInstruction(inst)
     setMessages((prev) => [...prev, { role: 'user', content: instruction }])
     setBusy('generating')
@@ -619,10 +811,11 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     setStreamText(null)
     setCompilationProgress(null)
     setCompilationInterrupt(null)
+    setFetchPaused(false)
     autoResumeAttemptRef.current = 0
     let keepProgress = false
     try {
-      const res = await window.api.generateCompilation(taskId, inst)
+      const res = await window.api.generateCompilation(taskId, inst, skipConvergence)
       if (res.ok && res.data) {
         const data = res.data as {
           compilation: CompilationView
@@ -654,12 +847,29 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
             siteErrors: number
             hits: number
             fetched: number
-            skippedByCap: number
             chars: number
-            reused?: number
-            newCandidates?: number
+            relevanceDropped?: number
             invalidBody?: number
+            shortBody?: number
+            templateRepeat?: number
+            fetchFailed?: number
+            blocked?: number
+            cacheHits?: number
+            downgrades?: number
           }
+          /* 第二组 ⑤：本轮的取段统计与"真正送细读"的段数（汇总气泡要如实带一句） */
+          convergence?: {
+            contextRange: number
+            gatedSegments: number
+            gatedChars: number
+            sources: number
+            keptSegments: number
+            keptChars: number
+            droppedSegments: number
+            droppedChars: number
+            noSignalSources: number
+          }
+          candidateChunks?: number
           interrupted?: { stage: string; message: string; percent: number; retryable?: boolean }
         }
         const comp = data.compilation
@@ -681,7 +891,6 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
         } else {
           setCompilationInterrupt(null)
           setLastWebScan(data.webScan ?? null)
-          void loadPinnedWebCount()
           const summary = buildGeneratedSummary('已生成资料汇编：', comp, data)
           appendAssistant(summary)
           void window.api.addTaskMessage(taskId, 'assistant', summary, 'notice')
@@ -719,7 +928,23 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
     try {
       const res = await window.api.continueCompilation(cid)
       if (res.ok && res.data) {
-        const data = res.data as { compilation: CompilationView; interrupted?: { stage: string; message: string; percent: number; retryable?: boolean } }
+        const data = res.data as {
+          compilation: CompilationView
+          interrupted?: { stage: string; message: string; percent: number; retryable?: boolean }
+          /* 续跑也带 ⑤ 的取段统计（状态里带着走），汇总气泡同样如实说一句 */
+          convergence?: {
+            contextRange: number
+            gatedSegments: number
+            gatedChars: number
+            sources: number
+            keptSegments: number
+            keptChars: number
+            droppedSegments: number
+            droppedChars: number
+            noSignalSources: number
+          }
+          candidateChunks?: number
+        }
         const comp = data.compilation
         setCompilation(comp)
         if (data.interrupted) {
@@ -741,7 +966,7 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
         } else {
           autoResumeAttemptRef.current = 0
           setCompilationInterrupt(null)
-          const summary = buildGeneratedSummary('已继续生成资料汇编：', comp, {})
+          const summary = buildGeneratedSummary('已继续生成资料汇编：', comp, data)
           appendAssistant(summary)
           void window.api.addTaskMessage(taskId, 'assistant', summary, 'notice')
           onChanged()
@@ -1205,13 +1430,17 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           generateInterrupt={compilationInterrupt}
           onRetryCompilation={compilationInterrupt ? () => void handleContinueCompilation() : undefined}
           onGenerate={(instruction) => void handleGenerateCompilation(instruction)}
+          restoreDraft={restoreDraft}
           webScan={lastWebScan}
-          pinnedWebCount={pinnedWebCount}
           anchorStats={anchorStats}
-          scopeCheck={scopeCheck}
-          onExcludeItems={(ids) => void handleExcludeItems(ids)}
           onRegenerateCompilation={() => setRegenConfirmOpen(true)}
           sourceRefs={sourceRefs}
+          webYears={{ from: task?.webYearFrom, to: task?.webYearTo }}
+          onWebYearsChange={handleWebYearsChange}
+          webYearsPreview={webYearsPreview}
+          onWebYearsPreviewQuery={handleWebYearsPreviewQuery}
+          fetchPaused={fetchPaused}
+          onToggleFetchPause={handleToggleFetchPause}
         />
       )
     }
@@ -1424,6 +1653,46 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           onConfirm={() => handleRegenerateCompilation()}
           onCancel={() => setRegenConfirmOpen(false)}
         />
+      ) : null}
+
+      {/*
+        生成前的「材料规模」确认（2026-10-05 用户要求 P1）：真正开始生成之前报一次预计规模与耗时，
+        **只提示、不限制**。取消 = 不生成：清掉弹窗（busy 早在估算结束时已复位，不会卡在「生成中」），
+        并把刚提交的撰写要求**放回输入框**（ChatPanel 的 submit 已先清空输入框，不回填就得重敲）。
+      */}
+      {materialEstimate ? (
+        <ConfirmDialog
+          title={zhCN.compilation.materialEstimateTitle}
+          message={materialEstimate.data ? buildMaterialEstimateMessage(materialEstimate.data, skipConvergence) : materialEstimate.message}
+          confirmText={zhCN.compilation.materialEstimateConfirm}
+          cancelText={zhCN.compilation.materialEstimateCancel}
+          error={materialEstimate.error}
+          onConfirm={() => {
+            const inst = materialEstimate.instruction
+            const skip = skipConvergence
+            setMaterialEstimate(null)
+            void startCompilationGeneration(inst, skip)
+          }}
+          onCancel={() => {
+            const inst = materialEstimate.instruction
+            setMaterialEstimate(null)
+            requestRestoreDraft(inst)
+            const msg = zhCN.compilation.materialEstimateCancelled
+            appendAssistant(msg)
+            void window.api.addTaskMessage(taskId, 'assistant', msg, 'notice')
+          }}
+        >
+          {/*
+            第二组 ⑤ 的逃生门（2026-10-06）：默认收敛；勾选后本轮全量送入、行为回到今天。
+            只有拿到估算数据（知道收敛前后面各多少）时才显示——估算失败时不摆一个说不清代价的开关。
+          */}
+          {materialEstimate.data?.converged ? (
+            <label className="confirm-dialog__checkbox" title={zhCN.compilation.materialEstimateConvergeOffHint}>
+              <input type="checkbox" checked={skipConvergence} onChange={(e) => setSkipConvergence(e.target.checked)} />
+              <span>{zhCN.compilation.materialEstimateConvergeOff}</span>
+            </label>
+          ) : null}
+        </ConfirmDialog>
       ) : null}
 
       {showRecycleBin ? (

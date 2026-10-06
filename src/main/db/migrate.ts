@@ -3,6 +3,7 @@
  * 迁移按编号依次执行，已执行过的跳过。
  */
 import type Database from 'better-sqlite3'
+import { parseUrlDate, urlDateConfidence } from '../web-source/article-date'
 
 interface Migration {
   version: number
@@ -1109,6 +1110,174 @@ CREATE TABLE IF NOT EXISTS compilation_item_anchors (
   PRIMARY KEY (item_id, source_id, block_index)
 );
 CREATE INDEX IF NOT EXISTS idx_compilation_item_anchors_source ON compilation_item_anchors(source_id);
+`
+  },
+  {
+    // 2026-10-04（Phase 10 P1：网页资料库 2.0 —— "带日期的文章目录"）
+    //
+    // 旧流程的缺陷：日期只在抓正文时从**页面文本**猜（还有把日期截断成 "2025-02-2" 的 bug），而且**从不参与筛选**——
+    // 第一步筛的是**标题**（用户已裁定"标题绝不能作为相关性判据"）。新流程第一步是"用户给定年份区间 → 按发布时间筛"，
+    // 因此目录里必须**在建清单时就带日期**，并保留每一级的原始证据以便互校。
+    //
+    // 只做**纯新增列**，不改任何现有列的语义、不回填：
+    // - published_date     规范化后的发布日期（YYYY-MM-DD / YYYY-MM / YYYY）——年份区间筛选**只认它**
+    // - date_source        日期来自哪一级：'feed' | 'sitemap' | 'url' | 'http' | 'page'
+    // - date_confidence    'high' | 'medium' | 'low'（L4 `Last-Modified` 只能算中）
+    // - url_date           URL 内嵌日期（L3 的原始证据；真实库里这是主源）
+    // - sitemap_lastmod    sitemap 的 `lastmod`（L2；它是"最后修改"而不是"发布"）
+    // - http_last_modified L4 的响应头原值
+    // - date_checked_at    日期最后一次判定时间（换口径后可重算）
+    // - fetch_state        抓取状态：NULL=未处理 | 'fetched' | 'dropped' | 'failed'
+    // - body_chars         正文字数（未命中粗筛的正文会被丢弃，只留 body_hash + 本列）
+    // - screen_hit         本地粗筛是否命中（0/1）
+    // - screened_at        粗筛时间
+    // 注意：`published_at`（Migration 025）仍是**原始值**列，二者并存、互不覆盖。
+    version: 45,
+    sql: `
+ALTER TABLE web_site_articles ADD COLUMN published_date TEXT;
+ALTER TABLE web_site_articles ADD COLUMN date_source TEXT;
+ALTER TABLE web_site_articles ADD COLUMN date_confidence TEXT;
+ALTER TABLE web_site_articles ADD COLUMN url_date TEXT;
+ALTER TABLE web_site_articles ADD COLUMN sitemap_lastmod TEXT;
+ALTER TABLE web_site_articles ADD COLUMN http_last_modified TEXT;
+ALTER TABLE web_site_articles ADD COLUMN date_checked_at TEXT;
+ALTER TABLE web_site_articles ADD COLUMN fetch_state TEXT;
+ALTER TABLE web_site_articles ADD COLUMN body_chars INTEGER;
+ALTER TABLE web_site_articles ADD COLUMN screen_hit INTEGER;
+ALTER TABLE web_site_articles ADD COLUMN screened_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_web_site_articles_date ON web_site_articles(site_id, published_date);
+`
+  },
+  {
+    // 2026-10-04（Phase 10 P2 收尾）：按 **URL 内嵌日期（L3）** 回填 `published_date`。
+    //
+    // 为什么需要：Migration 045 只加列不回填，而 P3 的"年份区间筛选"必须**立刻能用**（不能等重新抓一遍清单）。
+    // 真实库实测：62,589 条 URL 里 **62,588 条（100%）** 能直接读出日期，故本次回填覆盖率≈100%。
+    //
+    // 规则（幂等）：只填 `published_date IS NULL` 的行，**不覆盖**已有的 feed/sitemap 级结果；
+    // 精度到日 → high、到月 → medium、仅年份 → low；同时把 URL 日期写进 `url_date` 作为原始证据。
+    version: 46,
+    run: (db) => {
+      const rows = db
+        .prepare('SELECT rowid AS rid, url FROM web_site_articles WHERE published_date IS NULL')
+        .all() as { rid: number; url: string }[]
+      const upd = db.prepare(
+        'UPDATE web_site_articles SET published_date = ?, date_source = ?, date_confidence = ?, url_date = ?, date_checked_at = ? WHERE rowid = ?'
+      )
+      const now = new Date().toISOString()
+      let filled = 0
+      for (const r of rows) {
+        const d = parseUrlDate(r.url)
+        if (!d) continue
+        upd.run(d.date, 'url', urlDateConfidence(d.precision), d.date, now, r.rid)
+        filled++
+      }
+      if (rows.length > 0) {
+        console.log(`[migrate] 046 按 URL 日期回填 web_site_articles：候选 ${rows.length} 行，回填 ${filled} 行`)
+      }
+    }
+  },
+  {
+    // 2026-10-04（Phase 10 P5）：把"抓取 + 筛选"的账本从**站点级**改成**任务级**，并给任务加年份区间。
+    //
+    // 为什么必须改（用户裁定 2026-10-04）：**新建任务、开始一个新主题的汇编生成时，必须重新抓取并重跑一遍筛选**，
+    // 且这是默认行为、不需要用户额外操作。原实现把 `fetch_state`/`screen_hit` 记在 `web_site_articles`（站点目录）上，
+    // 新任务会把这些文章当成"已处理"而**跳过**；叠加"未命中的正文丢弃"这一裁定，新任务连本地复筛都做不到。
+    //
+    // - `task_web_fetch`：**任务级**抓取账本，主键 (task_id, site_id, url)。`state='fetched'` 表示该任务已采用该文章
+    //   （正文已落成该任务的 `sources`）、`dropped` 表示该任务筛掉了它（正文已丢弃）、`failed` 表示抓取失败。
+    //   任务删除时级联清理；站点/URL 不设外键（目录行可能被重新发现，账本按任务独立记账）。
+    // - `writing_tasks.web_year_from / web_year_to`：**该任务**的网页资料年份区间；为空表示"用全局默认"。
+    version: 47,
+    sql: `
+CREATE TABLE IF NOT EXISTS task_web_fetch (
+  task_id TEXT NOT NULL REFERENCES writing_tasks(id) ON DELETE CASCADE,
+  site_id TEXT NOT NULL,
+  url TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('fetched','dropped','failed')),
+  hit INTEGER,
+  best_score INTEGER,
+  body_hash TEXT,
+  body_chars INTEGER,
+  published_date TEXT,
+  fetched_at TEXT NOT NULL,
+  PRIMARY KEY (task_id, site_id, url)
+);
+CREATE INDEX IF NOT EXISTS idx_task_web_fetch_task_state ON task_web_fetch(task_id, state);
+ALTER TABLE writing_tasks ADD COLUMN web_year_from INTEGER;
+ALTER TABLE writing_tasks ADD COLUMN web_year_to INTEGER;
+`
+  },
+  {
+    // 2026-10-04（Phase 10 P5b-2）：**候选材料字符预算的"排队"落地**。
+    //
+    // 用户裁定 ④/⑥：上限**只落在"送大模型的字符预算"上**，超预算的材料**只排队、不丢弃**。
+    // 本表按任务保存"本轮没排上队的来源 id"（只存引用，不存正文——正文在 `sources.cleaned_text`，下轮按需重新取回），
+    // 故体积很小（几百个 id）；任务删除时级联清理。
+    version: 48,
+    sql: `
+CREATE TABLE IF NOT EXISTS compilation_material_queue (
+  task_id TEXT PRIMARY KEY REFERENCES writing_tasks(id) ON DELETE CASCADE,
+  source_ids TEXT NOT NULL,
+  chars INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`
+  },
+  {
+    /*
+     * Migration 049（2026-10-05，用户裁定）：**网页正文缓存**（站点级、跨任务复用）。
+     *
+     * 动因（用户实测）：2021–2025 区间有 21,341 篇，按"只按发布时间筛 + 全量抓正文 + 未命中丢弃"的口径，
+     * 每换一个任务都要重新联网抓一遍（实测 6.83 篇/秒 → 52 分钟；2005–2025 需 150 分钟）。
+     * 正文本身与主题无关，**不该因为换了任务就重下**。于是：
+     *   - 抓取前先查本表：命中 → 直接用缓存正文**本地重筛**（不联网）；
+     *   - 抓取后**一律写入本表**（命中与未命中都写，因为"未命中"只对当前主题成立）；
+     *   - 正文用 `deflateRaw` 压缩存储（实测平均 1,325 字/篇，压缩后约 1.3–1.8KB；6.2 万篇约 100MB）。
+     * 与 `task_web_fetch`（任务级账本）的分工：**账本管"这个任务筛过什么"，缓存管"正文有没有"**。
+     * 用户裁定：账本**不再作为跳过依据**（每次生成都全量重筛本区间），是否联网完全由本表决定。
+     * 站点删除时级联清理；设置/资料库面板提供占用显示与一键清空。
+     */
+    version: 49,
+    sql: `
+CREATE TABLE IF NOT EXISTS web_article_body (
+  site_id TEXT NOT NULL REFERENCES web_sites(id) ON DELETE CASCADE,
+  url TEXT NOT NULL,
+  body_z BLOB NOT NULL,
+  body_hash TEXT NOT NULL,
+  body_chars INTEGER NOT NULL DEFAULT 0,
+  probe_ok INTEGER NOT NULL DEFAULT 1,
+  text_source TEXT NOT NULL DEFAULT 'extractor',
+  fetched_at TEXT NOT NULL,
+  last_used_at TEXT NOT NULL,
+  PRIMARY KEY (site_id, url)
+);
+CREATE INDEX IF NOT EXISTS idx_web_article_body_used ON web_article_body(last_used_at);
+`
+  },
+  {
+    /*
+     * Migration 050（2026-10-06，用户裁定「决策 3A」）：**网页正文缓存加"尝试结论"列 `state`**。
+     *
+     * 动因：新需求「建立缓存与索引」要在生成汇编前判定"这个区间还有没有没建立的资料"，没有就拦住用户
+     * 先去设置页建立（用户裁定：**严格阻断**，不给逃生门）。而 049 的旧表**只在成功抽到正文时写行**——
+     * 抓取失败 / 老文章失效 / 模板页 / 越权地址**不留任何痕迹**，于是它们永远被算作"待建立"，
+     * 生成前闸门**永远差那几篇、永远不放行**。
+     *
+     * 三态口径：
+     *   - `ok`      = 正文可用（049 时代的全部旧行都属于这一态）；
+     *   - `no-body` = **已尝试过**但没取到可用正文（失效/模板/过短）→ 计入"已尝试"，不再计入缺口；
+     *   - `blocked` = URL 不在该站点的 http(s) 同域白名单内（`article-guards.ts`）→ **永不可建**，
+     *                 但仍要如实计数（界面上要能解释"为什么总篇数不等于可建立篇数"）。
+     *
+     * 为什么用 DEFAULT 'ok'：旧行（真实库 10,876 条）全部是成功抓到的正文，语义上就是 `ok`，
+     * 因此本迁移**纯新增、不回填**（`ALTER TABLE ... ADD COLUMN` 只改表定义，不动任何行）。
+     */
+    version: 50,
+    sql: `
+ALTER TABLE web_article_body ADD COLUMN state TEXT NOT NULL DEFAULT 'ok'
+  CHECK (state IN ('ok', 'no-body', 'blocked'));
 `
   }
 ]

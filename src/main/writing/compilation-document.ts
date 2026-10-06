@@ -363,6 +363,9 @@ export function isYearbookLikeTitle(title?: string | null): boolean {
 /**
  * 从来源标题推断年份（**年鉴惯例**）：仅对年鉴/年报类标题生效，取标题中的 4 位年份**减 1**。
  * 非年鉴标题（含网页新闻标题）不在此处理——见 `inferYearFromSource`。
+ *
+ * ⚠ 本函数**只按标题判断**，不看来源类型。因此它只能用于**已知是本地年鉴文件**的场合；
+ * 网页来源（`kind === 'url'`）**不得**走这里——2026-10-05 用户裁定：年 −1 只对"年鉴/年报/志书"类**本地文件**生效。
  */
 export function inferYearFromSourceTitle(title?: string | null): number | undefined {
   if (!isYearbookLikeTitle(title)) return undefined
@@ -386,6 +389,19 @@ export function yearOfDate(value?: string | null): number | undefined {
   if (!m) return undefined
   const year = Number(m[0])
   return year >= 1900 ? year : undefined
+}
+
+/**
+ * 把来源发布时间**如实**缩短成提示词里好读的形式（2026-10-05）：
+ * 库里存的是 ISO（`2021-05-06T00:00:00.000Z`），直接塞进提示词对模型只是噪声且占字符；
+ * 截到「日」为止既保留了"发布时间"这个证据本身，又与方志语境的"某年某月某日"一致。
+ * 只做**截取**、不做任何时区换算或推算——取不到日期形态时原样返回，绝不瞎编。
+ */
+export function formatSourceDate(value?: string | null): string {
+  const v = (value ?? '').trim()
+  if (!v) return ''
+  const m = v.match(/(?:18|19|20)\d{2}(?:-\d{1,2}(?:-\d{1,2})?)?/)
+  return m ? m[0] : v
 }
 
 /**
@@ -454,12 +470,17 @@ export function looksLikeUrl(value?: string | null): boolean {
 
 /**
  * 段落缺少年份时的**来源级兜底**（纯函数，优先级从高到低）：
- * 1. 年鉴/年报类标题 → 标题年份 − 1（`title-yearbook`，地方志行业惯例）；
+ * 1. **本地年鉴/年报/志书类文件**（`kind === 'file'` 且标题像年鉴）→ 标题年份 − 1（`title-yearbook`，地方志行业惯例）；
  * 2. 其它标题里出现的年份 → **原样采用**（`title`；新闻标题《2021年全区教育工作总结》指的就是 2021 年）；
  * 3. 网页来源（kind='url'）且解析到发布时间 → 发布时间年份（`published`；网页正文常用「近日/今年」，
  *    标题里也没年份时这是唯一可靠依据）；
  * 4. 都推不出 → undefined（保持「时间待核」，**不编造**）。
  * 注：标题若本身就是 URL/域名则**跳过第 1、2 条**——`/202512/t20251203_xxx.htm` 这类数字不是内容年份。
+ *
+ * ⚠ 2026-10-05 用户裁定（实测缺陷）：**`kind === 'url'` 的来源一律不做年鉴 −1**。
+ * 旧实现在这里**只按标题**判断年鉴，于是同一站点既发新闻也发年鉴时，网页版年鉴页的标题年份被 −1，
+ * 用户实测到"网页来源的段落年份 = 网页发布年 − 1"的整片错年。−1 是"年度出版物次年产出的体例"，
+ * 只对**本地文件**成立；网页页面本身就是内容载体，标题里的年份指向内容年。
  */
 export function inferYearFromSource(source: {
   title?: string | null
@@ -468,8 +489,11 @@ export function inferYearFromSource(source: {
 }): InferredYear | undefined {
   const titleUsable = !looksLikeUrl(source.title)
   if (titleUsable) {
-    const yearbook = inferYearFromSourceTitle(source.title)
-    if (yearbook != null) return { year: yearbook, basis: 'title-yearbook' }
+    // 年鉴惯例 −1 只认可"本地文件"这一条证据：网页没有"年度出版物"这个载体语义（2026-10-05 裁定）
+    if (source.kind === 'file') {
+      const yearbook = inferYearFromSourceTitle(source.title)
+      if (yearbook != null) return { year: yearbook, basis: 'title-yearbook' }
+    }
     const titleYear = yearOfDate(source.title)
     if (titleYear != null) return { year: titleYear, basis: 'title' }
   }
@@ -661,11 +685,25 @@ export interface AssembleInputParagraph {
   origin?: CompilationParagraphOrigin
   /** 该段来自本批的第几个候选（用于窗口级矛盾说法的映射与诊断） */
   parentIndex: number
+  /**
+   * 该段在**来源正文**里的字符区间（2026-10-05 用户裁定 P0-2）：由生成期（切块 → 成卡 → 提取）
+   * 一路携带下来，落锚点时直接映射 `source_blocks` 得到块号与页码，不再拿文字去正文里回溯匹配。
+   * 缺省（老链路/模型改写掉的卡片）时落锚点会回退逐字匹配，**不影响旧数据**。
+   */
+  charStart?: number
+  charEnd?: number
 }
 
 /** 成文输出的一段（尚无数据库 id：由仓储层 upsert 时分配/复用） */
 export type AssembledParagraph = Omit<CompilationParagraph, 'id'> & {
   parentIndex: number
+  /**
+   * 该段在来源正文里的**生成期字符区间**（P0-2）。落锚点时用它映射 `source_blocks` 得块号与页码；
+   * 缺省时回退逐字匹配。**只走内存**（与 `anchorCandidates` 同一体例），
+   * 因此不落库、不进版本快照、不进导出，撤销/版本恢复/导入链路一概不用改。
+   */
+  charStart?: number
+  charEnd?: number
   /**
    * 各来源**可用来定位的逐字候选文字**（Phase 9 / S3 修复，2026-10-03）：
    * 主来源与每个并列来源各一份，落库时就地算锚点（`attachAnchors`）时按来源取用。
@@ -683,6 +721,12 @@ export interface SourceAnchorCandidate {
   sourceId: string
   evidence?: string
   excerpt: string
+  /**
+   * 该段在该来源正文里的**生成期字符区间**（P0-2）。有它就直接映射块表得页码；
+   * 没有（并列来源的候选是"被合并掉那一段"的文字，可能没记区间）则回退逐字匹配。
+   */
+  charStart?: number
+  charEnd?: number
 }
 
 /** 合并候选列表：按 sourceId 去重（先出现的优先），并丢掉空 sourceId */
@@ -700,8 +744,14 @@ function mergeAnchorCandidates(...lists: (SourceAnchorCandidate[] | undefined)[]
 }
 
 /** 某一段自身的候选（主来源） */
-function ownAnchorCandidate(p: { sourceId?: string; evidence?: string; text: string }): SourceAnchorCandidate[] {
-  return p.sourceId ? [{ sourceId: p.sourceId, evidence: p.evidence, excerpt: p.text }] : []
+function ownAnchorCandidate(p: {
+  sourceId?: string
+  evidence?: string
+  text: string
+  charStart?: number
+  charEnd?: number
+}): SourceAnchorCandidate[] {
+  return p.sourceId ? [{ sourceId: p.sourceId, evidence: p.evidence, excerpt: p.text, charStart: p.charStart, charEnd: p.charEnd }] : []
 }
 
 /**
@@ -710,8 +760,8 @@ function ownAnchorCandidate(p: { sourceId?: string; evidence?: string; text: str
  * 因此这里集中成一个函数，并在单测里用"候选来源集合 ⊇ {主来源} ∪ 并列来源"的不变量钉住。
  */
 export function absorbAnchorCandidates(
-  target: { sourceId?: string; evidence?: string; text: string; anchorCandidates?: SourceAnchorCandidate[] },
-  ...absorbed: { sourceId?: string; evidence?: string; text: string; anchorCandidates?: SourceAnchorCandidate[] }[]
+  target: { sourceId?: string; evidence?: string; text: string; anchorCandidates?: SourceAnchorCandidate[]; charStart?: number; charEnd?: number },
+  ...absorbed: { sourceId?: string; evidence?: string; text: string; anchorCandidates?: SourceAnchorCandidate[]; charStart?: number; charEnd?: number }[]
 ): SourceAnchorCandidate[] {
   return mergeAnchorCandidates(
     target.anchorCandidates ?? [],
@@ -817,7 +867,15 @@ export function assembleDocument(inputs: AssembleInputParagraph[]): AssembleResu
       origin: input.origin ?? 'generate',
       kept: true,
       parentIndex: input.parentIndex,
-      anchorCandidates: ownAnchorCandidate({ sourceId: input.sourceId || undefined, evidence: input.evidence, text })
+      charStart: input.charStart,
+      charEnd: input.charEnd,
+      anchorCandidates: ownAnchorCandidate({
+        sourceId: input.sourceId || undefined,
+        evidence: input.evidence,
+        text,
+        charStart: input.charStart,
+        charEnd: input.charEnd
+      })
     }
     if (draft.alsoSourceIds && draft.alsoSourceIds.length === 0) draft.alsoSourceIds = undefined
     const norm = normalizeForCompare(text)
@@ -933,6 +991,22 @@ if (import.meta.vitest) {
       expect(parseTimeLabel('十三五规划期间')).toMatchObject({ confidence: 'unknown' })
       expect(parseTimeLabel('')).toEqual({ confidence: 'unknown' })
       expect(parseTimeLabel(null)).toEqual({ confidence: 'unknown' })
+    })
+
+    /*
+     * 2026-10-05 用户裁定（P0-1）：来源发布时间要作为**证据**注入提示词，所以需要一个"如实缩短"的展示格式。
+     * 只截取、不做时区换算，取不到日期形态时原样返回（绝不瞎编）。
+     */
+    it('formatSourceDate 把 ISO 发布时间缩到「日」，取不到时原样返回', () => {
+      expect(formatSourceDate('2021-05-06T00:00:00.000Z')).toBe('2021-05-06')
+      expect(formatSourceDate('2021-05-06')).toBe('2021-05-06')
+      expect(formatSourceDate('2021-05')).toBe('2021-05')
+      expect(formatSourceDate('2021')).toBe('2021')
+      expect(formatSourceDate('2021年5月6日')).toBe('2021')
+      expect(formatSourceDate('')).toBe('')
+      expect(formatSourceDate(undefined)).toBe('')
+      // 取不到年份的数字串 → 原样返回（宁可显示原值，也不编一个日期）
+      expect(formatSourceDate('未知')).toBe('未知')
     })
 
     it('renders one line per paragraph with the time label prefix', () => {
@@ -1101,7 +1175,7 @@ if (import.meta.vitest) {
       expect(inferYearFromSourceTitle('2021年全区教育工作总结')).toBeUndefined()
 
       // 有年份 → exact，原样保留（依据记为 text）
-      expect(withFallbackYear('2018 年 5 月', '长乐年鉴2020')).toEqual({
+      expect(withFallbackYear('2018 年 5 月', '长乐年鉴2020', { kind: 'file' })).toEqual({
         timeLabel: '2018 年 5 月',
         year: 2018,
         month: 5,
@@ -1109,8 +1183,12 @@ if (import.meta.vitest) {
         timeConfidence: 'exact',
         basis: 'text'
       })
-      // 缺年份 + 标题可推断 → inferred，并补出年份（带月份时保留月日）
-      expect(withFallbackYear('5 月 19 日', '长乐年鉴2019')).toEqual({
+      /*
+       * 缺年份 + 标题可推断 → inferred，并补出年份（带月份时保留月日）。
+       * ⚠ 2026-10-05 用户裁定后必须显式传 `kind: 'file'`：年鉴 −1 只对**本地年鉴类文件**生效，
+       * 不传 kind 时按"来源类型未知"处理 → 不走 −1（这正是"网页被减 1"那个缺陷的根治方式）。
+       */
+      expect(withFallbackYear('5 月 19 日', '长乐年鉴2019', { kind: 'file' })).toEqual({
         timeLabel: '2018 年 5 月 19 日',
         year: 2018,
         month: 5,
@@ -1119,13 +1197,18 @@ if (import.meta.vitest) {
         basis: 'title-yearbook'
       })
       // 只有日（缺月份本身已无意义）→ 只写年份
-      expect(withFallbackYear('29 日', '长乐年鉴2019')).toMatchObject({ timeLabel: '2018 年', timeConfidence: 'inferred' })
-      expect(withFallbackYear(undefined, '长乐年鉴2019')).toMatchObject({ timeLabel: '2018 年', timeConfidence: 'inferred' })
+      expect(withFallbackYear('29 日', '长乐年鉴2019', { kind: 'file' })).toMatchObject({ timeLabel: '2018 年', timeConfidence: 'inferred' })
+      expect(withFallbackYear(undefined, '长乐年鉴2019', { kind: 'file' })).toMatchObject({ timeLabel: '2018 年', timeConfidence: 'inferred' })
+      // 同一份年鉴标题、但来源是**网页**时不得 −1：年份按内容年原样采用（这条差异就是本次修复的可见效果）
+      expect(inferYearFromSource({ title: '长乐年鉴2019', kind: 'file' })).toEqual({ year: 2018, basis: 'title-yearbook' })
+      expect(inferYearFromSource({ title: '长乐年鉴2019', kind: 'url' })).toEqual({ year: 2019, basis: 'title' })
+      // 网页标题里没有年份 → 推不出就是推不出（如实留空，不编造）
+      expect(inferYearFromSource({ title: '长乐年鉴（未标年份）', kind: 'url' })).toBeUndefined()
       // 标题也推断不出 → 保持 unknown（不编造）
       expect(withFallbackYear('7—9 日', '教育发展报告')).toMatchObject({ timeConfidence: 'unknown' })
     })
 
-    it('infers the year for web sources without applying the yearbook −1 rule (Phase 7.7 网页第一批)', () => {
+    it('infers the year for web sources without applying the yearbook −1 rule (Phase 7.7 网页第一批 + 2026-10-05 裁定)', () => {
       // ① 网页新闻标题里的年份 = 内容年，**不减 1**（旧实现会推成 2020，静默错年）
       expect(inferYearFromSource({ title: '2021年全区教育工作总结', kind: 'url' })).toEqual({ year: 2021, basis: 'title' })
       // ② 网页标题没有年份 → 用发布时间（网页正文常用「近日/今年」，这是唯一依据）
@@ -1138,10 +1221,27 @@ if (import.meta.vitest) {
         year: 2020,
         basis: 'title'
       })
-      // ④ 网页年鉴页仍按年鉴惯例 −1（同一站点既发新闻也发年鉴）
-      expect(inferYearFromSource({ title: '福州新区年鉴（2025）', kind: 'url' })).toEqual({ year: 2024, basis: 'title-yearbook' })
+      /*
+       * ④ 2026-10-05 用户裁定（本轮 P0-1 修复）：**网页来源一律不做年鉴 −1**。
+       * 旧行为是"只按标题判断年鉴"，于是 `kind === 'url'` 且标题含「年鉴」时也会 −1（期望 2024），
+       * 用户实测到的正是这类整片错年：同一站点既发新闻也发年鉴，网页版年鉴页的标题年份被减 1。
+       * −1 是"年度出版物次年产出的体例"，只对**本地文件**成立 → 网页标题里的年份按内容年原样采用。
+       */
+      expect(inferYearFromSource({ title: '福州新区年鉴（2025）', kind: 'url' })).toEqual({ year: 2025, basis: 'title' })
+      // 网页标题里没有年份时也不 −1，只能靠发布时间
+      expect(inferYearFromSource({ title: '福州新区年鉴', kind: 'url' })).toBeUndefined()
+      expect(inferYearFromSource({ title: '福州新区年鉴', kind: 'url', publishedAt: '2025-06-01' })).toEqual({
+        year: 2025,
+        basis: 'published'
+      })
       // ⑤ 本地文件里出现年份也不再一律 −1（只有年鉴类才 −1）
       expect(inferYearFromSource({ title: '2019年教育统计表.xlsx', kind: 'file' })).toEqual({ year: 2019, basis: 'title' })
+      // ⑤b 本地**年鉴/年报/志书类**文件仍按惯例 −1（−1 没有被取消，只是收窄到本地文件）
+      expect(inferYearFromSource({ title: '长乐年鉴2019.pdf', kind: 'file' })).toEqual({ year: 2018, basis: 'title-yearbook' })
+      expect(inferYearFromSource({ title: '2019年教育年度报告.docx', kind: 'file' })).toEqual({
+        year: 2018,
+        basis: 'title-yearbook'
+      })
       // ⑥ 本地文件不会用发布时间兜底（文件没有"发布时间"概念）
       expect(inferYearFromSource({ title: '教育发展报告', kind: 'file', publishedAt: '2021-03-05' })).toBeUndefined()
       // ⑦ 都没有 → 不编造

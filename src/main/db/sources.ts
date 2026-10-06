@@ -113,6 +113,17 @@ export function getAnySourceByUrl(url: string): Source | null {
   return row ? rowToSource(row) : null
 }
 
+/**
+ * Phase 10 P5：列出**某个任务**已采用的网页来源 id（`kind='url'` 且 `task_id` 命中）。
+ * 生成汇编时把它们并入检索范围；对话追问导航（`listNavigableSources`）也用它——**不再依赖 `task_web_materials` 的"锁定"语义**。
+ */
+export function listUrlSourceIdsByTask(taskId: string): string[] {
+  const db = getDb()
+  return (
+    db.prepare("SELECT id FROM sources WHERE task_id = ? AND kind = 'url' ORDER BY created_at").all(taskId) as { id: string }[]
+  ).map((r) => r.id)
+}
+
 /** 批量按 ID 获取资料（保持传入顺序去重；用于 RAG 检索范围） */
 export function getSourcesByIds(ids: string[]): Source[] {
   const unique = Array.from(new Set(ids))

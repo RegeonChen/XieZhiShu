@@ -524,10 +524,13 @@ body {
   gap: 2px;
   margin-bottom: 8px;
 }
-.web-source__title {
-  font-weight: 600;
-  color: var(--fg);
-}
+/*
+ * 2026-10-05（用户裁定 A）：网页资料库面板的「抓取并筛选」整块已删除 —— 年份读写、区间预览、分年分布、
+ * 手动抓取都迁走了（预览现在用 `.chat-panel__web-years-preview*`），因此下面这批类已无引用方，一并删除：
+ * `.web-source__title` / `.web-source__years-hint` / `.web-source__years-inputs` / `.web-source__years-preview`
+ * / `.web-source__years-dist` / `.web-source__years-warn` / `.web-source__crawl` / `.web-source__crawl-progress`
+ * 以及它们的 `web-source__crawl .source-list__url-input` 覆盖规则。面板现在只用 head / add / list / item / empty。
+ */
 .web-source__hint {
   font-size: 12px;
   color: var(--fg-soft);
@@ -542,9 +545,9 @@ body {
 .web-source__add .source-list__url-input--small {
   flex: 0 0 140px;
 }
+
 .web-source__empty {
-  font-size: 12px;
-  color: var(--fg-soft);
+  font-size: 12px;  color: var(--fg-soft);
   margin: 4px 0;
 }
 .web-source__list {
@@ -2463,6 +2466,38 @@ body {
   color: var(--fg-soft);
 }
 
+/* 2026-10-05（用户要求）：抓取进行中的「暂停抓取 / 继续抓取」+ 暂停提示文本 */
+.chat-panel__fetch-ctl {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chat-panel__fetch-btn {
+  align-self: flex-start;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-soft);
+  font-size: 12px;
+  font-style: normal;
+  cursor: pointer;
+}
+
+.chat-panel__fetch-btn:hover {
+  color: var(--fg);
+  border-color: var(--fg-soft);
+}
+
+.chat-panel__fetch-hint {
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.5;
+  color: var(--fg-soft);
+}
+
 /* 资料汇编生成：大模型异常中断提示 + 尝试继续（Phase 6.x） */
 .chat-panel__interrupt {
   margin-top: 10px;
@@ -2593,6 +2628,74 @@ body {
   padding: 8px 12px;
   border-top: 1px solid var(--border);
   flex-shrink: 0;
+}
+/*
+ * 「资料年份范围」内联控件（2026-10-05 用户裁定：在任务流程里选、位于输入框**上方**）。
+ * ⚠ 必须是独立一行：塞进 `.chat-panel__input-row`（横向 flex）会把输入框挤没（真机自检抓到过）。
+ */
+.chat-panel__web-years {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+/* 年份输入行（标题 + 两个年份 + 提示 + 确定） */
+.chat-panel__web-years-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+/* 区间规模预览（2026-10-05：从资料库面板搬到这里）：区间内 N 篇 / 占比 / 预计抓取时长 + 分年分布 */
+.chat-panel__web-years-preview {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--fg);
+  line-height: 1.6;
+  word-break: break-word;
+}
+.chat-panel__web-years-preview--dist {
+  color: var(--fg-soft);
+}
+.chat-panel__web-years-preview--warn {
+  color: var(--warn, #b45309);
+}
+.chat-panel__web-years-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  white-space: nowrap;
+}
+.chat-panel__web-years-input {
+  width: 72px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--fg);
+  background: var(--bg-panel);
+  outline: none;
+}
+.chat-panel__web-years-input:focus {
+  border-color: var(--accent);
+}
+.chat-panel__web-years-sep {
+  color: var(--fg-soft);
+  font-size: 12px;
+}
+.chat-panel__web-years-hint {
+  flex: 1 1 160px;
+  min-width: 120px;
+  font-size: 11.5px;
+  color: var(--fg-soft);
+  line-height: 1.5;
+}
+.chat-panel__web-years-save {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 .chat-panel__input {
   flex: 1;
@@ -3158,6 +3261,22 @@ body {
   color: var(--danger);
   font-size: 12px;
   line-height: 1.6;
+}
+/* 第二组 ⑤ 的逃生门复选框（材料规模确认框内；与消息同一视觉层级，不做成主按钮的样子） */
+.confirm-dialog__checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -6px 0 14px;
+  color: var(--fg-soft);
+  font-size: 12.5px;
+  line-height: 1.5;
+  cursor: pointer;
+  user-select: none;
+}
+.confirm-dialog__checkbox input {
+  margin: 0;
+  cursor: pointer;
 }
 .confirm-dialog__actions {
   display: flex;
@@ -4980,61 +5099,9 @@ textarea:focus-visible {
   background: var(--danger-soft);
   color: var(--danger);
 }
-/* 疑似超出范围的复核条（Phase 9 补充）：用"提示"而非"警告"的观感——它只是一份待人工判断的清单 */
-.compilation-scope {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 8px 16px 0;
-}
-.compilation-scope .compilation-collapse-btn--bar {
-  background: var(--bg-soft);
-  color: var(--fg);
-}
-.compilation-scope__list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: 320px;
-  overflow: auto;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-panel);
-}
-.compilation-scope__hint {
-  margin: 0;
-  font-size: 11px;
-  line-height: 1.7;
-  color: var(--fg-soft);
-}
-.compilation-scope__item {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-}
-.compilation-scope__text {
-  font-size: 13px;
-  line-height: 1.7;
-  color: var(--fg);
-}
-.compilation-scope__meta {
-  font-size: 11px;
-  color: var(--fg-soft);
-}
-.compilation-scope__actions {
-  display: flex;
-  gap: 6px;
-}
-.compilation-scope__footer {
-  display: flex;
-  gap: 6px;
-  padding-top: 2px;
-}
+/* 2026-10-05 用户裁定：「疑似超出范围」提示整体关闭（越界段落直接保留）——
+   原 `.compilation-scope` / `__list` / `__hint` / `__item` / `__text` / `__meta` / `__actions` / `__footer`
+   九条规则随界面整块删除（删功能连带删死样式）。 */
 /* 矛盾卡片：正文在上、来源/时间/操作作为**右对齐底栏**在下（2026-10-03 用户裁定）——
    此前后者与正文并列，面板一窄正文就被压成"每两个字换一行"。 */
 .compilation-variant {
@@ -5424,9 +5491,6 @@ textarea:focus-visible {
   font-size: 11.5px;
   line-height: 1.5;
   color: var(--fg-soft);
-}
-.compilation-webinfo__new {
-  color: var(--fg);
 }
 .compilation-webinfo .source-list__btn {
   padding: 2px 10px;

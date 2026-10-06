@@ -63,7 +63,30 @@ export function getSettings(): AppSettings {
   // 长任务保持唤醒：只在显式关闭时落库（缺省即开启）
   // 注：原先只写不读，导致该开关重启后被重置为"开启"——2026-09-10 一并修掉
   if (getSetting('keep_awake') === 'false') settings.keepAwake = false
+  // Phase 10 P3：网页资料库的发布时间筛选区间（两年份都在且合法才生效）
+  const yf = getSetting('web_year_from')
+  const yt = getSetting('web_year_to')
+  if (yf && yt) {
+    const from = Number(yf)
+    const to = Number(yt)
+    if (isValidYearRange(from, to)) {
+      settings.webYearFrom = from
+      settings.webYearTo = to
+    }
+  }
+  // 2026-10-05：网页抓取节奏档位（缺省 = 标准档，由调用方兜底）
+  const tier = getSetting('web_crawl_tier')
+  if (tier === 'safe' || tier === 'fast') settings.webCrawlTier = tier
   return settings
+}
+
+/** 年份是否落在可接受范围内（与 `article-date.ts` 的 MIN_YEAR 口径一致） */
+function isValidYear(y: number): boolean {
+  return Number.isInteger(y) && y >= 1990 && y <= new Date().getFullYear() + 1
+}
+
+function isValidYearRange(from: number, to: number): boolean {
+  return isValidYear(from) && isValidYear(to) && from <= to
 }
 
 export function updateSettings(patch: Partial<AppSettings>): AppSettings {
@@ -129,6 +152,26 @@ export function updateSettings(patch: Partial<AppSettings>): AppSettings {
     else deleteSetting('doc_scale') // medium 是默认值，不落库
   }
 
+  // Phase 10 P3：网页资料库年份区间。两个值必须成对且合法，否则**两个键一起清除**（回到"不按年份筛"）
+  if ('webYearFrom' in patch || 'webYearTo' in patch) {
+    const from = patch.webYearFrom
+    const to = patch.webYearTo
+    if (typeof from === 'number' && typeof to === 'number' && isValidYearRange(from, to)) {
+      setSetting('web_year_from', String(from))
+      setSetting('web_year_to', String(to))
+    } else {
+      deleteSetting('web_year_from')
+      deleteSetting('web_year_to')
+    }
+  }
+
+  // 2026-10-05：网页抓取节奏档位。缺省/非法一律**清除键**（回到默认 = 标准档），避免把坏值写进库
+  if ('webCrawlTier' in patch) {
+    const v = patch.webCrawlTier
+    if (v === 'safe' || v === 'fast') setSetting('web_crawl_tier', v)
+    else deleteSetting('web_crawl_tier') // standard 是默认值，不落库
+  }
+
   return getSettings()
 }
 
@@ -183,6 +226,29 @@ if (import.meta.vitest) {
 
     it('rejects unknown provider id', () => {
       expect(() => updateSettings({ compilationProviderId: 'no-such-id' })).toThrow('不存在')
+    })
+
+    it('persists the web-material year range and clears invalid pairs (Phase 10 P3)', () => {
+      // 缺省：未设置（不按年份筛）
+      updateSettings({ webYearFrom: 0, webYearTo: 0 })
+      expect(getSettings().webYearFrom).toBeUndefined()
+      expect(getSettings().webYearTo).toBeUndefined()
+
+      // 合法区间 → 落库，重新读取（模拟重启）仍在
+      updateSettings({ webYearFrom: 2005, webYearTo: 2020 })
+      const saved = getSettings()
+      expect(saved.webYearFrom).toBe(2005)
+      expect(saved.webYearTo).toBe(2020)
+
+      // 起点大于终点 → 两个键一起清除（当作"回到不筛"）
+      updateSettings({ webYearFrom: 2020, webYearTo: 2005 })
+      expect(getSettings().webYearFrom).toBeUndefined()
+      expect(getSettings().webYearTo).toBeUndefined()
+
+      // 越界年份 → 同样清除
+      updateSettings({ webYearFrom: 1899, webYearTo: 2020 })
+      expect(getSettings().webYearFrom).toBeUndefined()
+      expect(getSettings().webYearTo).toBeUndefined()
     })
 
     it('persists per-step default provider ids (Phase 6.8)', () => {

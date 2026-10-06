@@ -9,7 +9,7 @@
  * 本文件只放纯函数（不碰数据库、不联网），便于单测与复算：**同一段正文切出的节 id 必须稳定**，
  * 因为第 2/3 轮里模型说的是"节 id"，第 4 轮要按同一规则取回正文。
  */
-import { inferYearFromSourceTitle } from './compilation-document'
+import { inferYearFromSource } from './compilation-document'
 
 /** 单节最大字符（超过则按段落再切；节过大时模型读不动、提示词也放不下） */
 export const SECTION_MAX_CHARS = 1200
@@ -33,15 +33,15 @@ export interface CatalogSection {
   text: string
 }
 
-/** 该来源的年份口径（年鉴 −1 惯例；网页用标题/发布时间里的年份） */
+/**
+ * 该来源的年份口径（年鉴 −1 惯例；网页用标题/发布时间里的年份）。
+ *
+ * 2026-10-05 用户裁定（P0-1 同期收口）：这里原来是**只看标题**的 `inferYearFromSourceTitle`，
+ * 于是「福州新区年鉴（2025）」这类**网页**页面的年份也被减 1，与 `inferYearFromSource` 是同一个错年入口。
+ * 现在统一走 `inferYearFromSource`（−1 只对本地年鉴类文件生效），使"生成汇编"与"导航问答"两条链路口径一致。
+ */
 export function sourceYearOf(source: CatalogSource): number | undefined {
-  const fromTitle = inferYearFromSourceTitle(source.title)
-  if (fromTitle) return fromTitle
-  const m = String(source.title ?? '').match(/(19|20)\d{2}/)
-  if (m) return Number(m[0])
-  const p = String(source.publishedAt ?? '').match(/(19|20)\d{2}/)
-  if (p) return Number(p[0])
-  return undefined
+  return inferYearFromSource({ title: source.title, kind: source.kind, publishedAt: source.publishedAt })?.year
 }
 
 function firstSentence(text: string, max = 24): string {
