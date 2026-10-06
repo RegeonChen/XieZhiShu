@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
+    "@mozilla/readability": "^0.6.0",
     "@tiptap/extension-table": "^2.27.2",
     "@tiptap/extension-table-cell": "^2.27.2",
     "@tiptap/extension-table-header": "^2.27.2",
@@ -28,17 +29,19 @@
     "@tiptap/starter-kit": "^2.27.2",
     "better-sqlite3": "^13.0.2",
     "chokidar": "^5.0.0",
+    "jszip": "^3.10.1",
+    "linkedom": "^0.18.13",
     "mammoth": "^1.12.0",
     "onnxruntime-common": "^1.27.0",
     "onnxruntime-node": "file:vendor/onnxruntime-node-stub",
     "onnxruntime-web": "^1.27.0",
     "pdf-parse": "^2.4.5",
     "pdfjs-dist": "^6.2.108",
-    "jszip": "^3.10.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tesseract.js": "^5.1.1",
     "tiptap-markdown": "^0.8.10",
+    "trafilatura": "^0.2.0",
     "word-extractor": "^1.0.4",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
@@ -69,7 +72,8 @@
     "asar": true,
     "npmRebuild": false,
     "asarUnpack": [
-      "node_modules/onnxruntime-web/dist/*.wasm"
+      "node_modules/onnxruntime-web/dist/*.wasm",
+      "node_modules/trafilatura-win32-x64-msvc/**"
     ],
     "files": [
       "out/**/*",
