@@ -612,6 +612,13 @@ export interface WebCrawlResult {
   downgrades?: number
   /** 2026-10-05：因为「暂停抓取」而额外耗费的等待毫秒数（诊断用） */
   pausedMs?: number
+  /**
+   * 2026-10-06（Phase 11 B 批）：本次**真的写进正文缓存**的篇数——只算 `mode: 'build'`（建立缓存）里
+   * 抓取并判定的那几篇（`ok` 与 `no-body` 标记都算）；**命中缓存的不算**（没写），
+   * **白名单拦截写下的 `blocked` 标记也不算**（那不走抓取路径，另由 `blocked` 计数）。
+   * 建立缓存模式的日志用它回答"这次到底建了多少篇"。
+   */
+  cacheWritten?: number
 }
 
 /**

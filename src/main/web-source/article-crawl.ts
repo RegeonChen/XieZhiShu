@@ -26,7 +26,7 @@ import { runMigrations } from '../db/migrate'
 import { enqueueIndex } from '../rag/indexer'
 import { judgeBodyRelevance, type RelevanceTier } from './body-relevance'
 import { getSourceByUrl, insertSource, updateSourcePublishedAt } from '../db/sources'
-import { updateArticleFetchState } from '../db/web-sites'
+import { updateArticleDates, updateArticleFetchState } from '../db/web-sites'
 import { countTaskFetch, listRangeArticles, recordTaskFetch, type TaskFetchTarget } from '../db/task-web-fetch'
 import { fetchUrl, type FetchResult } from '../import/url-fetcher'
 import { logMain } from '../logger'
@@ -44,7 +44,7 @@ import { allowedHostsForSite, isAllowedTargetUrl, judgeFetchedArticle, pageConta
 import { AdaptiveRate } from './adaptive-rate'
 import { isFetchCancelled, isFetchPaused, resetFetchControl } from './fetch-control'
 import { getSettings } from '../db/settings'
-import { getCachedBody, putCachedBody } from '../db/article-body-cache'
+import { getCachedBody, putCachedBody, putCacheMiss } from '../db/article-body-cache'
 import { findSiteArticleByBodyHash, listWebSites } from '../db/web-sites'
 
 /** 抓取期粗筛的最低词法分（与本地库保守闸门同口径：`score > RECALL_LEX_MIN`，即 ≥2） */
@@ -95,15 +95,25 @@ export function screenArticle(text: string, query: string, title = '', extraTerm
 export interface CrawlOptions {
   fromYear: number
   toYear: number
-  /** 主题关键词（用于正文粗筛；P5 会从撰写要求来） */
-  query: string
+  /** 主题关键词（用于正文粗筛；P5 会从撰写要求来）。`build` 模式不需要，可省略 */
+  query?: string
   /**
    * 撰写要求**现算词表**（第一组 ③）追加的补充词：只在分层判定里"只升不降"地并入，
    * 不进 `scoreChunk` 的词法分（它是主题词/要点词/范围词三组词，不是"查询串"）。
    */
   extraTerms?: string[]
-  /** 命中的文章落成该任务的来源（P5 传任务 id；不传则落成长期来源之外的"任务无关"来源会被拒绝，见下） */
-  taskId: string
+  /** 命中的文章落成该任务的来源（P5 传任务 id；`build` 模式不需要，可省略） */
+  taskId?: string
+  /**
+   * 2026-10-06（Phase 11 B 批）：抓取**模式**。
+   * - `screen`（默认）= 生成期：抓完按主题判定相关性、命中落成任务来源、写任务账本；
+   * - `build` = 建立缓存：**只抓正文并写缓存**（可用正文写 `ok`、无可用正文写 `no-body` 标记），
+   *   **不做主题筛选、不落任务来源、不写任务账本**（建立缓存时根本没有主题）。
+   *
+   * 两种模式**共用**同一套礼貌限速 / 档位 / ETA / robots / 安全白名单 / 自适应降档 / 暂停续跑，
+   * 因此不存在"两套判定漂移"的风险。
+   */
+  mode?: 'screen' | 'build'
   /** 并发度（默认取设置档位：标准档 = 4） */
   concurrency?: number
   onProgress?: (p: WebCrawlProgress) => void
@@ -159,12 +169,25 @@ async function runPool<T>(
 }
 
 /**
- * 执行抓取 + 粗筛。**同步 await 完成**（用户裁定 ②），可在任意时刻取消（已处理的状态已落库，重跑即续跑）。
+ * 执行抓取。**同步 await 完成**（用户裁定 ②），可在任意时刻取消（已处理的状态已落库，重跑即续跑）。
+ *
+ * 两种模式（{@link CrawlOptions.mode}）：
+ * - `screen`（生成期）：抓取 + 有效性判定 + **主题相关性粗筛** + 命中落成任务来源 + 写任务账本；
+ * - `build`（建立缓存，Phase 11 B）：抓取 + 有效性判定 + **写正文缓存**（`ok` / `no-body` 标记），
+ *   不做主题筛选、不落任务来源、不写任务账本。
  */
 export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCrawlResult> {
   const started = Date.now()
-  const { fromYear, toYear, query, taskId } = opts
-  /** 撰写要求现算词表的补充词（第一组 ③）：只并入分层判定，不参与词法打分 */
+  const { fromYear, toYear } = opts
+  /**
+   * 2026-10-06（Phase 11 B 批）：`build` = 建立缓存模式（无主题、不落来源、不写账本）。
+   * 它复用本函数的**全部**抓取基础设施，只在"抓完之后做什么"上分叉。
+   */
+  const buildMode = (opts.mode ?? 'screen') === 'build'
+  const query = opts.query ?? ''
+  const taskId = opts.taskId ?? ''
+  if (!buildMode && !taskId) throw new Error('抓取+筛选模式必须提供 taskId（建立缓存模式不需要）')
+  /** 建立缓存模式没有任务账本，因此"本次处理多少篇"直接看区间目录 */
   const extraTerms = opts.extraTerms ?? []
   /*
    * 抓取节奏（用户裁定 2026-10-05）：默认**标准档**（间隔 60ms / 同站并发 4），设置里可切保守或快速。
@@ -179,7 +202,8 @@ export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCra
    * 是否联网完全由 `article-body-cache`（正文缓存）决定：命中 → 本地重筛（毫秒级、零网络），未命中 → 抓取。
    */
   const allTargets = listRangeArticles(fromYear, toYear)
-  const rangeCount = countTaskFetch(taskId, fromYear, toYear)
+  /** `build` 模式不写任务账本，所以"区间内多少篇"直接取区间目录条数 */
+  const rangeCount = buildMode ? { total: allTargets.length, processed: 0, failed: 0 } : countTaskFetch(taskId, fromYear, toYear)
 
   /*
    * 2026-10-05（安全加固）：抓取目标来自 feed / sitemap / BFS 解析出的 `<loc>` / `<link>`，属于**外部数据**——
@@ -196,9 +220,14 @@ export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCra
     return false
   })
   for (const t of blockedTargets) {
-    // 记账为 dropped：这类 URL 永远不会被允许，重跑也不该再撞（避免每次生成都重试同一批垃圾）
+    /*
+     * 这类 URL 永远不会被允许，重跑也不该再撞（避免每次生成都重试同一批垃圾）：
+     * `screen` 模式记进任务账本；`build` 模式写 `blocked` 缓存标记——**否则生成前的缓存闸门
+     * 会把它们永远算作"待建立"、永远不放行**（这正是 Phase 11 决策 3A 要解决的问题）。
+     */
     try {
-      recordTaskFetch(taskId, t.siteId, t.url, { state: 'dropped', hit: false })
+      if (buildMode) putCacheMiss(t.siteId, t.url, 'blocked')
+      else recordTaskFetch(taskId, t.siteId, t.url, { state: 'dropped', hit: false })
     } catch (err) {
       logMain('web', `跳过非法目标时记账失败（忽略）：${err instanceof Error ? err.message : String(err)}`)
     }
@@ -259,6 +288,8 @@ export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCra
   let templateRepeat = 0
   /** 2026-10-05：从正文缓存复用（零网络）的篇数 */
   let cacheHits = 0
+  /** 2026-10-06（Phase 11 B）：本次写进正文缓存的篇数（`ok` 与 `no-body` 标记都算） */
+  let cacheWritten = 0
   /** 2026-10-05 自适应降档：本轮失败的目标（降档后要**重抓一遍**）与降档说明 */
   const failedTargets: TaskFetchTarget[] = []
   const downgradeNotes: string[] = []
@@ -307,14 +338,20 @@ export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCra
       let processMs = 0
       try {
         if (meta && isPathDisallowed(t.url, meta.disallow)) {
-          // robots 禁止的路径：记账为失败（每次生成都会再试一遍，因为不再有"跳过"语义）
-          recordTaskFetch(taskId, t.siteId, t.url, { state: 'failed' })
+          /*
+           * robots 禁止的路径：`screen` 模式记账为失败（每次生成都会再试一遍，因为不再有"跳过"语义）；
+           * `build` 模式写 `blocked` 标记（robots 不允许抓 = 永远建不了，不该计入缺口）。
+           */
+          if (buildMode) putCacheMiss(t.siteId, t.url, 'blocked')
+          else recordTaskFetch(taskId, t.siteId, t.url, { state: 'failed' })
           failed++
           return
         }
         // 列表页兜底：栏目/列表页绝不当文章（与旧管线同一规则）
         if (isListPageUrl(t.url)) {
-          recordTaskFetch(taskId, t.siteId, t.url, { state: 'dropped', hit: false })
+          // `build` 模式：列表页**永远不会有正文**，必须写 no-body 标记，否则它永远是"待建立"
+          if (buildMode) putCacheMiss(t.siteId, t.url, 'no-body')
+          else recordTaskFetch(taskId, t.siteId, t.url, { state: 'dropped', hit: false })
           dropped++
           return
         }
@@ -370,7 +407,7 @@ export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCra
           textSource = extracted.source === 'regex' || extracted.source === 'full-page' ? 'full-page' : 'extractor'
           // A1 标题探针：带标题的候选才会被判（无标题候选走"正文过短/同站重复"兜底）
           probeOk = !t.title.trim() ? true : pageContainsArticle(res.rawHtml, text, t.title)
-          putCachedBody(t.siteId, t.url, text, hashText(text), probeOk, textSource)
+          // 缓存写入**已移到有效性判定之后**（2026-10-06 Phase 11 B）：要按结论写 ok / no-body，见下
 
           // L4/L5 日期回填：只在"原日期缺失/偏低"时补齐（L5 优先于 L4 —— 阶梯顺序；页面日期更贴发布时间）
           const needDate = !t.publishedDate || t.dateConfidence === 'low'
@@ -384,6 +421,8 @@ export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCra
         }
         const bodyChars = text.length
         const bodyHash = hashText(text)
+        /** 本次是否**真的联网抓了**这一篇（缓存命中时不再写缓存，避免无意义地刷新 `fetched_at`） */
+        const fetchedNow = cached === null
 
         /*
          * 2026-10-05（P0 兜底回归，见 `article-guards.ts` 的 `judgeFetchedArticle`）：有效性判定。
@@ -399,7 +438,31 @@ export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCra
           duplicateUrl,
           knownProbeOk: probeOk
         })
+        /*
+         * 2026-10-06（Phase 11 B 批）：缓存写入移到**判定之后**，并按结论写对状态 ——
+         * `ok` = 正文可用；`no-body` = 已尝试但没取到可用正文（老文章失效 / 模板页 / 过短）。
+         * 旧实现是"抓到就按 ok 写"，于是"试过但没正文"的篇在缓存里和好篇长得一样，
+         * 生成前的闸门分不出"还要建"与"永远建不了"。`putCacheMiss` 是 `ON CONFLICT DO NOTHING`，
+         * 所以**绝不会**把以前抓到的好正文降级掉。
+         */
+        if (fetchedNow) {
+          if (verdict === 'ok') putCachedBody(t.siteId, t.url, text, bodyHash, probeOk, textSource)
+          else putCacheMiss(t.siteId, t.url, 'no-body')
+        }
         if (verdict !== 'ok') {
+          /*
+           * `build` 模式（建立缓存）：日期照常回填（抓到了就顺手把 L4/L5 补上，否则下次按年份筛还是"未知"），
+           * 但不写任务账本、不写站点筛选痕迹（那些是"筛选结论"，建立缓存时没有主题）。
+           */
+          if (buildMode) {
+            if (datePatch.publishedDate || datePatch.httpLastModified) updateArticleDates(t.siteId, t.url, datePatch)
+            dropped++
+            if (fetchedNow) cacheWritten++ // 命中缓存时并没有写缓存
+            if (verdict === 'invalidBody') invalidBody++
+            else if (verdict === 'shortBody') shortBody++
+            else templateRepeat++
+            return
+          }
           recordTaskFetch(taskId, t.siteId, t.url, {
             state: 'dropped',
             hit: false,
@@ -417,6 +480,18 @@ export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCra
             `未取到正文（${verdict === 'invalidBody' ? '页面为模板/该文章已失效' : verdict === 'shortBody' ? `空标题候选且清洗后仅 ${text.trim().length} 字` : `空标题候选且与已抓文章正文完全相同 ${duplicateUrl}`}），` +
               `丢弃 url=${t.url}`
           )
+          return
+        }
+
+        if (buildMode) {
+          /*
+           * 建立缓存模式到此结束：**不做主题筛选、不落任务来源、不入向量索引、不写任务账本**。
+           * 语义映射：`hits` = 正文可用（缓存里有好正文）；`dropped` = 无可用正文（已写 no-body 标记）。
+           * `cacheWritten` 只统计**本次真的写了缓存**的篇数（命中缓存不算）。
+           */
+          if (datePatch.publishedDate || datePatch.httpLastModified) updateArticleDates(t.siteId, t.url, datePatch)
+          hits++
+          if (fetchedNow) cacheWritten++
           return
         }
 
@@ -531,16 +606,33 @@ export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCra
           const extracted = extractArticle(res.rawHtml, t.url, siteMeta.get(t.siteId)?.title ?? null)
           const text = extracted.text ?? ''
           const probeOk = !t.title.trim() ? true : pageContainsArticle(res.rawHtml, text, t.title)
-          putCachedBody(t.siteId, t.url, text, hashText(text), probeOk)
           const bodyHash = hashText(text)
           const duplicateUrl = t.title.trim() ? null : findSiteArticleByBodyHash(t.siteId, bodyHash, t.url)?.url ?? null
           const verdict = judgeFetchedArticle({ candidateTitle: t.title, rawHtml: res.rawHtml, text, duplicateUrl, knownProbeOk: probeOk })
+          // 与主路径**同一口径**：按判定结论写缓存（ok / no-body），且绝不降级已抓到的好正文
+          if (verdict === 'ok') putCachedBody(t.siteId, t.url, text, bodyHash, probeOk)
+          else putCacheMiss(t.siteId, t.url, 'no-body')
           if (verdict !== 'ok') {
+            if (buildMode) {
+              dropped++
+              cacheWritten++
+              if (verdict === 'invalidBody') invalidBody++
+              else if (verdict === 'shortBody') shortBody++
+              else templateRepeat++
+              return
+            }
             recordTaskFetch(taskId, t.siteId, t.url, { state: 'dropped', hit: false, bodyHash, bodyChars: text.length })
             dropped++
             if (verdict === 'invalidBody') invalidBody++
             else if (verdict === 'shortBody') shortBody++
             else templateRepeat++
+            return
+          }
+          if (buildMode) {
+            // 建立缓存模式：命中正文即完成（不筛选、不落来源、不写账本）
+            hits++
+            cacheWritten++
+            failed = Math.max(0, failed - 1) // 该篇本轮已从失败转为成功
             return
           }
           const screen = screenArticle(text, query, extracted.title ?? t.title ?? '', extraTerms)
@@ -592,16 +684,28 @@ export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCra
   if (opts.shouldCancel?.() || isFetchCancelled()) cancelled = true
   emit(cancelled ? 'cancelled' : 'done')
   const elapsedMs = Date.now() - started
-  logMain(
-    'web',
-    `网页抓取结束：本次处理 ${done}/${targets.length} 篇（命中 ${hits}、未命中丢弃 ${dropped}、失败 ${failed}；其中**缓存复用 ${cacheHits} 篇**未联网），` +
-      `有效正文判定：A1 标题探针不过 ${invalidBody}｜空标题正文过短 ${shortBody}｜同站正文重复 ${templateRepeat}；` +
-      `安全过滤跳过 ${blockedTargets.length} 篇；` +
-      (rate.downgradeCount > 0 ? `自适应降档 ${rate.downgradeCount} 次（当前间隔 ${intervalMs}ms）＋重抓 ${retryRounds} 轮；` : '') +
-      (pausedMs > 0 ? `暂停累计 ${(pausedMs / 1000).toFixed(0)}s；` : '') +
-      `放行层级：专指词 ${tierCount.specific}｜弱词组合 ${tierCount['weak-pair']}｜bigram 兜底 ${tierCount.lexical}｜剔除 ${tierCount.none}；` +
-      `落库正文 ${chars} 字，耗时 ${(elapsedMs / 1000).toFixed(1)}s（${(elapsedMs / Math.max(1, done)).toFixed(0)}ms/篇）`
-  )
+  if (buildMode) {
+    logMain(
+      'web',
+      `建立缓存结束：本次处理 ${done}/${targets.length} 篇（正文可用 ${hits}、无可用正文 ${dropped}、失败 ${failed}；其中**缓存复用 ${cacheHits} 篇**未联网），` +
+        `本次写入缓存 ${cacheWritten} 篇；有效正文判定：A1 标题探针不过 ${invalidBody}｜空标题正文过短 ${shortBody}｜同站正文重复 ${templateRepeat}；` +
+        `安全过滤跳过 ${blockedTargets.length} 篇；` +
+        (rate.downgradeCount > 0 ? `自适应降档 ${rate.downgradeCount} 次（当前间隔 ${intervalMs}ms）＋重抓 ${retryRounds} 轮；` : '') +
+        (pausedMs > 0 ? `暂停累计 ${(pausedMs / 1000).toFixed(0)}s；` : '') +
+        `耗时 ${(elapsedMs / 1000).toFixed(1)}s（${(elapsedMs / Math.max(1, done)).toFixed(0)}ms/篇）——建立缓存不做主题筛选、不落任务来源`
+    )
+  } else {
+    logMain(
+      'web',
+      `网页抓取结束：本次处理 ${done}/${targets.length} 篇（命中 ${hits}、未命中丢弃 ${dropped}、失败 ${failed}；其中**缓存复用 ${cacheHits} 篇**未联网），` +
+        `有效正文判定：A1 标题探针不过 ${invalidBody}｜空标题正文过短 ${shortBody}｜同站正文重复 ${templateRepeat}；` +
+        `安全过滤跳过 ${blockedTargets.length} 篇；` +
+        (rate.downgradeCount > 0 ? `自适应降档 ${rate.downgradeCount} 次（当前间隔 ${intervalMs}ms）＋重抓 ${retryRounds} 轮；` : '') +
+        (pausedMs > 0 ? `暂停累计 ${(pausedMs / 1000).toFixed(0)}s；` : '') +
+        `放行层级：专指词 ${tierCount.specific}｜弱词组合 ${tierCount['weak-pair']}｜bigram 兜底 ${tierCount.lexical}｜剔除 ${tierCount.none}；` +
+        `落库正文 ${chars} 字，耗时 ${(elapsedMs / 1000).toFixed(1)}s（${(elapsedMs / Math.max(1, done)).toFixed(0)}ms/篇）`
+    )
+  }
   return {
     total: targets.length,
     done,
@@ -618,6 +722,7 @@ export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCra
     templateRepeat,
     blocked: blockedTargets.length,
     cacheHits,
+    cacheWritten,
     downgrades: rate.downgradeCount,
     pausedMs
   }
@@ -782,6 +887,129 @@ if (import.meta.vitest) {
       expect((before().prepare('SELECT COUNT(*) c FROM sources').get() as { c: number }).c).toBe(0)
       // ⑦ 账本：7 篇目录行全部记账（5 篇抓过 + 2 篇被白名单拦下，避免每次生成重复撞）
       expect((before().prepare('SELECT COUNT(*) c FROM task_web_fetch').get() as { c: number }).c).toBe(7)
+    })
+  })
+
+  /*
+   * 2026-10-06（Phase 11 B 批）：**建立缓存模式**（`mode: 'build'`）。
+   * 口径：只抓正文并写缓存（可用正文 `ok`、无可用正文 `no-body`、白名单外 `blocked`），
+   * **不做主题筛选、不落任务来源、不写任务账本、不写站点筛选痕迹**，但日期照常回填（L4/L5）。
+   */
+  describe('article-crawl 建立缓存模式（Phase 11 B：只抓不筛）', () => {
+    let db: Database.Database
+    const HOST = 'https://y.gov.cn'
+    const page = (title: string, body: string): string =>
+      `<!doctype html><html><head><title>${title}</title></head><body><article>${body}</article></body></html>`
+    const count = (table: string): number => (db.prepare(`SELECT COUNT(*) c FROM ${table}`).get() as { c: number }).c
+
+    beforeAll(() => {
+      db = new Database(':memory:')
+      setDb(db)
+      runMigrations(db)
+      db.prepare(
+        "INSERT INTO web_sites (id, root_url, title, created_at, updated_at) VALUES ('s1', ?, 'Y站','2026-01-01','2026-01-01')"
+      ).run(`${HOST}/`)
+      const ins = db.prepare(
+        'INSERT INTO web_site_articles (site_id, url, title, discovered_at, published_date, date_source, date_confidence) VALUES (?,?,?,?,?,?,?)'
+      )
+      // A 正常文章（标题在页面里、正文够长）；日期置信度 low → 建立缓存时应被 L4 升级
+      ins.run('s1', `${HOST}/a.htm`, '某中学新建项目开工', '2026-01-01', '2021-01-01', 'url', 'low')
+      // D 有标题但页面是通用模板页（不含该文章）→ invalidBody
+      ins.run('s1', `${HOST}/d.htm`, '这所学校的教学楼封顶了', '2026-01-01', '2021-01-01', 'url', 'high')
+      // E 空标题（sitemap）+ 正文极短 → shortBody
+      ins.run('s1', `${HOST}/e.htm`, '', '2026-01-01', '2021-01-01', 'url', 'high')
+      // G 跨域（不在白名单）→ blocked 标记，**不发起请求**
+      ins.run('s1', 'https://evil.example.com/g.htm', '恶意 sitemap 注入', '2026-01-01', '2021-01-01', 'url', 'high')
+    })
+    afterAll(() => db.close())
+
+    it('只写缓存：三态分类正确、不落来源、不写账本、不动站点筛选痕迹，日期照常回填', async () => {
+      const fetched: string[] = []
+      const bodies: Record<string, string> = {
+        [`${HOST}/a.htm`]: page('某中学新建项目开工', '长乐区某中学新建项目开工，设计规模 36 个班。'.repeat(6)),
+        [`${HOST}/d.htm`]: page('Y站首页', 'Y站 首页 要闻 公告 服务 导航 '.repeat(20)),
+        [`${HOST}/e.htm`]: page('Y站首页', '短正文')
+      }
+      const result = await crawlAndScreenArticles({
+        fromYear: 2021,
+        toYear: 2021,
+        // **故意不传 query / taskId**：建立缓存模式不需要主题，也不需要任务
+        mode: 'build',
+        concurrency: 1,
+        onProgress: () => undefined,
+        fetchImpl: async (url: string) => {
+          fetched.push(url)
+          return {
+            url,
+            rawHtml: bodies[url] ?? page('未知', '未知内容'),
+            cleanedText: '',
+            snapshotAt: new Date().toISOString(),
+            lastModified: '2021-04-05'
+          }
+        }
+      })
+
+      // ① 白名单外**不发起请求**，但留下 blocked 标记（否则闸门永远差这几篇）
+      expect(fetched).not.toContain('https://evil.example.com/g.htm')
+      expect(result.blocked).toBe(1)
+      expect(getCachedBody('s1', 'https://evil.example.com/g.htm')?.state).toBe('blocked')
+
+      // ② 三篇站内都抓了
+      expect(fetched.sort()).toEqual([`${HOST}/a.htm`, `${HOST}/d.htm`, `${HOST}/e.htm`].sort())
+      expect(result.cacheWritten).toBe(3)
+      expect(result.hits).toBe(1) // a：正文可用
+      expect(result.dropped).toBe(2) // d：模板页；e：过短
+      expect(result.invalidBody).toBe(1)
+      expect(result.shortBody).toBe(1)
+
+      // ③ 缓存三态：ok 存正文；no-body **不存正文**（空文本、0 字）
+      const a = getCachedBody('s1', `${HOST}/a.htm`)
+      expect(a?.state).toBe('ok')
+      expect(a?.text).toContain('设计规模 36 个班')
+      const d = getCachedBody('s1', `${HOST}/d.htm`)
+      expect(d?.state).toBe('no-body')
+      expect(d?.text).toBe('')
+      expect(d?.bodyChars).toBe(0)
+      expect(getCachedBody('s1', `${HOST}/e.htm`)?.state).toBe('no-body')
+
+      // ④ **绝不**落任务来源、**绝不**写任务账本（建立缓存没有任务）
+      expect(count('sources')).toBe(0)
+      expect(count('task_web_fetch')).toBe(0)
+
+      // ⑤ 站点筛选痕迹不动（fetch_state / screen_hit 保持为空），但日期照常升级（low → medium）
+      const row = db
+        .prepare('SELECT fetch_state, screen_hit, published_date, date_confidence FROM web_site_articles WHERE site_id = ? AND url = ?')
+        .get('s1', `${HOST}/a.htm`) as {
+        fetch_state: string | null
+        screen_hit: number | null
+        published_date: string | null
+        date_confidence: string | null
+      }
+      expect(row.fetch_state).toBeNull()
+      expect(row.screen_hit).toBeNull()
+      expect(row.published_date).toBe('2021-04-05')
+      expect(row.date_confidence).toBe('medium')
+    })
+
+    it('第二次建立：全部命中缓存 → 零网络、零写入（幂等；已建立的不重复建立）', async () => {
+      const fetched: string[] = []
+      const result = await crawlAndScreenArticles({
+        fromYear: 2021,
+        toYear: 2021,
+        mode: 'build',
+        concurrency: 1,
+        onProgress: () => undefined,
+        fetchImpl: async (url: string) => {
+          fetched.push(url)
+          throw new Error('不应该联网：缓存应已命中')
+        }
+      })
+      expect(fetched).toEqual([])
+      expect(result.cacheHits).toBe(3)
+      expect(result.cacheWritten).toBe(0)
+      // 三篇里两篇 no-body、一篇 ok：`hits` 仍按"正文可用"计
+      expect(result.hits).toBe(1)
+      expect(result.dropped).toBe(2)
     })
   })
 }

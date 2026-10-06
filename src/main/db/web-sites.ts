@@ -372,6 +372,38 @@ export function updateArticleFetchState(
 }
 
 /**
+ * 2026-10-06（Phase 11 B 批）：「建立缓存」模式专用的**只回填日期**。
+ *
+ * 建立缓存时**没有主题**，所以**不写** `fetch_state` / `screen_hit`（那些是"筛选痕迹"，写了就是撒谎），
+ * 但抓取时顺带解析出的 L4/L5 日期必须留下来（否则下次按年份筛还是"日期未知"，等于白抓一趟）。
+ * 日期升级判定与 `updateArticleFetchState` 用**同一个** `shouldUpgradeDate`，保证两条路径不漂移。
+ */
+export function updateArticleDates(
+  siteId: string,
+  url: string,
+  patch: { publishedDate?: string; dateSource?: string; dateConfidence?: string; httpLastModified?: string }
+): void {
+  const db = getDb()
+  const cur = db
+    .prepare('SELECT published_date, date_confidence FROM web_site_articles WHERE site_id = ? AND url = ?')
+    .get(siteId, url) as { published_date: string | null; date_confidence: string | null } | undefined
+  const upgrade = shouldUpgradeDate(cur?.published_date ?? null, cur?.date_confidence ?? null, patch.publishedDate, patch.dateConfidence)
+  db.prepare(
+    `UPDATE web_site_articles SET
+       published_date = ?, date_source = ?, date_confidence = ?,
+       http_last_modified = COALESCE(?, http_last_modified)
+     WHERE site_id = ? AND url = ?`
+  ).run(
+    upgrade ? (patch.publishedDate ?? null) : (cur?.published_date ?? null),
+    upgrade ? (patch.dateSource ?? null) : null,
+    upgrade ? (patch.dateConfidence ?? null) : (cur?.date_confidence ?? null),
+    patch.httpLastModified ?? null,
+    siteId,
+    url
+  )
+}
+
+/**
  * 重置年份区间内的抓取状态（清空 `fetch_state` / `screen_hit` / `body_hash` / `body_chars`）。
  * 用途：**换了主题关键词想重新筛选**时必须先重置——未命中粗筛的正文已被丢弃，只能重新抓一遍。
  * 只清状态，不删任何 `sources` 行（已落库的来源保持不动）。
