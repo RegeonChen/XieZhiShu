@@ -325,6 +325,21 @@ WritingTask 1─N Draft 1─N Segment N─N Source N─N Tag
   - 写入接口：`putCachedBody(..., state)` 与 `putCacheMiss(siteId, url, state)`——后者用 **`ON CONFLICT DO NOTHING`**，
     **绝不覆盖已有行**（曾经抓到过正文的文章，之后抓取失败也不能把已白抓一次的正文抹掉）；标记行**不存正文**（`body_chars = 0`），
     因此不会被当成可用正文喂给筛选。
+- **删除一致性追加（Migration 051，2026-10-06，Phase 11 F，用户需求 ④）——目录行删除时缓存跟着删**：
+  - 新增触发器 `trg_web_article_body_follow_catalog`：`AFTER DELETE ON web_site_articles` →
+    `DELETE FROM web_article_body WHERE site_id = OLD.site_id AND url = OLD.url`。
+  - **为什么用触发器**：删目录行今天只有一条路（删站点 → FK 级联），但**靠"记得在代码里一起删"迟早会漏**——
+    将来任何新增的单行删除（栏目清理、URL 规范化后清旧行）都会静默留下**孤儿缓存**（占磁盘、且让"待建立篇数"与目录对不上）。
+    放在数据层则**与调用方无关**：谁删、用什么 SQL 删，缓存都跟着走。
+  - **站点级联**（`web_article_body.site_id → web_sites(id) ON DELETE CASCADE`）覆盖"删站点"这一路；
+    本触发器补"删单个目录行"。两条路同一结论：**缓存绝不比目录活得久**。反方向（删缓存）**不**补偿：
+    目录行留着、这篇回到"待建立"，正是要的语义。
+  - 另有 `sweepOrphanBodyCaches()`（**孤儿清扫**）：删掉"目录里已无对应条目"的缓存行，返回条数。
+    正常应为 **0 条**（触发器 + 级联已保证）；它在「建立缓存与索引」开始时与删站点后各跑一次，
+    兜住**历史遗留**（051 之前的库）与"目录行换了地址"这类边角。**只删缓存，不动目录/来源/索引/账本**。
+  - 本地侧同语义：`chunk_embeddings` / `source_summaries` / `source_blocks` 均已 `ON DELETE CASCADE ON sources`；
+    另外索引队列现在把"资料已删除"（`indexSource` 返回 `missing: true`）记为**跳过**而不是**失败**——
+    否则删掉一篇资料，界面上会永远挂着一条"索引失败"。
 
 ### 2.21 compilations（资料汇编，Migration 016，Phase 6.0，2026-08-25）
 
