@@ -57,9 +57,19 @@ const api = {
   },
 
   // ---- 网页资料库（2026-08-11）----
-  /** 网页资料库站点列表 */
-  listWebSources(): Promise<ApiResult<{ sites: unknown[] }>> {
+  /** 网页资料库站点列表（含每站清单条数，Phase 11 G） */
+  listWebSources(): Promise<ApiResult<{ sites: unknown[]; articleCounts: Record<string, number> }>> {
     return ipcRenderer.invoke(IPC.WEB_SOURCE_LIST, {})
+  },
+  /**
+   * 2026-10-06（Phase 11 G）：**同步单个站点的清单**（注册后会自动同步一次；这里是失败后的重试入口）。
+   * 同步可能要几秒~几十秒，请用 `webSourceSyncStatus()` 轮询状态（谁在同步、谁上次失败）。
+   */
+  syncWebSource(id: string): Promise<ApiResult<{ added: number; error?: string }>> {
+    return ipcRenderer.invoke(IPC.WEB_SOURCE_SYNC, { id })
+  },
+  webSourceSyncStatus(): Promise<ApiResult<{ syncing: string[]; errors: Record<string, string> }>> {
+    return ipcRenderer.invoke(IPC.WEB_SOURCE_SYNC_STATUS, {})
   },
   /** 注册网页资料库站点（生成初稿时自动检索该站点相关文章） */
   addWebSource(rootUrl: string, title?: string): Promise<ApiResult<{ site: unknown }>> {

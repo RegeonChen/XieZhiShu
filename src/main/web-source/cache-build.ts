@@ -27,6 +27,7 @@ import { getSettings } from '../db/settings'
 import { logMain } from '../logger'
 import { crawlAndScreenArticles } from './article-crawl'
 import { requestFetchCancel } from './fetch-control'
+import { syncAllSitesTracked } from './site-sync'
 import {
   DEFAULT_BUILD_FROM_YEAR,
   DEFAULT_BUILD_TO_YEAR,
@@ -95,6 +96,7 @@ let state: CacheBuildStatus = {
   toYear: DEFAULT_BUILD_TO_YEAR,
   plannedPending: 0,
   alreadyBuilt: 0,
+  sync: { siteIndex: 0, siteTotal: 0, currentSite: '', added: 0, failed: 0 },
   web: { ...WEB_ZERO },
   local: emptyLocal(),
   message: ''
@@ -108,6 +110,14 @@ export interface CacheBuildDeps {
   crawl?: typeof crawlAndScreenArticles
   /** 测试缝：注入假本地索引重建（默认 `requeuePendingIndexes(true)`） */
   startLocalIndex?: () => { queued: number; reset: number }
+  /**
+   * 测试缝：注入假站点清单同步（默认同步**所有**注册站点，见 `site-sync.ts`）。
+   * 单测**必须**注入它——否则会走真实同步去请求站点。
+   */
+  syncAll?: (opts: {
+    shouldCancel?: () => boolean
+    onSite?: (p: { index: number; total: number; site: { id: string; rootUrl: string; title?: string } }) => void
+  }) => Promise<{ added: number; failed: number; notAttempted: number; outcomes: unknown[] }>
 }
 
 /** 当前状态（界面按 1.5s 轮询；`local` 每次实时取，因此本地索引跑完/被打断都能立刻反映） */
@@ -136,8 +146,56 @@ export async function runCacheBuild(
   const { fromYear, toYear } = range
 
   stopRequested = false
+  state = {
+    running: true,
+    phase: 'syncing',
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    fromYear,
+    toYear,
+    plannedPending: 0,
+    alreadyBuilt: 0,
+    sync: { siteIndex: 0, siteTotal: 0, currentSite: '', added: 0, failed: 0 },
+    web: { ...WEB_ZERO },
+    local: localSnapshot(),
+    message: '正在同步站点清单（发现各站点有哪些文章）…'
+  }
   /*
-   * 先取一次**只读规划**：它给出"本次要建几篇 / 已经建好几篇（直接跳过）"。
+   * ⓪ 先**同步站点清单**（Phase 11 G，2026-10-06 用户实测反馈）。
+   *
+   * 为什么必须在最前面：站点里"有哪些文章"只有同步过才知道（`syncSite`：feed → sitemap → BFS 列表页
+   * 写进 `web_site_articles`），而**注册站点并不触发同步**。不先同步的话，新注册的站点在目录里 0 条，
+   * 下面的规划与抓取**完全看不到它**——用户会以为软件只认某一个站点。
+   * 同步放在规划**之前**，所以"本次要建 N 篇"里会**立刻包含**新发现的文章。
+   * 单站失败不中断（如实记数）；用户按「停止」时在站点之间生效（当前站点的同步没有取消通道）。
+   */
+  let syncFailed = 0
+  let syncAdded = 0
+  try {
+    const syncAll = deps.syncAll ?? syncAllSitesTracked
+    const syncRes = await syncAll({
+      shouldCancel: () => stopRequested,
+      onSite: ({ index, total, site }) => {
+        state.sync = { siteIndex: index, siteTotal: total, currentSite: site.rootUrl, added: syncAdded, failed: syncFailed }
+        state.message = `正在同步站点清单（${index}/${total}：${site.title || site.rootUrl}）…`
+      }
+    })
+    syncAdded = syncRes.added
+    syncFailed = syncRes.failed
+    state.sync = {
+      siteIndex: syncRes.outcomes.length,
+      siteTotal: syncRes.outcomes.length + syncRes.notAttempted,
+      currentSite: '',
+      added: syncAdded,
+      failed: syncFailed
+    }
+  } catch (err) {
+    // 同步整体异常也不能阻断建立（目录保持原样，按已有清单继续）
+    logMain('web', `建立缓存：站点清单同步异常（继续按已有清单建立）：${err instanceof Error ? err.message : String(err)}`)
+  }
+
+  /*
+   * 再取一次**只读规划**：它给出"本次要建几篇 / 已经建好几篇（直接跳过）"。
    * 这两个数必须**如实**报给用户（需求 ③：已建立的不重复建立），而且进度条的"总数"应当是
    * "要干活的篇数"（真实库 2005–2025 是 50,825，而不是目录的 61,701）。
    * 规划失败不能阻断建立（尽力而为），失败时两个数记 0。
@@ -151,22 +209,15 @@ export async function runCacheBuild(
   } catch (err) {
     logMain('web', `建立缓存：只读规划失败（不影响建立）：${err instanceof Error ? err.message : String(err)}`)
   }
-  state = {
-    running: true,
-    phase: 'web',
-    startedAt: new Date().toISOString(),
-    finishedAt: null,
-    fromYear,
-    toYear,
-    plannedPending,
-    alreadyBuilt,
-    web: { ...WEB_ZERO, total: plannedPending },
-    local: localSnapshot(),
-    message: `正在建立网页正文缓存（区间 ${fromYear}–${toYear}）：本次要建 ${plannedPending} 篇，已有 ${alreadyBuilt} 篇直接跳过…`
-  }
+  state.phase = 'web'
+  state.plannedPending = plannedPending
+  state.alreadyBuilt = alreadyBuilt
+  state.web = { ...WEB_ZERO, total: plannedPending }
+  state.local = localSnapshot()
+  state.message = `正在建立网页正文缓存（区间 ${fromYear}–${toYear}）：本次要建 ${plannedPending} 篇，已有 ${alreadyBuilt} 篇直接跳过…`
   logMain(
     'web',
-    `建立缓存开始：区间 ${fromYear}–${toYear}；本次要建 ${plannedPending} 篇，已有 ${alreadyBuilt} 篇（含"试过但没正文"与"越权地址"标记）直接跳过，不重复建立`
+    `建立缓存开始：区间 ${fromYear}–${toYear}；站点清单同步新增 ${syncAdded} 篇${syncFailed > 0 ? `（${syncFailed} 个站点同步失败）` : ''}；本次要建 ${plannedPending} 篇，已有 ${alreadyBuilt} 篇（含"试过但没正文"与"越权地址"标记）直接跳过，不重复建立`
   )
   /*
    * Phase 11 F：顺手清扫孤儿缓存（目录里已经没有对应条目的缓存行）。
@@ -370,11 +421,56 @@ if (import.meta.vitest) {
       ...over
     }) as Awaited<ReturnType<typeof crawlAndScreenArticles>>
 
+  /**
+   * 假站点清单同步（Phase 11 G）：**单测绝不能走真实同步**（那会去请求站点）。
+   * 默认"什么都没发现"；需要模拟"同步发现了新文章"时，在测试里自己注入 `syncAll`。
+   */
+  const fakeSync = (res: { added?: number; failed?: number } = {}) => async (): Promise<{
+    added: number
+    failed: number
+    notAttempted: number
+    outcomes: unknown[]
+  }> => ({ added: res.added ?? 0, failed: res.failed ?? 0, notAttempted: 0, outcomes: [] })
+
   describe('cache-build 建立引擎（Phase 11 C）', () => {
-    it('年份非法时抛错（不静默回退默认区间）', async () => {
-      await expect(runCacheBuild({ fromYear: 2025, toYear: 2005 }, { crawl: async () => fakeResult() })).rejects.toThrow(
-        /年份区间无效/
+    /*
+     * Phase 11 G（用户实测反馈）：**建立必须先把站点清单同步进来**——否则新注册的站点
+     * （目录 0 条）在建立里完全不可见。这条测试同时锁住"同步在规划**之前**"这个顺序：
+     * 假同步在过程中插入一条 2019 年目录行，规划（同步之后算）必须把它算进"本次要建"。
+     * 用 2019 区间与既有夹具（2020 年）互不干扰，结束时删掉自己插的那一行。
+     */
+    it('先同步站点清单再算计划：同步新发现的文章必须计入"本次要建"', async () => {
+      let synced = false
+      const res = await runCacheBuild(
+        { fromYear: 2019, toYear: 2019, includeLocal: false },
+        {
+          syncAll: async (opts) => {
+            opts.onSite?.({ index: 1, total: 1, site: { id: 's1', rootUrl: 'https://x.gov.cn', title: 'X站' } })
+            synced = true
+            db.prepare(
+              'INSERT INTO web_site_articles (site_id, url, title, discovered_at, published_date) VALUES (?,?,?,?,?)'
+            ).run('s1', 'https://x.gov.cn/new-by-sync.htm', '同步新发现', '2026-10-06', '2019-09-01')
+            return { added: 1, failed: 0, notAttempted: 0, outcomes: [{ siteId: 's1', rootUrl: 'https://x.gov.cn', title: 'X站', added: 1 }] }
+          },
+          crawl: async () => fakeResult()
+        }
       )
+      try {
+        expect(synced).toBe(true)
+        expect(res.status.plannedPending).toBe(1)
+        expect(res.status.alreadyBuilt).toBe(0)
+        expect(res.status.sync.added).toBe(1)
+        expect(res.status.sync.siteIndex).toBe(1)
+        expect(res.status.sync.failed).toBe(0)
+      } finally {
+        db.prepare("DELETE FROM web_site_articles WHERE url = 'https://x.gov.cn/new-by-sync.htm'").run()
+      }
+    })
+
+    it('年份非法时抛错（不静默回退默认区间）', async () => {
+      await expect(
+        runCacheBuild({ fromYear: 2025, toYear: 2005 }, { crawl: async () => fakeResult(), syncAll: fakeSync() })
+      ).rejects.toThrow(/年份区间无效/)
     })
 
     it('成功后：状态转为 done、网页计数落到状态里、本地索引被触发一次', async () => {
@@ -393,7 +489,8 @@ if (import.meta.vitest) {
           startLocalIndex: () => {
             localCalls += 1
             return { queued: 0, reset: 0 }
-          }
+          },
+          syncAll: fakeSync()
         }
       )
       expect(res.started).toBe(true)
@@ -422,7 +519,8 @@ if (import.meta.vitest) {
           startLocalIndex: () => {
             localCalls += 1
             return { queued: 5, reset: 1 }
-          }
+          },
+          syncAll: fakeSync()
         }
       )
       expect(localCalls).toBe(0)
@@ -436,7 +534,8 @@ if (import.meta.vitest) {
         {
           crawl: async () => {
             throw new Error('模拟抓取崩溃')
-          }
+          },
+          syncAll: fakeSync()
         }
       )
       expect(res.status.phase).toBe('failed')
@@ -455,7 +554,8 @@ if (import.meta.vitest) {
           crawl: async () => {
             await gate
             return fakeResult()
-          }
+          },
+          syncAll: fakeSync()
         }
       )
       // 让第一个建立先进入 running 状态
@@ -463,7 +563,7 @@ if (import.meta.vitest) {
       expect(isCacheBuildRunning()).toBe(true)
       const second = await runCacheBuild(
         { fromYear: 2022, toYear: 2022, includeLocal: false },
-        { crawl: async () => fakeResult() }
+        { crawl: async () => fakeResult(), syncAll: fakeSync() }
       )
       expect(second.started).toBe(false)
       expect(second.message).toContain('已在建立中')
@@ -487,7 +587,8 @@ if (import.meta.vitest) {
             await gate
             sawCancel = opts.shouldCancel?.() === true
             return fakeResult({ cancelled: sawCancel })
-          }
+          },
+          syncAll: fakeSync()
         }
       )
       await new Promise((r) => setTimeout(r, 0))

@@ -27,7 +27,8 @@ import type {
   BuildYearBucket,
   CacheBuildPlan,
   LocalBuildPlan,
-  WebBuildPlan
+  WebBuildPlan,
+  WebLibrarySiteStats
 } from '../../shared/types'
 
 /** 需求给定的默认建立区间（用户 2026-10-06 原话：默认年份区间 2005–2025，用户可改） */
@@ -245,7 +246,26 @@ export function buildCacheBuildPlan(req?: { fromYear?: number; toYear?: number }
 
   const local = readLocalBuildPlan()
   const { ready, reasons } = decideReadiness(web, local)
-  return { web, local, ready, reasons }
+  return { web, local, sites: readSiteStats(), ready, reasons }
+}
+
+/**
+ * 站点概况（Phase 11 G）：有几个注册站点、其中几个**从来没同步过清单**。
+ *
+ * 为什么必须报给界面：没同步过的站点在目录里是 0 条，于是"本次要建 N 篇"看起来与它无关——
+ * 用户会以为软件漏了这个站点（2026-10-06 实测反馈）。现在建立会**先同步再统计**，
+ * 而计划里这个数让"建立前会先同步"这件事在点「建立」之前就看得见。
+ */
+function readSiteStats(): WebLibrarySiteStats {
+  const row = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN last_synced_at IS NOT NULL THEN 1 ELSE 0 END) AS synced
+         FROM web_sites`
+    )
+    .get() as { total: number; synced: number | null }
+  const synced = row.synced ?? 0
+  return { total: row.total, synced, neverSynced: row.total - synced }
 }
 
 // ---- vitest inline test ----
@@ -331,6 +351,16 @@ if (import.meta.vitest) {
       expect(plan.web.estimatedMinutes).toBe(estimateWebFetchMinutes(2))
       expect(plan.ready).toBe(false)
       expect(plan.reasons).toContain('web-pending')
+    })
+
+    it('站点概况（Phase 11 G）：如实报"共几个站、其中几个从来没同步过清单"', () => {
+      const plan = buildCacheBuildPlan({ fromYear: 2020, toYear: 2021 })
+      // 夹具里只有 s1，且它没有 last_synced_at → 1 个站点、0 个已同步、1 个从未同步
+      expect(plan.sites).toEqual({ total: 1, synced: 0, neverSynced: 1 })
+
+      // 同步过一次之后 → 变成"已同步"
+      db.prepare("UPDATE web_sites SET last_synced_at = '2026-10-06T00:00:00.000Z' WHERE id = 's1'").run()
+      expect(buildCacheBuildPlan({ fromYear: 2020, toYear: 2021 }).sites).toEqual({ total: 1, synced: 1, neverSynced: 0 })
     })
 
     it('本地侧：正文缺失的来源不算缺口，但仍如实计数；索引失败默认阻断', () => {
