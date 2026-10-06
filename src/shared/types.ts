@@ -579,6 +579,8 @@ export interface WebCrawlProgress {
   cacheHits?: number
   /** 2026-10-05：当前生效的请求间隔（毫秒）——自适应降档后会变大 */
   intervalMs?: number
+  /** 2026-10-06（Phase 11 B）：`build` 模式下本次**真的写入缓存**的篇数（命中缓存不算） */
+  cacheWritten?: number
 }
 
 /** Phase 10 P4：一次抓取的结果汇总 */
@@ -721,6 +723,70 @@ export interface CacheBuildPlan {
   /** 是否已"建齐"（可以生成汇编） */
   ready: boolean
   reasons: BuildNotReadyReason[]
+}
+
+/** 建立过程的阶段（Phase 11 C） */
+export type CacheBuildPhase = 'idle' | 'web' | 'done' | 'cancelled' | 'failed'
+
+/** 建立过程的**网页侧**进度（`build` 模式下 `hits`/`dropped` 的含义见 `WebCrawlResult`） */
+export interface CacheBuildWebProgress {
+  total: number
+  done: number
+  /** 正文可用（写 `ok`） */
+  hits: number
+  /** 无可用正文（写 `no-body` 标记） */
+  dropped: number
+  failed: number
+  /** 本次**真的写入缓存**的篇数 */
+  cacheWritten: number
+  /** 命中缓存、未联网的篇数 */
+  cacheHits: number
+  ratePerSec: number
+  etaSeconds: number
+  intervalMs?: number
+  paused?: boolean
+  currentTitle?: string
+}
+
+/**
+ * 2026-10-06（Phase 11 C）：「建立缓存与索引」的**运行状态**（界面按 1.5s 轮询，与 `rag:indexStatus` 同一套路）。
+ * 本地索引部分**实时取自 rag 队列**（不另存一份，避免两个真相）。
+ */
+export interface CacheBuildStatus {
+  running: boolean
+  phase: CacheBuildPhase
+  startedAt: string | null
+  finishedAt: string | null
+  fromYear: number
+  toYear: number
+  /**
+   * 本次**要建**的篇数（区间内**没有缓存行**的目录条数）——开始时取自只读规划。
+   * 页面上的"总进度"以它为准（而不是区间目录总数），否则会被上万篇"已建、直接跳过"的篇冲淡。
+   */
+  plannedPending: number
+  /** 已经建好（含 `no-body` / `blocked` 标记）、本次**直接跳过**的篇数（需求 ③：已建立的不重复建立） */
+  alreadyBuilt: number
+  web: CacheBuildWebProgress
+  local: {
+    total: number
+    ready: number
+    pending: number
+    indexing: number
+    failed: number
+    bodyMissing: number
+    queued: number
+    percent: number
+    active: boolean
+  }
+  /** 给用户看的一句话（结束时如实汇报，含失败篇数） */
+  message: string
+}
+
+/** 启动建立的结果（`started: false` + `message` 说明为什么没启动，例如"已在建立中"） */
+export interface CacheBuildStartRes {
+  started: boolean
+  message: string
+  status: CacheBuildStatus
 }
 
 // ============================================================

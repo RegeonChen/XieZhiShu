@@ -16,6 +16,7 @@
 import Database from 'better-sqlite3'
 import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
+import { putCachedBody, putCacheMiss } from './article-body-cache'
 
 export interface TaskFetchTarget {
   url: string
@@ -44,6 +45,49 @@ export function listRangeArticles(fromYear: number, toYear: number): TaskFetchTa
        JOIN web_sites s ON s.id = a.site_id
        WHERE a.published_date IS NOT NULL
          AND CAST(substr(a.published_date, 1, 4) AS INTEGER) BETWEEN ? AND ?
+       ORDER BY a.published_date DESC, a.rowid`
+    )
+    .all(fromYear, toYear) as {
+    url: string
+    title: string
+    site_id: string
+    site_title: string | null
+    published_date: string | null
+    date_source: string | null
+    date_confidence: string | null
+  }[]
+  return rows.map((r) => ({
+    url: r.url,
+    title: r.title,
+    siteId: r.site_id,
+    siteTitle: r.site_title ?? '',
+    publishedDate: r.published_date ?? undefined,
+    dateSource: r.date_source ?? undefined,
+    dateConfidence: r.date_confidence ?? undefined
+  }))
+}
+
+/**
+ * 「建立缓存」用：区间内**还没有缓存行**的文章（Phase 11 C，2026-10-06）。
+ *
+ * 为什么单独一条查询（而不是"取全区间再靠缓存命中跳过"）：
+ * ① 建立缓存时 `total` 必须是**真正要干活的篇数**（真实库 2005–2025 是 50,825，而不是目录的 61,701），
+ *    否则进度条与 ETA 会被 1 万多篇"命中即跳过"的篇冲淡；
+ * ② 已经写过 `no-body` / `blocked` 标记的篇**也不该再进队列**——它们已经"试过了"，
+ *    这正是 Phase 11 决策 3A 的要点（否则闸门永远差这几篇）。
+ */
+export function listUncachedRangeArticles(fromYear: number, toYear: number): TaskFetchTarget[] {
+  const db = getDb()
+  const rows = db
+    .prepare(
+      `SELECT a.url, a.title, a.site_id, s.title AS site_title, a.published_date, a.date_source, a.date_confidence
+       FROM web_site_articles a
+       JOIN web_sites s ON s.id = a.site_id
+       WHERE a.published_date IS NOT NULL
+         AND CAST(substr(a.published_date, 1, 4) AS INTEGER) BETWEEN ? AND ?
+         AND NOT EXISTS (
+           SELECT 1 FROM web_article_body b WHERE b.site_id = a.site_id AND b.url = a.url
+         )
        ORDER BY a.published_date DESC, a.rowid`
     )
     .all(fromYear, toYear) as {
@@ -192,6 +236,21 @@ if (import.meta.vitest) {
       expect(
         (db.prepare("SELECT COUNT(*) c FROM task_web_fetch WHERE task_id = 't1'").get() as { c: number }).c
       ).toBe(0)
+    })
+
+    it('建立缓存的目标 = 区间内**还没有缓存行**的文章（三态标记也算"有"）', () => {
+      // 前置：上一用例已在 2020/2021 各插了一篇，且都还没有缓存行
+      expect(listUncachedRangeArticles(2020, 2021)).toHaveLength(2)
+
+      // ① 抓到正文 → 写 ok → 不再进建立队列
+      putCachedBody('s1', 'https://x.gov.cn/2020/a.htm', '某中学新建项目开工。', 'h-a')
+      expect(listUncachedRangeArticles(2020, 2021).map((t) => t.url)).toEqual(['https://x.gov.cn/2021/b.htm'])
+
+      // ② "试过但没正文"的标记行**也算已建立**（否则闸门永远差这几篇 —— Phase 11 决策 3A 的要点）
+      putCacheMiss('s1', 'https://x.gov.cn/2021/b.htm', 'no-body')
+      expect(listUncachedRangeArticles(2020, 2021)).toHaveLength(0)
+      // 但 `listRangeArticles`（生成期全量重筛）**不受缓存影响**，仍然是 2 篇
+      expect(listRangeArticles(2020, 2021)).toHaveLength(2)
     })
   })
 }

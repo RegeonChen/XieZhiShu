@@ -79,7 +79,7 @@ import {
   type SourceGetReq,
   type SourceBlocksRes
 } from '../shared/ipc'
-import type { ApiResult, CacheBuildPlan, Source, Tag, LlmProviderConfig, AppSettings, WritingTask, Draft, RetrievedChunk } from '../shared/types'
+import type { ApiResult, CacheBuildPlan, CacheBuildStartRes, CacheBuildStatus, Source, Tag, LlmProviderConfig, AppSettings, WritingTask, Draft, RetrievedChunk } from '../shared/types'
 import { getDb } from './db/connection'
 import { listSourceBlocks } from './db/source-blocks'
 import { listSources, getSourceById, deleteSource, deleteSources, updateSourceTitle, updateSourceFingerprint } from './db/sources'
@@ -94,7 +94,8 @@ import { listProviders, saveProvider, deleteProvider } from './llm/provider-stor
 import { testProviderConnection } from './llm/test'
 import { getSettings, updateSettings } from './db/settings'
 import { bodyCacheStats, clearBodyCache } from './db/article-body-cache'
-import { buildCacheBuildPlan } from './web-source/cache-build-plan'
+import { buildCacheBuildPlan, normalizeYearRange } from './web-source/cache-build-plan'
+import { getCacheBuildStatus, isCacheBuildRunning, requestCacheBuildStop, runCacheBuild } from './web-source/cache-build'
 import { requestFetchCancel, setFetchPaused } from './web-source/fetch-control'
 import { startKeepAwake, stopKeepAwake } from './power/keep-awake'
 import { createTask as createWritingTask, listTasks as listWritingTasks, getTaskById, deleteTask as deleteWritingTask, renameTask, updateTaskProvider, updateTaskInstruction, updateTaskModelText } from './db/tasks'
@@ -153,7 +154,7 @@ import { loadWindowState, trackWindowState } from './window-state'
 import type { WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceUpdateReq, WebSourceUpdateRes, WebSourceDateStatsReq, WebSourceDateStatsRes, WritingSetWebYearsReq, WritingSetWebYearsRes, AppGetPdfCmapsUrlRes, LogAppendReq, LogExportRes, StyleGuideListRes, StyleGuideSaveReq, StyleGuideSaveRes, StyleGuideSetDefaultReq, StyleGuideSetDefaultRes, StyleGuideDeleteReq, CompilationExportDocxReq, CompilationExportDocxRes, CompilationExportArchiveReq, CompilationExportArchiveRes, CompilationImportArchiveReq, CompilationImportArchiveRes, CompilationImportFromTaskReq, CompilationImportFromTaskRes, CompilationListFinalizedForImportReq, CompilationListFinalizedForImportRes } from '../shared/ipc'
 import { logMain, logIpc, logRenderer, exportLogsText } from './logger'
 import { resolveFileDelivery } from './file-range'
-import type { WebBrowserOpenReq, WebBrowserSetBoundsReq, WebBrowserNavigateReq, WebBrowserActionReq, WebBrowserStateRes, CacheBuildPlanReq } from '../shared/ipc'
+import type { WebBrowserOpenReq, WebBrowserSetBoundsReq, WebBrowserNavigateReq, WebBrowserActionReq, WebBrowserStateRes, CacheBuildPlanReq, CacheBuildStartReq } from '../shared/ipc'
 
 /** 长任务保持唤醒：开启则 start，任务结束/异常在 finally 中 stop（引用计数，重叠任务不提前释放） */
 function keepAwakeEnabled(): boolean {
@@ -2053,6 +2054,46 @@ handleLogged(IPC.CACHE_BUILD_PLAN, (_event, params: CacheBuildPlanReq): ApiResul
       ok: false,
       error: { code: 'INVALID_PARAM', message: err instanceof Error ? err.message : String(err) }
     }
+  }
+})
+
+/*
+ * 2026-10-06（用户需求，Phase 11 C）：「建立缓存与索引」的启动 / 停止 / 状态。
+ * `start` 是**后台跑**（网页抓取可能几十分钟），界面轮询 `status` 看进度与 ETA。
+ * 年份区间在**这里同步校验**，非法就如实报错（不静默回退默认区间）。
+ */
+handleLogged(IPC.CACHE_BUILD_START, (_event, params: CacheBuildStartReq): ApiResult<CacheBuildStartRes> => {
+  try {
+    const range = normalizeYearRange(params?.fromYear, params?.toYear)
+    if (!range) return { ok: false, error: { code: 'INVALID_PARAM', message: '年份区间无效：起止年份必须是整数、且起始不晚于结束（1900–2100）' } }
+    if (isCacheBuildRunning()) {
+      // 不重复建立：如实告诉用户"已在建立中"
+      return { ok: true, data: { started: false, message: '已在建立中：不会重复建立，已建立的会自动跳过。', status: getCacheBuildStatus() } }
+    }
+    const includeLocal = params?.includeLocal !== false
+    void runCacheBuild({ fromYear: range.fromYear, toYear: range.toYear, includeLocal }).catch((err) => {
+      logMain('web', `建立缓存未捕获异常：${err instanceof Error ? err.message : String(err)}`)
+    })
+    logMain('web', `建立缓存已启动：区间 ${range.fromYear}–${range.toYear}${includeLocal ? '（含本地索引）' : '（只建网页缓存）'}`)
+    return { ok: true, data: { started: true, message: '已开始建立：可以切走做别的，进度会一直保留。', status: getCacheBuildStatus() } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INVALID_PARAM', message: err instanceof Error ? err.message : String(err) } }
+  }
+})
+
+handleLogged(IPC.CACHE_BUILD_STOP, (): ApiResult<{ stopped: boolean }> => {
+  try {
+    return { ok: true, data: { stopped: requestCacheBuildStop() } }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
+handleLogged(IPC.CACHE_BUILD_STATUS, (): ApiResult<CacheBuildStatus> => {
+  try {
+    return { ok: true, data: getCacheBuildStatus() }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
   }
 })
 

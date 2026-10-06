@@ -6,6 +6,8 @@ import type {
   ApiResult,
   AppSettings,
   CacheBuildPlan,
+  CacheBuildStartRes,
+  CacheBuildStatus,
   Compilation,
   CompilationContradiction,
   CompilationInterrupt,
@@ -206,6 +208,15 @@ export const IPC = {
    * 还要建几篇 / 几篇永远建不了（越权地址）+ 本地待索引几篇。**只读**：不写库、不抓网页、不调模型。
    */
   CACHE_BUILD_PLAN: 'cacheBuild:plan',
+  /**
+   * 2026-10-06（用户需求，Phase 11 C）：「建立缓存与索引」的**启动 / 停止 / 状态**。
+   * - `start`：启动一次建立（网页正文缓存 + 本地索引并行）；已在建立中会被拒绝（不重复建立）；
+   * - `stop`：只停止"抓新的"（已抓到的都已写入缓存）；
+   * - `status`：界面轮询进度（`local` 部分实时取自 rag 队列）。
+   */
+  CACHE_BUILD_START: 'cacheBuild:start',
+  CACHE_BUILD_STOP: 'cacheBuild:stop',
+  CACHE_BUILD_STATUS: 'cacheBuild:status',
   /** Phase 10 P5：设置该任务的网页资料年份区间（按任务保存；新建任务继承全局默认） */
   WRITING_SET_WEB_YEARS: 'writing:setWebYears',
 
@@ -289,6 +300,14 @@ export type WebSourceDateStatsRes = { stats: WebArticleDateStats }
 export interface CacheBuildPlanReq {
   fromYear?: number
   toYear?: number
+}
+
+/** 启动一次「建立缓存与索引」（Phase 11 C） */
+export interface CacheBuildStartReq {
+  fromYear?: number
+  toYear?: number
+  /** 默认 `true`：同时把本地资料库未索引的排队（与网页抓取**并行**）；`false` = 只建网页正文缓存 */
+  includeLocal?: boolean
 }
 
 /** Phase 10 P5：设置**该任务**的网页资料年份区间（null = 清除任务级设置、回退全局默认） */
@@ -1100,7 +1119,10 @@ export interface IpcMapping {
     _res: ApiResult<{ entries: number; bytes: number; byState: { ok: number; 'no-body': number; blocked: number } }>
   },
   [IPC.WEB_SOURCE_CLEAR_CACHE]: { _req: Record<string, never>; _res: ApiResult<{ cleared: number }> },
-  [IPC.CACHE_BUILD_PLAN]: { _req: CacheBuildPlanReq; _res: ApiResult<CacheBuildPlan> }
+  [IPC.CACHE_BUILD_PLAN]: { _req: CacheBuildPlanReq; _res: ApiResult<CacheBuildPlan> },
+  [IPC.CACHE_BUILD_START]: { _req: CacheBuildStartReq; _res: ApiResult<CacheBuildStartRes> },
+  [IPC.CACHE_BUILD_STOP]: { _req: Record<string, never>; _res: ApiResult<{ stopped: boolean }> },
+  [IPC.CACHE_BUILD_STATUS]: { _req: Record<string, never>; _res: ApiResult<CacheBuildStatus> }
   [IPC.WRITING_SET_WEB_YEARS]: { _req: WritingSetWebYearsReq; _res: ApiResult<WritingSetWebYearsRes> }
   [IPC.SOURCES_GET]: { _req: SourceGetReq; _res: ApiResult<{ source: Source; tags: Tag[] }> }
   [IPC.SOURCES_RENDER_HTML]: { _req: SourceRenderHtmlReq; _res: ApiResult<SourceRenderHtmlRes> }
