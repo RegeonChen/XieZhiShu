@@ -174,8 +174,10 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `sources:getSummary` | `{ id: string }` → `{ summary?: {...} }` | 读取单篇资料的 LLM 摘要（摘要/主题词/关键实体） |
 | `sources:openPath` | `{ sourceId }` → `{ opened: boolean }` | 用系统默认软件打开来源文件（URL 走浏览器；缺失返回稳定错误） |
 | `sources:getSnapshot` | `{ id }` → `{ id, kind, title, url?, snapshotAt?, publishedAt?, text, totalChars, truncated, shortText }` | **第三批 C** 来源本地快照：读库里已存的正文（`cleaned_text`），**不联网**——网页改版/撤稿后仍能核对原文。上限 200,000 字并标 `truncated`；`shortText` = 正文 <500 字（多为只抓到导航/页脚，界面提示可信度存疑） |
-| `webSource:list` | `{}` → `{ sites: WebSite[] }` | 网页资料库站点列表 |
-| `webSource:add` | `{ rootUrl, title? }` → `{ site: WebSite }` | 注册站点（root_url 去重） |
+| `webSource:list` | `{}` → `{ sites: WebSite[], articleCounts }` | 网页资料库站点列表。**2026-10-06（Phase 11 G）**：新增 `articleCounts: Record<siteId, number>`（每站清单条数）——"这个站还没同步过"（0 条）必须一眼可见，否则用户会以为软件漏了它（实测反馈） |
+| `webSource:add` | `{ rootUrl, title? }` → `{ site: WebSite }` | 注册站点（root_url 去重）。**2026-10-06（Phase 11 G）**：注册后**后台自动同步一次清单**（不 await，界面轮询 `webSource:syncStatus` 看状态）——不同步的话该站目录 0 条，「建立缓存与索引」完全看不到它 |
+| `webSource:sync` | `{ id }` → `{ added, error? }` | **2026-10-06（Phase 11 G）**：手动同步单个站点的清单（feed → sitemap → BFS 列表页 → `web_site_articles`）；**失败后的重试入口**（否则只能删站重注册）。同步可能要几秒~几十秒，界面轮询下面的状态接口 |
+| `webSource:syncStatus` | `{}` → `{ syncing: string[], errors: Record<siteId, string> }` | **2026-10-06（Phase 11 G）**：谁在同步、谁上次失败（**内存态**，不落库；`last_synced_at` 仍然持久化，界面显示"上次同步时间"） |
 | `webSource:remove` | `{ id }` → `{ ok: true }` | 删除站点（文章清单级联删除） |
 | `webSource:update` | `{ id, rootUrl?, title? }` → `{ site: WebSite }` | 修改站点名称/根网址（根网址重复返回错误） |
 | `webSource:dateStats` | `{ fromYear, toYear }` → `{ stats: WebArticleDateStats }` | **Phase 10 P3** 年份区间预览：只统计目录（**不抓正文**、不联网）。`WebArticleDateStats = { total, dated, unknown, inRange, byYear[], inRangeByYear[], estimatedMinutes }`；年份无效（非整数 / 越界 / 起 > 止）返回 `INVALID_PARAM`。`estimatedMinutes` 按"同站并发 2 + 每请求 ≥120ms"的实测口径估算（`web-source/fetch-estimate.ts`）。**2026-10-05（用户裁定 A）：入口从资料库面板移到任务流程的年份控件**（`ChatPanel` 的 `WebYearsInline` → 容器 `WritingWorkspace.handleWebYearsPreviewQuery`，防抖 400ms），通道本身不变 |
