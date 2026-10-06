@@ -81,14 +81,14 @@ Windows 桌面、接入大模型的志书撰写工具：帮地方党史方志办
 
 ## 当前状态
 
-截至 **2026-10-06**（HEAD `d9c1998`，约 55 项改动 + 新文件，**全部未提交**）。Phase 1–9、Phase 10 P0–P6 与 2026-10-05/06 各项裁定**均已实现**；**Phase 11「建立缓存与索引」正在按批复实现（A 批已完成）**；**Last Phase（打包 / 端到端演示）用户裁定数月后再做**。
+截至 **2026-10-06**（HEAD `d9c1998`，约 55 项改动 + 新文件，**全部未提交**）。Phase 1–9、Phase 10 P0–P6 与 2026-10-05/06 各项裁定**均已实现**；**Phase 11「建立缓存与索引」正在按批复实现（A–C 批已完成）**；**Last Phase（打包 / 端到端演示）用户裁定数月后再做**。
 
-- **验证基线**（2026-10-06，Phase 11 B 批后）：typecheck **0 错**；vitest **480 通过 / 481**（唯一失败＝既有 chokidar `unlink` 环境项，非回归）；build 成功（CSS **143.87** kB / JS **4,278.69** kB）。
+- **验证基线**（2026-10-06，Phase 11 C 批后）：typecheck **0 错**；vitest **487 通过 / 488**（唯一失败＝既有 chokidar `unlink` 环境项，非回归）；build 成功（CSS **143.87** kB / JS **4,278.69** kB）。
 - **数据库**：Migration 001–**050**（050 = 网页正文缓存加"尝试结论"`state` 三态；049 = 正文缓存 `web_article_body`；047 = 任务级抓取账本 `task_web_fetch`；048 = 已废弃的候选排队表，保留不删）。
   **真实库仍在 49**——050 会在下次启动软件时自动应用（已用真实库副本演练通过）。真实库 `%APPDATA%\xie-zhishu\xie-zhishu.db` 约 **862 MB**、站点目录 **62,593** 条、已缓存正文 **10,876** 篇（恰好是 2021+2022 两年）。
 - **真实库数字**：2005–2020 = **40,360 篇（64.5%）**；2012 单年 = **897 篇**；⑤ 收敛 **51 窗 → 19 窗**，已采用段漏检 **9.59% → 1.37%**。
-- **已完成、不要重做（最易被旧笔记误导）**：① 年份范围**早已搬到任务流程**（资料库面板**没有**年份控件）；② P6 清理（标题粗筛链路、`task_web_materials` 锁定路径、手动「抓取并筛选」整块 + 三个手动抓取 IPC、29 条死文案、`filterArticlesByQuery`/`importSiteArticle`/`checkEmptyBody`/`WebDropReason` 均已删）；③ 抓取提速（档位、自适应降档 + 本轮重抓失败篇、正文缓存(049)、暂停/继续、退出即终止）；④ **账本不再是跳过依据**（每次生成全量重筛 `listRangeArticles`）；⑤ P0 兜底回归 + 抓取目标 http(s) + 同域白名单（`article-guards.ts`，A1 探针最短标题 **8** 字、标题是 URL 不做探针）；⑥ **Phase 11 A 批**：`cacheBuild:plan` + `cache-build-plan.ts` + Migration 050；⑦ **Phase 11 B 批**：`CrawlOptions.mode: 'screen' | 'build'`（建立缓存模式只抓不筛）+ 缓存写入移到有效性判定之后 + `web-sites.updateArticleDates` + `WebCrawlResult.cacheWritten`（详见 G 组）。
-- **待办**：Phase 11 的 C 批（建立引擎 + 进度 ETA）/ D 批（设置页面板改名与年份区间）/ E 批（生成前严格阻断框 + 跳转）/ F 批（目录行删除守卫与孤儿缓存扫描）；以及① 真实 Provider 端到端与性能基线、② 对话追问端到端（后两项需用户授权额度）。
+- **已完成、不要重做（最易被旧笔记误导）**：① 年份范围**早已搬到任务流程**（资料库面板**没有**年份控件）；② P6 清理（标题粗筛链路、`task_web_materials` 锁定路径、手动「抓取并筛选」整块 + 三个手动抓取 IPC、29 条死文案、`filterArticlesByQuery`/`importSiteArticle`/`checkEmptyBody`/`WebDropReason` 均已删）；③ 抓取提速（档位、自适应降档 + 本轮重抓失败篇、正文缓存(049)、暂停/继续、退出即终止）；④ **账本不再是跳过依据**（每次生成全量重筛 `listRangeArticles`）；⑤ P0 兜底回归 + 抓取目标 http(s) + 同域白名单（`article-guards.ts`，A1 探针最短标题 **8** 字、标题是 URL 不做探针）；⑥ **Phase 11 A 批**：`cacheBuild:plan` + `cache-build-plan.ts` + Migration 050；⑦ **Phase 11 B 批**：`CrawlOptions.mode: 'screen' | 'build'`（建立缓存模式只抓不筛）+ 缓存写入移到有效性判定之后 + `web-sites.updateArticleDates` + `WebCrawlResult.cacheWritten`；⑧ **Phase 11 C 批**：`web-source/cache-build.ts` 建立编排引擎 + `cacheBuild:start/stop/status` + `listUncachedRangeArticles`（详见 G 组）。
+- **待办**：Phase 11 的 D 批（设置页面板改名与年份区间 + 进度/ETA + 缓存占用与清空）/ E 批（生成前严格阻断框 + 跳转）/ F 批（目录行删除守卫与孤儿缓存扫描）；以及① 真实 Provider 端到端与性能基线、② 对话追问端到端（后两项需用户授权额度）。
 - **用户已裁定不做**：资料库面板「抓取节奏档位 + 正文缓存占用/清空」界面（IPC/preload/文案均已就绪；**该面板在 Phase 11 D 批会一并并入「建立缓存与索引」**）；真机 CDP 补验（用户自行完成）。
 
 ## 设计决策（要点）
@@ -158,6 +158,7 @@ Windows 桌面、接入大模型的志书撰写工具：帮地方党史方志办
 - **只读规划**：`cacheBuild:plan`（`web-source/cache-build-plan.ts`）**只 SELECT**——不写库、不抓网页、不调模型；**`pending` 是唯一决定闸门放不放行的数**。年份非法 → `INVALID_PARAM`（**不静默回退默认区间**）。真实库实测：2005–2025 目录 **61,701** / 已有缓存 **10,876** / 待建立 **50,825**（≈ 64 分钟@75ms 口径、约 120 MB）/ 规划耗时 **729ms**。
 - **抓取模式开关（B 批，已实现）**：`CrawlOptions.mode: 'screen' | 'build'`——`build` = 只抓正文并写缓存（`ok` / `no-body` / `blocked` 标记），**不筛主题、不落任务来源、不写任务账本、不写站点筛选痕迹**，日期 L4/L5 照常回填（`updateArticleDates`）。
   **刻意不拆成两个函数**：两种模式共用同一套礼貌限速/档位/ETA/robots/白名单/降档/暂停，避免两套判定漂移。**缓存写入必须在有效性判定之后**（按结论写 `ok`/`no-body`）——"抓到就按 ok 写"会让闸门分不出"还要建"与"永远建不了"。
+- **建立编排引擎（C 批，已实现）**：`web-source/cache-build.ts` + IPC `cacheBuild:start` / `stop` / `status`（界面 1.5s 轮询）。要点：① 目标只取 **`listUncachedRangeArticles`**（没有缓存行的目录条目）→ `status.web.total` 是**真正要干活的篇数**，`alreadyBuilt` 如实报"已建好直接跳过"；② 本地索引**先排队、与抓取并行**（网络 vs CPU），进度**实时取自 rag 队列**（不另存一份，避免两个真相）；③ 停止用**独立开关**（+ 全局抓取取消），不依赖也不影响生成期抓取；④ **同一时刻只能有一个抓取在跑**（抓取池是全局单例）→ 已在建立中会被拒绝，Phase E 的闸门负责不让"边生成边建立"发生；⑤ **收尾必须用最终结果覆盖进度快照**（进度每 5 篇 emit 一次，会落后）；⑥ **模块加载绝不允许碰数据库**（否则单测与启动早期直接崩）。
 - **"建立"不花 LLM 额度**：向量嵌入是本地模型；`source_summaries`（LLM 摘要）**只由「整理资料库」手动触发**，生成链路不自动调用（真实库 `source_summaries` = 0 而汇编生成一直正常）。
 
 ## 历史决策索引
@@ -187,7 +188,7 @@ Windows 桌面、接入大模型的志书撰写工具：帮地方党史方志办
 1. Phase 1–3：项目基础 / 资料收集闭环 / 撰写闭环 —— **已完成**
 2. Phase 6–9：三段式重构 / 生成汇编重构 / 来源分栏与定位 / 来源定位重构 —— **已完成**
 3. Phase 10：网页资料库 2.0（P0–P6 + 2026-10-05/06 各项裁定）—— **已完成**
-4. **Phase 11：建立缓存与索引**（A 批只读规划、B 批"只抓不筛"模式已完成；C–F 批待做）—— **进行中**，见 G 组
+4. **Phase 11：建立缓存与索引**（A 批只读规划、B 批"只抓不筛"模式、C 批建立引擎已完成；D–F 批待做）—— **进行中**，见 G 组
 5. **Last Phase（收尾）：Windows 安装包、端到端演示、文档收尾** —— **待进行**（用户裁定数月后）
 
 ## 已知问题
