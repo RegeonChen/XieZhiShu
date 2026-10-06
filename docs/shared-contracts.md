@@ -143,7 +143,25 @@ interface LlmProviderConfig { id: string; name: string; apiBase: string; model: 
 
 interface AppSettings { dataDir?: string; workspaceDir?: string; compilationProviderId?: string; draftProviderId?: string; keepAwake?: boolean; docScale?: 'small' | 'medium' | 'large'; onboardingDone?: boolean;
   /** Phase 10 P3：网页资料库的发布时间筛选区间（两个值成对生效；非法成对值 = 清除，回到"不按年份筛"） */
-  webYearFrom?: number; webYearTo?: number; }
+  webYearFrom?: number; webYearTo?: number;
+  /** 2026-10-05（Phase 10）：抓取节奏档位（safe/standard/fast；standard 为默认、不落库） */
+  webCrawlTier?: 'safe' | 'standard' | 'fast';
+  /**
+   * 2026-10-06（Phase 11 H）：站点清单发现的规模——**默认 auto**（页/层由算法走到"收益饱和"测出，
+   * 并把每个站点实测用量记回 `web_sites.discovery_pages/discovery_depth` 供下次当起点下限）。
+   * 手动（manual）才用下面两个硬顶，只在自动撞安全阀（300 页/6 层/3 分钟）时需要。
+   * 落库口径：`auto` 与非法值一律**删键**（回到默认），数值夹到 [10,2000] / [1,8]。
+   */
+  webDiscoveryMode?: 'auto' | 'manual'; webDiscoveryPages?: number; webDiscoveryDepth?: number; }
+
+/** 站点清单发现的实测报告（Phase 11 H；`webSource:sync` 的返回体、建立进度的 lastSummary 同源） */
+interface WebDiscoveryReport { method: 'feed' | 'sitemap' | 'bfs'; pagesFetched: number; maxDepthReached: number;
+  stopReason: string | null; stopText: string; discovered: number; freshArticles: number; added: number; dated: number;
+  byYear: Record<string, number>; cellCount: number; depthPruned: number; seconds: number; }
+
+/** 网页资料库站点（`WebSite` 于 Phase 11 H 增加三个发现规模字段，均来自 Migration 052） */
+interface WebSite { id: string; rootUrl: string; title: string; createdAt: string; updatedAt: string; lastSyncedAt?: string;
+  discoveryPages?: number; discoveryDepth?: number; discoveryAt?: string; }
 
 /** Phase 10 P3：年份区间筛选预览数据（IPC `webSource:dateStats` 的返回体） */
 interface WebArticleDateStats { total: number; dated: number; unknown: number; inRange: number;
@@ -176,7 +194,7 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `sources:getSnapshot` | `{ id }` → `{ id, kind, title, url?, snapshotAt?, publishedAt?, text, totalChars, truncated, shortText }` | **第三批 C** 来源本地快照：读库里已存的正文（`cleaned_text`），**不联网**——网页改版/撤稿后仍能核对原文。上限 200,000 字并标 `truncated`；`shortText` = 正文 <500 字（多为只抓到导航/页脚，界面提示可信度存疑） |
 | `webSource:list` | `{}` → `{ sites: WebSite[], articleCounts }` | 网页资料库站点列表。**2026-10-06（Phase 11 G）**：新增 `articleCounts: Record<siteId, number>`（每站清单条数）——"这个站还没同步过"（0 条）必须一眼可见，否则用户会以为软件漏了它（实测反馈） |
 | `webSource:add` | `{ rootUrl, title? }` → `{ site: WebSite }` | 注册站点（root_url 去重）。**2026-10-06（Phase 11 G）**：注册后**后台自动同步一次清单**（不 await，界面轮询 `webSource:syncStatus` 看状态）——不同步的话该站目录 0 条，「建立缓存与索引」完全看不到它 |
-| `webSource:sync` | `{ id }` → `{ added, error? }` | **2026-10-06（Phase 11 G）**：手动同步单个站点的清单（feed → sitemap → BFS 列表页 → `web_site_articles`）；**失败后的重试入口**（否则只能删站重注册）。同步可能要几秒~几十秒，界面轮询下面的状态接口 |
+| `webSource:sync` | `{ id }` → `{ added, error?, report? }` | **2026-10-06（Phase 11 G）**：手动同步单个站点的清单（feed → sitemap → 自适应 BFS 列表页 → `web_site_articles`）；**失败后的重试入口**（否则只能删站重注册）。**Phase 11 H**：`report` 返回本次发现的**实测报告**（`WebDiscoveryReport`：走了多少页/层、发现与新增条数、停止原因与人话说明、年月格子数、被剪枝的深层链接数）——页/层数由算法测出，界面据此如实展示 |
 | `webSource:syncStatus` | `{}` → `{ syncing: string[], errors: Record<siteId, string> }` | **2026-10-06（Phase 11 G）**：谁在同步、谁上次失败（**内存态**，不落库；`last_synced_at` 仍然持久化，界面显示"上次同步时间"） |
 | `webSource:remove` | `{ id }` → `{ ok: true }` | 删除站点（文章清单级联删除） |
 | `webSource:update` | `{ id, rootUrl?, title? }` → `{ site: WebSite }` | 修改站点名称/根网址（根网址重复返回错误） |
