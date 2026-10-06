@@ -79,7 +79,7 @@ import {
   type SourceGetReq,
   type SourceBlocksRes
 } from '../shared/ipc'
-import type { ApiResult, CacheBuildPlan, CacheBuildStartRes, CacheBuildStatus, Source, Tag, LlmProviderConfig, AppSettings, WritingTask, Draft, RetrievedChunk } from '../shared/types'
+import type { ApiResult, CacheBuildPlan, CacheBuildStartRes, CacheBuildStatus, CompilationReadiness, Source, Tag, LlmProviderConfig, AppSettings, WritingTask, Draft, RetrievedChunk } from '../shared/types'
 import { getDb } from './db/connection'
 import { listSourceBlocks } from './db/source-blocks'
 import { listSources, getSourceById, deleteSource, deleteSources, updateSourceTitle, updateSourceFingerprint } from './db/sources'
@@ -95,7 +95,7 @@ import { testProviderConnection } from './llm/test'
 import { getSettings, updateSettings } from './db/settings'
 import { bodyCacheStats, clearBodyCache } from './db/article-body-cache'
 import { buildCacheBuildPlan, normalizeYearRange } from './web-source/cache-build-plan'
-import { getCacheBuildStatus, isCacheBuildRunning, requestCacheBuildStop, runCacheBuild } from './web-source/cache-build'
+import { getCacheBuildStatus, isCacheBuildRunning, requestCacheBuildStop, runCacheBuild, checkCompilationReadiness, describeReadiness } from './web-source/cache-build'
 import { requestFetchCancel, setFetchPaused } from './web-source/fetch-control'
 import { startKeepAwake, stopKeepAwake } from './power/keep-awake'
 import { createTask as createWritingTask, listTasks as listWritingTasks, getTaskById, deleteTask as deleteWritingTask, renameTask, updateTaskProvider, updateTaskInstruction, updateTaskModelText } from './db/tasks'
@@ -154,7 +154,7 @@ import { loadWindowState, trackWindowState } from './window-state'
 import type { WorkspaceStatusRes, WorkspaceMigrateRes, DraftGetContradictionsReq, DraftGetContradictionsRes, DraftResolveContradictionReq, DraftResolveContradictionRes, DraftApplyContradictionReq, DraftApplyContradictionRes, DraftGetLatestReq, DraftGetLatestRes, SourceOpenPathReq, SourceOpenPathRes, WritingAskSourceReq, WritingAskSourceRes, WebSourceAddReq, WebSourceAddRes, WebSourceListRes, WebSourceRemoveReq, WebSourceUpdateReq, WebSourceUpdateRes, WebSourceDateStatsReq, WebSourceDateStatsRes, WritingSetWebYearsReq, WritingSetWebYearsRes, AppGetPdfCmapsUrlRes, LogAppendReq, LogExportRes, StyleGuideListRes, StyleGuideSaveReq, StyleGuideSaveRes, StyleGuideSetDefaultReq, StyleGuideSetDefaultRes, StyleGuideDeleteReq, CompilationExportDocxReq, CompilationExportDocxRes, CompilationExportArchiveReq, CompilationExportArchiveRes, CompilationImportArchiveReq, CompilationImportArchiveRes, CompilationImportFromTaskReq, CompilationImportFromTaskRes, CompilationListFinalizedForImportReq, CompilationListFinalizedForImportRes } from '../shared/ipc'
 import { logMain, logIpc, logRenderer, exportLogsText } from './logger'
 import { resolveFileDelivery } from './file-range'
-import type { WebBrowserOpenReq, WebBrowserSetBoundsReq, WebBrowserNavigateReq, WebBrowserActionReq, WebBrowserStateRes, CacheBuildPlanReq, CacheBuildStartReq } from '../shared/ipc'
+import type { WebBrowserOpenReq, WebBrowserSetBoundsReq, WebBrowserNavigateReq, WebBrowserActionReq, WebBrowserStateRes, CacheBuildPlanReq, CacheBuildStartReq, CompilationReadinessReq } from '../shared/ipc'
 
 /** 长任务保持唤醒：开启则 start，任务结束/异常在 finally 中 stop（引用计数，重叠任务不提前释放） */
 function keepAwakeEnabled(): boolean {
@@ -755,6 +755,20 @@ handleLogged(IPC.COMPILATION_GET, (_event, params: CompilationGetReq): ApiResult
 // 生成前的材料规模预检（2026-10-05 用户要求 P1）：**只读**估算，供界面在真正开始生成之前弹一次确认
 // （用户实测：材料规模只有跑完"召回 + 闸门"才知道，上次跑到一半才发现要 20 多分钟）。
 // 刻意**不加 withKeepAwake**（毫秒~秒级、不调用大模型、不抓网页），也不落库、不影响后续真实生成。
+/**
+ * 2026-10-06（Phase 11 E 用户需求 ②）：生成前的**就绪检查**——本次生成要用到的资料是否都已建立缓存/索引。
+ * 界面在弹预检框**之前**先问它：未就绪就弹阻断提示（指引去设置页建立），**严格阻断、无逃生门**（决策 1A）。
+ * 只读、不花钱；主进程在真正生成时还会**再查一次**（那才是唯一真相）。
+ */
+handleLogged(IPC.COMPILATION_READINESS, (_event, params: CompilationReadinessReq): ApiResult<CompilationReadiness> => {
+  try {
+    if (!params?.taskId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
+    return { ok: true, data: checkCompilationReadiness(params.taskId) }
+  } catch (err) {
+    return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
+  }
+})
+
 handleLogged(IPC.COMPILATION_ESTIMATE_MATERIALS, async (_event, params: CompilationEstimateMaterialsReq): Promise<ApiResult<CompilationEstimateMaterialsRes>> => {
   try {
     if (!params.taskId) return { ok: false, error: { code: 'INVALID_PARAM', message: '参数无效' } }
@@ -768,6 +782,20 @@ handleLogged(IPC.COMPILATION_ESTIMATE_MATERIALS, async (_event, params: Compilat
 
 // 生成资料汇编（Phase 6.1：本地宽召回宁多勿漏 + AI 细读 + 矛盾标注；无 Provider/失败降级本地候选）
 handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerateReq): Promise<ApiResult<CompilationGenerateRes>> => withKeepAwake(async () => {
+  /*
+   * 2026-10-06（Phase 11 E 用户需求 ②；用户裁定 1A：**严格阻断、无逃生门**）：
+   * 界面在弹预检框之前已经查过一次，这里**再查一次**——因为从"检查完"到"真正开始"之间，
+   * 用户可能刚点了「建立缓存与索引」（抓取池是全局单例，两条抓取会互相干扰），或者界面被绕过。
+   * 这道判断放在**最前面**：拒绝了就不该动任务数据（否则写下撰写要求、却没生成，用户会看到莫名记录）。
+   */
+  const readiness = checkCompilationReadiness(params.taskId)
+  if (!readiness.ready) {
+    logMain(
+      'compilation',
+      `拒绝生成：缓存与索引尚未建立齐（原因 ${readiness.reasons.join(',')}；网页待建立 ${readiness.webPending} 篇、本地待索引 ${readiness.localPending} 篇、索引失败 ${readiness.localFailed} 篇）`
+    )
+    return { ok: false, error: { code: 'NOT_READY', message: describeReadiness(readiness) } }
+  }
   // 持久化用户撰写要求（供对话历史 / 重新生成汇编使用）
   const inst = params.title.trim()
   if (inst) {

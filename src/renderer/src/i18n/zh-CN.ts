@@ -597,6 +597,24 @@ export const zhCN = {
     materialEstimateUnavailable: '本次无法估算材料规模（不影响生成：确认后照常开始）。',
     materialEstimateError: '估算失败：{message}',
     materialEstimateCancelled: '已取消本次生成，未消耗大模型额度；刚才那条撰写要求已放回输入框，可直接修改后再发送。',
+    /*
+     * 2026-10-06（Phase 11 E 用户需求 ②；用户裁定 1A「严格阻断、无逃生门」）：
+     * 本次生成要用到的资料还没建立缓存/索引 → 弹这个框，只给「去设置页建立」一个出口。
+     * ⚠ 这里是**纯文本**（ConfirmDialog 用 <p> 渲染）→ 不要写 `**` 等 markdown 记号。
+     */
+    notReadyTitle: '还不能生成汇编：缓存与索引尚未建齐',
+    notReadyBody:
+      '为了避免生成时临时联网抓取（又慢又容易中断），本次生成要用到的资料需要先建立缓存与索引。现在还缺：',
+    notReadyWeb: '网页资料（年份 {from}–{to}）还有 {pending} 篇没有建立缓存，建立预计约 {minutes} 分钟',
+    notReadyLocalPending: '本地资料库还有 {count} 篇没有建立索引',
+    notReadyLocalFailed: '本地资料库有 {count} 篇索引失败（重新建立可恢复）',
+    notReadyBuilding: '正在「建立缓存与索引」（抓取同一时刻只能跑一个，等它结束再生成）',
+    notReadyAlready: '这一区间已建立 {cached} 篇，不会重复建立。',
+    notReadyBlocked: '另有 {blocked} 篇地址不在站点白名单内、永远不会建立（不影响生成）。',
+    notReadyUndated: '另有 {undated} 篇日期未知，不参与年份区间。',
+    notReadyGoBtn: '去设置页建立',
+    notReadyCancelBtn: '取消（稍后再说）',
+    notReadyCancelled: '缓存与索引尚未建齐，本次未开始生成、未消耗大模型额度；刚才那条撰写要求已放回输入框，建立好之后直接发送即可。',
     estimating: '正在估算材料规模（不消耗大模型额度）…',
     /* 生成汇总里如实带一句"本轮送了多少段/字、多少段因无信号未送"（第二组 ⑤） */
     convergenceSummary:

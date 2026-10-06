@@ -119,8 +119,12 @@ export function mergeYearBuckets(
   return [...byYear.values()].sort((a, b) => a.year - b.year)
 }
 
-/** 本地资料库索引的建立情况（口径与设置页「已索引 N / 共 M 篇」一致，但**排除**正文缺失的来源） */
-function readLocalPlan(): LocalBuildPlan {
+/**
+ * 本地资料库索引的建立情况（口径与设置页「已索引 N / 共 M 篇」一致，但**排除**正文缺失的来源）。
+ * 导出供生成前就绪检查复用（`cache-build.checkCompilationReadiness`）——**本地侧与年份区间无关**，
+ * 所以"本轮不用网页资料"（任务与全局都没设年份）时也要单独拿到这几个数。
+ */
+export function readLocalBuildPlan(): LocalBuildPlan {
   const db = getDb()
   const row = db
     .prepare(
@@ -239,7 +243,7 @@ export function buildCacheBuildPlan(req?: { fromYear?: number; toYear?: number }
     undatedArticles: undated
   }
 
-  const local = readLocalPlan()
+  const local = readLocalBuildPlan()
   const { ready, reasons } = decideReadiness(web, local)
   return { web, local, ready, reasons }
 }

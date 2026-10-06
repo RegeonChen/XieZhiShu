@@ -714,7 +714,46 @@ export interface LocalBuildPlan {
 }
 
 /** 生成前被拦住的原因（界面据此给出"缺什么"） */
-export type BuildNotReadyReason = 'web-pending' | 'local-pending' | 'local-index-failed'
+/**
+ * 未就绪的原因（Phase 11 E 的生成前闸门按这几个数逐一如实说明）：
+ * - `web-pending`：区间内还有**可建立但尚未建立**的网页正文；
+ * - `local-pending` / `local-index-failed`：本地资料库还有未索引 / 索引失败的资料；
+ * - `build-running`：正在「建立缓存与索引」——抓取池是全局单例，不能让建立与生成同时跑。
+ */
+export type BuildNotReadyReason = 'web-pending' | 'local-pending' | 'local-index-failed' | 'build-running'
+
+/**
+ * 生成前的**就绪检查**（Phase 11 E，2026-10-06 用户需求 ②）。
+ *
+ * 用户裁定 1A：**严格阻断、无逃生门**——`ready === false` 时生成汇编**必须**被拒绝，
+ * 界面指引用户去设置页「建立缓存与索引」，建完才能生成。判据只看**这一篇有没有缓存**
+ * （决策 2A：不比较区间大小；`no-body` / `blocked` 两种"已尝试过"的标记**不算缺口**）。
+ */
+export interface CompilationReadiness {
+  /** 能否开始生成（**唯一判据**） */
+  ready: boolean
+  reasons: BuildNotReadyReason[]
+  /** 本次生成会用的网页年份区间（任务优先、回退全局默认）；两者都没有 = 本轮根本不抓网页 */
+  fromYear: number | null
+  toYear: number | null
+  /** 该区间内还没建立缓存的文章数 */
+  webPending: number
+  /** 该区间内已建立的篇数（含 `ok` / `no-body` / `blocked` 三种标记） */
+  webCached: number
+  /** 永不可建（地址不在站点同域白名单内）——如实显示，但**不算缺口** */
+  webBlocked: number
+  /** 日期未知、不参与任何年份区间 */
+  webUndated: number
+  /** 本地资料库：待索引 / 索引中 / 索引失败（均**已排除**正文缺失的来源） */
+  localPending: number
+  localIndexing: number
+  localFailed: number
+  /** 正在建立缓存与索引 */
+  buildRunning: boolean
+  /** 把 `webPending` 建完的预计耗时（分钟，只读规划口径） */
+  estimatedMinutes: number
+}
+
 
 /** 「建立缓存与索引」的完整计划（只读预检 + 设置页面板共用） */
 export interface CacheBuildPlan {
@@ -835,6 +874,11 @@ export const ErrorCodes = {
 
   // 通用
   INVALID_PARAM: 'INVALID_PARAM',
+  /**
+   * 2026-10-06（Phase 11 E 用户需求 ②）：**还没建立缓存与索引 → 拒绝生成**（严格阻断、无逃生门＝决策 1A）。
+   * 主进程是唯一真相：即使界面被绕过（或界面刚检查完、用户中途点了「建立」），生成也必须被拒。
+   */
+  NOT_READY: 'NOT_READY',
   INTERNAL_ERROR: 'INTERNAL_ERROR'
 } as const
 

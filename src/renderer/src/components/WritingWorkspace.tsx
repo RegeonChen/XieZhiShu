@@ -14,7 +14,7 @@ import CompilationStep, {
   type CompilationVersionDiffView,
   type CompilationMessageView
 } from './CompilationStep'
-import type { Contradiction, CompilationRecycleBinItem } from '../../../shared/types'
+import type { CompilationReadiness, Contradiction, CompilationRecycleBinItem } from '../../../shared/types'
 import type { CompilationWebScan } from '../../../shared/ipc'
 
 interface TaskItem {
@@ -228,7 +228,7 @@ const transientByTask = new Map<string, WritingTransient>()
 const AUTO_RESUME_LIMIT = 2
 const AUTO_RESUME_DELAYS_MS = [8000, 20000]
 
-function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: string; mode: 'compile' | 'draft'; onChanged: () => void; reloadKey?: number }) {
+function WritingWorkspace({ taskId, mode, onChanged, reloadKey, onGoBuildCache }: { taskId: string; mode: 'compile' | 'draft'; onChanged: () => void; reloadKey?: number; onGoBuildCache?: () => void }) {
   const [task, setTask] = useState<TaskItem | null>(null)
   const [draft, setDraft] = useState<DraftItem | null>(null)
   const [loading, setLoading] = useState(true)
@@ -731,6 +731,36 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
   type MaterialEstimateView = Parameters<typeof buildMaterialEstimateMessage>[0]
 
   /**
+   * 2026-10-06（Phase 11 E 用户需求 ②）：把就绪检查的原始数字拼成一句人话。
+   * 口径必须与主进程 `describeReadiness` 一致：**只列真正缺的**，并把"不算缺口"的两种
+   * （白名单外、日期未知）如实摆出来——不让用户以为"怎么建都建不完"。
+   * 这里用「；」串成一段（`ConfirmDialog` 的 message 是纯文本 `<p>`，不走 Markdown、也不认换行）。
+   */
+  function buildNotReadyMessage(r: CompilationReadiness): string {
+    const c = zhCN.compilation
+    const lacks: string[] = []
+    if (r.reasons.includes('build-running')) lacks.push(c.notReadyBuilding)
+    if (r.reasons.includes('web-pending')) {
+      lacks.push(
+        c.notReadyWeb
+          .replace('{from}', String(r.fromYear ?? '?'))
+          .replace('{to}', String(r.toYear ?? '?'))
+          .replace('{pending}', String(r.webPending))
+          .replace('{minutes}', String(r.estimatedMinutes))
+      )
+    }
+    if (r.reasons.includes('local-pending')) {
+      lacks.push(c.notReadyLocalPending.replace('{count}', String(r.localPending + r.localIndexing)))
+    }
+    if (r.reasons.includes('local-index-failed')) lacks.push(c.notReadyLocalFailed.replace('{count}', String(r.localFailed)))
+    const notes: string[] = []
+    if (r.webCached > 0) notes.push(c.notReadyAlready.replace('{cached}', String(r.webCached)))
+    if (r.webBlocked > 0) notes.push(c.notReadyBlocked.replace('{blocked}', String(r.webBlocked)))
+    if (r.webUndated > 0) notes.push(c.notReadyUndated.replace('{undated}', String(r.webUndated)))
+    return c.notReadyBody + lacks.join('；') + '。' + notes.join('')
+  }
+
+  /**
    * 生成前的「材料规模」确认（2026-10-05 用户要求 P1）：非空 = 弹窗打开。
    * 动机（用户实测）：材料规模只有跑完"召回 + 闸门"才知道，上次**跑到一半**才发现要 20 多分钟；
    * 因此真正开始生成之前先把预计规模与耗时报出来。**只提示、不限制**：确认后走原生成流程，取消则什么都不生成。
@@ -748,6 +778,13 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
    * **每次生成单独选择、不持久化**：每次打开确认框都复位为 false（默认收敛）。
    */
   const [skipConvergence, setSkipConvergence] = useState(false)
+
+  /**
+   * 2026-10-06（Phase 11 E 用户需求 ②；用户裁定 1A「**严格阻断、无逃生门**」）：
+   * 本次生成要用到的资料尚未建立缓存/索引时，只弹这个阻断框——**没有"仍然生成"这个选项**。
+   * 唯一的出口是去设置页「建立缓存与索引」把它建起来。
+   */
+  const [notReady, setNotReady] = useState<{ instruction: string; readiness: CompilationReadiness } | null>(null)
 
   /** 生成入口：先**只读**估算材料规模（不消耗额度、不落库）→ 弹一次确认 → 才开始原来的生成流程 */
   const handleGenerateCompilation = async (instruction: string) => {
@@ -773,6 +810,22 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
      */
     setBusy('generating')
     setBusyText(zhCN.compilation.estimating)
+    /*
+     * ⓪ 生成前闸门（Phase 11 E）：先问主进程"本轮要用到的资料都建立好了吗"（只读、不花钱）。
+     * 未就绪 → **直接弹阻断框，连估算都不做**（估了也不能生成，白等）。
+     * 闸门查询本身失败**不阻断**：主进程在真正生成时还会再查一次，那里才是唯一真相。
+     */
+    try {
+      const rd = typeof window.api.compilationReadiness === 'function' ? await window.api.compilationReadiness(taskId) : null
+      if (rd?.ok && rd.data && !rd.data.ready) {
+        setBusy(null)
+        setBusyText(null)
+        setNotReady({ instruction, readiness: rd.data })
+        return
+      }
+    } catch {
+      /* 桥不可用/查询失败：交给主进程在生成时拒绝（不在这里假装已知） */
+    }
     let message: string = zhCN.compilation.materialEstimateUnavailable
     let estError: string | undefined
     let estData: MaterialEstimateView | undefined
@@ -896,6 +949,20 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
           void window.api.addTaskMessage(taskId, 'assistant', summary, 'notice')
           // 生成时主进程可能已把任务标题从「新建任务」自动改为大模型提取的标题，此处刷新任务列表以同步显示新标题
           onChanged()
+        }
+      } else if (res.error?.code === 'NOT_READY') {
+        /*
+         * 2026-10-06（Phase 11 E）：竞态被拒——界面刚检查通过、主进程这次查到"还没建齐"
+         * （例如用户中途点了「建立」，或界面被绕过）。主进程是唯一真相：如实说明 + 补弹阻断框给出按钮。
+         */
+        const msg = res.error.message || zhCN.compilation.notReadyTitle
+        appendAssistant(msg)
+        void window.api.addTaskMessage(taskId, 'assistant', msg, 'notice')
+        try {
+          const rd = typeof window.api.compilationReadiness === 'function' ? await window.api.compilationReadiness(taskId) : null
+          if (rd?.ok && rd.data) setNotReady({ instruction: instruction.trim(), readiness: rd.data })
+        } catch {
+          /* 拿不到明细也不影响"已被拒绝"这个事实（聊天里已有原话） */
         }
       } else {
         const msg = '生成资料汇编失败：' + (res.error?.message ?? '')
@@ -1660,6 +1727,37 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey }: { taskId: stri
         **只提示、不限制**。取消 = 不生成：清掉弹窗（busy 早在估算结束时已复位，不会卡在「生成中」），
         并把刚提交的撰写要求**放回输入框**（ChatPanel 的 submit 已先清空输入框，不回填就得重敲）。
       */}
+      {/*
+        2026-10-06（Phase 11 E 用户需求 ②；裁定 1A「严格阻断、无逃生门」）：
+        未建立齐时**只有**一个出口——去设置页「建立缓存与索引」。刻意**不提供"仍然生成"**。
+        两个按钮都把撰写要求放回输入框（否则用户建立完回来还得重敲一遍）。
+      */}
+      {notReady ? (
+        <ConfirmDialog
+          title={zhCN.compilation.notReadyTitle}
+          message={buildNotReadyMessage(notReady.readiness)}
+          confirmText={zhCN.compilation.notReadyGoBtn}
+          cancelText={zhCN.compilation.notReadyCancelBtn}
+          onConfirm={() => {
+            const inst = notReady.instruction
+            setNotReady(null)
+            requestRestoreDraft(inst)
+            const msg = zhCN.compilation.notReadyCancelled
+            appendAssistant(msg)
+            void window.api.addTaskMessage(taskId, 'assistant', msg, 'notice')
+            onGoBuildCache?.()
+          }}
+          onCancel={() => {
+            const inst = notReady.instruction
+            setNotReady(null)
+            requestRestoreDraft(inst)
+            const msg = zhCN.compilation.notReadyCancelled
+            appendAssistant(msg)
+            void window.api.addTaskMessage(taskId, 'assistant', msg, 'notice')
+          }}
+        />
+      ) : null}
+
       {materialEstimate ? (
         <ConfirmDialog
           title={zhCN.compilation.materialEstimateTitle}

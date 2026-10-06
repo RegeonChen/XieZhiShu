@@ -161,6 +161,17 @@ export default function App() {
     document.getElementById('settings-' + id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }, [])
 
+  /*
+   * 2026-10-06（Phase 11 E 用户需求 ②）：从「生成前阻断框」跳到设置页「建立缓存与索引」。
+   * 设置页是**按需挂载**的（切到 settings 才渲染），所以不能在这里直接 scrollIntoView——
+   * 改为传一个带 nonce 的 focus 信号，由 Settings 挂载后的 effect 负责滚动（见 Settings.focusSection）。
+   */
+  const [settingsFocus, setSettingsFocus] = useState<{ id: string; nonce: number } | null>(null)
+  const handleGoBuildCache = useCallback(() => {
+    setPage('settings')
+    setSettingsFocus((cur) => ({ id: 'index', nonce: (cur?.nonce ?? 0) + 1 }))
+  }, [])
+
   // 三栏宽度变化时持久化（下次启动恢复）
   useEffect(() => {
     try { localStorage.setItem(LS_SIDEBAR_W, String(sidebarW)) } catch { /* 忽略 */ }
@@ -390,7 +401,7 @@ export default function App() {
       case 'settings':
         return (
           <main className="work-pane">
-            <Settings onOpenOnboarding={() => setOnboardingOpen(true)} onActiveChange={(id) => setSettingsActive(id)} theme={theme} onThemeChange={setTheme} docScale={docScale} onDocScaleChange={setDocScale} />
+            <Settings onOpenOnboarding={() => setOnboardingOpen(true)} onActiveChange={(id) => setSettingsActive(id)} theme={theme} onThemeChange={setTheme} docScale={docScale} onDocScaleChange={setDocScale} focusSection={settingsFocus} />
           </main>
         )
     }
@@ -458,6 +469,7 @@ export default function App() {
                 mode="compile"
                 onChanged={() => setWritingReload((v) => v + 1)}
                 reloadKey={sourceRemovalReloadKey}
+                onGoBuildCache={handleGoBuildCache}
               />
             ) : compileTaskCount === 0 ? (
               <WritingEmptyState

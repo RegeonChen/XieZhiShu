@@ -46,12 +46,17 @@ interface SettingsProps {
   /** Phase 7.6：资料汇编查看器字号档位（由 App 注入并持久化到设置表） */
   docScale?: DocScale
   onDocScaleChange?: (scale: DocScale) => void
+  /**
+   * 2026-10-06（Phase 11 E）：从别处**跳转**过来并定位到某个区块（带 nonce，重复点也能再触发）。
+   * 设置页是按需挂载的，所以滚动由本组件在挂载后的 effect 里做，而不是由调用方直接 scrollIntoView。
+   */
+  focusSection?: { id: string; nonce: number } | null
 }
 
 /** 设置页区块顺序（与中栏导航一致；scroll-spy 观察对象） */
 const SETTING_SECTIONS = ['overview', 'appearance', 'workspace', 'index', 'preset', 'stepModels', 'provider'] as const
 
-function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docScale, onDocScaleChange }: SettingsProps) {
+function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docScale, onDocScaleChange, focusSection }: SettingsProps) {
   const [providers, setProviders] = useState<ProviderItem[] | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadErr, setLoadErr] = useState<string | null>(null)
@@ -92,6 +97,18 @@ function Settings({ onOpenOnboarding, onActiveChange, theme, onThemeChange, docS
    * 已搬进 `CacheBuildPanel`（更名「建立缓存与索引」）——它自己轮询 `cacheBuildStatus` 与
    * `getRagIndexStatus`，这里不再保留第二份状态（避免两个真相）。
    */
+
+  /*
+   * 2026-10-06（Phase 11 E 用户需求 ②）：从「生成前阻断框」跳过来时，挂载后**滚动并高亮**目标区块。
+   * 依赖 `focusSection.nonce`——同一个区块被再次跳转时（nonce 变大）仍会重新滚动。
+   */
+  useEffect(() => {
+    if (!focusSection) return
+    const el = document.getElementById('settings-' + focusSection.id)
+    if (!el) return
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    onActiveChange?.(focusSection.id)
+  }, [focusSection, onActiveChange])
 
   const load = useCallback(async () => {
     setLoading(true)
