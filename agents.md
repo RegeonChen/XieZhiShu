@@ -64,6 +64,7 @@ Windows 桌面、接入大模型的志书撰写工具：帮地方党史方志办
 
 - **仓库** `https://github.com/RegeonChen/XieZhiShu`，默认分支 `main`，默认直接提交；大改动可开 `feature/*`；开发前先 `git pull --rebase`。
 - **发布**：SemVer；里程碑打 tag `vX.Y.Z` + GitHub Release 说明；**每个 `vX.Y.Z` 必须打包上传 Windows NSIS 安装包**（`npm run dist:win`，产物 `dist/XieZhiShu-Setup-${version}-x64.exe` + `.blockmap`）。本机无需 VS：better-sqlite3 用 N-API 预编译产物，故 `npmRebuild: false`。
+  **⚠ 发布口径（v0.4.0 实测）**：CI（`release.yml`）打出的包**不含 `resources/models`（90 MB 本地嵌入模型）**→ 用户装上语义检索会退化成纯词法。**正确做法＝本地 `npm run dist:win` 后经 API 建 Release 并上传**，**不要推 tag**（推 tag 会让 CI 用无模型包覆盖已有资产）；上传时**只传当前版本的两个文件**（`dist/` 里留着历史版本产物，别整个目录传——v0.4.0 首次上传曾误带 6 个旧版本资产，已删）。
 - **禁止**：对 `main` 用 `git push --force`、`git reset --hard`、`git checkout .`；**未经用户明确要求不执行 commit / push / tag / release**。
 - **数据隔离**：API Key、`.env`、本地数据库、用户资料样本不入库；`.gitignore` 排除 `node_modules`/`dist`/`release`/`out`/模型文件；项目文档（本文件、`PLAN.md`、`init.md`、`docs/`）纳入版本管理。
 
