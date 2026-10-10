@@ -2,9 +2,25 @@ import type { ReactNode } from 'react'
 
 export type PageKey = 'sources' | 'compile' | 'draft' | 'templates' | 'settings'
 
+/**
+ * 导航项。`disabled` + `badge` 用于「尚未实现的功能区」（2026-10-09 用户裁定 A）：
+ * 「撰写初稿」功能区当前不可用，界面上**置灰并标注「开发中」**，
+ * 与 README 的功能边界声明（"目前仅实现到生成汇编功能区"）保持一致——
+ * 界面能看到入口、但明确告知尚未实现，避免"文档说不存在、界面却能点进去"的自相矛盾。
+ */
+export interface SideNavItem {
+  key: PageKey
+  label: string
+  disabled?: boolean
+  /** 置灰项上的小徽标（如「开发中」） */
+  badge?: string
+  /** 置灰项的悬停说明（原生 title） */
+  disabledHint?: string
+}
+
 interface SideNavProps {
   current: PageKey
-  items: { key: PageKey; label: string }[]
+  items: SideNavItem[]
   onSelect: (key: PageKey) => void
   /**
    * 顶部附加按钮（2026-10-04 用户要求）：
@@ -12,7 +28,7 @@ interface SideNavProps {
    */
   leading?: ReactNode
   /** 贴在导航栏**最下方**的入口（「设置」由用户要求移到这里） */
-  bottomItems?: { key: PageKey; label: string }[]
+  bottomItems?: SideNavItem[]
   style?: React.CSSProperties
 }
 
@@ -48,15 +64,23 @@ const ICONS: Record<PageKey, ReactNode> = {
 }
 
 export default function SideNav({ current, items, onSelect, leading, bottomItems, style }: SideNavProps) {
-  const renderItem = (item: { key: PageKey; label: string }): ReactNode => (
+  const renderItem = (item: SideNavItem): ReactNode => (
     <button
       key={item.key}
       type="button"
-      className={`side-nav__item${current === item.key ? ' side-nav__item--active' : ''}`}
-      onClick={() => onSelect(item.key)}
+      className={`side-nav__item${current === item.key ? ' side-nav__item--active' : ''}${item.disabled ? ' side-nav__item--disabled' : ''}`}
+      onClick={() => {
+        // 置灰项不可进入（同时也用原生 disabled 挡住点击，这里再兜一层）
+        if (!item.disabled) onSelect(item.key)
+      }}
+      disabled={item.disabled === true}
+      aria-disabled={item.disabled === true}
+      title={item.disabled ? item.disabledHint : undefined}
+      data-onboarding={item.disabled ? 'side-nav-disabled' : undefined}
     >
       <span className="side-nav__icon">{ICONS[item.key]}</span>
       <span className="side-nav__label">{item.label}</span>
+      {item.badge ? <span className="side-nav__badge">{item.badge}</span> : null}
     </button>
   )
 

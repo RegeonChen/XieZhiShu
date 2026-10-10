@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef, type ReactNode } from 'react'
-import SideNav, { type PageKey } from './components/SideNav'
+import SideNav, { type PageKey, type SideNavItem } from './components/SideNav'
 import EmptyState from './components/EmptyState'
 import SourceList from './components/SourceList'
 import TagManager from './components/TagManager'
@@ -20,14 +20,25 @@ import ConfirmDialog from './components/ConfirmDialog'
 import { DEMO_TASK_TITLE } from '../../shared/demo'
 import { zhCN } from './i18n/zh-CN'
 
-const NAV_ITEMS: { key: PageKey; label: string }[] = [
+/**
+ * 主导航项。**「撰写初稿」置灰并标注「开发中」**（2026-10-09 用户裁定 A）：
+ * 该功能区尚未实现，README 的功能边界声明与界面必须一致——界面保留入口但明确告知不可用，
+ * 而不是"文档说不存在、界面却能点进去"。功能可用时把 disabled/badge 去掉即可恢复。
+ */
+const NAV_ITEMS: SideNavItem[] = [
   { key: 'sources', label: zhCN.nav.sources },
   { key: 'compile', label: zhCN.nav.compile },
-  { key: 'draft', label: zhCN.nav.draft }
+  {
+    key: 'draft',
+    label: zhCN.nav.draft,
+    disabled: true,
+    badge: zhCN.nav.devBadge,
+    disabledHint: zhCN.nav.draftDisabledHint
+  }
 ]
 
 /** 「设置」按用户要求（2026-10-04）移出主导航组，贴在左栏最下方 */
-const NAV_BOTTOM_ITEMS: { key: PageKey; label: string }[] = [{ key: 'settings', label: zhCN.nav.settings }]
+const NAV_BOTTOM_ITEMS: SideNavItem[] = [{ key: 'settings', label: zhCN.nav.settings }]
 
 /**
  * 「隐藏中栏 / 显示中栏」图标（2026-10-04 用户要求的造型）：
@@ -277,6 +288,8 @@ export default function App() {
 
   // 新手引导：步骤切换时联动切换功能区页面，使目标元素渲染出来
   const handleOnboardingStepChange = useCallback((page: string) => {
+    // 置灰的功能区（尚未实现）不允许被引导切过去——否则会停在一个不可用页面上
+    if (NAV_ITEMS.some((it) => it.key === page && it.disabled)) return
     setPage(page as PageKey)
     // 引导切到「生成汇编」/「撰写初稿」页时自动打开演示任务，使工作台与功能可见
     if (page === 'compile' || page === 'draft') {
