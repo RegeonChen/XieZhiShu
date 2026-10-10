@@ -150,11 +150,15 @@ npm run dist:win     # 构建并打包 Windows 安装包
 > 本地嵌入模型需放在 `resources/models/bge-small-zh-v1.5/`（transformers.js 兼容格式，约 90 MB）。模型或推理引擎不可用时，检索会**自动降级为纯词法检索**，不阻塞其它功能。
 > `dist:win` 的产物含该模型（约 340 MB）；**CI 构建的安装包不含模型**（模型未入库），因此正式发布使用本地构建的产物。
 
+> **macOS**：`npm run dev` / `npm run test` 开发与测试可直接使用（全套测试在 macOS 上通过，检索、数据库、打包均正常）。打包用 `npm run dist:mac`（arm64 dmg，同样要求先备好本地模型）。注意两点：① macOS 26+ 上 electron-builder 的 dmg 封装器存在 `hdiutil` 兼容问题，失败时改走 `--mac dir` 后用系统 `hdiutil create` 手动封装（`.github/workflows/build-mac.yml` 里有现成做法）；② 安装包未签名，他人首次打开需 `xattr -cr <应用路径>` 去除隔离属性后运行。
+
 ## 八、发布说明（维护者）
 
 正式发布流程为：本地 `npm run dist:win` → 通过 GitHub API 创建 Release 并上传**当前版本**的 `XieZhiShu-Setup-<版本>-x64.exe` 与其 `.blockmap`。
 
 > ⚠️ 请**不要**直接推送 `v*` 标签：`.github/workflows/release.yml` 会在 CI 上重新构建，而 CI 产物**不含本地嵌入模型**，会把已发布的安装包覆盖成降级版本。
+
+> **macOS 版**不进正式 Release：`.github/workflows/build-mac.yml`（手动触发）会在 CI 内下载嵌入模型并产出**含模型**的 arm64 dmg，仅作为 workflow artifact 提供下载，不自动发布、不触碰 Release 资产。
 
 ## 九、目录结构
 
