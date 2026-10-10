@@ -2,10 +2,13 @@ import type { PageKey } from '../SideNav'
 import { DEMO_TASK_TITLE } from '../../../../shared/demo'
 
 /**
- * 新手引导步骤定义与文案（2026-08-28 重写）。
+ * 新手引导步骤定义与文案（2026-08-28 重写；2026-10-09 按功能边界修正）。
  * 借鉴聚合拾遗（HaiDiXiaoZongDui）的"聚光引导"架构：每步通过 CSS 选择器定位界面元素，
  * 用遮罩挖洞 + 高亮框突出目标，配合提示卡片逐步讲解核心功能闭环。
- * 步骤顺序即推荐使用流程：配置大模型（手动 / 预设）→ 选择工作区 → 了解资料库 → 演示任务 → 三步生成初稿。
+ * 步骤顺序即推荐使用流程：配置大模型（手动 / 预设）→ 选择工作区 → 了解资料库 → 演示任务 → 生成汇编。
+ *
+ * ⚠ 2026-10-09（用户裁定 A）：**「撰写初稿」功能区尚未实现**（导航项已置灰标注「开发中」），
+ * 因此原先指向该页的 `writingFlow` 一步改为指向「生成汇编」——引导**绝不能把用户带到不可用的页面**上。
  */
 export type OnboardingStepId = 'llm' | 'preset' | 'workspace' | 'library' | 'demoTask' | 'writingFlow'
 
@@ -26,7 +29,7 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
   { id: 'workspace', page: 'settings', targets: ['[data-onboarding="settings-workspace"]'], padding: 8 },
   { id: 'library', page: 'sources', targets: ['[data-onboarding="sources-library"]'], padding: 8 },
   { id: 'demoTask', page: 'compile', targets: ['[data-onboarding="writing-demo-task"]'], padding: 8 },
-  { id: 'writingFlow', page: 'draft', targets: ['[data-onboarding="writing-new-task"]'], padding: 8 }
+  { id: 'writingFlow', page: 'compile', targets: ['[data-onboarding="writing-new-task"]'], padding: 8 }
 ]
 
 export const ONBOARDING_COPY = {
@@ -64,25 +67,25 @@ export const ONBOARDING_COPY = {
       title: '第 4 步：了解资料库',
       description:
         '「资料」页集中管理全部原始资料：可手动导入文件、添加信源网址、注册网页资料库（生成时自动检索相关文章），' +
-        '并打标签、搜索、预览全文与管理标签。生成资料汇编与初稿时，只会使用这里的资料，绝不引入外部知识。',
+        '并打标签、搜索、预览全文与管理标签。生成资料汇编时，只会使用这里的资料，绝不引入外部知识。',
       hint: '新用户可先添加几篇相关材料；本教程的演示任务自带两份任务级演示材料。'
     },
     demoTask: {
       title: '演示任务（仅作为演示）',
       description:
-        '为避免任务列表为空时无从下手，软件已为你预制「' + DEMO_TASK_TITLE + '」，在「生成汇编」与「撰写初稿」两个功能区各有一份。' +
-        '点击它即可打开对应的工作台，并已预置「资料汇编（含矛盾）」与「志书初稿」，' +
-        '方便你逐个环节对照理解。',
+        '为避免任务列表为空时无从下手，软件已为你预制「' + DEMO_TASK_TITLE + '」，在「生成汇编」功能区有一份。' +
+        '点击它即可打开工作台，并已预置「资料汇编（含矛盾）」，方便你逐个环节对照理解。',
       hint: '该任务仅供演示，可随意操作；不满意也可在右键菜单删除它。'
     },
     writingFlow: {
-      title: '生成汇编 → 撰写初稿',
+      title: '生成资料汇编',
       description:
-        '撰写流程分为两个功能区：①「生成汇编」——AI 细读资料、整合提取为一篇连续的资料汇编（每段都有时间标注与来源编号），再标注矛盾（不同来源相左）；' +
-        '需要改动汇编时点右下角的悬浮按钮与大模型对话（改完可选择「采纳」或「回退」），随时可「导出资料汇编」；' +
-        '②「撰写初稿」——新建任务后从「生成汇编」导入一份已完成汇编（或导入外部文件），先指定「行文规范」，再点击「开始撰写」并「生成志书初稿」，' +
-        '生成后仍可在编辑器继续修改、框选正文「询问来源」。',
-      hint: '两个功能区任务列表相互独立；「撰写初稿」需先导入一份资料汇编。'
+        '当前版本实现到「生成汇编」功能区：新建任务后填写撰写要求（并可指定网页资料的年份区间），' +
+        '软件会先做只读预检，再由 AI 细读资料、整合提取为一篇连续的资料汇编（每段都有时间标注与来源编号），并标注矛盾（不同来源相左）；' +
+        '需要改动汇编时点右下角的悬浮按钮与大模型对话（改完可选择「采纳」或「回退」），随时可「导出资料汇编」（docx / xzsc）。',
+      hint:
+        '「撰写初稿」功能区尚未实现（左侧导航中该项标注为「开发中」）：当前版本请以「生成汇编」的产出为交付物；' +
+        '生成前请先在 设置 →「建立缓存与索引」把网页正文缓存与本地索引建好。'
     }
   }
 }

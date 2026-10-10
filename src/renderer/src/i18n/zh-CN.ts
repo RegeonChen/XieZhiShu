@@ -18,7 +18,13 @@ export const zhCN = {
     sources: '资料库',
     compile: '生成汇编',
     draft: '撰写初稿',
-    settings: '设置'
+    settings: '设置',
+    /**
+     * 2026-10-09（用户裁定 A）：「撰写初稿」功能区尚未实现 → 导航项**置灰 + 标注「开发中」**。
+     * 与 README 的功能边界声明保持一致（避免"文档说不存在、界面却能点进去"）。
+     */
+    devBadge: '开发中',
+    draftDisabledHint: '「撰写初稿」功能尚未实现（开发中）：当前版本请使用「生成汇编」，并导出资料汇编。'
   },
   panes: {
     sources: {

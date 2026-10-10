@@ -170,6 +170,29 @@ body {
   color: var(--accent);
 }
 
+/*
+ * 2026-10-09（用户裁定 A）：「尚未实现」的功能区导航项置灰 + 「开发中」徽标。
+ * 目的是让界面与 README 的功能边界声明一致——入口可见、但明确告知不可用。
+ */
+.side-nav__item--disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.side-nav__item--disabled:hover {
+  background: transparent;
+}
+
+.side-nav__badge {
+  font-size: 9px;
+  line-height: 1;
+  padding: 1px 3px;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.4));
+  border-radius: 3px;
+  color: var(--fg-soft);
+  white-space: nowrap;
+}
+
 /* ---------- 中栏：列表区 ---------- */
 .center-pane {
   width: 280px;
