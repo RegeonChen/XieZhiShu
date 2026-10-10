@@ -14,7 +14,8 @@
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "test": "vitest run",
-    "dist:win": "npm run build && electron-builder --win nsis --x64 --publish never"
+    "dist:win": "npm run build && electron-builder --win nsis --x64 --publish never",
+    "dist:mac": "npm run build && electron-builder --mac dmg --arm64 --publish never"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
@@ -97,6 +98,18 @@
           ]
         }
       ]
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "artifactName": "XieZhiShu-${version}-${arch}.${ext}",
+      "identity": null
     },
     "nsis": {
       "artifactName": "XieZhiShu-Setup-${version}-${arch}.${ext}",

@@ -1,0 +1,50 @@
+name: build-mac
+
+# macOS 版构建：仅作为 workflow artifact 供下载，不自动发布、不触碰 Release 资产
+# （正式 Release 仍走维护者本地 dist:win 流程；本工作流在 CI 内下载嵌入模型，
+#  产物是含模型的完整版，但绝不覆盖 Release，避免与 release.yml 的降级覆盖问题纠缠）。
+on:
+  workflow_dispatch:
+
+jobs:
+  build-mac:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # package-lock 由 Windows 端生成，不含 darwin 平台的 optional 依赖条目，
+      # 用 npm install 而非 npm ci（待维护者在 mac 上重跑一次 install 并提交 lock 后可收紧）。
+      - run: npm install --no-audit --no-fund
+
+      - name: Download local embed model (bge-small-zh-v1.5)
+        run: |
+          BASE="https://huggingface.co/Xenova/bge-small-zh-v1.5/resolve/main"
+          DIR="resources/models/bge-small-zh-v1.5"
+          mkdir -p "$DIR/onnx"
+          for f in config.json tokenizer.json tokenizer_config.json special_tokens_map.json; do
+            curl -fsSL --retry 3 -o "$DIR/$f" "$BASE/$f"
+          done
+          curl -fsSL --retry 3 -o "$DIR/onnx/model.onnx" "$BASE/onnx/model.onnx"
+
+      - run: npm run build
+
+      # macOS 26+ 上 electron-builder 的 dmg 封装器（dmgbuild）存在 hdiutil 兼容问题，
+      # 稳妥路径：dir 产物 + 系统 hdiutil 手动封装（本机 macOS 27 实测可行）。
+      - run: npx electron-builder --mac dir --arm64 --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Wrap .app into dmg
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          hdiutil create -volname "志书撰写工具" -srcfolder dist/mac-arm64 -ov -format UDZO "dist/XieZhiShu-${VERSION}-arm64.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: XieZhiShu-mac-arm64-dmg
+          path: dist/*.dmg
+          retention-days: 30
