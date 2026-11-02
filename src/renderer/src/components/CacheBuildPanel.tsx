@@ -78,6 +78,8 @@ export default function CacheBuildPanel(): JSX.Element {
   const [busy, setBusy] = useState(false)
   const [clearing, setClearing] = useState(false)
   const [touched, setTouched] = useState(false)
+  /** 上一次「建立」实测的每篇毫秒（null = 还没测过，估算用默认 75ms/篇） */
+  const [measuredMs, setMeasuredMs] = useState<number | null>(null)
 
   const f = Number(from)
   const t = Number(to)
@@ -132,19 +134,26 @@ export default function CacheBuildPanel(): JSX.Element {
     return () => window.clearInterval(timer)
   }, [running, localActive, refresh])
 
-  // 初始设置（抓取节奏档位 + 站点清单发现模式）与一次性刷新
+  // 初始设置（抓取节奏档位 + 站点清单发现模式 + 上次实测速度）与一次性刷新
   useEffect(() => {
     void (async () => {
       try {
         const res = await window.api.getSettings()
         const patch =
           res.ok && res.data
-            ? (res.data as { webCrawlTier?: CrawlTier; webDiscoveryMode?: 'auto' | 'manual'; webDiscoveryPages?: number; webDiscoveryDepth?: number })
+            ? (res.data as {
+                webCrawlTier?: CrawlTier
+                webDiscoveryMode?: 'auto' | 'manual'
+                webDiscoveryPages?: number
+                webDiscoveryDepth?: number
+                webFetchMsPerArticle?: number
+              })
             : null
         if (patch?.webCrawlTier) setTier(patch.webCrawlTier)
         if (patch?.webDiscoveryMode) setDiscoveryMode(patch.webDiscoveryMode)
         if (patch?.webDiscoveryPages) setDiscoveryPages(patch.webDiscoveryPages)
         if (patch?.webDiscoveryDepth) setDiscoveryDepth(patch.webDiscoveryDepth)
+        if (patch?.webFetchMsPerArticle) setMeasuredMs(patch.webFetchMsPerArticle)
       } catch {
         /* 设置读不到就用默认档位 */
       }
@@ -157,6 +166,22 @@ export default function CacheBuildPanel(): JSX.Element {
    * 注意不要依赖整个 status——那会让 1.5 秒轮询每次都跑一遍 5 万行的统计。
    */
   const finishedAt = status?.finishedAt ?? null
+
+  /*
+   * 「上次实测」必须跟着**档位**与**建立结束**刷新（2026-11-02 实测时发现的 UI 缺口）：
+   * 只在挂载时读一次，会让刚建完的实测值一直到重启才出现；换档后显示的也还是旧档位的数。
+   */
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await window.api.getSettings()
+        const v = res.ok && res.data ? (res.data as { webFetchMsPerArticle?: number }).webFetchMsPerArticle : undefined
+        setMeasuredMs(typeof v === 'number' ? v : null)
+      } catch {
+        /* 读不到就按"没测过"显示 */
+      }
+    })()
+  }, [tier, finishedAt])
   useEffect(() => {
     if (!yearsValid || !bridgeReady) {
       setPlan(null)
@@ -178,7 +203,12 @@ export default function CacheBuildPanel(): JSX.Element {
       })()
     }, 400)
     return () => window.clearTimeout(timer)
-  }, [f, t, yearsValid, bridgeReady, finishedAt])
+    /*
+     * `measuredMs` 也要进依赖：刚建完时实测值会变，预计分钟数必须跟着用新口径重算。
+     * 2026-11-02 实测时发现漏了它——面板显示"预计 60 分钟"（默认 75ms 口径），
+     * 而接口按实测 124ms 算出来是 98 分钟，两个数字自相矛盾。
+     */
+  }, [f, t, yearsValid, bridgeReady, finishedAt, measuredMs])
 
   const start = async (): Promise<void> => {
     setMsg(null)
@@ -345,6 +375,16 @@ export default function CacheBuildPanel(): JSX.Element {
             {plan.web.total - plan.web.pending > 0
               ? '；' + index.planAlready.replace('{already}', String(plan.web.total - plan.web.pending))
               : ''}
+            {/*
+              2026-11-02（第三项任务）：把估算依据摊开——"上次实测 N 篇/秒"比"预计 X 分钟"更能让用户判断。
+              没测过时如实说用的是默认口径（默认 75ms/篇 偏乐观，真实站点实测约 142ms/篇）。
+            */}
+            {'　'}
+            {measuredMs != null
+              ? index.planRateMeasured
+                  .replace('{ms}', String(measuredMs))
+                  .replace('{perSec}', (1000 / measuredMs).toFixed(1))
+              : index.planRateDefault}
           </p>
         ) : null}
         {/*

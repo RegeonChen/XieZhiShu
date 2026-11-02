@@ -23,10 +23,11 @@ import { setDb } from '../db/connection'
 import { runMigrations } from '../db/migrate'
 import { putCachedBody, putCacheMiss, sweepOrphanBodyCaches } from '../db/article-body-cache'
 import { getTaskById } from '../db/tasks'
-import { getSettings } from '../db/settings'
+import { effectiveCrawlTier, getSettings, setMeasuredFetchMsPerArticle } from '../db/settings'
 import { logMain } from '../logger'
 import { crawlAndScreenArticles } from './article-crawl'
 import { getCrawlOwner, requestFetchCancel } from './fetch-control'
+import { MIN_CALIBRATION_SAMPLE, calibrateMsPerArticle } from './fetch-estimate'
 import { syncAllSitesTracked } from './site-sync'
 import type { DiscoveryReport } from './site-crawler'
 import {
@@ -305,6 +306,29 @@ export async function runCacheBuild(
       }
     })
 
+    /*
+     * 2026-11-02（第三项任务）：把**本次实测**的每篇耗时写回设置，下次估算与闸门提示自动变准。
+     * 口径：`elapsedMs` 减去**暂停时间**（暂停期间池不发请求，算进去会把每篇毫秒抬高数倍）；
+     * 样本 < 20 篇不校准（`calibrateMsPerArticle` 返回 null），宁可继续用旧口径也不写坏值。
+     */
+    const activeMs = Math.max(0, res.elapsedMs - (res.pausedMs ?? 0))
+    const measuredMs = calibrateMsPerArticle(res.done, activeMs)
+    // 按**本次实际用的档位**记（切换档位后估算口径各自独立，见 `getMeasuredFetchMsPerArticle`）
+    const measuredTier = effectiveCrawlTier()
+    if (measuredMs != null) {
+      setMeasuredFetchMsPerArticle(measuredMs, measuredTier)
+      logMain(
+        'web',
+        `建立缓存：实测 ${res.done} 篇 / 有效耗时 ${(activeMs / 1000).toFixed(1)}s ≈ ${measuredMs}ms/篇` +
+          `（约 ${(1000 / measuredMs).toFixed(2)} 篇/秒，档位 ${measuredTier}），已写回该档位的估算口径`
+      )
+    } else if (res.done > 0) {
+      logMain(
+        'web',
+        `建立缓存：本次样本 ${res.done} 篇，未达校准门槛（≥${MIN_CALIBRATION_SAMPLE} 篇）或数据异常，估算口径保持不变`
+      )
+    }
+
     state.phase = res.cancelled ? 'cancelled' : 'done'
     /*
      * ⚠ 收尾必须用**最终结果**覆盖进度快照：进度是"每 5 篇 emit 一次"，最后一次 emit 会落后
@@ -548,6 +572,31 @@ if (import.meta.vitest) {
       expect(res.status.message).toContain('1 篇抓取失败')
       expect(localCalls).toBe(1)
       expect(res.status.finishedAt).not.toBeNull()
+    })
+
+    /*
+     * 2026-11-02（第三项任务）：**实测速度必须写回**，且口径是"扣掉暂停后的真实耗时"。
+     * 60 篇 / 有效 9 秒 = 150ms/篇；`elapsedMs` 里含 3 秒暂停，若不扣除会算成 200ms/篇。
+     */
+    it('建立结束后把实测每篇耗时写回设置（扣掉暂停时间）', async () => {
+      const res = await runCacheBuild(
+        { fromYear: 2020, toYear: 2021, includeLocal: false },
+        {
+          crawl: async () => fakeResult({ done: 60, total: 60, elapsedMs: 12_000, pausedMs: 3_000 }),
+          syncAll: fakeSync()
+        }
+      )
+      expect(res.started).toBe(true)
+      expect(getSettings().webFetchMsPerArticle).toBe(150)
+    })
+
+    it('样本不够（<20 篇）时不写回，避免偶然值污染估算', async () => {
+      const before = getSettings().webFetchMsPerArticle
+      await runCacheBuild(
+        { fromYear: 2020, toYear: 2021, includeLocal: false },
+        { crawl: async () => fakeResult({ done: 5, total: 5, elapsedMs: 1000, pausedMs: 0 }), syncAll: fakeSync() }
+      )
+      expect(getSettings().webFetchMsPerArticle).toBe(before)
     })
 
     it('includeLocal=false 时不动本地索引；取消时状态为 cancelled 且文案如实说明', async () => {

@@ -393,6 +393,12 @@ export const zhCN = {
       discoveryMeasured: '（上次实测：{pages} 页 / {depth} 层）',
       planPending: '本次要建立 {pending} 篇，预计约 {minutes} 分钟',
       planAlready: '已有 {already} 篇直接跳过（不会重做）',
+      /*
+       * 2026-11-02（第三项任务）：把估算依据摊开。实测值来自上一次「建立」的真实耗时，
+       * 没测过时如实说用的是默认口径（默认 75ms/篇偏乐观，真实站点实测约 142ms/篇）。
+       */
+      planRateMeasured: '（按上次实测 {ms}ms/篇 ≈ {perSec} 篇/秒 估算）',
+      planRateDefault: '（还没实测过，按默认 75ms/篇 估算，可能偏乐观）',
       planBlocked: '另有 {blocked} 篇地址不在该站点的同域白名单内，永远不会建立（已如实排除，不影响生成）',
       planUndated: '另有 {undated} 篇日期未知，不参与任何年份区间',
       planFailed: '区间统计失败：{message}',

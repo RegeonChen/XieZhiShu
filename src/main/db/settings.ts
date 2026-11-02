@@ -5,7 +5,7 @@
  *   currentLlmProviderId → current_llm_provider_id
  */
 import Database from 'better-sqlite3'
-import type { AppSettings } from '../../shared/types'
+import type { AppSettings, WebCrawlTier } from '../../shared/types'
 import {
   AUTO_MAX_DEPTH,
   AUTO_MAX_PAGES,
@@ -15,6 +15,7 @@ import {
   MIN_DISCOVERY_PAGES,
   type DiscoveryMode
 } from '../web-source/site-discovery'
+import { MAX_MEASURED_MS, MIN_MEASURED_MS } from '../web-source/fetch-estimate'
 import { getDb, setDb } from './connection'
 import { runMigrations } from './migrate'
 import { existsSync, statSync } from 'node:fs'
@@ -93,6 +94,10 @@ export function getSettings(): AppSettings {
   if (Number.isFinite(dp) && dp > 0) settings.webDiscoveryPages = dp
   const dd = Number(getSetting('web_discovery_depth') ?? '')
   if (Number.isFinite(dd) && dd > 0) settings.webDiscoveryDepth = dd
+  // 2026-11-02（第三项任务）：上一次「建立」实测的每篇毫秒（界面据此显示"上次实测"并参与估算）
+  // **按当前档位取**：换档后估算口径跟着换，不会拿快档数据去估保守档。
+  const measured = getMeasuredFetchMsPerArticle(effectiveCrawlTier())
+  if (measured != null) settings.webFetchMsPerArticle = measured
   return settings
 }
 
@@ -110,6 +115,37 @@ export function getDiscoverySettings(): { mode: DiscoveryMode; pages: number; de
     pages: Number.isFinite(pages) && pages > 0 ? pages : AUTO_MAX_PAGES,
     depth: Number.isFinite(depth) && depth > 0 ? depth : AUTO_MAX_DEPTH
   }
+}
+
+/**
+ * 上一次「建立缓存」实测出的**每篇毫秒**（2026-11-02，第三项任务）。
+ *
+ * 为什么存在设置里而不是常量里：默认 75ms/篇 是估的，真实站点实测约 122ms/篇（2013 年 318 篇实测，
+ * 40ms/6 档），而"预计 N 分钟"会直接显示在闸门弹框与建立面板上。每次建立结束后用真实数据算一个值写回来，
+ * 下次估算就自动变准。**只认 ≥20 篇的样本**（见 `calibrateMsPerArticle`），读不到就是 `null`（用默认口径）。
+ *
+ * **按抓取档位分别记**（2026-11-02 实测后修正）：safe / standard / fast 的间隔与并发差 3 倍以上
+ * （120ms/2、60ms/4、40ms/6），用一个全局值会让"切到保守档"后仍按快档估算——等于骗人。
+ */
+function msPerArticleKey(tier: WebCrawlTier): string {
+  return `web_fetch_ms_per_article:${tier}`
+}
+
+export function getMeasuredFetchMsPerArticle(tier: WebCrawlTier = 'standard'): number | null {
+  const raw = Number(getSetting(msPerArticleKey(tier)) ?? '')
+  return Number.isFinite(raw) && raw >= MIN_MEASURED_MS && raw <= MAX_MEASURED_MS ? Math.round(raw) : null
+}
+
+/** 写回实测的每篇毫秒（越界值直接不写——宁可继续用旧口径，也不要毒化估算） */
+export function setMeasuredFetchMsPerArticle(ms: number, tier: WebCrawlTier = 'standard'): void {
+  if (!Number.isFinite(ms) || ms < MIN_MEASURED_MS || ms > MAX_MEASURED_MS) return
+  setSetting(msPerArticleKey(tier), String(Math.round(ms)))
+}
+
+/** 当前生效的抓取档位（设置里没选过 = 标准档，与 `crawlTierParams` 的缺省一致） */
+export function effectiveCrawlTier(): WebCrawlTier {
+  const tier = getSetting('web_crawl_tier')
+  return tier === 'safe' || tier === 'fast' ? tier : 'standard'
 }
 
 /** 年份是否落在可接受范围内（与 `article-date.ts` 的 MIN_YEAR 口径一致） */

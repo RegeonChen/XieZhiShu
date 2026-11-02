@@ -574,6 +574,11 @@ export interface AppSettings {
   webDiscoveryPages?: number
   /** 手动模式的层数上限（1–8；缺省 6） */
   webDiscoveryDepth?: number
+  /**
+   * 上一次「建立缓存」**实测**出的每篇毫秒（2026-11-02；缺省 = 没测过，估算用默认 75ms/篇）。
+   * 由建立引擎在收官时按"真实耗时 ÷ 篇数（扣暂停）"写回，界面据此显示"上次实测"并参与预计时间。
+   */
+  webFetchMsPerArticle?: number
 }
 
 /** Phase 10 P4：按年份区间全量抓取时的进度（渲染层据此显示进度与剩余时长） */

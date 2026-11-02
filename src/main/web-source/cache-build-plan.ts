@@ -22,6 +22,7 @@ import { runMigrations } from '../db/migrate'
 import { putCachedBody, putCacheMiss } from '../db/article-body-cache'
 import { allowedHostsForSite, isAllowedTargetUrl } from './article-guards'
 import { estimateWebFetchMinutes } from './fetch-estimate'
+import { getMeasuredFetchMsPerArticle, effectiveCrawlTier } from '../db/settings'
 import type {
   BuildNotReadyReason,
   BuildYearBucket,
@@ -240,7 +241,7 @@ export function buildCacheBuildPlan(req?: { fromYear?: number; toYear?: number }
     blocked: sum((b) => b.blocked),
     pending: sum((b) => b.pending),
     byYear,
-    estimatedMinutes: estimateWebFetchMinutes(sum((b) => b.pending)),
+    estimatedMinutes: estimateWebFetchMinutes(sum((b) => b.pending), getMeasuredFetchMsPerArticle(effectiveCrawlTier()) ?? undefined),
     undatedArticles: undated
   }
 
