@@ -206,7 +206,7 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | ~~事件 `webSource:crawlProgress`~~ | — | **2026-10-05 已删除**（随手动抓取入口）。生成期的抓取进度改由事件 `compilation:progress` 的 stage 文案如实汇报（"正在抓取网页资料（N/M 篇：采用 X、筛除 Y，剩余约 Z 分钟）…"）+ 主进程日志 |
 | `webSource:setCrawlPaused` | `{ paused: boolean }` → `{ paused: boolean }` | **2026-10-05（用户要求）** 暂停 / 继续抓取。暂停期间 `runPool` 在**取下一篇之前**等待（不占限速名额、不发请求）；已抓到的篇都已入缓存与账本，点「继续」从原处接着跑。**2026-10-06 前未写入本文档（补记）** |
 | `webSource:cacheStats` | `{}` → `{ entries, bytes, byState: { ok, 'no-body', blocked } }` | **2026-10-05** 网页正文缓存（`web_article_body`）占用。`byState` 是 **Migration 050** 的三态计数（`ok` 正文可用 / `no-body` 已尝试但没取到可用正文 / `blocked` URL 不在同域白名单内）。**2026-10-06 前未写入本文档（补记）** |
-| `webSource:clearCache` | `{}` → `{ cleared }` | **2026-10-05**：清空正文缓存。**只删 `web_article_body`**，不动 `sources` / 目录 / 账本 |
+| `webSource:clearCache` | `{}` → `{ cleared }` | **2026-10-05**：清空正文缓存。**只删 `web_article_body`**，不动 `sources` / 目录 / 账本。**2026-11-02**：它会连 `no-body` / `blocked` 标记一起删（那些篇会重新变为"待建立"），所以界面**必须先弹确认框**并如实给出篇数（Implementation：`CacheBuildPanel` 的 `pendingClear`） |
 | `cacheBuild:plan` | `{ fromYear?, toYear? }` → `CacheBuildPlan` | **2026-10-06（用户需求「建立缓存与索引」，Phase A）**：生成前闸门与设置页面板共用的**只读**规划。`web = { fromYear, toYear, total, cached, noBody, blocked, pending, byYear[], estimatedMinutes, undatedArticles }`——**`pending` 是唯一决定闸门放不放行的数**；`noBody` / `blocked` **绝不算缺口**（否则失效链接会让闸门永远不放行）。`local = { total, ready, pending, indexing, failed, bodyMissing }`，其中 `pending/indexing/failed` **已排除 `body_missing = 1` 的来源**。`ready` + `reasons[]`（`web-pending` / `local-pending` / `local-index-failed`）由纯函数 `decideReadiness` 给出（索引失败默认也算未就绪；可关）。省略年份 → 默认 **2005–2025**；年份无效（非整数 / 越界 / 起 > 止）→ `INVALID_PARAM`。**只读**：不写库、不抓网页、不调大模型。实现 `web-source/cache-build-plan.ts` |
 | `cacheBuild:start` | `{ fromYear?, toYear?, includeLocal? }` → `{ started, message, status }` | **2026-10-06（用户需求，Phase C）建立缓存与索引**：**后台跑**（网页抓取可能几十分钟），调 `runCacheBuild` 编排「网页正文缓存（`crawlAndScreenArticles({ mode: 'build' })`）+ 本地索引（`requeuePendingIndexes`，与抓取并行）」。**已在建立中会被拒绝**（`started: false`，不重复建立）；年份非法 → `INVALID_PARAM`（**不静默回退默认区间**）。目标只取 `listUncachedRangeArticles`（**没有缓存行**的目录条目），所以 `status.web.total` = 真正要干活的篇数；`status.alreadyBuilt` 如实报"已建好、直接跳过"的篇数（需求 ③） |
 | `cacheBuild:stop` | `{}` → `{ stopped }` | **2026-10-06（Phase C）**：只停止"抓新的"（已抓到的都已写入缓存）；用独立停止开关 + 全局抓取取消，`shouldCancel` 让抓取池在**取下一篇之前**退出。没在跑返回 `stopped: false` |
@@ -260,6 +260,14 @@ type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
 | `compilation:undoState` | `{ compilationId }` → `{ undoAvailable, redoAvailable }` | 查询当前汇编可撤销/可恢复步数 |
 | `compilation:recycleBin:list` | `{ compilationId }` → `{ items: CompilationRecycleBinItem[] }` | 回收站条目（**Phase 7.7 起仅矛盾一类**，按时间倒序 = 最近删除在前） |
 | `compilation:recycleBin:restore` | `{ binId }` → `{ contradiction? }` | 恢复条目：矛盾回到 pending（卡片回收站与 `compilation_card_recycle_bin` 已随 Phase 7.7 删除） |
+
+> **2026-11-02 审查修复（抓取独占与就绪语义）**
+> 1. **抓取独占**：主进程同一时刻只允许**一条**网页抓取（生成期筛选 `screen` / 建立缓存 `build`）。`fetch-control.ts` 提供租约 `acquireCrawlFor / releaseCrawlFrom / getCrawlOwner`，`crawlAndScreenArticles` 是唯一入口（拿不到租约抛 `CrawlBusyError`）。
+>    - `compilation:generate` 在闸门之后**再查一次**：若 `screen` 抓取已在跑，返回 `code: 'BUSY'`（"另一个生成正在抓取网页资料…"），**不写任务数据**；
+>    - `cacheBuild:start` 在开始前检查：若 `screen` 抓取在跑，返回 `started: false` 并给出人话原因（界面显示 `message`，不再显示笼统"已拒绝"）；
+>    - **取消按归属**：`requestFetchCancel('build')` **不会**中断正在跑的生成抓取（应用退出仍是无参强制取消）。
+> 2. **`CompilationReadiness` 增加 `webNoBody`**：`webCached` 仍是"已建立（含 `ok`/`no-body`/`blocked` 三种标记）"的合计（字段名为历史原因保留），有可用正文的篇数 = `webCached − webNoBody − webBlocked`；生成前阻断框会另起一句说明"其中 N 篇已尝试但没有可用正文"。
+> 3. **`webSource:cacheStats` 的三态计数**（`byState`）现在也用于"清空缓存"的确认框（如实告知会清掉多少正文、多少标记）。
 | `compilation:repairs:revert` / `compilation:repairs:apply` | ~~`{ repairId }` → `{ item, repair }`~~ | **已于 Phase 7.7 删除**（连同渲染层徽标与弹窗、`compilation-repairs.ts` 仓储、`compilation_repairs` 表） |
 | `compilation:versions` | `{ compilationId }` → `{ versions: CompilationVersionSummary[] }` | **Phase 7.4** 版本列表（`versionNo / origin / instruction? / reply? / changeSummary / createdAt`）。内容变更类操作各记一版；**恢复不记版本**；只保留最近 2 版（`pruneCompilationVersions(id, 2)`）。当前唯一用途是对话编辑的**乐观锁基线**（`baseVersionNo`），界面无版本下拉 |
 | `compilation:version:diff` / `compilation:version:restore` | ~~两版差异 / 恢复到某版~~ | **已于 Phase 7.7 删除**：复核态改为「本次修改前后」的自动差异（由 `compilation:doc:edit` 返回），版本下拉与恢复按钮早已移除。仓储 `restoreCompilationFromVersion` 保留为版本恢复原语（当前无调用方） |
