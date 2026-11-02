@@ -23,9 +23,9 @@ AI 辅助地方志 / 志书编纂的 Windows 桌面工具。面向地方志、�
 
 ## 二、下载与安装
 
-最新版本：**v0.4.0** → [Releases](https://github.com/RegeonChen/XieZhiShu/releases/latest)
+最新版本：**v0.4.1** → [Releases](https://github.com/RegeonChen/XieZhiShu/releases/latest)
 
-- 安装包：`XieZhiShu-Setup-0.4.0-x64.exe`（Windows x64，NSIS，约 340 MB，**已内含本地嵌入模型**，开箱即可用语义检索）。
+- 安装包：`XieZhiShu-Setup-0.4.1-x64.exe`（Windows x64，NSIS，约 340 MB，**已内含本地嵌入模型**，开箱即可用语义检索）。
 - 安装包**未做代码签名**：首次运行 Windows 可能提示"未知发布者"，选择"仍要运行"即可。
 - **覆盖安装即保留原有数据**（数据库在 `%APPDATA%\xie-zhishu`）；首次启动会自动执行数据库迁移。
 - **升级后或首次使用，请先到 设置 →「建立缓存与索引」点一次「建立」**：软件会按您的年份区间把网页正文缓存与本地索引补齐。未建齐时点「生成汇编」会被**明确拦住**并引导过去（这是刻意的设计，不是故障）。
