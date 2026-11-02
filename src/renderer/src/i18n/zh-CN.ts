@@ -655,8 +655,7 @@ export const zhCN = {
     notReadyLocalPending: '本地资料库还有 {count} 篇没有建立索引',
     notReadyLocalFailed: '本地资料库有 {count} 篇索引失败（重新建立可恢复）',
     notReadyBuilding: '正在「建立缓存与索引」（抓取同一时刻只能跑一个，等它结束再生成）',
-    notReadyAlready: '这一区间已建立 {cached} 篇，不会重复建立。',
-    /* 2026-11-02：把"已建立"里有多少是"无可用正文"标记说清楚，避免被读成"有正文" */
+    notReadyAlready: '这一区间已建立 {cached} 篇，不会重复建立。',    /* 2026-11-02：把"已建立"里有多少是"无可用正文"标记说清楚，避免被读成"有正文" */
     notReadyNoBody: '其中 {count} 篇已尝试但没有可用正文（老文章失效/模板页），不算缺口。',
     notReadyBlocked: '另有 {blocked} 篇地址不在站点白名单内、永远不会建立（不影响生成）。',
     notReadyUndated: '另有 {undated} 篇日期未知，不参与年份区间。',
@@ -704,6 +703,10 @@ export const zhCN = {
      * `webScanInvalidBody` 的含义也随之改为"未通过正文相关性判定而丢弃"。
      */
     webScan: '网页资料：本轮抓取 {hits} 篇，采用 {fetched} 篇（{chars} 字）',
+    /* 2026-11-02（性能基线）：本轮大模型用量，让用户能直接看到"花了多少" */
+    usageSummary: '本轮调用大模型 {calls} 次，输入 {input} / 输出 {output} token',
+    usageSummaryNoTokens: '本轮调用大模型 {calls} 次（该 Provider 未返回 token 用量，无法统计 token）',
+    usageSummaryPartial: '（其中 {count} 次未返回 token 用量）',
     /* 2026-10-04 用户裁定：年份区间改在**任务流程里**选（新建任务、第一次发撰写要求时） */
     webYearTitle: '资料年份范围',
     webYearFrom: '起始年',

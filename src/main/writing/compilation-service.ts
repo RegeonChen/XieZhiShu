@@ -11,7 +11,7 @@
  * 且修正的输入从整篇降到约 1/3，净增成本有限。提纯为黑箱（不保留提纯前原文、不可单独回退，
  * 需要退回时用「重新生成汇编」），修正的「标记 + 回退」语义因此仍与最终卡片一对一。
  */
-import type { RetrievedChunk } from '../../shared/types'
+import type { CompilationUsage, RetrievedChunk } from '../../shared/types'
 import { ErrorCodes } from '../../shared/types'
 import Database from 'better-sqlite3'
 import { setDb } from '../db/connection'
@@ -28,6 +28,7 @@ import { getProviderSecret } from '../llm/provider-store'
 import { safeStorageCodec } from '../llm/secret'
 import { chatCompletion, type ChatMessage } from '../llm/chat'
 import { logMain } from '../logger'
+import { beginUsageSession, describeUsage, getUsageTotals } from '../llm/usage'
 import { extractTopicTerms, expandDomainHints } from '../web-source/site-crawler'
 import { syncSiteTracked } from '../web-source/site-sync'
 import { sentenceRanges } from '../parse/anchors'
@@ -203,6 +204,8 @@ export interface CompilationProgress {
 export type GenerateCompilationResult =
   | {
       ok: true
+      /** 2026-11-02（性能基线）：本轮大模型用量（调用次数 / token / 分阶段） */
+      usage?: CompilationUsage
       compilationId: string
       candidateChunks: number
       contradictions: number
@@ -234,7 +237,7 @@ export type GenerateCompilationResult =
        */
       convergence?: ArticleConvergenceStats
     }
-  | { ok: false; error: { code: string; message: string } };
+  | { ok: false; error: { code: string; message: string }; usage?: CompilationUsage };
 
 /** 生成资料汇编时大模型异常中断的可视化信息（供前端展示「尝试继续」） */
 export interface CompilationInterrupt {
@@ -1413,7 +1416,46 @@ export interface GenerateCompilationOptions {
   skipConvergence?: boolean
 }
 
+/**
+ * 2026-11-02（第一项任务）：**包一层用量统计**。
+ * 为什么用薄壳而不是在每个 return 前手写：`generateCompilation` 有十几条返回路径（含各种失败），
+ * 逐条补必然漏；薄壳能保证"只要进过这个函数就有用量"，失败路径同样带 usage（用于诊断"卡在哪、烧了多少"）。
+ */
 export async function generateCompilation(
+  taskId: string,
+  title: string,
+  onProgress?: (p: CompilationProgress) => void,
+  onAdvice?: (message: string) => void,
+  options: GenerateCompilationOptions = {}
+): Promise<GenerateCompilationResult> {
+  beginUsageSession()
+  const result = await generateCompilationInner(taskId, title, onProgress, onAdvice, options)
+  return attachUsage(result)
+}
+
+/** 断点续跑：同样统计"这一段"的用量 */
+export async function continueCompilation(
+  compilationId: string,
+  onProgress?: (p: CompilationProgress) => void,
+  onAdvice?: (message: string) => void
+): Promise<GenerateCompilationResult> {
+  beginUsageSession()
+  const result = await continueCompilationInner(compilationId, onProgress, onAdvice)
+  return attachUsage(result)
+}
+
+/** 收尾：把本轮用量挂到结果上并记一行日志（失败也记，便于排查"额度被烧在哪"） */
+function attachUsage(result: GenerateCompilationResult): GenerateCompilationResult {
+  const usage = getUsageTotals()
+  try {
+    logMain('compilation', `大模型用量：${describeUsage(usage)}`)
+  } catch {
+    /* 日志失败不影响生成结果 */
+  }
+  return { ...result, usage }
+}
+
+async function generateCompilationInner(
   taskId: string,
   title: string,
   onProgress?: (p: CompilationProgress) => void,
@@ -2680,7 +2722,7 @@ function persistLocalFallback(compilationId: string, paragraphs: AssembledParagr
  * 仅会话内（内存 resumeStore，应用重启后清空）。复用已完成窗口/提纯批次/修正批次，重读失败或未完成的
  * 窗口、重跑未完成的提纯与修正批次，并继续扫描剩余矛盾批次；再次异常仍返回 interrupted（可再点「尝试继续」）。
  */
-export async function continueCompilation(compilationId: string, onProgress?: (p: CompilationProgress) => void, onAdvice?: (message: string) => void): Promise<GenerateCompilationResult> {
+async function continueCompilationInner(compilationId: string, onProgress?: (p: CompilationProgress) => void, onAdvice?: (message: string) => void): Promise<GenerateCompilationResult> {
   const state = resumeStore.get(compilationId)
   if (!state) return fail(ErrorCodes.INVALID_PARAM, '没有可继续的生成中断记录')
 

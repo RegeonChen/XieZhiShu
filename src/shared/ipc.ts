@@ -13,6 +13,7 @@ import type {
   CompilationContradiction,
   CompilationInterrupt,
   CompilationReadiness,
+  CompilationUsage,
   CompilationRecycleBinItem,
   CompilationVersionSummary,
   Contradiction,
@@ -748,6 +749,8 @@ export type CompilationGenerateRes = {
   /** 本轮**真正送细读**的候选块数（勾选「本轮不做收敛」时 = 闸门后的全部段数） */
   candidateChunks?: number
   interrupted?: CompilationInterrupt
+  /** 2026-11-02（性能基线）：本轮大模型用量（调用次数 / token / 分阶段），供生成汇总与成本核算 */
+  usage?: CompilationUsage
 }
 /** 中断续跑（Phase 6.x：会话内断点续传） */
 export interface CompilationContinueReq {
@@ -759,6 +762,8 @@ export type CompilationContinueRes = {
   extractScan?: CompilationExtractScan
   webScan?: CompilationWebScan
   interrupted?: CompilationInterrupt
+  /** 2026-11-02（性能基线）：本轮（续跑这一段）大模型用量 */
+  usage?: CompilationUsage
 }
 /** 资料汇编卡片重新按时间排序（2026-08-28）：asc = 正序（旧→新），desc = 反序（新→旧） */
 export interface CompilationReorderReq {

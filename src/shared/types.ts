@@ -754,6 +754,25 @@ export type BuildNotReadyReason = 'web-pending' | 'local-pending' | 'local-index
  * 界面指引用户去设置页「建立缓存与索引」，建完才能生成。判据只看**这一篇有没有缓存**
  * （决策 2A：不比较区间大小；`no-body` / `blocked` 两种"已尝试过"的标记**不算缺口**）。
  */
+/**
+ * 一次生成的大模型用量（2026-11-02，第一项任务「性能基线」）。
+ *
+ * 为什么要有它：`llm_call_logs` 只记字符数与耗时，**没有 token**——"这次生成花了多少、哪个阶段最贵"
+ * 无法回答。Provider 的 `usage` 现在被逐次采集并按 `kind` 分组，随生成结果一起返回，
+ * 界面在生成汇总里如实显示，日志也记一句（便于横向比较不同区间/材料的成本）。
+ */
+export interface CompilationUsage {
+  /** 本轮实际调用次数（**失败调用也计入**） */
+  calls: number
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+  /** 返回里没有 `usage` 的调用数（流式未带 include_usage / 兼容实现不返回）——不猜 token */
+  callsWithoutUsage: number
+  /** 按调用用途分组（`detailed-read` / `extract` / `contradiction-scan` …） */
+  byKind: Record<string, { calls: number; promptTokens: number; completionTokens: number; totalTokens: number }>
+}
+
 export interface CompilationReadiness {
   /** 能否开始生成（**唯一判据**） */
   ready: boolean

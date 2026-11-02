@@ -50,6 +50,14 @@ function buildGeneratedSummary(
   prefix: string,
   comp: CompilationView,
   scans: {
+    /** 2026-11-02（性能基线）：本轮大模型用量（调用次数 / token / 分阶段） */
+    usage?: {
+      calls: number
+      promptTokens: number
+      completionTokens: number
+      totalTokens: number
+      callsWithoutUsage: number
+    }
     contradictionScan?: { ok: boolean; message?: string }
     extractScan?: {
       ok: boolean
@@ -152,6 +160,30 @@ function buildGeneratedSummary(
   }
   // 网页资料本轮抓取情况：让用户知道"这次用上了多少网页材料"
   const ws = scans.webScan
+  /*
+   * 2026-11-02（性能基线）：把**本轮大模型用量**如实写进汇总。
+   * 用户据此判断"这次生成花了多少"，我们据此做性能基线（同一任务重跑的数字可直接对比）。
+   */
+  const us = scans.usage
+  if (us && us.calls > 0) {
+    const fmt = (n: number): string => {
+      if (!Number.isFinite(n) || n <= 0) return '0'
+      return n < 10000 ? String(Math.round(n)) : (n / 10000).toFixed(n >= 1000000 ? 0 : 1) + ' 万'
+    }
+    if (us.callsWithoutUsage === us.calls) {
+      parts.push(zhCN.compilation.usageSummaryNoTokens.replace('{calls}', String(us.calls)))
+    } else {
+      parts.push(
+        zhCN.compilation.usageSummary
+          .replace('{calls}', String(us.calls))
+          .replace('{input}', fmt(us.promptTokens))
+          .replace('{output}', fmt(us.completionTokens))
+      )
+      if (us.callsWithoutUsage > 0) {
+        parts.push(zhCN.compilation.usageSummaryPartial.replace('{count}', String(us.callsWithoutUsage)))
+      }
+    }
+  }
   if (ws && ws.sites > 0) {
     parts.push(
       zhCN.compilation.webScan

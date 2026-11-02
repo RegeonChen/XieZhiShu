@@ -898,7 +898,9 @@ handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerate
       // 第二组 ⑤：把"本轮送了多少段/字、多少段因无信号未送"透出给生成汇总
       convergence: res.convergence,
       candidateChunks: res.candidateChunks,
-      interrupted: res.interrupted
+      interrupted: res.interrupted,
+      // 2026-11-02（性能基线）：本轮大模型用量（调用次数 / token / 分阶段），界面在生成汇总里显示
+      usage: res.usage
     }
   }
 }))
@@ -935,7 +937,8 @@ handleLogged(IPC.COMPILATION_CONTINUE, async (event, params: CompilationContinue
       contradictionScan: res.contradictionScan,
       extractScan: res.extractScan,
       webScan: res.webScan,
-      interrupted: res.interrupted
+      interrupted: res.interrupted,
+      usage: res.usage
     }
   }
 }))

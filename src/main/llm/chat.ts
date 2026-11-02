@@ -9,6 +9,7 @@ import { net } from 'electron'
 import { ErrorCodes } from '../../shared/types'
 import { getDb } from '../db/connection'
 import { logLlm, logLlmPayload } from '../logger'
+import { recordUsage } from './usage'
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
@@ -21,7 +22,19 @@ export interface ChatProvider {
   apiKey: string
 }
 
-export type ChatResult = { ok: true; text: string } | { ok: false; error: { code: string; message: string } }
+export type ChatResult = { ok: true; text: string; usage?: ChatUsage } | { ok: false; error: { code: string; message: string } }
+
+/**
+ * Provider 返回的 token 用量（2026-11-02，第一项任务）。
+ * OpenAI-compatible 的 `/chat/completions` 在响应体里带 `usage`；**流式**要显式请求
+ * `stream_options: { include_usage: true }` 才会在最后一个 chunk 里给。缺失时保持 undefined——
+ * `usage.ts` 会如实记"没有用量"，而不是猜一个数。
+ */
+export interface ChatUsage {
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+}
 
 export const DEFAULT_CHAT_TIMEOUT_MS = 60000
 
@@ -109,6 +122,11 @@ export async function chatCompletion(provider: ChatProvider, messages: ChatMessa
   const result = await doCompletion(provider, messages, timeoutMs, opts)
   const elapsedMs = Date.now() - started
   const kind = meta?.kind ?? 'misc'
+  /*
+   * 2026-11-02（第一项任务）：把 token 用量记进本轮账本（`usage.ts`）。
+   * 失败调用也计数（token 未知），这样"调用了几次"始终是真数。
+   */
+  recordUsage(kind, result.ok ? result.usage : undefined)
   logLlmCall(
     meta ?? { kind: 'misc' },
     provider.model,
@@ -159,6 +177,8 @@ async function requestOnce(
       messages,
       stream: opts?.onDelta ? true : false
     }
+    // 流式下也必须拿到 token 用量（性能基线要用）：OpenAI-compatible 需要显式开 include_usage
+    if (opts?.onDelta) body.stream_options = { include_usage: true }
     if (typeof opts?.temperature === 'number') body.temperature = opts.temperature
     if (typeof opts?.seed === 'number') body.seed = opts.seed
     const res = await Promise.race([
@@ -181,14 +201,14 @@ async function requestOnce(
 
     if (opts?.onDelta) {
       // 流式：SSE 逐段解析，把每个 delta.content（模型输出原文片段，对 JSON 输出型调用即 JSON 文本片段）回调给调用方
-      const content = await readStreamContent(res.body, opts.onDelta)
-      if (content == null) {
+      const streamed = await readStreamContent(res.body, opts.onDelta)
+      if (streamed == null) {
         return { result: { ok: false, error: { code: ErrorCodes.LLM_FORMAT_INVALID, message: '模型返回内容无法解析' } }, status: res.status }
       }
-      if (!content.trim()) {
+      if (!streamed.text.trim()) {
         return { result: { ok: false, error: { code: ErrorCodes.LLM_EMPTY_RESPONSE, message: '模型返回了空内容' } }, status: res.status }
       }
-      return { result: { ok: true, text: content }, status: res.status }
+      return { result: { ok: true, text: streamed.text, usage: streamed.usage }, status: res.status }
     }
 
     const bodyText = await res.text()
@@ -199,7 +219,7 @@ async function requestOnce(
     if (!content.trim()) {
       return { result: { ok: false, error: { code: ErrorCodes.LLM_EMPTY_RESPONSE, message: '模型返回了空内容' } }, status: res.status }
     }
-    return { result: { ok: true, text: content }, status: res.status }
+    return { result: { ok: true, text: content, usage: parseUsage(bodyText) }, status: res.status }
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       return { result: { ok: false, error: { code: ErrorCodes.LLM_TIMEOUT, message: '模型响应超时，请稍后重试' } }, status: null }
@@ -305,15 +325,18 @@ export function createJsonFieldStreamer(field: string): { feed: (text: string) =
   }
 }
 
-/** 读取 SSE 响应流：解析 data: 行中的 delta.content，逐段回调；返回拼接后的完整内容。非 SSE 响应回退 JSON 解析 */
-async function readStreamContent(body: ReadableStream<Uint8Array> | null, onDelta: (text: string) => void): Promise<string | null> {
+/** 读取 SSE 响应流：解析 data: 行中的 delta.content，逐段回调；返回拼接后的完整内容（含 usage）。非 SSE 响应回退 JSON 解析 */
+async function readStreamContent(
+  body: ReadableStream<Uint8Array> | null,
+  onDelta: (text: string) => void
+): Promise<{ text: string; usage?: ChatUsage } | null> {
   if (!body) return null
   const reader = body.getReader()
   const decoder = new TextDecoder('utf-8')
   let buffer = ''
   let raw = ''
   // 用对象承载可变量，避免 TS 对闭包内赋值的控制流收窄
-  const state: { deltas: string[]; sawData: boolean } = { deltas: [], sawData: false }
+  const state: { deltas: string[]; sawData: boolean; usage?: ChatUsage } = { deltas: [], sawData: false }
 
   const handleLine = (line: string): void => {
     const trimmed = line.trim()
@@ -323,7 +346,10 @@ async function readStreamContent(body: ReadableStream<Uint8Array> | null, onDelt
     if (!payload) return
     state.sawData = true
     try {
-      const obj = JSON.parse(payload) as { choices?: { delta?: { content?: unknown } }[] }
+      const obj = JSON.parse(payload) as { choices?: { delta?: { content?: unknown } }[]; usage?: unknown }
+      // 流式下 usage 出现在**最后一个** chunk（`stream_options.include_usage`）——照收，不猜
+      const u = normalizeUsage(obj?.usage)
+      if (u) state.usage = u
       const d = obj?.choices?.[0]?.delta?.content
       if (typeof d === 'string' && d.length > 0) {
         state.deltas.push(d)
@@ -349,11 +375,36 @@ async function readStreamContent(body: ReadableStream<Uint8Array> | null, onDelt
     buffer += decoder.decode()
     for (const line of buffer.split('\n')) handleLine(line)
 
-    if (state.sawData && state.deltas.length > 0) return state.deltas.join('')
+    if (state.sawData && state.deltas.length > 0) return { text: state.deltas.join(''), usage: state.usage }
     // 未收到 SSE 数据行：按普通 JSON 响应兜底解析
-    return parseContent(raw)
+    const fallback = parseContent(raw)
+    return fallback == null ? null : { text: fallback, usage: parseUsage(raw) }
   } catch {
-    return state.deltas.length > 0 ? state.deltas.join('') : null
+    return state.deltas.length > 0 ? { text: state.deltas.join(''), usage: state.usage } : null
+  }
+}
+
+/** 解析响应体里的 `usage`（缺字段/类型不对时返回 undefined，不猜） */
+function parseUsage(bodyText: string): ChatUsage | undefined {
+  try {
+    const body = JSON.parse(bodyText) as { usage?: unknown }
+    return normalizeUsage(body?.usage)
+  } catch {
+    return undefined
+  }
+}
+
+function normalizeUsage(raw: unknown): ChatUsage | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const u = raw as { prompt_tokens?: unknown; completion_tokens?: unknown; total_tokens?: unknown }
+  const p = Number(u.prompt_tokens)
+  const c = Number(u.completion_tokens)
+  if (!Number.isFinite(p) || !Number.isFinite(c)) return undefined
+  const t = Number(u.total_tokens)
+  return {
+    promptTokens: Math.max(0, Math.round(p)),
+    completionTokens: Math.max(0, Math.round(c)),
+    totalTokens: Number.isFinite(t) ? Math.max(0, Math.round(t)) : Math.max(0, Math.round(p + c))
   }
 }
 
