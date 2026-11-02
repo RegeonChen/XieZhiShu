@@ -534,3 +534,26 @@
 **回归测试**：`article-crawl.ts` 内联测试断言「任何档位下估算器看到的都是 120ms、速率 8.33 篇/秒」；`site-crawler.ts` 断言 `max(下限, robots, 档位)` 语义。
 
 **仍未做**（可选增强）：用「已处理 ÷ 已用墙钟」的滚动实测速率替代模型（结束汇总已经这么算，天然准确）；以及 `fetchMs`/`processMs` 是跨 worker 共享的 `let`，失败篇会带上上一篇的样本（影响很小，但属于同类隐患）。
+
+---
+
+## 附二：大模型用量采集（2026-11-02，第一项任务「真实 Provider 端到端 + 性能基线」）
+
+**缺口**：`llm_call_logs` 只记**字符数**与耗时，**没有 token**——"这次生成花了多少、哪个阶段最贵"无法回答，成本核算与技术基线都做不了。
+
+**做法**（不新增迁移，纯内存账本）：
+- `llm/usage.ts`：会话式账本 `beginUsageSession / recordUsage(kind, usage) / getUsageTotals / describeUsage`，按调用用途（`detailed-read` / `extract` / `contradiction-scan` …）分组，直接得到"各阶段花了多少 token"。**没有 usage 的调用只计次数（`callsWithoutUsage`），绝不猜 token**——猜出来的数字比没有更糟（用户会拿它算钱）。
+- `llm/chat.ts`：非流式从响应体解析 `usage`；**流式必须显式请求 `stream_options: { include_usage: true }`**（OpenAI-compatible 约定），在最后一个 SSE chunk 里取；拿不到就留 undefined。成功/失败调用都记一次。
+- `compilation-service`：`generateCompilation` / `continueCompilation` 各包一层薄壳（`beginUsageSession` → 原函数 → `attachUsage`）——十几条返回路径（含各种失败）不必逐条补，**只要进过就有 usage**；收尾记一行日志。
+- 契约：`compilation:generate/continue` 响应新增 `usage`（`CompilationUsage`），生成汇总显示「本轮调用大模型 N 次，输入 X / 输出 Y token」；`docs/shared-contracts.md` 已同步。
+
+**真机验证**：本想用副本 profile 跑一次真实生成，结果 **0 次调用、3.9 秒出了 632 段**——由此查到一个**平台约束**：
+
+> **副本 profile 无法解密 API Key**。密钥由 `safeStorage`（DPAPI）加密，加密材料绑定在**该 profile 的 `Local State`** 上；`--user-data-dir=副本` 换了一份新的 `Local State` → 解密失败 → `resolveProvider()` 返回失败 → 管线按设计走**本地降级**（`finalizeCompilationLocalInto`）。
+
+所以「用副本测真实 Provider」这条路**走不通**：要真跑必须①用真实 profile（会写用户数据），或②在副本里用 UI 重新填一次 key。这条已写进 `agents.md`，避免下次再把"3.9 秒出 632 段"误读成性能好。
+
+**同时验证到的（真实有效）**：本地降级路径本身正常——无可用 Provider 时不报错、几秒内用**保守闸门后的材料**产出 632 段，进度与汇总都如实（`usage.calls = 0`）。
+
+**教训（自检脚本）**：preload 的 compilation 系列是**位置参数**（`compilationReadiness(taskId)`、`generateCompilation(taskId, title)`）；传对象会被当成 `taskId`，在 better-sqlite3 里表现为 `RangeError: Too few parameter values were provided`——我一度误判为软件缺陷，实际是自检脚本调用方式错误。
+
