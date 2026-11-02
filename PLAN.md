@@ -354,7 +354,8 @@
 
 用户实测：区间 2021–2025 = **21,341 篇**、实测 **6.83 篇/秒** → 52 分钟。只读核查排除了两条"看起来能省一半"的路：**URL 文章 id 去重收益为 0**（21,341 行 → 21,341 个不同 id）；候选标题 **96.4% 可走 A1 探针**（<8 字仅 3.6%）。
 
-1. **节奏档位（`AppSettings.webCrawlTier`，默认 `standard`）**：`safe` = 120ms/并发 2（P4 原始口径）、`standard` = **60ms/并发 4**、`fast` = 40ms/并发 6。实测 6.83 篇/秒说明瓶颈是"并发 ÷ 单篇服务耗时（≈293ms）"而非网络。
+1. **节奏档位（`AppSettings.webCrawlTier`，默认 `standard`）**：`safe` = 120ms/并发 2（P4 原始口径）、`standard` = **60ms/并发 4**、`fast` = 40ms/并发 6。
+   **⚠ 2026-11-02 实测修正**：`politeDelay` 有 **120ms 硬下限**（`WEB_FETCH_MIN_INTERVAL_MS`），所以低于它的 60/40ms **不生效**——三档真实吞吐都约 **8 篇/秒**（实测 7.6/7.9/8.2），差别只在"站点很慢（单篇 >0.24/0.48/0.72 秒）时并发才起作用"。**估算器必须用有效下限**（`effectiveMinIntervalMs`），否则会把进度估快 3 倍（见下）。
 2. **自适应降档 + 本轮重抓失败篇**（`web-source/adaptive-rate.ts`，纯逻辑已单测）：限流（429/503）**一次即降档**、连续失败 3 篇、或 40 篇窗口内失败 ≥6 → 间隔 ×2（上限 `base×8` 或 480ms），ETA 同步改口径，并在本轮内**重抓失败文章**（有界：每次降档触发、最多 2 轮）。**降档只影响本次运行**。
 3. **正文缓存（Migration 049 `web_article_body`）**：站点级、跨任务复用。抓取前命中 → **本地重筛（零网络）**；抓取后**一律写缓存**（命中与否都写）。存 `deflateRaw` 压缩正文 + `body_hash`/`body_chars`/**`probe_ok`（A1 探针结论——缓存里没有原始 HTML，重跑探针会误杀"标题只在 `<title>` 里"的正常文章）**/`text_source`；平均 1,325 字/篇 → 约 1.3–1.8KB/篇、6.2 万篇约 100MB。站点删除级联清理；`article-body-cache.ts` 提供 `bodyCacheStats`/`clearBodyCache`（对应 IPC `webSource:cacheStats`/`clearCache`）。
 4. **账本语义（用户裁定 A）**：**每次生成都对区间全量重筛**，`task_web_fetch` **不再是跳过依据**（降级为诊断与计数）→ `listUnprocessedForTask` 改为 `listRangeArticles`，`clearTaskFetchFailed` 随之删除。"是否联网"完全由正文缓存决定。
@@ -493,9 +494,9 @@
 
 ## 附：抓取速度实测与估算校准（2026-11-02）
 
-**背景**：建立缓存的"预计 N 分钟"一直是常量 75ms/篇（etch-estimate.ts），而 2026-10-05 真实抓取实测约 142ms/篇——差近一倍，且这句话直接显示在闸门弹框与建立面板上。
+**背景**：建立缓存的「预计 N 分钟」一直是常量 `75ms/篇`（`fetch-estimate.ts`），而 2026-10-05 真实抓取实测约 142ms/篇——差近一倍，且这句话直接显示在闸门弹框与建立面板上。
 
-**实测方法**：真实库副本（861.8 MB）+ 真实网络 + 走产品自己的建立流程（CDP 驱动"，而不是另写脚本抓），只看 **web 阶段**（站点清单同步不计入）；每档跑到 150–320 篇主动停止（cacheBuildStop），用"web 阶段墙钟 ÷ done"算每篇耗时。
+**实测方法**：真实库副本（861.8 MB）+ 真实网络 + 走产品自己的建立流程（CDP 驱动，而不是另写脚本抓），只看 **web 阶段**（站点清单同步不计入）；每档跑到 150–320 篇主动停止（`cacheBuildStop`），用「web 阶段墙钟 ÷ done」算每篇耗时。
 
 | 档位（间隔/并发） | 区间 | 处理篇数 | web 阶段耗时 | 每篇 | 吞吐 |
 |---|---|---|---|---|---|
@@ -505,13 +506,31 @@
 
 **结论**：
 1. 真实每篇约 **120–130ms**（与 2026-10-05 的 142ms 同量级），**默认 75ms 偏乐观约 1.7 倍**。
-2. **档位几乎不影响吞吐**（132 vs 126ms）：瓶颈是**单篇网络延迟**（≈600–700ms / 并发 4–6），不是 40/60ms 的礼貌间隔。因此"切到快速档能快一倍"的说法不成立（实测差 5%），但档位仍按**各自实测值**记校准。
-3. 2013 年 318 篇里 hits 175 / no-body 143（45% 无可用正文），与该站 2013 年存档已删除的结论一致。
-4. 真实库 2005–2025 待建 **47,216 篇**：按默认口径"约 60 分钟" → 按实测 124ms **"约 98 分钟"**。
+2. **档位几乎不影响吞吐**（132 vs 126ms）——原因见下面的"ETA 修复"：`politeDelay` 有 **120ms 硬下限**，40/60ms 的档位间隔**根本不生效**，三档真实吞吐都被钉在约 8.3 篇/秒。旧文案「切到快速档能快一倍」是错的。
+3. 2013 年 318 篇里 `hits 175 / no-body 143`（45% 无可用正文），与该站 2013 年存档已删除的结论一致。
+4. 真实库 2005–2025 待建 **47,216 篇**：按默认口径「约 60 分钟」→ 按实测 124ms **「约 98 分钟」**。
 
-**实现**（etch-estimate.ts + db/settings.ts + cache-build.ts + CacheBuildPanel.tsx）：
-- calibrateMsPerArticle(processed, activeMs)：纯函数，**样本 <20 篇不校准**、>2s/篇不校准（多为长时间暂停）、<20ms 抬到下限；**调用方必须扣除 pausedMs**（暂停期间不发请求，算进去会把每篇抬高数倍）。
-- 校准值按**档位**存 web_fetch_ms_per_article:<tier>（safe/standard/fast 各自独立），getSettings().webFetchMsPerArticle 取**当前档位**的值；cacheBuild:plan 与闸门弹框的 estimatedMinutes 统一用它（首次仍用 75ms）。
+### 实现一：计划/闸门的估算用实测值
+
+- `calibrateMsPerArticle(processed, activeMs)`：纯函数，**样本 <20 篇不校准**、>2s/篇不校准（多为长时间暂停）、<20ms 抬到下限；**调用方必须扣除 `pausedMs`**（暂停期间不发请求，算进去会把每篇抬高数倍）。
+- 校准值按**档位**存 `web_fetch_ms_per_article:<tier>`（safe/standard/fast 各自独立），`getSettings().webFetchMsPerArticle` 取**当前档位**的值；`cacheBuild:plan` 与闸门弹框的 `estimatedMinutes` 统一用它（首次仍用 75ms）。
 - 面板文案：「按上次实测 124ms/篇 ≈ 8.1 篇/秒 估算」/「还没实测过，按默认 75ms/篇 估算，可能偏乐观」；建立结束时刷新（此前只在挂载时读一次，导致面板显示 60 分钟而接口是 98 分钟）。
 
-**顺带发现（未修）**：抓取**进行中**的 atePerSec 报 25 篇/秒（= max(interval, 先验75ms÷并发)），实测只有 8.2 篇/秒 → 进度里的"剩余约 X 分钟"约为真实的 1/3。属于 EtaEstimator 的样本/预热口径问题，与本次的计划估算无关，**列为下一项**。
+### 实现二：进行中 ETA 改用「有效下限」（同日修复）
+
+**问题**：抓取**进行中**的进度里 `ratePerSec` 报 25 篇/秒，实测只有 8.2 篇/秒 → 「剩余约 X 分钟」约为真实的 1/3。
+
+**根因（两处口径不一致）**：
+- 真实限速在 `site-crawler.ts` 的 `politeDelay`：`minMs = max(WEB_FETCH_MIN_INTERVAL_MS=120, robots Crawl-delay)`——**任何档位都不可能快过 120ms**。
+- 估算器被告知的却是**档位值**（`baseIntervalMs = max(tier.intervalMs, maxCrawlDelay)`，快档 40ms）→ `msPerArticle = max(40, 200÷6≈33) = 40ms` → **25 篇/秒**（正好 `1000/40`）；真实 `1000/120 = 8.33 篇/秒`，与实测 8.2 吻合。
+
+**修法**（不改变抓取行为，只让估算与现实一致）：
+- `site-crawler.ts` 新增 `effectiveMinIntervalMs(...candidates)` = `max(120, robots, 档位)`（纯函数 + 单测）。
+- `article-crawl.ts` 的 `baseIntervalMs` 改用它 → `AdaptiveRate` 起点、`EtaEstimator.intervalMs`、降档后的 `setIntervalMs` 全部拿到**有效下限**；进度里的 `ratePerSec` / `etaSeconds` 随之变准（8.33 篇/秒，预热期也不会更快）。
+- 抓取**行为完全不变**（`politeDelay` 原本就兜底 120ms），改的只是「报给用户的速度」。
+
+**口径修正**：设置页三档文案改成「每请求 ≥120ms、并发 2/4/6」，并如实说明「三档最小间隔相同，区别只在并发；站点快时三档差不多，站点慢时并发才起作用」。
+
+**回归测试**：`article-crawl.ts` 内联测试断言「任何档位下估算器看到的都是 120ms、速率 8.33 篇/秒」；`site-crawler.ts` 断言 `max(下限, robots, 档位)` 语义。
+
+**仍未做**（可选增强）：用「已处理 ÷ 已用墙钟」的滚动实测速率替代模型（结束汇总已经这么算，天然准确）；以及 `fetchMs`/`processMs` 是跨 worker 共享的 `let`，失败篇会带上上一篇的样本（影响很小，但属于同类隐患）。
