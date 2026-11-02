@@ -15,6 +15,7 @@
  */
 import { type JSX, useCallback, useEffect, useState } from 'react'
 import { zhCN } from '../i18n/zh-CN'
+import ConfirmDialog from './ConfirmDialog'
 import type { CacheBuildPlan, CacheBuildStatus } from '../../../shared/types'
 
 /** 与主进程 `AppSettings.webCrawlTier` 一致 */
@@ -187,7 +188,11 @@ export default function CacheBuildPanel(): JSX.Element {
       const res = await window.api.cacheBuildStart({ fromYear: f, toYear: t, includeLocal: true })
       if (res.ok && res.data) {
         setStatus(res.data.status)
-        setMsg({ ok: res.data.started, text: res.data.started ? index.started : index.refused })
+        // 2026-11-02：被拒（如"正在生成汇编、抓取进行中"）时显示**主进程的真实原因**，不要笼统说"已拒绝"
+        setMsg({
+          ok: res.data.started,
+          text: res.data.started ? index.started : res.data.message || index.refused
+        })
       } else {
         setMsg({ ok: false, text: index.failed.replace('{message}', res.error?.message ?? '') })
       }
@@ -241,6 +246,13 @@ export default function CacheBuildPanel(): JSX.Element {
     }
   }
 
+  /**
+   * 2026-11-02（审查修复）：清空缓存**必须先确认**。
+   * 它是全表 `DELETE FROM web_article_body`：正文全丢要重抓，而且连 `no-body` 标记一起清掉——
+   * 那批"永远建不了"的老文章会重新变成"待建立"，闸门又被它们卡住。与"删站点/删资料"的确认口径对齐。
+   */
+  const [pendingClear, setPendingClear] = useState(false)
+
   const clearCache = async (): Promise<void> => {
     setMsg(null)
     setClearing(true)
@@ -256,6 +268,7 @@ export default function CacheBuildPanel(): JSX.Element {
       setMsg({ ok: false, text: index.failed.replace('{message}', String(e)) })
     } finally {
       setClearing(false)
+      setPendingClear(false)
     }
   }
 
@@ -533,10 +546,10 @@ export default function CacheBuildPanel(): JSX.Element {
         <button
           type="button"
           className="source-list__btn"
-          onClick={() => void clearCache()}
+          onClick={() => setPendingClear(true)}
           disabled={clearing || running || (cache?.entries ?? 0) === 0}
         >
-          {clearing ? '清空中…' : zhCN.compilation.webCacheClearBtn}
+          {clearing ? zhCN.compilation.webCacheClearing : zhCN.compilation.webCacheClearBtn}
         </button>
       </div>
 
@@ -555,6 +568,22 @@ export default function CacheBuildPanel(): JSX.Element {
         <p className="settings__hint settings__hint--err">
           {index.lastError}：<code>{rag.lastError}</code>
         </p>
+      ) : null}
+
+      {/* 清空缓存确认（2026-11-02）：如实说明会清掉多少正文、多少"无可用正文"标记，以及后果 */}
+      {pendingClear ? (
+        <ConfirmDialog
+          title={zhCN.compilation.webCacheClearTitle}
+          message={zhCN.compilation.webCacheClearMessage
+            .replace('{entries}', String(cache?.entries ?? 0))
+            .replace('{noBody}', String(cache?.byState['no-body'] ?? 0))}
+          confirmText={zhCN.compilation.webCacheClearBtn}
+          cancelText={zhCN.common.cancel}
+          busy={clearing}
+          busyText={zhCN.compilation.webCacheClearing}
+          onConfirm={() => void clearCache()}
+          onCancel={() => setPendingClear(false)}
+        />
       ) : null}
     </>
   )

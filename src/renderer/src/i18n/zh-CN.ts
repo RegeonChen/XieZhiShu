@@ -650,6 +650,8 @@ export const zhCN = {
     notReadyLocalFailed: '本地资料库有 {count} 篇索引失败（重新建立可恢复）',
     notReadyBuilding: '正在「建立缓存与索引」（抓取同一时刻只能跑一个，等它结束再生成）',
     notReadyAlready: '这一区间已建立 {cached} 篇，不会重复建立。',
+    /* 2026-11-02：把"已建立"里有多少是"无可用正文"标记说清楚，避免被读成"有正文" */
+    notReadyNoBody: '其中 {count} 篇已尝试但没有可用正文（老文章失效/模板页），不算缺口。',
     notReadyBlocked: '另有 {blocked} 篇地址不在站点白名单内、永远不会建立（不影响生成）。',
     notReadyUndated: '另有 {undated} 篇日期未知，不参与年份区间。',
     notReadyGoBtn: '去设置页建立',
@@ -735,6 +737,16 @@ export const zhCN = {
     webCacheUsage: '已缓存 {entries} 篇正文，占用约 {mb} MB。',
     webCacheHint: '正文只与文章本身有关，与撰写主题无关：缓存后，换任务或重新生成本区间时不再重复下载，只做本地重筛（秒级）。',
     webCacheClearBtn: '清空缓存',
+    webCacheClearing: '清空中…',
+    /*
+     * 2026-11-02（审查修复）：清空缓存是全表删除，必须二次确认。
+     * 两个数字都要如实给出——正文篇数 + "无可用正文"标记数（后者被清掉会让老文章重新变成"待建立"）。
+     */
+    webCacheClearTitle: '确定要清空正文缓存吗？',
+    webCacheClearMessage:
+      '将删除全部 {entries} 篇正文缓存，其中 {noBody} 篇是「无可用正文」标记。' +
+      '清空后这些文章都会重新变成「待建立」：正文需要重新联网抓取（可能要几十分钟到数小时），' +
+      '已尝试无正文的失效文章也会被再次尝试。若有资料汇编依赖这些正文，重新生成时才需要重新下载——已生成的汇编、资料与目录都不受影响。',
     webCacheCleared: '已清空 {count} 篇正文缓存（不影响已有资料与目录）。',
     webCacheEmpty: '暂无缓存。',
     webMaterialsFetched: '本次采用 {count} 篇网页材料',

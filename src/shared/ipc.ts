@@ -1209,7 +1209,19 @@ export interface IpcMapping {
   [IPC.COMPILATION_REDO]: { _req: CompilationUndoReq; _res: ApiResult<CompilationUndoRes> }
   [IPC.COMPILATION_UNDO_STATE]: { _req: CompilationUndoReq; _res: ApiResult<CompilationUndoStateRes> }
   [IPC.COMPILATION_RECYCLE_BIN_LIST]: { _req: CompilationRecycleBinListReq; _res: ApiResult<CompilationRecycleBinListRes> }
-  [IPC.COMPILATION_RECYCLE_BIN_RESTORE]: { _req: CompilationRecycleBinRestoreReq; _res: ApiResult<CompilationRecycleBinRestoreRes> }
+  [IPC.COMPILATION_RECYCLE_BIN_RESTORE]: { _req: CompilationRecycleBinRestoreReq; _res: ApiResult<CompilationRecycleBinRestoreRes> },
+  /*
+   * 2026-11-02（审查修复）：导出 / 归档导入这几条一直有处理器与 preload 方法，却**漏在映射表里** ——
+   * 于是它们拿不到 `_req/_res` 的类型约束（"契约表齐全"只能靠人肉核对）。补上。
+   */
+  [IPC.COMPILATION_EXPORT_DOCX]: { _req: CompilationExportDocxReq; _res: ApiResult<CompilationExportDocxRes> },
+  [IPC.COMPILATION_EXPORT_ARCHIVE]: { _req: CompilationExportArchiveReq; _res: ApiResult<CompilationExportArchiveRes> },
+  [IPC.COMPILATION_IMPORT_ARCHIVE]: { _req: CompilationImportArchiveReq; _res: ApiResult<CompilationImportArchiveRes> },
+  [IPC.COMPILATION_IMPORT_FROM_TASK]: { _req: CompilationImportFromTaskReq; _res: ApiResult<CompilationImportFromTaskRes> },
+  [IPC.COMPILATION_LIST_FINALIZED_FOR_IMPORT]: {
+    _req: CompilationListFinalizedForImportReq
+    _res: ApiResult<CompilationListFinalizedForImportRes>
+  },
   [IPC.STYLE_GUIDE_LIST]: { _req: void; _res: ApiResult<StyleGuideListRes> }
   [IPC.STYLE_GUIDE_SAVE]: { _req: StyleGuideSaveReq; _res: ApiResult<StyleGuideSaveRes> }
   [IPC.STYLE_GUIDE_SET_DEFAULT]: { _req: StyleGuideSetDefaultReq; _res: ApiResult<StyleGuideSetDefaultRes> }

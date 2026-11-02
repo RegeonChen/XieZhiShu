@@ -755,6 +755,7 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey, onGoBuildCache }
     if (r.reasons.includes('local-index-failed')) lacks.push(c.notReadyLocalFailed.replace('{count}', String(r.localFailed)))
     const notes: string[] = []
     if (r.webCached > 0) notes.push(c.notReadyAlready.replace('{cached}', String(r.webCached)))
+    if (r.webNoBody > 0) notes.push(c.notReadyNoBody.replace('{count}', String(r.webNoBody)))
     if (r.webBlocked > 0) notes.push(c.notReadyBlocked.replace('{blocked}', String(r.webBlocked)))
     if (r.webUndated > 0) notes.push(c.notReadyUndated.replace('{undated}', String(r.webUndated)))
     return c.notReadyBody + lacks.join('；') + '。' + notes.join('')

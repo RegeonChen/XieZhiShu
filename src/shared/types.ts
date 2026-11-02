@@ -758,8 +758,14 @@ export interface CompilationReadiness {
   toYear: number | null
   /** 该区间内还没建立缓存的文章数 */
   webPending: number
-  /** 该区间内已建立的篇数（含 `ok` / `no-body` / `blocked` 三种标记） */
+  /**
+   * 该区间内**已建立**的篇数（含 `ok` / `no-body` / `blocked` 三种标记）。
+   * ⚠ 字段名为历史原因保留：它**不等于**"有可用正文的篇数"；有正文 = `webCached − webNoBody − webBlocked`。
+   * 界面用 `webNoBody` 说清"其中 N 篇已尝试但无可用正文"，避免把标记读成正文。
+   */
   webCached: number
+  /** 其中被标记为「无可用正文」的篇数（老文章失效 / 模板页 / 过短）——如实显示，**不算缺口** */
+  webNoBody: number
   /** 永不可建（地址不在站点同域白名单内）——如实显示，但**不算缺口** */
   webBlocked: number
   /** 日期未知、不参与任何年份区间 */
