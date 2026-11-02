@@ -35,6 +35,7 @@ import { EtaEstimator } from './eta'
 import { WEB_FETCH_MS_PER_ARTICLE } from './fetch-estimate'
 import {
   awaitPoliteDelay,
+  effectiveMinIntervalMs,
   fetchRobotsTxt,
   isListPageUrl,
   isPathDisallowed,
@@ -283,11 +284,13 @@ async function crawlAndScreenArticlesInner(opts: CrawlOptions): Promise<WebCrawl
     siteMeta.set(t.siteId, { host, crawlDelayMs: robots.crawlDelayMs, disallow: robots.disallow, title: t.siteTitle })
   }
   /*
-   * 请求间隔 = max(设置档位, 站点 robots 的 Crawl-delay)；自适应降档从这里起步往上走（间隔翻倍，上限 480ms）。
+   * 请求间隔 = max(**120ms 硬下限**, 设置档位, 站点 robots 的 Crawl-delay)；自适应降档从这里起步往上走（间隔翻倍，上限 480ms）。
+   * 2026-11-02（实测修复）：**必须把 120ms 下限算进去**——`politeDelay` 一直有这道兜底，但估算器只拿到档位值（40/60ms），
+   * 于是进度里报 25 篇/秒（= 1000/40）而真实只有 8.2 篇/秒，"剩余约 X 分钟"仅为真实的 1/3。
    * 注意：robots 的 Crawl-delay 是"站点声明的底线"，降档只会**更慢**，永远不会突破它。
    */
   const maxCrawlDelay = Math.max(...[...siteMeta.values()].map((m) => m.crawlDelayMs ?? 0), 0)
-  const baseIntervalMs = Math.max(tier.intervalMs, maxCrawlDelay)
+  const baseIntervalMs = effectiveMinIntervalMs(tier.intervalMs, maxCrawlDelay)
   const rate = new AdaptiveRate({ intervalMs: baseIntervalMs, maxIntervalMs: Math.max(baseIntervalMs * 8, 480) })
   let intervalMs = rate.currentIntervalMs
   const eta = new EtaEstimator({
@@ -798,6 +801,32 @@ function normalizeDate(raw: string): { date: string } | null {
 // ---- vitest inline test ----
 if (import.meta.vitest) {
   const { describe, expect, it, beforeAll, afterAll } = import.meta.vitest
+
+  /*
+   * 2026-11-02 实测回归：进度里的"篇/秒"与"剩余约 X 分钟"必须按**有效下限**算。
+   * 旧实现把档位间隔（快档 40ms）直接给估算器 → 25 篇/秒；真实被 `politeDelay` 钉在 120ms → 8.33 篇/秒，
+   * 于是"剩余时间"只有真实值的 1/3（实测：报 25，实测 8.2）。
+   */
+  describe('article-crawl 速率估算必须用有效下限（2026-11-02）', () => {
+    it('档位间隔低于 120ms 时，估算器看到的是 120ms（而不是 40/60ms）', () => {
+      for (const t of ['safe', 'standard', 'fast'] as const) {
+        const tier = crawlTierParams(t)
+        const effective = effectiveMinIntervalMs(tier.intervalMs, 0)
+        // 任何档位都不会比 120ms 更快
+        expect(effective).toBe(WEB_FETCH_MIN_INTERVAL_MS)
+        const eta = new EtaEstimator({ intervalMs: effective, concurrency: tier.concurrency })
+        // 没有样本时也不能声称比物理下限更快（旧实现会是 25 篇/秒，即 40ms）
+        expect(eta.snapshot().msPerArticle).toBe(WEB_FETCH_MIN_INTERVAL_MS)
+        expect(1000 / eta.snapshot().msPerArticle).toBeCloseTo(8.33, 1)
+      }
+    })
+
+    it('站点声明的 Crawl-delay 更大时以站点为准（估算不会比站点允许的更快）', () => {
+      expect(effectiveMinIntervalMs(40, 1500)).toBe(1500)
+      // 非法/缺失值不影响下限
+      expect(effectiveMinIntervalMs(0, Number.NaN)).toBe(WEB_FETCH_MIN_INTERVAL_MS)
+    })
+  })
 
   describe('article-crawl 抓取期正文粗筛（Phase 10 P4）', () => {
     it('keeps on-topic bodies and drops clearly unrelated ones (只按正文判断)', () => {

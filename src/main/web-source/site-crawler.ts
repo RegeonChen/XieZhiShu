@@ -37,7 +37,21 @@ const SYNC_MAX_PAGES = 20/** 站点发现 BFS 最大深度（0=仅首页） */
 const SYNC_MAX_DEPTH = 2/** 增量导入正文的串行延迟（毫秒），降低对目标站点的压力 */
 const IMPORT_DELAY_MS = 120/** 前沿（待访问列表页）容量上限：超出时丢弃**优先级最差**的，避免内存被导航链接撑爆 */
 const FRONTIER_CAP = 2000/** Phase 10 P4：同一站点两次请求之间的**最小**间隔（毫秒）——抓取流水线据此计算 ETA 的物理下限 */
-export const WEB_FETCH_MIN_INTERVAL_MS = IMPORT_DELAY_MS/** * robots.txt 里 `Crawl-delay` 的上限（毫秒）。 * **2026-10-04 修正的单位缺陷**：`parseRobotsTxt` 原先按**秒**解析、`politeDelay` 按**毫秒**使用， * 于是站点声明 `Crawl-delay: 10` 时我们仍按 120ms 连发（快约 83 倍）——站点声明的限速被完全忽略， * 而且看不出来。现在统一在解析处换算为毫秒；另设上限，避免个别站点声明 `Crawl-delay: 3600` * 让一次生成卡死数小时（超上限时记日志说明）。 */
+export const WEB_FETCH_MIN_INTERVAL_MS = IMPORT_DELAY_MS
+
+/**
+ * 一次抓取的**有效最小请求间隔**（毫秒）= `max(120ms 硬下限, 站点 robots Crawl-delay, 档位间隔)`。
+ *
+ * 为什么要专门给一个函数（2026-11-02 实测发现的问题）：
+ * `politeDelay` 自己会把间隔兜底到 `WEB_FETCH_MIN_INTERVAL_MS`（120ms），**真实请求节奏是对的**；
+ * 但**用于估算的模型**（`EtaEstimator` / `AdaptiveRate`）如果只拿到档位值（快档 40ms / 标准档 60ms），
+ * 就会算出比现实快 3 倍的速度——实测进度显示 **25 篇/秒**，真实只有 **8.2 篇/秒**，
+ * 于是"剩余约 X 分钟"约为真实值的 1/3。估算与限速必须共用**同一个下限**。
+ */
+export function effectiveMinIntervalMs(...candidates: number[]): number {
+  const finite = candidates.filter((c) => Number.isFinite(c) && c > 0)
+  return Math.max(WEB_FETCH_MIN_INTERVAL_MS, ...finite)
+}/** * robots.txt 里 `Crawl-delay` 的上限（毫秒）。 * **2026-10-04 修正的单位缺陷**：`parseRobotsTxt` 原先按**秒**解析、`politeDelay` 按**毫秒**使用， * 于是站点声明 `Crawl-delay: 10` 时我们仍按 120ms 连发（快约 83 倍）——站点声明的限速被完全忽略， * 而且看不出来。现在统一在解析处换算为毫秒；另设上限，避免个别站点声明 `Crawl-delay: 3600` * 让一次生成卡死数小时（超上限时记日志说明）。 */
 const CRAWL_DELAY_MAX_MS = 10000/** * 空标题候选（sitemap 发现，`title === ''`）的正文长度下限。 * 这类候选取不到"抓取前就知道的标题"，A1 的标题探针必然命中页面自己的 `<title>` → 形同不存在； * 改用两条可判定的兜底：① 清洗后正文短于此长度；② 同站点**别的 URL** 已抓到完全相同的正文（模板页成群出现）。 */
 /** 简单 HTML → 纯文本（标签/实体/空白清理，供提取链接文本） */
 /** 成熟正文提取（D8）：优先取 article/main/内容容器，去导航/页脚/广告噪音，并保留表格单元格（如志书数据表）。纯函数、可测试。 */
