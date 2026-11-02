@@ -65,6 +65,7 @@ import {
 import { listWebSites } from '../db/web-sites'
 import { listUrlSourceIdsByTask } from '../db/sources'
 import { crawlAndScreenArticles } from '../web-source/article-crawl'
+import { CrawlBusyError } from '../web-source/fetch-control'
 import { judgeBodyRelevance } from '../web-source/body-relevance'
 import { stripStructureNoise } from '../parse/structure-noise'
 import {
@@ -1544,6 +1545,11 @@ export async function generateCompilation(
           })
         }
       }).catch((err) => {
+        /*
+         * 2026-11-02（审查修复）：抓取失败通常"不阻断生成"（拿已有材料继续），但**抓取独占**这类
+         * "系统级拒绝"必须穿透——否则用户只会看到"网页材料 0 篇"，而不知道原因是另一条抓取正在跑。
+         */
+        if (err instanceof CrawlBusyError) throw err
         logMain('compilation', `网页抓取失败（不阻断生成）：${String(err)}`)
         return null
       })

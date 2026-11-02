@@ -42,7 +42,15 @@ import {
 } from './site-crawler'
 import { allowedHostsForSite, isAllowedTargetUrl, judgeFetchedArticle, pageContainsArticle } from './article-guards'
 import { AdaptiveRate } from './adaptive-rate'
-import { isFetchCancelled, isFetchPaused, resetFetchControl } from './fetch-control'
+import {
+  acquireCrawlFor,
+  releaseCrawlFrom,
+  getCrawlOwner,
+  CrawlBusyError,
+  isFetchCancelled,
+  isFetchPaused,
+  type CrawlOwner
+} from './fetch-control'
 import { getSettings } from '../db/settings'
 import { getCachedBody, putCachedBody, putCacheMiss } from '../db/article-body-cache'
 import { findSiteArticleByBodyHash, listWebSites } from '../db/web-sites'
@@ -176,7 +184,24 @@ async function runPool<T>(
  * - `build`（建立缓存，Phase 11 B）：抓取 + 有效性判定 + **写正文缓存**（`ok` / `no-body` 标记），
  *   不做主题筛选、不落任务来源、不写任务账本。
  */
+/**
+ * 抓取的**独占入口**（2026-11-02）：先拿租约，再跑真正的抓取，最后释放。
+ *
+ * 为什么分成两层：`crawlAndScreenArticlesInner` 有一千多行，包进 try/finally 要整体重排缩进（风险大）；
+ * 而"独占 + 释放"只需要一个薄壳。租约没拿到时抛 {@link CrawlBusyError}——生成管线原本把抓取异常
+ * `catch` 成"不阻断生成"，这条错误必须在那里**重新抛出**，否则用户只会看到网页材料为 0。
+ */
 export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCrawlResult> {
+  const owner: CrawlOwner = (opts.mode ?? 'screen') === 'build' ? 'build' : 'screen'
+  if (!acquireCrawlFor(owner)) throw new CrawlBusyError({ busyOwner: getCrawlOwner() })
+  try {
+    return await crawlAndScreenArticlesInner(opts)
+  } finally {
+    releaseCrawlFrom(owner)
+  }
+}
+
+async function crawlAndScreenArticlesInner(opts: CrawlOptions): Promise<WebCrawlResult> {
   const started = Date.now()
   const { fromYear, toYear } = opts
   /**
@@ -196,7 +221,10 @@ export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCra
    */
   const tier = crawlTierParams(getSettings().webCrawlTier)
   const concurrency = Math.max(1, opts.concurrency ?? tier.concurrency)
-  resetFetchControl()
+  /*
+   * 2026-11-02：**不再在这里复位抓取标志**——复位已并入 `acquireCrawlFor()`（拿租约 = 开始新一轮抓取）。
+   * 旧实现每次进来都 `resetFetchControl()`，会在"生成抓取进行中又启动建立"时**静默清除用户的暂停状态**。
+   */
   /*
    * 目标 = 区间内**全部**文章（用户裁定 A：账本不再作为跳过依据，每次生成都全量重筛）。
    * 是否联网完全由 `article-body-cache`（正文缓存）决定：命中 → 本地重筛（毫秒级、零网络），未命中 → 抓取。
@@ -619,8 +647,9 @@ export async function crawlAndScreenArticles(opts: CrawlOptions): Promise<WebCra
           const bodyHash = hashText(text)
           const duplicateUrl = t.title.trim() ? null : findSiteArticleByBodyHash(t.siteId, bodyHash, t.url)?.url ?? null
           const verdict = judgeFetchedArticle({ candidateTitle: t.title, rawHtml: res.rawHtml, text, duplicateUrl, knownProbeOk: probeOk })
-          // 与主路径**同一口径**：按判定结论写缓存（ok / no-body），且绝不降级已抓到的好正文
-          if (verdict === 'ok') putCachedBody(t.siteId, t.url, text, bodyHash, probeOk)
+          // 与主路径**同一口径**：正文来源按提取器结论记录（regex / full-page 视为"整页退化"）
+          const retryTextSource = extracted.source === 'regex' || extracted.source === 'full-page' ? 'full-page' : 'extractor'
+          if (verdict === 'ok') putCachedBody(t.siteId, t.url, text, bodyHash, probeOk, retryTextSource)
           else putCacheMiss(t.siteId, t.url, 'no-body')
           if (verdict !== 'ok') {
             if (buildMode) {

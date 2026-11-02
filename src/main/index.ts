@@ -97,7 +97,7 @@ import { bodyCacheStats, clearBodyCache, sweepOrphanBodyCaches } from './db/arti
 import { buildCacheBuildPlan, normalizeYearRange } from './web-source/cache-build-plan'
 import { getCacheBuildStatus, isCacheBuildRunning, requestCacheBuildStop, runCacheBuild, checkCompilationReadiness, describeReadiness } from './web-source/cache-build'
 import { getSiteSyncSnapshot, syncSiteTracked } from './web-source/site-sync'
-import { requestFetchCancel, setFetchPaused } from './web-source/fetch-control'
+import { getCrawlOwner, requestFetchCancel, setFetchPaused } from './web-source/fetch-control'
 import { startKeepAwake, stopKeepAwake } from './power/keep-awake'
 import { createTask as createWritingTask, listTasks as listWritingTasks, getTaskById, deleteTask as deleteWritingTask, renameTask, updateTaskProvider, updateTaskInstruction, updateTaskModelText } from './db/tasks'
 import { getDraftById, getLatestDraftByTask, updateSegmentContent, replaceDraftSegments } from './db/drafts'
@@ -844,6 +844,19 @@ handleLogged(IPC.COMPILATION_GENERATE, async (event, params: CompilationGenerate
       `拒绝生成：缓存与索引尚未建立齐（原因 ${readiness.reasons.join(',')}；网页待建立 ${readiness.webPending} 篇、本地待索引 ${readiness.localPending} 篇、索引失败 ${readiness.localFailed} 篇）`
     )
     return { ok: false, error: { code: 'NOT_READY', message: describeReadiness(readiness) } }
+  }
+  /*
+   * 2026-11-02（审查修复）：另一条**生成期抓取**正在进行时也不放行。
+   * 旧实现只挡了"建立缓存中"（readiness 的 build-running），没挡"另一个生成正在抓"——
+   * 抓取池是全局单例，两条抓取会互相抢限速名额、让 ETA 与并发全部失真。
+   * 用独立的错误码，界面按普通失败提示（`NOT_READY` 那条会去重查就绪性，语义不符）。
+   */
+  if (getCrawlOwner() === 'screen') {
+    logMain('compilation', `拒绝生成：已有另一条生成期抓取在进行（taskId=${params.taskId}）`)
+    return {
+      ok: false,
+      error: { code: 'BUSY', message: '另一个生成正在抓取网页资料（同一时刻只能有一条抓取），请等它结束再试。' }
+    }
   }
   // 持久化用户撰写要求（供对话历史 / 重新生成汇编使用）
   const inst = params.title.trim()
@@ -2076,6 +2089,43 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+}).catch((err: unknown) => {
+  /*
+   * 2026-11-02（审查修复）：启动失败必须**看得见**。
+   * 旧实现这条 `.then` 链没有 `.catch`：迁移或初始化一抛错，主窗口永远不会创建，
+   * 用户看到的是"软件点了没反应"，而且没有任何提示（进程还挂着）。
+   * 另外迁移器在批次期间会关闭外键（见 `db/migrate.ts`），启动失败时给出明确出路比静默挂起重要得多。
+   */
+  const message = err instanceof Error ? err.stack || err.message : String(err)
+  try {
+    logMain('app', `启动失败：${message}`)
+  } catch {
+    /* 日志本身失败也要弹框 */
+  }
+  try {
+    dialog.showErrorBox(
+      '启动失败',
+      `软件初始化时出错，无法继续运行。\n\n${err instanceof Error ? err.message : String(err)}\n\n` +
+        `数据库位置：${join(app.getPath('userData'), 'xie-zhishu.db')}\n` +
+        `（如需协助，请把这条信息提供给开发者；设置页的「导出诊断日志」在下次启动成功后可用）`
+    )
+  } catch {
+    /* 连错误框都弹不出来时，至少让进程退出，不要留一个"活着但没窗口"的僵尸进程 */
+  }
+  app.quit()
+})
+
+/*
+ * 兜底：主进程里任何没人接的 Promise 拒绝都进诊断日志（2026-11-02）。
+ * 不改变行为（不退出、不弹框——偶发的后台失败不该打断用户），但**不再静默**：
+ * 之前这类异常只会进终端 stderr，而打包版用户看不到终端。
+ */
+process.on('unhandledRejection', (reason: unknown) => {
+  try {
+    logMain('app', `未处理的 Promise 拒绝：${reason instanceof Error ? reason.stack || reason.message : String(reason)}`)
+  } catch {
+    /* 忽略日志自身的异常 */
+  }
 })
 
 app.on('window-all-closed', () => {
@@ -2095,8 +2145,9 @@ handleLogged(IPC.WEB_SOURCE_SET_CRAWL_PAUSED, (_event, params: { paused?: boolea
   }
 })
 
-handleLogged(IPC.WEB_SOURCE_CACHE_STATS, (): ApiResult<{ entries: number; bytes: number }> => {
+handleLogged(IPC.WEB_SOURCE_CACHE_STATS, (): ApiResult<{ entries: number; bytes: number; byState: Record<string, number> }> => {
   try {
+    // 2026-11-02：把三态计数一并返回（面板据此在「清空缓存」前如实说明会清掉多少篇正文、多少篇"无可用正文"标记）
     return { ok: true, data: bodyCacheStats() }
   } catch (err) {
     return { ok: false, error: { code: 'INTERNAL_ERROR', message: String(err) } }
@@ -2146,6 +2197,22 @@ handleLogged(IPC.CACHE_BUILD_START, (_event, params: CacheBuildStartReq): ApiRes
     if (isCacheBuildRunning()) {
       // 不重复建立：如实告诉用户"已在建立中"
       return { ok: true, data: { started: false, message: '已在建立中：不会重复建立，已建立的会自动跳过。', status: getCacheBuildStatus() } }
+    }
+    /*
+     * 2026-11-02（审查修复）：**生成期抓取进行中时不许开始建立**。
+     * 抓取池是全局单例，两条抓取并行会让同站并发翻倍、ETA 失真，并互相抢限速名额。
+     * 这里在"动手之前"给出人话拒绝（`runCacheBuild` 里还有一道防御性拒绝）。
+     */
+    const crawlOwner = getCrawlOwner()
+    if (crawlOwner === 'screen') {
+      return {
+        ok: true,
+        data: {
+          started: false,
+          message: '正在生成汇编（网页抓取进行中）：同一时刻只能有一条抓取，等它结束再建立缓存。',
+          status: getCacheBuildStatus()
+        }
+      }
     }
     const includeLocal = params?.includeLocal !== false
     void runCacheBuild({ fromYear: range.fromYear, toYear: range.toYear, includeLocal }).catch((err) => {

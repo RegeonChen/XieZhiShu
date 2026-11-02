@@ -3,6 +3,7 @@
  * 迁移按编号依次执行，已执行过的跳过。
  */
 import type Database from 'better-sqlite3'
+import { logMain } from '../logger'
 import { parseUrlDate, urlDateConfidence } from '../web-source/article-date'
 
 interface Migration {
@@ -1347,19 +1348,44 @@ export function runMigrations(db: Database.Database): void {
 
   const insert = db.prepare('INSERT INTO schema_migrations (version) VALUES (?)')
 
-  // 迁移批次期间关闭外键：部分迁移需要重建被其它表引用的父表（如 compilation_items 的 source_id 外键），
-  // PRAGMA foreign_keys 无法在事务内修改，故须在事务开始前关闭、结束后开启。
+  /*
+   * 迁移批次期间关闭外键：部分迁移需要重建被其它表引用的父表（如 compilation_items 的 source_id 外键），
+   * PRAGMA foreign_keys 无法在事务内修改，故须在事务开始前关闭、结束后开启。
+   *
+   * ⚠ 2026-11-02（审查修复）：**必须 try/finally 恢复**。旧实现是"OFF → 跑事务 → ON"直线执行，
+   * 事务一抛错 `foreign_keys = ON` 就永远执行不到——之后整个进程的外键（含 047 账本、051 级联触发器
+   * 依赖的引用完整性）全部失效，而且没人知道。现在无论成功失败都恢复，并在恢复后**跑一次外键校验**：
+   * 迁移期间 FK 是关着的，坏迁移可以"成功"提交并留下悬空引用，必须在启用后查出来并如实记日志。
+   */
   db.pragma('foreign_keys = OFF')
-  const runOne = db.transaction(() => {
-    for (const m of pending) {
-      if (m.run) {
-        m.run(db)
-      } else if (m.sql) {
-        db.exec(m.sql)
+  try {
+    const runOne = db.transaction(() => {
+      for (const m of pending) {
+        if (m.run) {
+          m.run(db)
+        } else if (m.sql) {
+          db.exec(m.sql)
+        }
+        insert.run(m.version)
       }
-      insert.run(m.version)
+    })
+    runOne()
+  } finally {
+    db.pragma('foreign_keys = ON')
+  }
+
+  /*
+   * 迁移后的外键体检：只记日志、**不抛错**（抛错会让用户完全打不开软件）。
+   * 之所以要查：迁移批次是关着外键跑的，一旦有悬空引用，后续写入只会在别处以"查不到那条记录"的
+   * 方式悄悄出错——把数量写进诊断日志，至少可复现、可追责。
+   */
+  try {
+    const violations = db.prepare('PRAGMA foreign_key_check').all() as { table?: string; rowid?: number }[]
+    if (violations.length > 0) {
+      const sample = violations.slice(0, 5).map((v) => `${v.table ?? '?'}#${v.rowid ?? '?'}`).join('、')
+      logMain('db', `⚠ 迁移后外键校验发现 ${violations.length} 处悬空引用（示例：${sample}）——请导出诊断日志`)
     }
-  })
-  runOne()
-  db.pragma('foreign_keys = ON')
+  } catch {
+    /* 体检本身失败不该影响启动 */
+  }
 }

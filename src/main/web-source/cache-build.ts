@@ -26,7 +26,7 @@ import { getTaskById } from '../db/tasks'
 import { getSettings } from '../db/settings'
 import { logMain } from '../logger'
 import { crawlAndScreenArticles } from './article-crawl'
-import { requestFetchCancel } from './fetch-control'
+import { getCrawlOwner, requestFetchCancel } from './fetch-control'
 import { syncAllSitesTracked } from './site-sync'
 import type { DiscoveryReport } from './site-crawler'
 import {
@@ -149,6 +149,20 @@ export async function runCacheBuild(
 ): Promise<CacheBuildStartRes> {
   if (state.running) {
     return { started: false, message: '已在建立中：不会重复建立，已建立的会自动跳过。', status: getCacheBuildStatus() }
+  }
+  /*
+   * 2026-11-02（审查修复）：**生成期抓取正在进行时不许开始建立**。
+   * 抓取池是全局单例（同一时刻只能一条抓取），旧实现只查自己的 `state.running`，
+   * 于是"生成正在抓、用户又点建立"会让两条抓取并行（同站并发翻倍、ETA 失真、互相抢限速名额）。
+   * 这里做一道**防御性**拒绝；正常入口（`cacheBuild:start` 处理器）会更早给出人话提示。
+   */
+  const owner = getCrawlOwner()
+  if (owner === 'screen') {
+    return {
+      started: false,
+      message: '正在生成汇编（网页抓取进行中）：同一时刻只能有一条抓取，等它结束再建立缓存。',
+      status: getCacheBuildStatus()
+    }
   }
   const range = normalizeYearRange(req.fromYear, req.toYear)
   if (!range) throw new Error('年份区间无效：起止年份必须是整数、且起始不晚于结束（1900–2100）')
@@ -334,8 +348,13 @@ export async function runCacheBuild(
 export function requestCacheBuildStop(): boolean {
   if (!state.running) return false
   stopRequested = true
-  // 同时置全局抓取取消开关：抓取池在 await 中也能尽快退出（下一次抓取开始时会被 reset）
-  requestFetchCancel()
+  /*
+   * 2026-11-02（审查修复）：取消**按归属**——只取消建立自己的抓取。
+   * 旧实现调 `requestFetchCancel()`（全局），若此刻恰好有一条生成期抓取在跑，会被一并掐断，
+   * 用户只在设置页点了「停止建立」，生成却以"部分/零网页材料"结束且不知原因。
+   * 现在传 `'build'`：租约不是 build 时**不生效**（应用退出仍走不带参数的全量取消）。
+   */
+  requestFetchCancel('build')
   state.message = '已请求停止：不再抓取新文章（已抓到的都已写入缓存）。'
   logMain('web', '建立缓存：用户请求停止')
   return true
@@ -377,6 +396,7 @@ export function checkCompilationReadiness(taskId: string): CompilationReadiness 
     toYear,
     webPending: web.pending,
     webCached: web.cached + web.noBody + web.blocked,
+    webNoBody: web.noBody,
     webBlocked: web.blocked,
     webUndated: web.undatedArticles,
     localPending: local.pending,
