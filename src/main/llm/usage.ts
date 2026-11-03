@@ -88,6 +88,23 @@ export function describeUsage(t: UsageTotals): string {
   return parts.join('，')
 }
 
+/**
+ * 「本次追问」的一句话（2026-11-03）：对话追问是一次**独立会话**（导航 N 次 + 作答 1–2 次），
+ * 措辞与"生成汇总"分开，避免用户把两次动作的用量混在一起。**没有调用就返回空串**（不写"调用 0 次"），
+ * 部分调用没拿回 usage 时照实说明——**绝不猜 token**。
+ */
+export function describeDocChatUsage(t: UsageTotals): string {
+  if (t.calls === 0) return ''
+  const parts = [`本次追问调用大模型 ${t.calls} 次`]
+  if (t.callsWithoutUsage === t.calls) {
+    parts.push('（Provider 未返回 token 用量）')
+  } else {
+    parts.push(`，输入 ${formatTokens(t.promptTokens)}、输出 ${formatTokens(t.completionTokens)} token`)
+    if (t.callsWithoutUsage > 0) parts.push(`（其中 ${t.callsWithoutUsage} 次未返回用量）`)
+  }
+  return parts.join('')
+}
+
 /** token 数量的人类可读写法（万为界；面向普通用户，不用 M/k） */
 export function formatTokens(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0'
@@ -136,6 +153,16 @@ if (import.meta.vitest) {
       expect(getUsageTotals().calls).toBe(0)
     })
 
+    it('追问的一句话：0 次不写、缺 usage 只说次数、部分缺失照实标注', () => {
+      expect(describeDocChatUsage(getUsageTotals())).toBe('')
+      recordUsage('compilation-nav')
+      expect(describeDocChatUsage(getUsageTotals())).toBe('本次追问调用大模型 1 次（Provider 未返回 token 用量）')
+      recordUsage('compilation-doc-edit', { promptTokens: 120000, completionTokens: 800, totalTokens: 120800 })
+      const s = describeDocChatUsage(getUsageTotals())
+      expect(s).toContain('2 次')
+      expect(s).toContain('输入 12.0 万')
+      expect(s).toContain('其中 1 次未返回用量')
+    })
     it('一句话汇总与 token 格式化', () => {
       expect(describeUsage(getUsageTotals())).toContain('未调用大模型')
       recordUsage('extract', { promptTokens: 123456, completionTokens: 7890, totalTokens: 131346 })

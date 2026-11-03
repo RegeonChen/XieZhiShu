@@ -818,6 +818,11 @@ export type CompilationDocEditRes = {
   leakState: 'ok' | 'empty' | 'failed' | 'skipped'
   /** 本次新增段落里"逐字取自候选原文"的条数 */
   addedFromCandidates: number
+  /**
+   * 本次追问的大模型用量（2026-11-03）：一次追问 = 导航 N 次 + 作答 1–2 次，全部记在这一次会话里。
+   * 回复气泡末尾也会如实写一句（没有 token 就只说次数，绝不猜）。
+   */
+  usage?: CompilationUsage
 }
 export interface CompilationMessagesReq {
   compilationId: string

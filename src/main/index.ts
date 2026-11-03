@@ -92,6 +92,8 @@ import { createReadStream, existsSync, readFileSync, statSync, writeFileSync } f
 import { safeStorageCodec } from './llm/secret'
 import { listProviders, saveProvider, deleteProvider } from './llm/provider-store'
 import { testProviderConnection } from './llm/test'
+// 追问用量（2026-11-03）：doc:edit 结束后把本次会话的累计用量带回渲染层
+import { getUsageTotals } from './llm/usage'
 import { getSettings, updateSettings } from './db/settings'
 import { bodyCacheStats, clearBodyCache, sweepOrphanBodyCaches } from './db/article-body-cache'
 import { buildCacheBuildPlan, normalizeYearRange } from './web-source/cache-build-plan'
@@ -1095,7 +1097,9 @@ handleLogged(IPC.COMPILATION_DOC_EDIT, async (_event, params: CompilationDocEdit
           diff: res.summary.diff,
           candidates: res.summary.candidates,
           leakState: res.summary.leakState,
-          addedFromCandidates: res.summary.addedFromCandidates
+          addedFromCandidates: res.summary.addedFromCandidates,
+          // 追问用量（2026-11-03）：runDocEdit 内部已 beginUsageSession，这里读到的就是本次问话的累计
+          usage: getUsageTotals()
         }
       }
     } catch (err) {

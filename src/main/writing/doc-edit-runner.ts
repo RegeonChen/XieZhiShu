@@ -11,6 +11,7 @@ import { getSettings } from '../db/settings'
 import { getProviderSecret } from '../llm/provider-store'
 import { safeStorageCodec } from '../llm/secret'
 import { chatCompletion } from '../llm/chat'
+import { beginUsageSession, describeDocChatUsage, getUsageTotals } from '../llm/usage'
 import { getSourceById, getSourcesByIds, listUrlSourceIdsByTask } from '../db/sources'
 import {
   dedupeSourceIds,
@@ -206,6 +207,17 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
   const prov = resolveProvider()
   if (!prov.ok) return { ok: false, error: prov.error }
 
+  /*
+   * 追问也要能报用量（2026-11-03）：每次对话是一次独立会话——
+   * 导航的 N 次调用 + 作答的 1–2 次调用都算进本轮，reply 末尾如实写一句，
+   * 用户不用去翻日志就知道"这次问话花了多少"（**没有 token 就只说次数，绝不猜**）。
+   */
+  beginUsageSession()
+  const usageLine = (): string => {
+    const line = describeDocChatUsage(getUsageTotals())
+    return line ? '\n' + line : ''
+  }
+
   const refs = buildDocEditRefs(compilationId)
   if (refs.length === 0) return { ok: false, error: { code: ErrorCodes.INVALID_PARAM, message: '当前汇编没有可修改的段落' } }
   const sources = listCompilationSources(compilationId).map((s) => ({ ordinal: s.ordinal, title: s.title }))
@@ -251,7 +263,7 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
 
   let first = await askModel(leak.candidates)
   if (!first.ok) {
-    insertCompilationMessage({ compilationId, role: 'assistant', content: '修改失败：' + first.message })
+    insertCompilationMessage({ compilationId, role: 'assistant', content: '修改失败：' + first.message + usageLine() })
     return { ok: false, error: { code: first.code, message: first.message } }
   }
 
@@ -285,9 +297,15 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
 
   const { accepted, rejected } = validateDocOps(ops, refs, buildSourceTextByOrdinal(compilationId, refs), leak.candidates)
   if (accepted.length === 0) {
-    // 一条都没应用 → 文档不变，把原因如实回给用户
+    /*
+     * 一条都没应用 → 文档不变，把原因如实回给用户。
+     * 用户裁定 2026-11-03：模型过去会在提问时"顺手"发 insertAfter（被校验拒），
+     * 而它的 reply 仍写"我已把…补入汇编"，与事实自相矛盾。现在**把真实结论放最前面**，
+     * 并把拒因写在后面；reply 只作内容说明。
+     */
     const why = rejected.length > 0 ? '（' + rejected.map((r) => r.op + '：' + r.reason).join('；') + '）' : ''
-    const reply = (parsed.reply || '没有需要修改的内容。') + navNote(nav, 0) + (why ? '\n未做任何改动：' + why : '')
+    const head = rejected.length > 0 ? `本轮汇编未做任何改动：模型的 ${rejected.length} 处改动未通过校验\n` : ''
+    const reply = head + (parsed.reply || '没有需要修改的内容。') + navNote(nav, 0) + (why ? '\n未做任何改动：' + why : '') + usageLine()
     insertCompilationMessage({ compilationId, role: 'assistant', content: reply, rejected })
     return {
       ok: true,
@@ -441,7 +459,8 @@ export async function runDocEdit(compilationId: string, instruction: string, bas
     change.removed +
     ' 段）' +
     navNote(nav, addedFromCandidates) +
-    (rejected.length > 0 ? '\n有 ' + rejected.length + ' 项未执行：' + rejected.map((r) => r.reason).join('；') : '')
+    (rejected.length > 0 ? '\n有 ' + rejected.length + ' 项未执行：' + rejected.map((r) => r.reason).join('；') : '') +
+    usageLine()
   insertCompilationMessage({
     compilationId,
     role: 'assistant',
