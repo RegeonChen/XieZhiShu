@@ -581,6 +581,7 @@
 - **0 次调用不写这句**；全部/部分调用没拿回 usage 时如实标注（「Provider 未返回 token 用量」「其中 N 次未返回用量」），**绝不猜 token**；
 - 契约：`compilation:doc:edit` 响应新增 `usage`（`CompilationUsage`），`docs/shared-contracts.md` 已同步。
 
+**真机验证（2026-11-03，1 问，真实 profile）**：问「2024 年长乐区初中毕业生升学率」→ pplied=0、ejected=[]（**模型没再发 op**），回复自称"以上数字只回答该提问，不改动汇编"；**气泡末尾真机出现**「本次追问调用大模型 4 次，输入 4.0 万、输出 2686 token」（usage 3 次 nav + 1 次 doc-edit，42,547 token，18.7 秒，≈0.1 元）。两项均**已验证生效**。
 **验证（零额度）**：typecheck 0 错；vitest **527 / 528**（唯一失败＝既有 chokidar 环境项，+2 条新测试）；build 成功。新增测试：提示词必须含"`ops` 必须是空数组 `[]`""不要声称自己改动了文档""只有用户明确说…才输出对应 op"；`describeDocChatUsage` 的 0 次/全缺/部分缺三种口径。
 ### 对话追问端到端（2026-11-03，真实 profile + 真实 DeepSeek）
 
