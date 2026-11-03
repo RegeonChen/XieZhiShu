@@ -4503,6 +4503,21 @@ textarea:focus-visible {
   background: var(--accent, #3b82f6);
   transition: width 0.4s ease;
 }
+/* 2026-11-03（用户实测反馈）：建立完成后进度条转为绿色"收尾态"，并给状态章留出版位 */
+.cache-build__progress-bar--done {
+  background: #16a34a;
+}
+.cache-build__block-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.settings__status-chip.is-err {
+  background: #fef2f2;
+  color: #dc2626;
+  border-color: #fecaca;
+}
 .cache-build__tier {
   display: flex;
   gap: 14px;

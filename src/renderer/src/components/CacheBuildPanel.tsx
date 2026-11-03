@@ -210,6 +210,17 @@ export default function CacheBuildPanel(): JSX.Element {
      */
   }, [f, t, yearsValid, bridgeReady, finishedAt, measuredMs])
 
+  /*
+   * 2026-11-03（用户实测反馈）：建立结束后，点击时那句绿色的"已开始建立…"仍留在面板上，
+   * 与「已完成」并存会让用户以为还在跑 → 一旦确认这轮已结束，就把这条"开工回执"收掉
+   * （错误类提示由 status.message 负责，不受影响）。
+   */
+  useEffect(() => {
+    if (!msg?.ok) return
+    if (!status || status.running) return
+    if (status.phase === 'done' || status.phase === 'cancelled') setMsg(null)
+  }, [msg, status])
+
   const start = async (): Promise<void> => {
     setMsg(null)
     setBusy(true)
@@ -305,6 +316,20 @@ export default function CacheBuildPanel(): JSX.Element {
   const web = status?.web
   // 已开始处理但还不到 1% 时也给一点点宽度，否则进度条看起来"没动"
   const webPct = web && web.total > 0 ? Math.min(100, Math.max(web.done > 0 ? 1 : 0, Math.round((web.done / web.total) * 100))) : 0
+  /*
+   * 2026-11-03（用户实测反馈）：网页侧必须有"收尾态"。
+   * `running=false` 之后进度条仍按 `web.total > 0` 常显，看起来像还在跑；
+   * 这里按 phase 明确区分 已完成 / 已停止 / 失败（失败时保留红色提示，不伪装成完成）。
+   */
+  const webFinished = !running && status?.phase === 'done' && (web?.total ?? 0) > 0
+  const webCancelled = !running && status?.phase === 'cancelled' && (web?.total ?? 0) > 0
+  const webFinishedLabel = (() => {
+    const t = status?.finishedAt
+    if (!t) return ''
+    const d = new Date(t)
+    if (Number.isNaN(d.getTime())) return ''
+    return index.webFinishedAt.replace('{time}', d.toLocaleTimeString('zh-CN', { hour12: false }))
+  })()
   const local = status?.local
   const localPending = (local?.pending ?? 0) + (local?.indexing ?? 0)
   const localReady = (local?.total ?? 0) > 0 && (local?.ready ?? 0) === (local?.total ?? 0) && (local?.failed ?? 0) === 0
@@ -498,11 +523,29 @@ export default function CacheBuildPanel(): JSX.Element {
 
       {/* ① 网页正文缓存 */}
       <div className="cache-build__block">
-        <span className="settings__field-label">{index.webTitle}</span>
+        <div className="cache-build__block-head">
+          <span className="settings__field-label">{index.webTitle}</span>
+          {/*
+           * 2026-11-03（用户实测反馈）：建完之后进度条一直留在 100%、没有"已完成"的收尾态，
+           * 用户看着以为还在跑。这里给网页侧一个明确的状态章：建立中 / 已完成 / 已停止 / 建立失败。
+           */}
+          {running ? (
+            <span className="settings__status-chip">{index.webChipRunning}</span>
+          ) : webFinished ? (
+            <span className="settings__status-chip is-ok">✓ {index.webChipDone}</span>
+          ) : webCancelled ? (
+            <span className="settings__status-chip">{index.webChipStopped}</span>
+          ) : status?.phase === 'failed' ? (
+            <span className="settings__status-chip is-err">{index.webChipFailed}</span>
+          ) : null}
+        </div>
         {web && (running || web.total > 0) ? (
           <>
             <div className="cache-build__progress">
-              <div className="cache-build__progress-bar" style={{ width: `${webPct}%` }} />
+              <div
+                className={`cache-build__progress-bar${webFinished ? ' cache-build__progress-bar--done' : ''}`}
+                style={{ width: `${webFinished ? 100 : webPct}%` }}
+              />
             </div>
             <p className="settings__field-hint" data-testid="cache-build-web">
               {index.webProgress
@@ -513,8 +556,12 @@ export default function CacheBuildPanel(): JSX.Element {
                 .replace('{failed}', String(web.failed))}
             </p>
             <p className="settings__field-hint">
-              {index.webRate.replace('{rate}', String(web.ratePerSec)).replace('{eta}', fmtEta(web.etaSeconds))}
-              {web.total - web.done > 0 && web.currentTitle ? `　当前：${web.currentTitle.slice(0, 24)}` : ''}
+              {webFinished
+                ? webFinishedLabel || index.webChipDone
+                : webCancelled
+                  ? index.webStoppedHint
+                  : index.webRate.replace('{rate}', String(web.ratePerSec)).replace('{eta}', fmtEta(web.etaSeconds))}
+              {!webFinished && !webCancelled && web.total - web.done > 0 && web.currentTitle ? `　当前：${web.currentTitle.slice(0, 24)}` : ''}
             </p>
             {web.cacheHits > 0 ? <p className="settings__field-hint">{index.webSkipped.replace('{count}', String(web.cacheHits))}</p> : null}
           </>

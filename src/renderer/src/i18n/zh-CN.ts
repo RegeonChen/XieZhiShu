@@ -407,6 +407,14 @@ export const zhCN = {
       webRate: '{rate} 篇/秒，预计剩余 {eta}',
       webSkipped: '本次跳过 {count} 篇（已建立）',
       webIdle: '尚未建立：点「建立」按上面的年份区间开始（已建立的会自动跳过）。',
+      /* 2026-11-03（用户实测反馈）：建完之后进度条一直留在 100%，没有任何"已完成"的收尾态，
+         用户无法判断是跑完了还是卡住了 → 给网页侧加状态章 + 完成时间 + 停止提示。 */
+      webChipRunning: '建立中',
+      webChipDone: '已完成',
+      webChipStopped: '已停止',
+      webChipFailed: '建立失败',
+      webFinishedAt: '完成于 {time}',
+      webStoppedHint: '已请求停止：已抓到的都已写入缓存；剩下没建的可以再点「建立」接着建（不重复抓）。',
       localTitle: '本地资料库索引',
       localCounts: '已索引 {ready} / 共 {total} 篇（失败 {failed}）',
       localPending: '待索引 {count} 篇（与网页抓取并行进行）',
