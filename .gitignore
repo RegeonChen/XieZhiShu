@@ -35,3 +35,5 @@ Thumbs.db
 
 # Debug artifacts
 .dbg/
+# 用户导出的资料汇编留档（2026-11-04 误入库一次，之后永久忽略）
+*.xzsc
