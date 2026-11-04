@@ -646,6 +646,17 @@ umbersCoveredBy 处理；4 位年份跳过。
 - 单测：extract-service 17 条（新增 A 的三条：无依据丢弃 / 证据改挂来源 / 无 evidence 不落地）；compilation-document 25 条（新增 B 的三条：单位不符判无据 / 量级换算跳过 / "1 所"不被"2018"带偏）。
 - 全套 **539/540**（唯一失败＝既有 chokidar 环境项），typecheck 0 错，build 通过。
 
+### P0+P1：整合提取的重试/截断（2026-11-04 用户裁定落地）
+
+**诊断**：callExtract 完全不传 max_tokens（走 Provider 默认值），而提取批上限是 **30 张卡 / 12,000 字**——一批要模型输出 30 条 JSON（每条含 text+evidence+timeLabel），很容易被输出上限截断。截断后 JSON 缺尾 → 解析失败 → **换温度重试**（同一批再截断一次）→ 再失败才**对半拆**（每半各再重试）。实测吻合：197 段耗 **88 次提取调用**（约 3 倍），132 次总调用 / 32 分钟 / 折算 16 元。
+
+**改动**：
+- **P0 让成本可见**：ChatResult 增 inishReason?（非流式取 choices[0].finish_reason、流式取最后一个 chunk），ChatCallOptions 增 maxTokens?；ExtractBatchStats / CompilationExtractScan 增 etried、	runcated，生成汇总在非零时显示「换温度重试 N 次、因输出截断直接拆分 M 批」。
+- **P1 截断即拆**：max_tokens=6000；批上限 **30/12,000 → 12/6,000**；inish_reason==='length' **跳过温度重试、直接对半拆**（截断是"批太大"，不是"温度不对"）。
+
+**验证**：新增单测「截断 → 不重试直接拆」（断言调用序列为 [6, 3, 3]、stats.truncated=1、6 段全部找回）；全套 **543/544**（唯一失败＝既有 chokidar 项）、typecheck 0 错、build 通过。
+
+**预期**（待真机跑批对账）：提取调用 88 → 30–40，总调用 132 → 70–80，费用 16 → **9–11 元**，耗时 32 → 22–25 分钟。**未做**：P2（重试次数再降、EXTRACT_SPLIT_MAX_CALLS 4→6）与 P3（卡片先去重/相邻合并）。
 ### 产出影响（预期）
 同一份材料重跑，**73 段中约 10 段会被丢弃**（无逐字依据的那些），预计落到 **60–65 段**；这是有意的取舍——**宁可少一段，不留无据段**。C 方案（界面标红 + 确认前强制自检 + 恢复"移出这一段"入口）本次按用户要求**未做**。
 **教训（自检脚本）**：preload 的 compilation 系列是**位置参数**（`compilationReadiness(taskId)`、`generateCompilation(taskId, title)`）；传对象会被当成 `taskId`，在 better-sqlite3 里表现为 `RangeError: Too few parameter values were provided`——我一度误判为软件缺陷，实际是自检脚本调用方式错误。

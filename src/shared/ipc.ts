@@ -711,6 +711,10 @@ export type CompilationExtractScan = CompilationStageScan & {
   duplicatesDropped?: number
   /** 疑似同一事实但数字不一致、特意保留的段数（矛盾候选） */
   conflictsKept?: number
+  /** 换温度重试次数（2026-11-04 P0：让"重试成本"可见） */
+  retried?: number
+  /** 因输出被截断（`finish_reason=length`）而直接对半拆的批次数（2026-11-04 P0/P1） */
+  truncated?: number
 }
 /**
  * 网页资料库本轮抓取情况（**2026-10-05 P6 对齐 Phase 10 P4/P5 口径**）：

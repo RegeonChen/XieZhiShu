@@ -83,6 +83,9 @@ function buildGeneratedSummary(
       /** C（2026-09-12）：因"只复述标题"被丢弃 / 因"年份无据"被标待核的段落数 */
       titleOnlyDropped?: number
       timeUnsupported?: number
+      /** 2026-11-04（P0）：换温度重试次数 / 因输出截断直接拆分的批次数（成本可见） */
+      retried?: number
+      truncated?: number
     }
     webScan?: {
       sites: number
@@ -158,6 +161,12 @@ function buildGeneratedSummary(
     if (ps.titleOnlyDropped) parts.push(zhCN.compilation.extractTitleOnly.replace('{count}', String(ps.titleOnlyDropped)))
     if (ps.timeUnsupported) parts.push(zhCN.compilation.extractTimeUnsupported.replace('{count}', String(ps.timeUnsupported)))
     if (ps.conflictsKept) parts.push(zhCN.compilation.extractConflictsKept.replace('{count}', String(ps.conflictsKept)))
+    // 2026-11-04（P0）：重试/截断次数如实报出（只在发生时报，避免正常批次噪音）
+    if (ps.retried || ps.truncated) {
+      parts.push(
+        zhCN.compilation.extractRetryCost.replace('{retried}', String(ps.retried ?? 0)).replace('{truncated}', String(ps.truncated ?? 0))
+      )
+    }
   }
   // 网页资料本轮抓取情况：让用户知道"这次用上了多少网页材料"
   const ws = scans.webScan

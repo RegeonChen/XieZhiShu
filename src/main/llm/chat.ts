@@ -22,7 +22,9 @@ export interface ChatProvider {
   apiKey: string
 }
 
-export type ChatResult = { ok: true; text: string; usage?: ChatUsage } | { ok: false; error: { code: string; message: string } }
+export type ChatResult =
+  | { ok: true; text: string; usage?: ChatUsage; /** 结束原因（length = 输出被截断，调用方应缩小批而非重试） */ finishReason?: string }
+  | { ok: false; error: { code: string; message: string } }
 
 /**
  * Provider 返回的 token 用量（2026-11-02，第一项任务）。
@@ -45,6 +47,8 @@ export interface ChatCallOptions {
   seed?: number
   /** 瞬时故障自动重试次数（HTTP 429 / 5xx / 网络错误，指数退避）；默认 0 = 不重试。成功路径零成本 */
   maxRetries?: number
+  /** 输出 token 上限（透传 max_tokens）；不设则用 Provider 默认值 */
+  maxTokens?: number
   /** 提供时启用流式输出（SSE）：每收到一段增量文本回调一次；仍以完整结果返回 */
   onDelta?: (text: string) => void
 }
@@ -181,6 +185,7 @@ async function requestOnce(
     if (opts?.onDelta) body.stream_options = { include_usage: true }
     if (typeof opts?.temperature === 'number') body.temperature = opts.temperature
     if (typeof opts?.seed === 'number') body.seed = opts.seed
+    if (typeof opts?.maxTokens === 'number') body.max_tokens = opts.maxTokens
     const res = await Promise.race([
       net.fetch(endpoint, {
         method: 'POST',
@@ -208,7 +213,7 @@ async function requestOnce(
       if (!streamed.text.trim()) {
         return { result: { ok: false, error: { code: ErrorCodes.LLM_EMPTY_RESPONSE, message: '模型返回了空内容' } }, status: res.status }
       }
-      return { result: { ok: true, text: streamed.text, usage: streamed.usage }, status: res.status }
+      return { result: { ok: true, text: streamed.text, usage: streamed.usage, finishReason: streamed.finishReason }, status: res.status }
     }
 
     const bodyText = await res.text()
@@ -219,7 +224,7 @@ async function requestOnce(
     if (!content.trim()) {
       return { result: { ok: false, error: { code: ErrorCodes.LLM_EMPTY_RESPONSE, message: '模型返回了空内容' } }, status: res.status }
     }
-    return { result: { ok: true, text: content, usage: parseUsage(bodyText) }, status: res.status }
+    return { result: { ok: true, text: content, usage: parseUsage(bodyText), finishReason: parseFinishReason(bodyText) }, status: res.status }
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       return { result: { ok: false, error: { code: ErrorCodes.LLM_TIMEOUT, message: '模型响应超时，请稍后重试' } }, status: null }
@@ -329,14 +334,14 @@ export function createJsonFieldStreamer(field: string): { feed: (text: string) =
 async function readStreamContent(
   body: ReadableStream<Uint8Array> | null,
   onDelta: (text: string) => void
-): Promise<{ text: string; usage?: ChatUsage } | null> {
+): Promise<{ text: string; usage?: ChatUsage; finishReason?: string } | null> {
   if (!body) return null
   const reader = body.getReader()
   const decoder = new TextDecoder('utf-8')
   let buffer = ''
   let raw = ''
   // 用对象承载可变量，避免 TS 对闭包内赋值的控制流收窄
-  const state: { deltas: string[]; sawData: boolean; usage?: ChatUsage } = { deltas: [], sawData: false }
+  const state: { deltas: string[]; sawData: boolean; usage?: ChatUsage; finishReason?: string } = { deltas: [], sawData: false }
 
   const handleLine = (line: string): void => {
     const trimmed = line.trim()
@@ -346,10 +351,13 @@ async function readStreamContent(
     if (!payload) return
     state.sawData = true
     try {
-      const obj = JSON.parse(payload) as { choices?: { delta?: { content?: unknown } }[]; usage?: unknown }
+      const obj = JSON.parse(payload) as { choices?: { delta?: { content?: unknown }; finish_reason?: unknown }[]; usage?: unknown }
       // 流式下 usage 出现在**最后一个** chunk（`stream_options.include_usage`）——照收，不猜
       const u = normalizeUsage(obj?.usage)
       if (u) state.usage = u
+      // 结束原因同量：`length` = 输出被截断（2026-11-04 供提取环节"截断即拆"判断）
+      const fr = obj?.choices?.[0]?.finish_reason
+      if (typeof fr === 'string' && fr) state.finishReason = fr
       const d = obj?.choices?.[0]?.delta?.content
       if (typeof d === 'string' && d.length > 0) {
         state.deltas.push(d)
@@ -375,12 +383,23 @@ async function readStreamContent(
     buffer += decoder.decode()
     for (const line of buffer.split('\n')) handleLine(line)
 
-    if (state.sawData && state.deltas.length > 0) return { text: state.deltas.join(''), usage: state.usage }
+    if (state.sawData && state.deltas.length > 0) return { text: state.deltas.join(''), usage: state.usage, finishReason: state.finishReason }
     // 未收到 SSE 数据行：按普通 JSON 响应兜底解析
     const fallback = parseContent(raw)
-    return fallback == null ? null : { text: fallback, usage: parseUsage(raw) }
+    return fallback == null ? null : { text: fallback, usage: parseUsage(raw), finishReason: parseFinishReason(raw) }
   } catch {
-    return state.deltas.length > 0 ? { text: state.deltas.join(''), usage: state.usage } : null
+    return state.deltas.length > 0 ? { text: state.deltas.join(''), usage: state.usage, finishReason: state.finishReason } : null
+  }
+}
+
+/** 解析 `finish_reason`（`length` = 输出被截断；2026-11-04 供提取环节"截断即拆"判断） */
+function parseFinishReason(bodyText: string): string | undefined {
+  try {
+    const body = JSON.parse(bodyText) as { choices?: { finish_reason?: unknown }[] }
+    const fr = body?.choices?.[0]?.finish_reason
+    return typeof fr === 'string' && fr ? fr : undefined
+  } catch {
+    return undefined
   }
 }
 

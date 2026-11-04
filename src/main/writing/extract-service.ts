@@ -39,10 +39,16 @@ import {
   type ParagraphRejectReason
 } from './compilation-document'
 
-/** 单批最多卡片数（双预算之一：输出是重写过的段落，批太大易被截断） */
-export const EXTRACT_BATCH_MAX = 30
-/** 单批输入字符预算 */
-export const EXTRACT_BATCH_CHARS = 12000
+/**
+ * 单批最多卡片数（双预算之一：输出是重写过的段落，批太大易被截断）。
+ * 2026-11-04（P1）：30 → **12**。实测 88 次调用只产出 197 段（约 3 倍重试），
+ * 根因是单批要模型输出 30 条 JSON + `max_tokens` 未设置 → 频繁截断。批变小后成功率显著提升。
+ */
+export const EXTRACT_BATCH_MAX = 12
+/** 单批输入字符预算（2026-11-04：12000 → 6000，与批上限同步收紧） */
+export const EXTRACT_BATCH_CHARS = 6000
+/** 提取调用的输出 token 上限（2026-11-04 P1：显式给值，别让 Provider 默认值决定成败） */
+export const EXTRACT_MAX_OUTPUT_TOKENS = 6000
 /** 单次调用超时（要重写 + 给证据，比提纯更重） */
 const EXTRACT_CALL_TIMEOUT_MS = 300000
 /** 整阶段时间预算：超出后剩余批次按"原文整段保留"处理，不丢材料、不阻断后续阶段 */
@@ -124,6 +130,8 @@ export interface ExtractBatchStats {
   omitted: number
   retainedChars: number
   retried: number
+  /** 因"输出被截断（`finish_reason=length`）"而直接对半拆的批次数（2026-11-04 P1） */
+  truncated: number
   /** 因"段落只是复述来源标题"而丢弃的段落数（2026-09-12：绝不能只看文章标题） */
   titleOnlyDropped: number
   /** 因"年份在该来源里查不到、也推不出"而降级为「时间待核」的段落数 */
@@ -148,6 +156,7 @@ export function emptyExtractStats(input = 0, inputChars = 0): ExtractBatchStats 
     omitted: 0,
     retainedChars: 0,
     retried: 0,
+    truncated: 0,
     titleOnlyDropped: 0,
     timeUnsupported: 0
   }
@@ -200,6 +209,8 @@ export interface ExtractScanStats {
   /** 其中由「包含关系」判定合并掉的段数（Phase 7.12 S1 新增规则） */
   containmentMerged?: number
   retried: number
+  /** 因"输出被截断（`finish_reason=length`）"而直接对半拆的批次数（2026-11-04 P0/P1） */
+  truncated?: number
 }
 
 // ---------------------------------------------------------------- 解析与提交物
@@ -429,7 +440,10 @@ export function logExtractBatchStats(batchNo: number, total: number, stats: Extr
       ' 张（其中输出无法解析 ' +
       stats.droppedUnparseable +
       ' 张），重试 ' +
-      stats.retried
+      stats.retried +
+      ' 次，因输出截断直接拆分 ' +
+      stats.truncated +
+      ' 批'
   )
 }
 
@@ -725,13 +739,18 @@ async function callExtract(
   taskId: string,
   temperature: number,
   requirement?: string
-): Promise<{ ok: boolean; text: string; message?: string; rateLimited?: boolean }> {
+): Promise<{ ok: boolean; text: string; message?: string; rateLimited?: boolean; finishReason?: string }> {
   const result = await chatCompletion(
     provider,
     buildExtractMessages(batch, topic, requirement),
     EXTRACT_CALL_TIMEOUT_MS,
     { kind: 'compilation-extract', taskId },
-    { maxRetries: 0, temperature, seed: temperature === 0 ? 42 : undefined }
+    /*
+     * P1（2026-11-04 用户裁定）：**显式给输出上限**并用 `finish_reason` 判断截断。
+     * 旧实现不传 `max_tokens` → 走 Provider 默认值；一批 30 张卡的 JSON 很容易超限被截断，
+     * 而截断后"换温度重试"必然再截断一次，白白多烧 1–2 次调用。
+     */
+    { maxRetries: 0, temperature, seed: temperature === 0 ? 42 : undefined, maxTokens: EXTRACT_MAX_OUTPUT_TOKENS }
   )
   if (!result.ok) {
     return {
@@ -741,7 +760,7 @@ async function callExtract(
       rateLimited: result.error?.code === ErrorCodes.LLM_RATE_LIMIT
     }
   }
-  return { ok: true, text: result.text }
+  return { ok: true, text: result.text, finishReason: result.finishReason }
 }
 
 /** 单次调用的形状（可注入，供单测/演练模拟"解析失败""漏答"等故障） */
@@ -827,7 +846,13 @@ async function extractCards(ctx: ExtractCtx, cards: ExtractCandidate[], attempt:
   if (parsed) normalizeExtractRefs(parsed, cards)
   const usable = !!parsed && [...parsed.paragraphs, ...parsed.dropped].some((e) => knownRefs.has(e.sourceRef))
   if (!usable) {
-    if (attempt === 0) {
+    /*
+     * P1（2026-11-04）：**被截断就别换温度重试**——截断是"批太大"，不是"温度不对"，
+     * 重试只会以同样的方式再截断一次（实测每批白烧 1–2 次调用）。直接对半拆。
+     */
+    const looksTruncated = res.finishReason === 'length'
+    if (looksTruncated) ctx.stats.truncated += 1
+    if (attempt === 0 && !looksTruncated) {
       ctx.stats.retried += 1
       const d = describeExtractOutput(res.text, cards)
       logMain('extract', '解析失败（换温度重试）：输出 ' + d.chars + ' 字，含 JSON=' + d.hasJson + '，检出编号 ' + JSON.stringify(d.refsSeen) + '，期望 ' + d.expected)
@@ -835,7 +860,11 @@ async function extractCards(ctx: ExtractCtx, cards: ExtractCandidate[], attempt:
     }
     const halves = splitHalf(ctx, cards)
     if (halves) {
-      logMain('extract', '重试仍无法解析，拆成 ' + halves[0].length + '+' + halves[1].length + ' 张分别重试')
+      logMain(
+        'extract',
+        (looksTruncated ? '输出被截断（finish_reason=length），' : '重试仍无法解析，') +
+          '拆成 ' + halves[0].length + '+' + halves[1].length + ' 张分别重试'
+      )
       const a = await extractCards(ctx, halves[0], 1)
       if (!a.ok) return a
       const b = await extractCards(ctx, halves[1], 1)
@@ -1256,6 +1285,43 @@ if (import.meta.vitest) {
       expect(calls.slice(0, 4)).toEqual([8, 8, 4, 4])
       expect(res.drafts).toHaveLength(8)
       expect(res.stats.droppedUnparseable).toBe(0)
+    })
+
+    /*
+     * P1（2026-11-04 用户裁定）：**被截断就别换温度重试**。
+     * 实测 88 次调用只出 197 段（约 3 倍重试），根因是单批 30 张卡的 JSON 超输出上限被截断，
+     * 而"换温度重试"会以同样方式再截断一次——纯浪费。这里钉住：截断 → 直接对半拆、不重试。
+     */
+    it('P1：输出被截断（finish_reason=length）→ 不换温度重试，直接对半拆', async () => {
+      const cards: ExtractCandidate[] = Array.from({ length: 6 }, (_, i) => ({
+        index: i,
+        key: 't' + (i + 1),
+        sourceRef: '#' + (i + 1),
+        sourceTitle: '长乐年鉴2023',
+        excerpt: '2022 年，长乐区第' + (i + 1) + '项工作完成，投资 ' + (i + 1) + ' 万元。',
+        ts: '2022 年'
+      }))
+      const calls: { cards: number; temp: number }[] = []
+      const fake = (async (_p: unknown, b: ExtractCandidate[], _t: string, _id: string, temperature: number) => {
+        calls.push({ cards: b.length, temp: temperature })
+        // 大批评"被截断"（JSON 缺尾），小批正常作答
+        if (b.length > 3) return { ok: true, text: '{"paragraphs":[{"sourceRef":"#1","text":"2022 年', finishReason: 'length' }
+        return {
+          ok: true,
+          text:
+            '{"paragraphs":[' +
+            b.map((c) => '{"sourceRef":"' + c.sourceRef + '","text":"' + c.excerpt + '","timeLabel":"2022 年","evidence":"' + c.excerpt + '"}').join(',') +
+            ']}'
+        }
+      }) as unknown as ExtractCall
+      const res = await extractBatch({ apiBase: 'x', model: 'm', apiKey: 'k' }, cards, '高中学校设置', 't1', '要求', undefined, { call: fake })
+      expect(res.ok).toBe(true)
+      // 截断的那一次 + 两个一半；**没有** 6 张的温度重试（temp 0.3 且 6 张）
+      expect(calls.map((c) => c.cards)).toEqual([6, 3, 3])
+      expect(calls.every((c) => c.temp === 0 || c.temp === 0.3)).toBe(true)
+      expect(calls.filter((c) => c.cards === 6)).toHaveLength(1)
+      expect(res.stats.truncated).toBe(1)
+      expect(res.drafts).toHaveLength(6)
     })
 
     it('ignores hallucinated source refs and leaves unanswered cards for the caller', () => {

@@ -713,6 +713,8 @@ export const zhCN = {
     extractTitleOnly: '另有 {count} 段因"只复述了文章标题、没有正文信息"而丢弃（标题不等于材料）',
     extractTimeUnsupported: '另有 {count} 段的年份在来源里查不到、也推不出，已标为「时间待核」',
     extractConflictsKept: '{count} 段因「疑似同一事实但数字不一致」特意保留（交给矛盾扫描）',
+    /* 2026-11-04（P0）：把"重试/截断"摆到明面上——它直接决定调用次数与费用 */
+    extractRetryCost: '（整合提取：换温度重试 {retried} 次、因输出截断直接拆分 {truncated} 批）',
     extractScanFailed: '整合提取未完成（{reason}），部分卡片可能仍按原文原样保留、未做裁剪整合。',
     /*
      * 网页资料本轮抓取情况。2026-10-05 P6 清理：

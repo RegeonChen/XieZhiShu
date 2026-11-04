@@ -2250,7 +2250,9 @@ async function runExtractPhase(
       conflictsKept: assembled.conflictsKept,
       crossSourceMerged: assembled.crossSourceMerged,
       containmentMerged: assembled.containmentMerged,
-      retried: agg.retried
+      retried: agg.retried,
+      /* 2026-11-04（P0）：把"因输出被截断而直接拆分"的批次数也报出去——它直接决定调用次数与费用 */
+      truncated: agg.truncated
     }
     if (incomplete) state.extractIncomplete = { message: incomplete }
     const chars = assembled.paragraphs.reduce((n, p) => n + p.text.length, 0)
@@ -2283,7 +2285,11 @@ async function runExtractPhase(
         assembled.conflictsKept +
         '、来源 ' +
         assembled.sourceOrder.length +
-        ' 篇' +
+        ' 篇（换温度重试 ' +
+        agg.retried +
+        ' 次，因输出截断直接拆分 ' +
+        agg.truncated +
+        ' 批）' +
         (incomplete ? '；未完成：' + incomplete : '')
     )
     return { paragraphs: assembled.paragraphs.length, sources: assembled.sourceOrder, chars }
@@ -2368,6 +2374,7 @@ async function runExtractPhase(
       agg.droppedUnparseable += res.stats.droppedUnparseable
       agg.retainedChars += res.stats.retainedChars
       agg.retried += res.stats.retried
+      agg.truncated += res.stats.truncated
       agg.titleOnlyDropped += res.stats.titleOnlyDropped
       agg.timeUnsupported += res.stats.timeUnsupported
       done.add(bi)
