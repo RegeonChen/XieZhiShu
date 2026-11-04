@@ -209,6 +209,38 @@ export function deleteTask(id: string): void {
   db.prepare('DELETE FROM writing_tasks WHERE id = ?').run(id)
 }
 
+/**
+ * 删除任务（**分批 + 让出事件循环**，2026-11-04 用户实测反馈"删除中…太久"）。
+ *
+ * 实测（1,020 篇任务来源、34,791 条 `chunk_embeddings`）：一次性 `DELETE FROM sources` 要 **1.6 秒**，
+ * 而 better-sqlite3 是同步的 —— 这 1.6 秒里主进程被占满，界面上的"删除中…"看着就像卡死。
+ *
+ * 做法（实测 1.56 秒，比一次性还快一点，且每批只占 190ms）：
+ * ① 先取该任务的来源 id（1 次查询）；
+ * ② 按 **200 个来源一批**删 `chunk_embeddings`（走 `idx_chunk_embeddings_source`），批间 `setImmediate` 让出；
+ * ③ 再删 `sources`（此时级联只剩零散小块表）与任务行本身；
+ * ④ `wal_checkpoint(TRUNCATE)` 把这次大删除撑起来的 WAL 收回去（实测几十毫秒）。
+ */
+export async function deleteTaskChunked(id: string, idsPerBatch = 200): Promise<void> {
+  const db = getDb()
+  const yieldNow = (): Promise<void> => new Promise((resolve) => setImmediate(resolve))
+  const ids = (db.prepare('SELECT id FROM sources WHERE task_id = ?').all(id) as { id: string }[]).map((r) => r.id)
+  const size = Math.max(20, Math.floor(idsPerBatch))
+  for (let i = 0; i < ids.length; i += size) {
+    const slice = ids.slice(i, i + size)
+    const sql = `DELETE FROM chunk_embeddings WHERE source_id IN (${slice.map(() => '?').join(',')})`
+    db.prepare(sql).run(...slice)
+    await yieldNow()
+  }
+  db.prepare('DELETE FROM sources WHERE task_id = ?').run(id)
+  db.prepare('DELETE FROM writing_tasks WHERE id = ?').run(id)
+  try {
+    db.pragma('wal_checkpoint(TRUNCATE)')
+  } catch {
+    /* checkpoint 失败不影响删除结果 */
+  }
+}
+
 /** 资料库（工作区）全部长期资料 id；任务绑定的网页缓存文章（task_id 非空）不计入，由生成时显式并入 scope */
 export function getAllSourceIds(): string[] {
   const db = getDb()
@@ -241,6 +273,35 @@ if (import.meta.vitest) {
   afterAll(() => db.close())
 
   describe('writing task store (Task 3.3)', () => {
+    /*
+     * 2026-11-04（用户实测反馈"删除中…太久"）：删除改为分批 + 让出事件循环。
+     * 这条测试钉住**仍然删干净**（分批不能留下孤儿 chunk_embeddings / 任务行）。
+     */
+    it('deleteTaskChunked：分批删掉索引与来源，任务行也消失（不留孤儿）', async () => {
+      const t = createTask({ title: '待删除任务' })
+      const ids: string[] = []
+      for (let i = 0; i < 60; i++) {
+        const sid = `del-src-${i}`
+        ids.push(sid)
+        db.prepare('INSERT INTO sources (id, kind, title, task_id) VALUES (?,?,?,?)').run(sid, 'file', 'S' + i, t.id)
+        for (let k = 0; k < 5; k++) {
+          db.prepare('INSERT INTO chunk_embeddings (id, source_id, chunk_text, position, embedding, model_id) VALUES (?,?,?,?,?,?)').run(
+            `del-ck-${i}-${k}`,
+            sid,
+            '正文',
+            String(k),
+            Buffer.alloc(8),
+            'test'
+          )
+        }
+      }
+      expect(db.prepare('SELECT COUNT(*) c FROM chunk_embeddings').get()).toEqual({ c: 300 })
+      await deleteTaskChunked(t.id, 10) // 故意用小批，逼出多批路径
+      expect(db.prepare('SELECT COUNT(*) c FROM sources WHERE task_id = ?').get(t.id)).toEqual({ c: 0 })
+      expect(db.prepare('SELECT COUNT(*) c FROM chunk_embeddings').get()).toEqual({ c: 0 })
+      expect(getTaskById(t.id)).toBeNull()
+    })
+
     it('creates and lists tasks with scope', () => {
       const t = createTask({ title: '新区教育发展', scope: { sourceIds: ['s1', 's2'] } })
       expect(t.title).toBe('新区教育发展')
