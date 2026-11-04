@@ -596,12 +596,78 @@ function titlesIn(text: string): string[] {
 /**
  * 该句是否"可核验"：句中的数字都能在来源原文里找到，且引用的《标题》也出现在来源原文里。
  * 句子里的**文字**无法本地核验（这是本地校验的边界，故只做"关键 token"核验）。
+ *
+ * 2026-11-04（用户实测：卡片"增加学位3600个"挂到年鉴某页，而该页只有"电线电缆 3600 余米"）：
+ * 追加 **B 数字上下文核验**——数字不仅要"出现过"，其**紧跟的单位/量词**也要对得上。
  */
 export function sentenceFactsVerified(sentence: string, sourceText: string): boolean {
   if (!numbersCoveredBy(sentence, sourceText)) return false
+  if (!numberContextVerified(sentence, sourceText)) return false
   const src = stripSpaces(sourceText)
   for (const title of titlesIn(sentence)) {
     if (!src.includes(stripSpaces(title))) return false
+  }
+  return true
+}
+
+/** 数字后面的第一个非空白字符（量词/单位；到末尾返回空串） */
+function charAfter(s: string, at: number): string {
+  let i = at
+  while (i < s.length && /\s/.test(s[i])) i += 1
+  return i < s.length ? s[i] : ''
+}
+
+/** `at` 处是否是一个**完整**数字记号（前后都不是数字或小数点）——避免把 60809.3 里的 6 当成"6" */
+function isCompleteNumberAt(s: string, at: number, len: number): boolean {
+  const prev = at > 0 ? s[at - 1] : ''
+  const next = at + len < s.length ? s[at + len] : ''
+  const numish = (c: string): boolean => /[0-9.]/.test(c)
+  return !numish(prev) && !numish(next)
+}
+
+/**
+ * **B：数字上下文核验**（2026-11-04 新增）。
+ *
+ * 只看"数字在原出现过"是不够的：年鉴里"电线电缆 3600 余米"会被当成"增加学位 3600 个"的依据。
+ * 这里要求：句中每个数字，在来源里存在一处**完整记号**，且其**紧跟的单位/量词**与句中一致
+ * （如 个/人/亩/班/所/万元/平方米）。
+ *
+ * 刻意**不判**两种情况（避免误杀真实事实）：
+ *  - 来源里没有该数字的完整记号（只可能是"6 亿元 ← 60809.3 万元"这种量级换算，已由 `numbersCoveredBy` 处理）；
+ *  - 4 位年份（"2021 年"这类，句子里几乎总带，且年份另有 `isYearSupportedBySource` 把关）。
+ */
+export function numberContextVerified(text: string, sourceText: string): boolean {
+  const src = String(sourceText ?? '')
+  if (!src) return true
+  for (const raw of numbersIn(text)) {
+    const token = raw.replace(/,/g, '')
+    if (/^(19|20)\d{2}$/.test(token)) continue
+    // 句子里可能出现多次（且可能嵌在更长的数字里，如 "1" 落在 "2018" 内）→ 只取**完整**记号
+    const positionsInText: number[] = []
+    let tp = text.indexOf(raw)
+    while (tp >= 0 && positionsInText.length < 40) {
+      if (isCompleteNumberAt(text, tp, raw.length)) positionsInText.push(tp)
+      tp = text.indexOf(raw, tp + 1)
+    }
+    for (const at of positionsInText) {
+      const wantAfter = charAfter(text, at + raw.length)
+      if (!wantAfter) continue
+      let pos = src.indexOf(token)
+      let checked = 0
+      let ok = false
+      while (pos >= 0 && checked < 60) {
+        if (isCompleteNumberAt(src, pos, token.length)) {
+          checked += 1
+          if (charAfter(src, pos + token.length) === wantAfter) {
+            ok = true
+            break
+          }
+        }
+        pos = src.indexOf(token, pos + 1)
+      }
+      if (checked === 0) continue // 来源里只有量级换算形式 → 交给 numbersCoveredBy
+      if (!ok) return false
+    }
   }
   return true
 }
@@ -977,7 +1043,27 @@ export function assembleDocument(inputs: AssembleInputParagraph[]): AssembleResu
 if (import.meta.vitest) {
   const { describe, expect, it } = import.meta.vitest
 
-  describe('compilation document helpers (Phase 7.1 连续文档)', () => {
+    /*
+   * B（2026-11-04 用户实测）：数字"在原出现过"不等于"说的是同一件事"——
+   * 年鉴里"电线电缆 3600 余米"曾被当成"增加学位 3600 个"的依据。这里钉住单位必须对得上。
+   */
+  describe('numberContextVerified（B：数字的单位上下文）', () => {
+    it('单位对不上 → 判无据（3600 个 vs 原文 3600 余米）', () => {
+      expect(numberContextVerified('年底动工建设长乐高级中学新校区，增加学位 3600 个。', '…更换电线电缆 3600 余米。')).toBe(false)
+      expect(numberContextVerified('增加学位 3600 个。', '增加学位 3600 个。')).toBe(true)
+      expect(numberContextVerified('增加学位 3600 个。', '增加学位 3600 所。')).toBe(false)
+    })
+
+    it('量级换算（6 亿元 ← 60809.3 万元）不在这里判，交给 numbersCoveredBy', () => {
+      expect(numberContextVerified('项目总投资预计超 6 亿元。', '项目总投资匡算 60809.3 万元。')).toBe(true)
+    })
+
+    it('句子里的数字可能嵌在更长的数字里（"1 所" 不能被 "2018" 里的 1 带偏）', () => {
+      expect(numberContextVerified('2018 年，全区普通中学 30 所，其中独立高中 1 所。', '2018 年，全区普通中学 30 所，其中独立高中 1 所。')).toBe(true)
+    })
+  })
+
+describe('compilation document helpers (Phase 7.1 连续文档)', () => {
     it('parses a full date label with a year as exact', () => {
       expect(parseTimeLabel('2018 年 5 月 19 日')).toEqual({ year: 2018, month: 5, day: 19, confidence: 'exact', label: '2018 年 5 月 19 日' })
       expect(parseTimeLabel('2018年')).toMatchObject({ year: 2018, confidence: 'exact' })

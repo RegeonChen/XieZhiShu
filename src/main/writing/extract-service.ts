@@ -360,7 +360,15 @@ export function buildExtractMessages(batch: ExtractCandidate[], topic: string, r
     '0. **绝不能只复述文章标题**：段落正文必须来自卡片正文，并至少给出一个正文里的具体要素（机构/学校全称、数量或规模、金额、地点、时间、事件结果等）。只把标题换个说法写一遍（例如标题写「长乐新添一所普通高中！将于9月开学！」，段落就写「长乐新添一所普通高中，将于9月开学。」）**不合格**——这种情况要么从正文里写出关键信息，要么把这张卡片放进 `dropped`。',
     '1. **忠于原文事实**：数字、日期、人名、地名、机构名一律照抄原文，不得改写、不得推算、不得编造；不得改变原文的结论。',
     '2. **每段只能来自一张卡片**（即一个来源）：不得把不同卡片的文字拼成一段；不同来源的内容必须分成不同段落。',
-    '3. 允许的加工：删掉无关内容；在同一张卡片内部调整语序、合并同一事实的多句表述、把省略的主语或指代补全（「他」「该校」→ 具体人名/校名）；去掉或改写「【概况】」这类栏目名。**允许压缩概括，但主体名称与规模/数量/金额/地点/时间等关键要素不得丢失**（例如「福州市福外高级中学…设计规模为高中3个年级60个班，可容纳3000名学生…总投资约6亿元，占地142亩」不能压缩成「长乐新添一所普通高中」）。',
+          '3. 允许的加工：删掉无关内容；在同一张卡片内部调整语序、合并同一事实的多句表述、把省略的主语或指代补全（「他」「该校」→ 具体人名/校名）；去掉或改写「【概况】」这类栏目名。**允许压缩概括，但主体名称与规模/数量/金额/地点/时间等关键要素不得丢失**（把「某校设计规模为三个年级、共若干班，可容纳学生若干人，总投资若干亿元，占地若干亩」压缩成「某地新添一所普通高中」就是丢失）。',
+      /*
+       * 2026-11-04（用户实测"可容纳学生3000人"在来源里查不到）：**上一版这条示例本身写着
+       * "60个班 / 可容纳3000名学生 / 总投资约6亿元 / 占地142亩"，实测被模型整段搬到了另一所学校上。**
+       * 示例里的具体数字必须去掉（改为"若干"），否则它就是幻觉的模板。
+       */
+      '3.1 **不得补写原文没有的细节**：面积、占地、建筑面积、班数、办学规模、可容纳人数、投资额、具体选址，',
+      '    只有卡片原文写了才写；原文没写就不写（不要按同类学校"通常是多少"来补）。',
+      '    原文只给项目名称与进度时，段落就只写名称与进度。',
     '4. **不得合并互相矛盾的说法**：若两张卡片（或同一卡片内两处）对同一事实给出不同数字、时间或说法，必须**分别保留为不同段落**，不要取其中一种，也不要折中。',
     '5. 每段必须给出 `timeLabel`（段首时间，**必须含 4 位年份**，如「2018 年」「2018 年 5 月」「2018 年 5 月 19 日」；不要写「5 月 19 日」这种缺年份的写法）。**年份必须有依据，按下列顺序取**：',
     '   · **正文里有年份** → 直接用（这是最好的依据）；',
@@ -503,6 +511,37 @@ function degradedChecked(candidate: ExtractCandidate, text: string, stats: Extra
 }
 
 /**
+ * **A：归属由证据反查**（2026-11-04 用户实测后新增）。
+ *
+ * 背景：模型自报的 `sourceRef` 不能全信 —— 实测出现过「内容来自 2021 年网页文章，却挂在年鉴某页」的错挂
+ * （那句里的 2400/3600 恰好在该年鉴里以别的对象出现过，于是数字校验放行了）。
+ *
+ * 口径：
+ *  - 段落带 `evidence` → 在本批所有候选来源的完整正文里逐字定位（去空白比对）；
+ *    命中哪个来源就归到哪个来源（**模型自报的来源优先**，避免同一句在多个来源里出现时来回跳）；
+ *  - **一个都命中不了 → 这张卡不落地**（宁可少一段，也不留无据段）；没有 `evidence` 同样不落地。
+ */
+export function resolveAttributionByEvidence(
+  draft: { sourceRef: string; evidence?: string },
+  batch: ExtractCandidate[],
+  fullSourceTextByRef?: Map<string, string>
+): { sourceRef: string; sourceText: string } | null {
+  const ev = (draft.evidence ?? '').trim()
+  if (ev.replace(/\s+/g, '').length < 6) return null
+  const refs = [...new Set(batch.map((c) => c.sourceRef))]
+  const textOf = (ref: string): string =>
+    fullSourceTextByRef?.get(ref) ?? batch.filter((c) => c.sourceRef === ref).map((c) => c.excerpt).join('\n')
+  const preferred = refs.includes(draft.sourceRef) ? draft.sourceRef : null
+  const order = preferred ? [preferred, ...refs.filter((r) => r !== preferred)] : refs
+  for (const ref of order) {
+    const text = textOf(ref)
+    if (!text) continue
+    if (locateVerbatim(text, ev)) return { sourceRef: ref, sourceText: text }
+  }
+  return null
+}
+
+/**
  * 把模型输出处理成"已校验/已降级"的段落草稿（纯函数，可测试）。
  * - sourceRef 找不到对应卡片 → 忽略（幻觉出来的引用号）；
  * - `evidence` 必须是该来源**卡片原文中逐字连续**的一段 → 这就是"每段单一来源"的本地保证
@@ -563,12 +602,25 @@ export function collectExtractResults(
   }
 
   for (const draft of parsed.paragraphs) {
-    const group = byRef.get(draft.sourceRef)
-    if (!group || group.length === 0) continue // 幻觉出来的 sourceRef：忽略
-    answered.add(draft.sourceRef)
-    // ③ 的比对范围 = 该来源**完整正文**（有则用），否则回退为本批卡片拼接
-    const sourceText = fullSourceTextByRef?.get(draft.sourceRef) || group.map((c) => c.excerpt).join('\n')
-    const validation = validateExtractedParagraph(draft, sourceText)
+    /*
+     * A（2026-11-04）：**先用证据反查归属，再校验**。
+     * 旧实现直接采信模型自报的 `sourceRef`，实测出现过"内容来自网页文章、却挂在年鉴某页"的错挂。
+     * 反查不到（含模型没给 evidence）→ 这张卡不落地，计入 `droppedUnverifiable`。
+     */
+    const attribution = resolveAttributionByEvidence(draft, batch, fullSourceTextByRef)
+    if (!attribution) {
+      stats.droppedUnverifiable += 1
+      continue
+    }
+    const group = byRef.get(attribution.sourceRef)
+    if (!group || group.length === 0) {
+      stats.droppedUnverifiable += 1
+      continue
+    }
+    answered.add(attribution.sourceRef)
+    // ③ 的比对范围 = **命中来源**的完整正文（有则用），否则回退为本批卡片拼接
+    const sourceText = attribution.sourceText
+    const validation = validateExtractedParagraph({ ...draft, sourceRef: attribution.sourceRef }, sourceText)
     if (!validation.ok) {
       stats.unverified += 1
       const reason: ParagraphRejectReason = validation.reason
@@ -952,37 +1004,60 @@ if (import.meta.vitest) {
       expect(answered.has('#2')).toBe(true)
     })
 
-    it('证据不再当门槛（2026-10-03）：事实逐句有据就接受，无据才按句修剪', () => {
+    /*
+     * 2026-11-04 用户实测后**收紧**（A 方案，取代 2026-10-03 的"证据只作充分度"）：
+     * 无逐字依据的卡片一律不落地——正是这一条放过了"内容来自网页、却挂在年鉴某页"的错挂段。
+     */
+    it('A：无逐字依据的卡片直接丢弃；编造数字仍按句降级到证据片段', () => {
       const stats = emptyExtractStats(batch.length, 0)
       const { drafts } = collectExtractResults(
         batch,
         {
           paragraphs: [
-            // 证据是改写过的（非逐字）→ **不再判失败**：事实逐句核验通过 → 接受并记 evidenceLoose
+            // 证据是改写过的（原文里不存在）→ 无从反查归属 → **丢弃**
             { sourceRef: '#1', text: '2018 年，全区普通中学 30 所。', timeLabel: '2018 年', evidence: '全区共有普通中学 30 所' },
-            // 编造数字（232 所，卡片里是 212）→ 判为无据；证据能逐字定位 → 只保留证据片段
+            // 证据逐字 → 归属成立；正文数字编造（232 vs 212）→ 只保留证据片段
             { sourceRef: '#2', text: '2020 年，全区幼儿园 232 所。', timeLabel: '2020 年', evidence: '全区幼儿园 212 所' }
           ],
           dropped: []
         },
         stats
       )
-      expect(stats.accepted).toBe(1)
-      expect(stats.evidenceLoose).toBe(1)
-      expect(stats.invalidEvidence).toBe(0)
+      expect(stats.accepted).toBe(0)
+      expect(stats.droppedUnverifiable).toBe(1)
       expect(stats.unverified).toBe(1)
       expect(stats.invalidNumbers).toBe(1)
-      expect(drafts).toHaveLength(2)
-      // ① 接受的这段：evidence 被忽略（非逐字），正文原样保留
-      expect(drafts[0].degraded).toBeFalsy()
-      expect(drafts[0].text).toBe('2018 年，全区普通中学 30 所。')
-      expect(drafts[0].evidence).toBeUndefined()
-      // ② 无据的那段：证据能定位 → 只保留该片段（粒度最细）
-      expect(drafts[1].degraded).toBe(true)
-      expect(drafts[1].degradedFromEvidence).toBe(true)
-      expect(drafts[1].text).toBe('全区幼儿园 212 所')
-      expect(stats.degradedFromEvidence).toBe(1)
-      expect(stats.droppedUnverifiable).toBe(0)
+      expect(drafts).toHaveLength(1)
+      expect(drafts[0].degraded).toBe(true)
+      expect(drafts[0].degradedFromEvidence).toBe(true)
+      expect(drafts[0].text).toBe('全区幼儿园 212 所')
+    })
+
+    it('A：证据命中的来源与模型自报的不一致时，按证据改挂来源', () => {
+      const stats = emptyExtractStats(batch.length, 0)
+      const { drafts } = collectExtractResults(
+        batch,
+        {
+          // 模型说这是 #1（年鉴2019），但这句话只在 #2 的卡片里
+          paragraphs: [{ sourceRef: '#1', text: '2020 年，全区幼儿园 212 所。', timeLabel: '2020 年', evidence: '全区幼儿园 212 所' }],
+          dropped: []
+        },
+        stats
+      )
+      expect(stats.accepted).toBe(1)
+      expect(drafts[0].parentIndex).toBe(2)
+    })
+
+    it('A：模型没给 evidence → 不落地（计入 droppedUnverifiable）', () => {
+      const stats = emptyExtractStats(batch.length, 0)
+      const { drafts } = collectExtractResults(
+        batch,
+        { paragraphs: [{ sourceRef: '#1', text: '2018 年，全区普通中学 30 所。', timeLabel: '2018 年' }], dropped: [] },
+        stats
+      )
+      expect(stats.accepted).toBe(0)
+      expect(stats.droppedUnverifiable).toBe(1)
+      expect(drafts).toHaveLength(0)
     })
 
     it('③ 的比对范围是**整个来源**，不只是本批卡片（未被成卡的数字同样有据）', () => {
@@ -1021,8 +1096,9 @@ if (import.meta.vitest) {
         stats2
       )
       expect(stats2.accepted).toBe(0)
-      expect(stats2.invalidNumbers).toBe(1)
-      // A1（2026-10-03）：证据在卡片里定位不到 → **丢弃该卡**，不再把卡片原文搬进来
+      // 2026-11-04（A）：没给完整来源正文时，这句证据在本批卡片里反查不到归属 → **直接丢弃**
+      // （比以前"降级到证据片段"更保守：宁可少一段，也不留无据段）
+      expect(stats2.invalidNumbers).toBe(0)
       expect(res2.drafts).toHaveLength(0)
       expect(stats2.droppedUnverifiable).toBe(1)
     })
