@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { zhCN } from '../i18n/zh-CN'
+import { buildMaterialEstimateMessage, type MaterialEstimateLike } from '../lib/material-estimate-text'
 import DraftEditor, { type DraftEditorHandle } from './DraftEditor'
 import ConfirmDialog from './ConfirmDialog'
 import ContradictionDialog from './ContradictionDialog'
@@ -725,42 +726,8 @@ function WritingWorkspace({ taskId, mode, onChanged, reloadKey, onGoBuildCache }
     setRestoreDraft((cur) => ({ text, seq: (cur?.seq ?? 0) + 1 }))
   }, [])
 
-  /**
-   * 材料规模确认框的正文（2026-10-05 P1）：成品文案在 `zh-CN` 里，这里只做占位替换。
-   * `{wan}` 用"万字"（1 位小数）——用户是按"多少万字"估耗时的。
-   */
-  const buildMaterialEstimateMessage = (est: {
-    segments: number
-    chars: number
-    localSegments: number
-    webSegments: number
-    estimatedWindows: number
-    estimatedMinutes: number
-    fullSegments?: number
-    fullChars?: number
-    fullEstimatedWindows?: number
-    fullEstimatedMinutes?: number
-    droppedSegments?: number
-    converged?: boolean
-  }, skipConvergence: boolean): string => {
-    const text = zhCN.compilation.materialEstimateBody
-      .replace('{segments}', String(est.segments))
-      .replace('{wan}', (est.chars / 10000).toFixed(1))
-      .replace('{local}', String(est.localSegments))
-      .replace('{web}', String(est.webSegments))
-      .replace('{windows}', String(est.estimatedWindows))
-      .replace('{minutes}', String(est.estimatedMinutes))
-      .replace('{dropped}', String(est.droppedSegments ?? 0))
-      .replace('{fullSegments}', String(est.fullSegments ?? est.segments))
-      .replace('{fullWan}', ((est.fullChars ?? est.chars) / 10000).toFixed(1))
-      .replace('{fullWindows}', String(est.fullEstimatedWindows ?? est.estimatedWindows))
-      .replace('{fullMinutes}', String(est.fullEstimatedMinutes ?? est.estimatedMinutes))
-    // 勾上"全量送入"时，正文要说清这一轮按哪个口径来（估算两套数都在，别让用户以为数字对不上）
-    return skipConvergence ? text + '\n' + zhCN.compilation.materialEstimateConvergeSkipNote : text
-  }
-
   /** 预检估算里界面要用到的字段（与 IPC `CompilationEstimateMaterialsRes` 同形） */
-  type MaterialEstimateView = Parameters<typeof buildMaterialEstimateMessage>[0]
+  type MaterialEstimateView = MaterialEstimateLike
 
   /**
    * 2026-10-06（Phase 11 E 用户需求 ②）：把就绪检查的原始数字拼成一句人话。

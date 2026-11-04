@@ -641,11 +641,19 @@ export const zhCN = {
      * 同时给出"不做收敛（全量送入）"的数——用户据此判断要不要勾下面的逃生门。两个数都写出来，不藏。
      */
     materialEstimateBody:
-      '默认收敛后本轮将细读 {segments} 段 / {wan} 万字（本地 {local} 段 + 网页 {web} 段），' +
+      '默认收敛后本轮将细读 {segments} 段 / {wan} 万字（{scope}），' +
       '预计约 {windows} 个细读窗口 / 约 {minutes} 分钟，并会消耗相应的大模型额度。' +
       '（做法：文章内只送有信号的段落及其紧邻上下文；另有 {dropped} 段因无信号本轮不送，仍留在资料库中、可随时打开查看。）' +
       '若不收敛（全量送入）则为 {fullSegments} 段 / {fullWan} 万字 / 约 {fullWindows} 个窗口 / 约 {fullMinutes} 分钟。' +
-      '（网页资料会在生成时按年份区间抓取并重筛，不在此估算内。）是否继续？',
+      '{webNote}是否继续？',
+    /*
+     * 2026-11-04（用户实测问"为什么网页 0 段"）：新任务还没有任何网页来源，
+     * 预检的网页侧必然为 0——旧文案"本地 N 段 + 网页 0 段"会被读成"没有网页材料"。
+     * 现在分开表述：任务已带网页来源才报数字；没有就如实说"生成时按区间重筛（未计入本估算）"。
+     */
+    materialEstimateScopeIncluded: '本地 {local} 段 + 网页 {web} 段',
+    materialEstimateScopeWebDeferred: '本地 {local} 段 + 网页：生成时按区间重筛（未计入本估算）',
+    materialEstimateWebNote: '（网页资料会在生成时按年份区间抓取并重筛，不在此估算内。）',
     materialEstimateConvergeOff: '本轮不做收敛（全量送入）',
     materialEstimateConvergeOffHint: '勾选后跳过"文章内取段"，闸门后的全部段落都交给大模型细读；耗时与额度消耗随之上升。仅对本次生成生效。',
     materialEstimateConvergeSkipNote: '（已勾选「本轮不做收敛（全量送入）」：下面按全量口径来。）',
