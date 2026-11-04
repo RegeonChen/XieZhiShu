@@ -17,6 +17,53 @@
  * 放在 .ts 而不是组件里：本项目的内联单测只覆盖 `src/**\/*.ts`，而这段几何必须用手算期望值钉住。
  */
 
+/**
+ * 在**这一页自己的文字层**里按"目标文本"找区间（2026-11-04 用户实测反馈后新增）。
+ *
+ * 为什么需要：`flashRectsForRange` 拿的是"`cleaned_text` 里的**页内字符偏移**"，
+ * 而 `cleaned_text` 是 pdf-parse 抽出来的、**页内阅读顺序与视觉栏序可能不同**（年鉴是三栏排版）。
+ * 两套下标一旦错位，高亮就会落在隔壁几行、甚至只剩「共享」两个字。
+ *
+ * 做法：把该页文字项拼成一串（与画高亮用的是**同一份**数据），把目标文本去空白后在这串里找；
+ * 找到就用**这一页的**下标画高亮——天然与字形对齐，不再依赖跨来源的下标一致性。
+ * 找不到（扫描件没有文字层 / 卡片被模型改写到认不出）→ 返回 null，调用方退回旧的偏移口径。
+ *
+ * 退化匹配：先试完整目标文本；失败则按 3/4、1/2、1/3、12 字逐级缩短（应对"结尾被改写"的情况）。
+ */
+export function findPageTextRange(items: PdfTextItemLike[], needle: string): { start: number; end: number } | null {
+  const want = (needle ?? '').replace(/\s+/g, '')
+  if (want.length < 4) return null
+  let pageText = ''
+  const map: number[] = []
+  // 游标口径与 flashRectsForRange 完全一致：按文字项顺序累加 str.length（空白也占位）
+  let cursor = 0
+  for (const item of items) {
+    const str = item.str ?? ''
+    for (let i = 0; i < str.length; i++) {
+      if (/\s/.test(str[i])) continue
+      pageText += str[i]
+      map.push(cursor + i)
+    }
+    cursor += str.length
+  }
+  if (!pageText) return null
+  const lengths = new Set<number>()
+  for (const factor of [1, 0.75, 0.5, 0.34]) {
+    const n = Math.floor(want.length * factor)
+    if (n >= 4) lengths.add(n)
+  }
+  lengths.add(Math.min(12, want.length))
+  for (const n of [...lengths].sort((a, b) => b - a)) {
+    const probe = want.slice(0, n)
+    const at = pageText.indexOf(probe)
+    if (at < 0) continue
+    const start = map[at]
+    const end = map[Math.min(map.length - 1, at + probe.length - 1)] + 1
+    return { start, end }
+  }
+  return null
+}
+
 /** 页面内的矩形（百分比：left/top/width/height 都是 0–100） */
 export interface FlashRect {
   left: number
@@ -135,6 +182,34 @@ if (import.meta.vitest) {
   })
 
   describe('pdf flash geometry (Phase 9 高亮补充)', () => {
+    it('findPageTextRange：在本页文字层里按目标串定位（跨文字项、跨空白都能命中）', () => {
+      const items: PdfTextItemLike[] = [
+        { str: '前面一段与目标无关的记述。', width: 200, transform: [10, 0, 0, 10, 0, 900] },
+        { str: '文武砂中学整合进长乐华侨中学', width: 200, transform: [10, 0, 0, 10, 0, 880] },
+        { str: '教育集团滨海校区', width: 100, transform: [10, 0, 0, 10, 0, 860] }
+      ]
+      const hit = findPageTextRange(items, '文武砂中学整合进长乐华侨中学教育集团滨海校区')!
+      expect(hit).not.toBeNull()
+      // 命中的区间拼起来必须等于目标（说明跨项边界接得对）
+      const joined = items.map((i) => i.str).join('')
+      expect(joined.slice(hit.start, hit.end)).toBe('文武砂中学整合进长乐华侨中学教育集团滨海校区')
+    })
+
+    it('findPageTextRange：结尾被改写时逐级缩短仍能找到（落到共同前缀）', () => {
+      const items: PdfTextItemLike[] = [{ str: '【社会事业】文武砂中学整合进教育集团，成为滨海校区。', width: 300, transform: [10, 0, 0, 10, 0, 500] }]
+      const hit = findPageTextRange(items, '文武砂中学整合进教育集团滨海校区（改写过的尾巴）')!
+      expect(hit).not.toBeNull()
+      const joined = items.map((i) => i.str).join('')
+      expect(joined.slice(hit.start, hit.end).startsWith('文武砂中学整合进教育集团')).toBe(true)
+    })
+
+    it('findPageTextRange：找不到 / 太短 / 没有文字层 → null（宁可不画）', () => {
+      const items: PdfTextItemLike[] = [{ str: '本页与此无关。', width: 100, transform: [10, 0, 0, 10, 0, 500] }]
+      expect(findPageTextRange(items, '完全不在这页的一段话')).toBeNull()
+      expect(findPageTextRange(items, '共享')).toBeNull() // < 4 字
+      expect(findPageTextRange([], '文武砂中学整合进')).toBeNull()
+    })
+
     it('整项命中：宽度按 item.width × scale 换算，基线换算成行框（手算值钉住）', () => {
       const rects = flashRectsForRange(viewport, [item('abcdefghij', 100, 500, 100)], 0, 10)
       expect(rects).toHaveLength(1)

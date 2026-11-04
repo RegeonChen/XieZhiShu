@@ -1423,6 +1423,13 @@ body {
   font-weight: 600;
   color: var(--fg);
 }
+/* 2026-11-04：定位说明（"已定位到同页最接近的一句"之类），比正文更弱，避免喧哗 */
+.source-viewer__locate-note {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--fg-soft);
+  opacity: 0.85;
+}
 .source-viewer__locate-text--miss {
   color: var(--fg-soft);
 }

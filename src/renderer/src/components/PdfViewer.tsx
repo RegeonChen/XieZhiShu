@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { getDocument } from 'pdfjs-dist'
 import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from 'pdfjs-dist'
 import { keepRange, parsePageInput, shouldRelease } from '../lib/pdf-pages'
-import { flashRectsForRange, type PdfTextItemLike } from '../lib/pdf-flash'
+import { findPageTextRange, flashRectsForRange, type PdfTextItemLike } from '../lib/pdf-flash'
 // 在主线程加载 worker 模块：其末尾会执行 globalThis.pdfjsWorker = { WorkerMessageHandler }。
 // pdf.js 检测到该全局对象后，使用 LoopbackPort 在主线程运行 worker —— 无需真实 Worker 构造，
 // 也无需动态 import，dev(http) 与生产(file://) 环境下均稳定。
@@ -52,7 +52,7 @@ interface PdfViewerProps {
    * 高亮框（2026-10-03 用户裁定新增）：页内字符区间 → 几条高亮横带，**显示约 1 秒后自动消失**。
    * 区间来自生成期锚点（`source-locate.flashRangeFor`），因此一定包含目标；没有文字层时自然画不出来。
    */
-  flash?: { page: number; start: number; end: number; nonce: number } | null
+  flash?: { page: number; start: number; end: number; nonce: number; needle?: string } | null
 }
 
 /**
@@ -358,7 +358,13 @@ export default function PdfViewer({ url, targetPage, flash }: PdfViewerProps): R
         const viewport = pageProxy.getViewport({ scale: RENDER_SCALE })
         const content = await pageProxy.getTextContent()
         if (seq !== flashSeqRef.current) return
-        const rects = flashRectsForRange(viewport, content.items as PdfTextItemLike[], flush.start, flush.end)
+        /*
+         * 2026-11-04（用户实测反馈：高亮只剩「共享」两个字）：优先在**这一页自己的文字层**里找目标文本，
+         * 找到就用本页下标画（与字形天然对齐）；找不到再退回"跨来源的页内偏移"（老口径）。
+         */
+        const items = content.items as PdfTextItemLike[]
+        const hit = flush.needle ? findPageTextRange(items, flush.needle) : null
+        const rects = flashRectsForRange(viewport, items, hit ? hit.start : flush.start, hit ? hit.end : flush.end)
         if (rects.length === 0) return
         // 同一页上的旧图层先清掉（重复打开/重渲染都不能累积）
         el.querySelectorAll('.pdf-viewer__flash-layer').forEach((n) => n.remove())

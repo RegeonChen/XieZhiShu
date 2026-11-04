@@ -47,7 +47,11 @@ export interface SourceBlockView {
  * 高亮区间（纯数据，查看器自己决定怎么画）：
  * - `docStart/docEnd`：**来源正文**里的字符区间（纯文本查看器用）；
  * - `page`/`localStart`/`localEnd`：该区间在目标页内的偏移（PDF 查看器用，块不跨页）；
- * - `pageStart/pageEnd`：该页在正文里的字符区间（PDF 端做夹取时用得上）。
+ * - `pageStart/pageEnd`：该页在正文里的字符区间（PDF 端做夹取时用得上）；
+ * - `how`：这个区间是**怎么来的**（2026-11-04 用户实测反馈后新增）：
+ *   `evidence` = 引文在锚点块内逐字命中（最准）；
+ *   `similar` = 块内找不到，在**同一页**内用相似度找到最像的一句（模型改写过，近似）；
+ *   `block` = 只能给整块（约 500 字，包含目标但不精确）。
  */
 export interface FlashRange {
   docStart: number
@@ -57,37 +61,111 @@ export interface FlashRange {
   localEnd: number
   /** 该高亮是"用证据引文收窄"得来的（更准）还是退化为"整块" */
   narrowed: boolean
+  how: 'evidence' | 'similar' | 'block'
+}
+
+/**
+ * 收窄的最小引文长度（去空白后）。短于这个长度**不做收窄**：
+ * 实测「共享」这种 2 字引文会在全文里命中几十处，收窄反而把人带到错误位置。
+ */
+export const NARROW_MIN_CHARS = 8
+/** 页内相似度兜底的接受门槛（bigram Dice）；低于它就是"不像"，宁可整块高亮 */
+export const SIMILAR_MIN_DICE = 0.5
+
+/** 去掉所有空白 + 建立"紧凑下标 → 原文下标"映射（与 findVerbatimRange 同一口径） */
+function compactWithMap(text: string): { compact: string; map: number[] } {
+  let compact = ''
+  const map: number[] = []
+  for (let i = 0; i < text.length; i++) {
+    if (/\s/.test(text[i])) continue
+    compact += text[i]
+    map.push(i)
+  }
+  return { compact, map }
 }
 
 /** 归一化（去空白）后做子串查找，返回**原文**里的区间；找不到返回 null */
 export function findVerbatimRange(text: string, needle: string): { start: number; end: number } | null {
   const n = (needle ?? '').trim()
   if (!n) return null
-  const compact = (s: string): string => s.replace(/\s+/g, '')
-  const target = compact(n)
-  if (target.length < 2) return null
-  // 建立"紧凑下标 → 原文下标"的映射
-  const map: number[] = []
-  let built = ''
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i]
-    if (/\s/.test(ch)) continue
-    built += ch
-    map.push(i)
-  }
-  const at = built.indexOf(target)
+  const target = n.replace(/\s+/g, '')
+  if (target.length < 4) return null
+  const { compact, map } = compactWithMap(text)
+  const at = compact.indexOf(target)
   if (at < 0) return null
   const start = map[at]
-  const last = map[at + target.length - 1]
+  const last = map[Math.min(map.length - 1, at + target.length - 1)]
   return { start, end: last + 1 }
+}
+
+/** bigram 多重集 Dice（0–1）；两个串都先去掉空白 */
+export function bigramDice(a: string, b: string): number {
+  const x = a.replace(/\s+/g, '')
+  const y = b.replace(/\s+/g, '')
+  if (x.length < 2 || y.length < 2) return 0
+  const grams = (s: string): Map<string, number> => {
+    const m = new Map<string, number>()
+    for (let i = 0; i + 1 < s.length; i++) {
+      const g = s.slice(i, i + 2)
+      m.set(g, (m.get(g) ?? 0) + 1)
+    }
+    return m
+  }
+  const ga = grams(x)
+  const gb = grams(y)
+  let inter = 0
+  for (const [g, n] of ga) inter += Math.min(n, gb.get(g) ?? 0)
+  return (2 * inter) / (x.length - 1 + (y.length - 1))
+}
+
+/**
+ * 在**一段正文区间**里找"最像 needle 的一小段"（用于模型改写过的卡片）。
+ *
+ * 口径：把该区间压成紧凑串，用与 needle 等长的滑窗逐位算 bigram Dice；取最高分。
+ * 同分（差 ≤0.02）时**优先离 `preferAt` 近的**——锚点块是我们最好的先验，别被页内别的相似句抢走。
+ * 返回的区间一定落在该页区间内（映射回原文下标后夹取）。
+ */
+export function findBestSimilarRange(
+  text: string,
+  from: number,
+  to: number,
+  needle: string,
+  preferAt: number
+): { start: number; end: number; dice: number } | null {
+  const fn = (needle ?? '').trim()
+  if (fn.length < 4) return null
+  const pageRaw = text.slice(Math.max(0, from), Math.min(text.length, to))
+  if (!pageRaw) return null
+  const { compact, map } = compactWithMap(pageRaw)
+  const want = fn.replace(/\s+/g, '')
+  const win = Math.max(4, Math.min(want.length + 4, 60))
+  if (compact.length < Math.min(4, win)) return null
+  let best: { start: number; end: number; dice: number; dist: number } | null = null
+  const limit = Math.max(1, compact.length - win + 1)
+  for (let i = 0; i < limit; i++) {
+    const cand = compact.slice(i, Math.min(compact.length, i + win))
+    const dice = bigramDice(cand, want)
+    if (dice < SIMILAR_MIN_DICE) continue
+    const rawStart = map[i]
+    const rawEnd = map[Math.min(map.length - 1, i + cand.length - 1)] + 1
+    const dist = Math.abs(Math.max(0, from) + rawStart - preferAt)
+    if (!best || dice > best.dice + 0.02 || (Math.abs(dice - best.dice) <= 0.02 && dist < best.dist)) {
+      best = { start: Math.max(0, from) + rawStart, end: Math.max(0, from) + rawEnd, dice, dist }
+    }
+  }
+  if (!best) return null
+  return { start: Math.max(from, best.start), end: Math.min(to, best.end), dice: best.dice }
 }
 
 /**
  * 把"锚点 + 块表 + 证据引文"换算成**保证包含目标**的高亮区间（纯函数）。
  *
- * 保证来自锚点的定义：`attachAnchors` 是把**证据引文（或卡片正文）逐字命中**到某个块上才写的锚点，
- * 所以"锚点那一块的区间"必然包含目标。这里再用证据引文把区间**收窄**（通常只有一两句话、跨几行），
- * 收窄结果若不与锚点块相交（理论上不该发生）就退回整块 —— 退一步也仍然"目标一定在内"。
+ * 2026-11-04（用户实测反馈：「文武砂中学…」那条高亮成「共享」两个字）后的三条口径：
+ * ① **块内优先**：引文只在**锚点块区间内**找，不再对全文 `indexOf`——旧实现找全文第一次出现，
+ *    短/常见引文会把高亮带到别的段落，或因交集为空退回整块（看着就"差几行"）；
+ * ② **短引文不收窄**：去空白后 < `NARROW_MIN_CHARS`（8 字）不参与收窄，直接整块；
+ * ③ **页内相似度兜底**：块内找不到逐字（卡片被模型改写过，或引文缺失）时，在**同一页**内找最像的一句，
+ *    拿到就高亮它（`how='similar'`，界面如实说明"与原文不完全一致"）；仍找不到才整块。
  */
 export function flashRangeFor(
   anchor: { kind: string; blockIndex?: number; page?: number | null },
@@ -115,14 +193,25 @@ export function flashRangeFor(
 
   let docStart = blockStart
   let docEnd = blockEnd
-  let narrowed = false
-  if (evidence && sourceText) {
-    const hit = findVerbatimRange(sourceText, evidence)
-    if (hit && hit.start < blockEnd && hit.end > blockStart) {
-      // 收窄，但**不能越出锚点块**（否则可能把目标切掉）
-      docStart = Math.max(blockStart, hit.start)
-      docEnd = Math.min(blockEnd, hit.end)
-      narrowed = true
+  let how: FlashRange['how'] = 'block'
+
+  const ev = (evidence ?? '').trim()
+  const longEnough = ev.replace(/\s+/g, '').length >= NARROW_MIN_CHARS
+  if (ev && sourceText && longEnough) {
+    // ① 块内优先（把搜索范围限制在锚点块里，天然不会跑到别处）
+    const blockHit = findVerbatimRange(sourceText.slice(blockStart, blockEnd), ev)
+    if (blockHit) {
+      docStart = blockStart + blockHit.start
+      docEnd = blockStart + blockHit.end
+      how = 'evidence'
+    } else if (page != null) {
+      // ③ 页内相似度兜底（只在同一页里找，且离锚点块越近越优先）
+      const near = findBestSimilarRange(sourceText, pageStart, pageEnd, ev, blockStart)
+      if (near) {
+        docStart = near.start
+        docEnd = near.end
+        how = 'similar'
+      }
     }
   }
   if (page != null) {
@@ -136,7 +225,8 @@ export function flashRangeFor(
     page,
     localStart: page != null ? docStart - pageStart : docStart,
     localEnd: page != null ? docEnd - pageStart : docEnd,
-    narrowed
+    narrowed: how === 'evidence',
+    how
   }
 }
 
@@ -268,30 +358,71 @@ if (import.meta.vitest) {
       expect(paragraphNumberAt('', 0)).toBeNull()
     })
 
-    it('高亮区间：证据引文把区间收窄，且**永不越出锚点块**（目标一定在内）', () => {
-      const text = '开头一段无关内容。' + '2022 年，全区有省一级达标高中 2 所，具体名单见下文。' + '后面还有很多别的文字，用来撑开长度。'.repeat(20)
+    it('高亮区间：引文在**锚点块内**逐字命中才收窄（不再被全文别处的同一句带偏）', () => {
       const evidence = '省一级达标高中 2 所'
-      const block0 = { blockIndex: 0, charStart: 0, charEnd: 300, page: 3 }
-      const block1 = { blockIndex: 1, charStart: 300, charEnd: 900, page: 3 }
-      const blocks = [block0, block1]
-      const hit = findVerbatimRange(text, evidence)!
-      expect(hit.start).toBeGreaterThan(0)
-      // 锚点在块 0 上 → 收窄到证据区间（在块 0 内）
-      const narrow = flashRangeFor({ kind: 'page', blockIndex: 0 }, blocks, evidence, text)!
+      const sent = '2022 年，全区有省一级达标高中 2 所，具体名单见下文。'
+      const first = '开头一段无关内容。' + sent
+      const pad = 'A'.repeat(300)
+      const text = first + pad + sent
+      const split = first.length + pad.length
+      const blocks = [
+        { blockIndex: 0, charStart: 0, charEnd: split, page: 3 },
+        { blockIndex: 1, charStart: split, charEnd: text.length, page: 3 }
+      ]
+      const second = text.indexOf(evidence, split)
+      expect(second).toBeGreaterThanOrEqual(split)
+      // 锚点在块 1 → 必须落在块 1 那一处（旧实现在全文找第一次出现，会被块 0 带偏）
+      const narrow = flashRangeFor({ kind: 'page', blockIndex: 1 }, blocks, evidence, text)!
+      expect(narrow.how).toBe('evidence')
       expect(narrow.narrowed).toBe(true)
-      expect(narrow.docStart).toBe(hit.start)
-      expect(narrow.docEnd).toBe(hit.end)
+      expect(narrow.docStart).toBe(second)
+      expect(narrow.docEnd).toBe(second + evidence.length)
       expect(narrow.page).toBe(3)
-      expect(narrow.localStart).toBe(hit.start) // 该页起点 = 块 0 起点 = 0
-      // 锚点在块 1 上、而证据落在块 0 内 → 不能收窄（否则把目标切掉），退回整块 1
-      const fallback = flashRangeFor({ kind: 'page', blockIndex: 1 }, blocks, evidence, text)!
-      expect(fallback.narrowed).toBe(false)
-      expect(fallback.docStart).toBe(300)
-      expect(fallback.docEnd).toBe(900)
-      // 没有证据 → 整块；没有块表 → null（宁可不画，也不乱画）
-      expect(flashRangeFor({ kind: 'page', blockIndex: 0 }, blocks)!.docEnd).toBe(300)
+      // 锚点块里找不到 → 页内相似度兜底（同页有一模一样的一句）
+      const otherBlocks = [
+        { blockIndex: 0, charStart: 0, charEnd: 20, page: 3 },
+        { blockIndex: 1, charStart: split, charEnd: text.length, page: 3 }
+      ]
+      const other = flashRangeFor({ kind: 'page', blockIndex: 0 }, otherBlocks, evidence, text)!
+      expect(other.how).toBe('similar')
+      expect(other.narrowed).toBe(false)
+      // 没有证据 → 整块；找不到块 → null
+      expect(flashRangeFor({ kind: 'page', blockIndex: 0 }, blocks)!.docEnd).toBe(split)
       expect(flashRangeFor({ kind: 'page', blockIndex: 9 }, blocks, evidence, text)).toBeNull()
       expect(flashRangeFor({ kind: 'unknown' }, blocks, evidence, text)).toBeNull()
+    })
+
+    it('短引文（如「共享」两字）不收窄：整块高亮，避免把人带到别的段落', () => {
+      const text = '共享单车在城区投放。' + '共享'.repeat(30) + '目标：文武砂中学整合进长乐华侨中学教育集团滨海校区。'
+      const blocks = [{ blockIndex: 0, charStart: 0, charEnd: text.length, page: 257 }]
+      const r = flashRangeFor({ kind: 'page', blockIndex: 0 }, blocks, '共享', text)!
+      expect(r.how).toBe('block')
+      expect(r.docStart).toBe(0)
+      expect(r.docEnd).toBe(text.length)
+    })
+
+    it('模型改写过的引文 → 页内相似度兜底，落到原文最像的那一句', () => {
+      const origin = '【社会事业】2022 年，文武砂中学整合进长乐华侨中学教育集团，成为滨海校区。'
+      const text = '前面是垃圾分类与人居环境的记述。'.repeat(3) + origin + '后面继续讲别的事情。'.repeat(3)
+      const pageStart = 0
+      const pageEnd = text.length
+      const blocks = [{ blockIndex: 0, charStart: pageStart, charEnd: pageEnd, page: 257 }]
+      // 模型写的版本与原文不同（"整合进…滨海校区"），逐字必然找不到
+      const rewritten = '文武砂中学整合进长乐华侨中学教育集团滨海校区'
+      expect(findVerbatimRange(text, rewritten)).toBeNull()
+      const r = flashRangeFor({ kind: 'page', blockIndex: 0 }, blocks, rewritten, text)!
+      expect(r.how).toBe('similar')
+      const at = text.indexOf('文武砂中学整合进')
+      expect(r.docStart).toBeLessThanOrEqual(at)
+      expect(r.docEnd).toBeGreaterThan(at)
+      expect(r.page).toBe(257)
+    })
+
+    it('页内也不像 → 退回整块（不猜）', () => {
+      const text = '完全不相关的甲甲甲甲。'.repeat(10)
+      const blocks = [{ blockIndex: 0, charStart: 0, charEnd: text.length, page: 1 }]
+      const r = flashRangeFor({ kind: 'page', blockIndex: 0 }, blocks, '乙方乙方的投资协议内容', text)!
+      expect(r.how).toBe('block')
     })
 
     it('高亮区间按页夹取：块不跨页，页码不同则局内偏移从该页起点算起', () => {

@@ -164,6 +164,9 @@ export const zhCN = {
     locateNone: '该卡片未记录来源位置（重新生成汇编可获得页级定位）',
     // 有页的来源（PDF）却没算出页码：逐页文字与库里的正文对不上 → 如实说，不拿"第 N 段"糊弄
     locatePdfNoPage: '未能确定页码（该 PDF 的逐页文字与正文对不上，可自行翻页或「用系统默认程序打开」）',
+    /* 2026-11-04（用户实测反馈）：高亮只能给到"同页最像的一句"或"整块"时，必须如实说明，不假装精确 */
+    locateApproximate: '该段文字与原文不完全一致，已定位到同页最接近的一句',
+    locateBlockOnly: '已定位到该段所在位置（约 500 字范围，未精确到句）',
     openExternal: '用系统默认程序打开',
     openExternalFailed: '打开失败：{message}',
     close: '关闭'

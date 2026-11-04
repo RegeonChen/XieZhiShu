@@ -271,12 +271,20 @@ function SourceViewer({
           ? t.locatePdfNoPage
           : t.locateNone
   // 网页来源不显示定位条：原网页是实时加载的，库里的段落位置对它没有意义
+  /*
+   * 2026-11-04（用户实测反馈）：高亮的"精度等级"必须如实说。
+   * `evidence` = 引文逐字命中（最准）；`similar` = 卡片被模型改写过，只能定位到同页最像的一句；
+   * `block` = 只到块（约 500 字）。后两种各给一句说明，避免用户以为"就是这句"。
+   */
+  const locateNote =
+    flashRange?.how === 'similar' ? t.locateApproximate : flashRange?.how === 'block' ? t.locateBlockOnly : ''
   const locateBar =
     barState && !isWebSource ? (
       <div className="source-viewer__locate">
         <span className={`source-viewer__locate-text${barState.kind === 'none' || barState.kind === 'page-unknown' ? ' source-viewer__locate-text--miss' : ''}`}>
           {locateText}
         </span>
+        {locateNote ? <span className="source-viewer__locate-note">{locateNote}</span> : null}
         {barState.label ? <span className="source-viewer__locate-anchor">{barState.label}</span> : null}
       </div>
     ) : null
@@ -440,7 +448,27 @@ function SourceViewer({
           <PdfViewer
             url={fileUrl}
             targetPage={locate?.kind === 'page' ? locate.page : null}
-            flash={flashRange && flashRange.page != null ? { page: flashRange.page, start: flashRange.localStart, end: flashRange.localEnd, nonce: flashNonce } : null}
+            flash={
+              flashRange && flashRange.page != null
+                ? {
+                    page: flashRange.page,
+                    start: flashRange.localStart,
+                    end: flashRange.localEnd,
+                    nonce: flashNonce,
+                    /*
+                     * 2026-11-04：把"要找的那段文字"一起交给 PDF 查看器，让它在**本页文字层**里重新对齐。
+                     * 逐字命中 → 用证据引文；相似/整块 → 用我们算出来的那段原文（`cleaned_text` 切片），
+                     * 这样即使 pdf-parse 与页面排版顺序不同，高亮也能落在这页真正的字形上。
+                     */
+                    needle:
+                      flashRange.how === 'evidence'
+                        ? snapshotHighlight
+                        : flashRange.how === 'similar'
+                          ? (source.cleanedText ?? '').slice(flashRange.docStart, flashRange.docEnd)
+                          : undefined
+                  }
+                : null
+            }
           />
         ) : isImage && fileUrl ? (
           <img className="source-viewer__image" src={fileUrl} alt={source.title} />
