@@ -4545,6 +4545,163 @@ textarea:focus-visible {
   color: #b91c1c;
 }
 
+/*
+ * 2026-11-04（用户反馈"纯文本堆砌、抓不住重点"）：面板重排后的样式——
+ * 数字块 / 状态横幅 / 并排进度卡 / 折叠的「更多设置」。
+ * 只做视觉，不改任何交互语义。
+ */
+.cache-build__stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.cache-build__stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated, #fff);
+  min-width: 0;
+}
+.cache-build__stat-num {
+  font-size: 20px;
+  font-weight: 650;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+.cache-build__stat-label {
+  font-size: 11.5px;
+  color: var(--fg-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cache-build__stat.is-ok .cache-build__stat-num { color: #059669; }
+.cache-build__stat.is-muted .cache-build__stat-num { color: var(--fg-soft); }
+
+.cache-build__banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  color: var(--fg);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.cache-build__banner-dot {
+  width: 6px;
+  height: 6px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.cache-build__banner.is-ok { background: #ecfdf5; border-color: #a7f3d0; color: #047857; }
+.cache-build__banner.is-err { background: #fef2f2; border-color: #fecaca; color: #b91c1c; }
+.cache-build__banner.is-info { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; }
+.cache-build__banner.is-muted { color: var(--fg-soft); }
+
+.cache-build__controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+.cache-build__year-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cache-build__chip {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  color: var(--fg-soft);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.cache-build__cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.cache-build__card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-elevated, #fff);
+  min-width: 0;
+}
+.cache-build__card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.cache-build__card-title {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.cache-build__card-metrics {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--fg-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+.cache-build__more {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+.cache-build__more > summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--fg-soft);
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  user-select: none;
+}
+.cache-build__more > summary::-webkit-details-marker { display: none; }
+.cache-build__more > summary::before { content: '▸'; font-size: 10px; }
+.cache-build__more[open] > summary::before { content: '▾'; }
+.cache-build__more > summary:hover { color: var(--fg); }
+.cache-build__more-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 8px;
+}
+.settings__hint--foot {
+  margin-top: 12px;
+  font-size: 11.5px;
+  opacity: 0.8;
+}
+@media (max-width: 900px) {
+  .cache-build__stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cache-build__cards { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* 预设模型卡片 */
 .settings__preset-item {
   transition: border-color 0.12s ease, box-shadow 0.12s ease;

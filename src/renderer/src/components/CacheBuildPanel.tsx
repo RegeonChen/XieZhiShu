@@ -45,6 +45,12 @@ const MAX_YEAR = 2100
 /** 网页抓取一完成就刷新一次规划（间隔统计），但不跟着 1.5 秒轮询反复查库 */
 const POLL_MS = 1500
 
+/** 数字加千分位：34,325 比 34325 好扫读（2026-11-04 改版） */
+function fmtNum(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return '—'
+  return Math.round(n).toLocaleString('zh-CN')
+}
+
 function fmtEta(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds <= 0) return '—'
   const m = Math.floor(seconds / 60)
@@ -333,6 +339,33 @@ export default function CacheBuildPanel(): JSX.Element {
   const local = status?.local
   const localPending = (local?.pending ?? 0) + (local?.indexing ?? 0)
   const localReady = (local?.total ?? 0) > 0 && (local?.ready ?? 0) === (local?.total ?? 0) && (local?.failed ?? 0) === 0
+  /*
+   * 2026-11-04（用户反馈"纯文本堆砌、抓不住重点"）：重排信息层级——
+   * ① 顶部四个数字：还剩多少要建（待建立网页 / 已缓存 / 待索引本地 / 无可用正文）；
+   * ② 一条状态横幅：运行中 / 已完成 / 已停止 / 建立失败（带颜色，替代原来的一堆灰字）；
+   * ③ 年份区间 + 预计小胶囊；
+   * ④ 两张进度卡（网页正文缓存 / 本地资料库索引），进度条 + 关键数字；
+   * ⑤ 「更多设置」折叠：清单发现、抓取档位、站点概况、缓存占用与清空、引擎自检。
+   * **功能与 IPC 调用一律不动**，只改信息层级与视觉。
+   */
+  const pendingWeb = plan ? plan.web.pending : null
+  const cachedEntries = cache?.entries ?? 0
+  const noBodyCount = cache?.byState['no-body'] ?? 0
+  const planChipText = plan
+    ? plan.web.pending > 0
+      ? index.planChip.replace('{pending}', fmtNum(plan.web.pending)).replace('{minutes}', String(plan.web.estimatedMinutes))
+      : index.planChipDone
+    : '—'
+
+  /** 状态横幅：优先级 = 失败 > 运行中 > 操作回执 > 已完成 > 已停止 */
+  const banner = (() => {
+    if (status?.phase === 'failed' && status.message) return { tone: 'err', text: status.message }
+    if (running) return { tone: 'info', text: index.runningBanner }
+    if (msg) return { tone: msg.ok ? 'ok' : 'err', text: msg.text }
+    if (webFinished) return { tone: 'ok', text: index.doneBanner + (webFinishedLabel ? '　' + webFinishedLabel : '') }
+    if (webCancelled) return { tone: 'muted', text: index.webStoppedHint }
+    return null
+  })()
 
   return (
     <>
@@ -360,304 +393,362 @@ export default function CacheBuildPanel(): JSX.Element {
           </button>
         </div>
       </div>
-      <p className="settings__hint">{index.hint}</p>
+
+      {/* ① 四个数字：用户一眼看到"还剩多少要建" */}
+      <div className="cache-build__stats" data-testid="cache-build-stats">
+        <div className="cache-build__stat">
+          <span className="cache-build__stat-num">{fmtNum(pendingWeb)}</span>
+          <span className="cache-build__stat-label">{index.statWebPending}</span>
+        </div>
+        <div className="cache-build__stat is-ok">
+          <span className="cache-build__stat-num">{fmtNum(cachedEntries)}</span>
+          <span className="cache-build__stat-label">{index.statCached}</span>
+        </div>
+        <div className="cache-build__stat">
+          <span className="cache-build__stat-num">{fmtNum(localPending)}</span>
+          <span className="cache-build__stat-label">{index.statLocalPending}</span>
+        </div>
+        <div className="cache-build__stat is-muted">
+          <span className="cache-build__stat-num">{fmtNum(noBodyCount)}</span>
+          <span className="cache-build__stat-label">{index.statNoBody}</span>
+        </div>
+      </div>
+
+      {/* ② 状态横幅（运行中 / 已完成 / 已停止 / 失败 / 操作回执） */}
+      {banner ? (
+        <div className={`cache-build__banner is-${banner.tone}`} data-testid="cache-build-banner" role="status">
+          <span className="cache-build__banner-dot" aria-hidden="true" />
+          <span>{banner.text}</span>
+        </div>
+      ) : null}
       {!bridgeReady ? <p className="settings__hint settings__hint--err">{index.staleBridge}</p> : null}
 
-      {/* 年份区间 + 只读规划（"本次要建多少 / 已有多少跳过"如实摆出来） */}
-      <div className="settings__field cache-build__years">
-        <span className="settings__field-label">{index.yearLabel}</span>
-        <div className="cache-build__years-row">
-          <input
-            type="number"
-            className="cache-build__year-input"
-            min={MIN_YEAR}
-            max={MAX_YEAR}
-            value={from}
-            disabled={running}
-            onChange={(e) => setFrom(e.target.value)}
-            aria-label={zhCN.compilation.webYearFrom}
-          />
-          <span className="cache-build__years-sep">–</span>
-          <input
-            type="number"
-            className="cache-build__year-input"
-            min={MIN_YEAR}
-            max={MAX_YEAR}
-            value={to}
-            disabled={running}
-            onChange={(e) => setTo(e.target.value)}
-            aria-label={zhCN.compilation.webYearTo}
-          />
-          {!yearsValid && (touched || from !== String(DEFAULT_FROM) || to !== String(DEFAULT_TO)) ? (
-            <span className="settings__field-hint settings__hint--err">{index.yearInvalid}</span>
-          ) : null}
+      {/* ③ 年份区间 + 预计（只读规划：本次要建多少篇） */}
+      <div className="cache-build__controls">
+        <div className="cache-build__year-block">
+          <span className="settings__field-label">{index.yearLabel}</span>
+          <div className="cache-build__years-row">
+            <input
+              type="number"
+              className="cache-build__year-input"
+              min={MIN_YEAR}
+              max={MAX_YEAR}
+              value={from}
+              disabled={running}
+              onChange={(e) => setFrom(e.target.value)}
+              aria-label={zhCN.compilation.webYearFrom}
+            />
+            <span className="cache-build__years-sep">–</span>
+            <input
+              type="number"
+              className="cache-build__year-input"
+              min={MIN_YEAR}
+              max={MAX_YEAR}
+              value={to}
+              disabled={running}
+              onChange={(e) => setTo(e.target.value)}
+              aria-label={zhCN.compilation.webYearTo}
+            />
+            {!yearsValid && (touched || from !== String(DEFAULT_FROM) || to !== String(DEFAULT_TO)) ? (
+              <span className="settings__field-hint settings__hint--err">{index.yearInvalid}</span>
+            ) : null}
+          </div>
         </div>
-        {yearsValid && plan && status?.phase !== 'syncing' ? (
-          <p className="settings__field-hint" data-testid="cache-build-plan">
-            {plan.web.pending > 0
-              ? index.planPending.replace('{pending}', String(plan.web.pending)).replace('{minutes}', String(plan.web.estimatedMinutes))
-              : index.nothingToDo}
-            {plan.web.total - plan.web.pending > 0
-              ? '；' + index.planAlready.replace('{already}', String(plan.web.total - plan.web.pending))
-              : ''}
-            {/*
-              2026-11-02（第三项任务）：把估算依据摊开——"上次实测 N 篇/秒"比"预计 X 分钟"更能让用户判断。
-              没测过时如实说用的是默认口径（默认 75ms/篇 偏乐观，真实站点实测约 142ms/篇）。
-            */}
-            {'　'}
-            {measuredMs != null
-              ? index.planRateMeasured
-                  .replace('{ms}', String(measuredMs))
-                  .replace('{perSec}', (1000 / measuredMs).toFixed(1))
-              : index.planRateDefault}
-          </p>
-        ) : null}
-        {/*
-          Phase 11 G（C）：站点概况 —— "有几个站、几个还没清单"必须看得见。
-          没同步过的站点在目录里是 0 条，不写清楚的话，用户会以为软件漏了它（用户实测反馈）。
-        */}
-        {yearsValid && plan && status?.phase !== 'syncing' ? (
-          <p className="settings__field-hint" data-testid="cache-build-sites">
-            {index.sites.replace('{total}', String(plan.sites.total))}
-            {plan.sites.neverSynced > 0 ? index.sitesNeverSynced.replace('{count}', String(plan.sites.neverSynced)) : ''}
-          </p>
-        ) : null}
-        {yearsValid && plan && plan.web.blocked > 0 ? (
-          <p className="settings__field-hint">{index.planBlocked.replace('{blocked}', String(plan.web.blocked))}</p>
-        ) : null}
-        {yearsValid && plan && plan.web.undatedArticles > 0 ? (
-          <p className="settings__field-hint">{index.planUndated.replace('{undated}', String(plan.web.undatedArticles))}</p>
-        ) : null}
-        {planErr ? <p className="settings__field-hint settings__hint--err">{index.planFailed.replace('{message}', planErr)}</p> : null}
+        <span className="cache-build__chip" data-testid="cache-build-plan-chip">
+          {planChipText}
+        </span>
       </div>
 
-      {/* 站点清单同步（A 的第一阶段）：运行中如实显示在同步哪个站点，结束后给汇总 */}
-      {status && (status.phase === 'syncing' || status.sync.added > 0 || status.sync.failed > 0) ? (
-        <div className="cache-build__block">
-          <span className="settings__field-label">{index.syncLabel}</span>
-          <p className="settings__field-hint" data-testid="cache-build-sync">
-            {status.phase === 'syncing'
-              ? status.sync.currentSite
-                ? index.syncingSites
-                    .replace('{index}', String(Math.max(1, status.sync.siteIndex)))
-                    .replace('{total}', String(status.sync.siteTotal || '?'))
-                    .replace('{site}', status.sync.currentSite)
-                : index.syncingSitesSimple
-              : index.syncSummary
-                  .replace('{done}', String(status.sync.siteIndex))
-                  .replace('{total}', String(status.sync.siteTotal))
-                  .replace('{added}', String(status.sync.added)) +
-                (status.sync.failed > 0 ? index.syncFailedCount.replace('{count}', String(status.sync.failed)) : '')}
-          </p>
-          {status.phase === 'syncing' ? <p className="settings__field-hint">{index.syncPendingHint}</p> : null}
-          {/* Phase 11 H：算法**实测**出来的发现规模（页/层数不再由人预设） */}
-          {status.phase !== 'syncing' && status.sync.lastSummary ? (
-            <p className="settings__field-hint" data-testid="cache-build-discovery">
-              {status.sync.lastSummary}
-            </p>
-          ) : null}
-        </div>
+      {yearsValid && plan && status?.phase !== 'syncing' ? (
+        <p className="settings__field-hint" data-testid="cache-build-plan">
+          {plan.web.total - plan.web.pending > 0
+            ? index.planAlready.replace('{already}', fmtNum(plan.web.total - plan.web.pending)) + '　'
+            : ''}
+          {/* 估算依据摊开：上次实测比"预计 X 分钟"更能帮用户判断 */}
+          {measuredMs != null
+            ? index.planRateMeasured.replace('{ms}', String(measuredMs)).replace('{perSec}', (1000 / measuredMs).toFixed(1))
+            : index.planRateDefault}
+        </p>
       ) : null}
+      {/* Phase 11 G（C）：站点概况——"有几个站、几个还没清单"必须看得见 */}
+      {yearsValid && plan && status?.phase !== 'syncing' ? (
+        <p className="settings__field-hint" data-testid="cache-build-sites">
+          {index.sites.replace('{total}', fmtNum(plan.sites.total))}
+          {plan.sites.neverSynced > 0 ? index.sitesNeverSynced.replace('{count}', fmtNum(plan.sites.neverSynced)) : ''}
+        </p>
+      ) : null}
+      {yearsValid && plan && plan.web.blocked > 0 ? (
+        <p className="settings__field-hint">{index.planBlocked.replace('{blocked}', fmtNum(plan.web.blocked))}</p>
+      ) : null}
+      {yearsValid && plan && plan.web.undatedArticles > 0 ? (
+        <p className="settings__field-hint">{index.planUndated.replace('{undated}', fmtNum(plan.web.undatedArticles))}</p>
+      ) : null}
+      {planErr ? <p className="settings__field-hint settings__hint--err">{index.planFailed.replace('{message}', planErr)}</p> : null}
 
-      {/* 站点清单发现的规模（Phase 11 H）：默认自动，页/层由算法测出；撞安全阀时可切手动放开 */}
-      <div className="cache-build__block">
-        <span className="settings__field-label">{index.discoveryLabel}</span>
-        <div className="cache-build__tiers">
-          <label className="cache-build__tier-item">
-            <input
-              type="radio"
-              name="cache-build-discovery"
-              checked={discoveryMode === 'auto'}
-              disabled={running}
-              onChange={() => void saveDiscoveryMode('auto')}
-            />
-            {index.discoveryAuto}
-          </label>
-          <label className="cache-build__tier-item">
-            <input
-              type="radio"
-              name="cache-build-discovery"
-              checked={discoveryMode === 'manual'}
-              disabled={running}
-              onChange={() => void saveDiscoveryMode('manual')}
-            />
-            {index.discoveryManual}
-          </label>
-          {discoveryMode === 'manual' ? (
+      {/* ④ 两张进度卡：网页 / 本地，并排 */}
+      <div className="cache-build__cards">
+        <div className="cache-build__card">
+          <div className="cache-build__card-head">
+            <span className="cache-build__card-title">{index.webTitle}</span>
+            {running ? (
+              <span className="settings__status-chip">{index.webChipRunning}</span>
+            ) : webFinished ? (
+              <span className="settings__status-chip is-ok">✓ {index.webChipDone}</span>
+            ) : webCancelled ? (
+              <span className="settings__status-chip">{index.webChipStopped}</span>
+            ) : status?.phase === 'failed' ? (
+              <span className="settings__status-chip is-err">{index.webChipFailed}</span>
+            ) : null}
+          </div>
+          {web && (running || web.total > 0) ? (
             <>
-              <label className="cache-build__tier-item">
-                {index.discoveryPages}
-                <input
-                  type="number"
-                  className="cache-build__year-input"
-                  min={10}
-                  max={2000}
-                  value={discoveryPages}
-                  disabled={running}
-                  onChange={(e) => setDiscoveryPages(Number(e.target.value))}
-                  onBlur={(e) => void saveDiscoveryNumber('webDiscoveryPages', e.target.value)}
+              <div className="cache-build__progress">
+                <div
+                  className={`cache-build__progress-bar${webFinished ? ' cache-build__progress-bar--done' : ''}`}
+                  style={{ width: `${webFinished ? 100 : webPct}%` }}
                 />
-              </label>
-              <label className="cache-build__tier-item">
-                {index.discoveryDepth}
-                <input
-                  type="number"
-                  className="cache-build__year-input"
-                  min={1}
-                  max={8}
-                  value={discoveryDepth}
-                  disabled={running}
-                  onChange={(e) => setDiscoveryDepth(Number(e.target.value))}
-                  onBlur={(e) => void saveDiscoveryNumber('webDiscoveryDepth', e.target.value)}
-                />
-              </label>
-            </>
-          ) : null}
-        </div>
-        <p className="settings__field-hint">
-          {discoveryMode === 'auto'
-            ? index.discoveryAutoHint.replace('{pages}', String(discoveryPages)).replace('{depth}', String(discoveryDepth))
-            : index.discoveryManualHint}
-        </p>
-      </div>
-
-      {/* ① 网页正文缓存 */}
-      <div className="cache-build__block">
-        <div className="cache-build__block-head">
-          <span className="settings__field-label">{index.webTitle}</span>
-          {/*
-           * 2026-11-03（用户实测反馈）：建完之后进度条一直留在 100%、没有"已完成"的收尾态，
-           * 用户看着以为还在跑。这里给网页侧一个明确的状态章：建立中 / 已完成 / 已停止 / 建立失败。
-           */}
-          {running ? (
-            <span className="settings__status-chip">{index.webChipRunning}</span>
-          ) : webFinished ? (
-            <span className="settings__status-chip is-ok">✓ {index.webChipDone}</span>
-          ) : webCancelled ? (
-            <span className="settings__status-chip">{index.webChipStopped}</span>
-          ) : status?.phase === 'failed' ? (
-            <span className="settings__status-chip is-err">{index.webChipFailed}</span>
-          ) : null}
-        </div>
-        {web && (running || web.total > 0) ? (
-          <>
-            <div className="cache-build__progress">
-              <div
-                className={`cache-build__progress-bar${webFinished ? ' cache-build__progress-bar--done' : ''}`}
-                style={{ width: `${webFinished ? 100 : webPct}%` }}
-              />
-            </div>
-            <p className="settings__field-hint" data-testid="cache-build-web">
-              {index.webProgress
-                .replace('{done}', String(web.done))
-                .replace('{total}', String(web.total))
-                .replace('{hits}', String(web.hits))
-                .replace('{dropped}', String(web.dropped))
-                .replace('{failed}', String(web.failed))}
-            </p>
-            <p className="settings__field-hint">
-              {webFinished
-                ? webFinishedLabel || index.webChipDone
-                : webCancelled
-                  ? index.webStoppedHint
-                  : index.webRate.replace('{rate}', String(web.ratePerSec)).replace('{eta}', fmtEta(web.etaSeconds))}
-              {!webFinished && !webCancelled && web.total - web.done > 0 && web.currentTitle ? `　当前：${web.currentTitle.slice(0, 24)}` : ''}
-            </p>
-            {web.cacheHits > 0 ? <p className="settings__field-hint">{index.webSkipped.replace('{count}', String(web.cacheHits))}</p> : null}
-          </>
-        ) : (
-          <p className="settings__field-hint">{index.webIdle}</p>
-        )}
-      </div>
-
-      {/* ② 本地资料库索引（进度来自 rag 队列，与网页抓取并行） */}
-      <div className="cache-build__block">
-        <span className="settings__field-label">{index.localTitle}</span>
-        {rag ? (
-          <>
-            <p className="settings__field-hint">
-              <span className={`settings__status-chip${localReady ? ' is-ok' : ''}`}>{localReady ? '索引可用' : localPending > 0 || rebuildRunning ? '尚未索引' : '索引可用'}</span>
-              {' '}
-              {index.localCounts.replace('{ready}', String(rag.ready)).replace('{total}', String(rag.total)).replace('{failed}', String(rag.failed))}
-            </p>
-            {localPending > 0 ? <p className="settings__field-hint">{index.localPending.replace('{count}', String(localPending))}</p> : null}
-            {rebuildRunning || rag.rebuild.status === 'interrupted' ? (
-              <p className="settings__field-hint">
-                {index.localProgress
-                  .replace('{percent}', String(rag.rebuild.percent))
-                  .replace('{processed}', String(rag.rebuild.processed))
-                  .replace('{total}', String(rag.rebuild.totalQueued))
-                  .replace('{remaining}', String(rag.rebuild.remaining))}
-                {rag.rebuild.status === 'interrupted' ? ' ' + index.localInterrupted : ''}
+              </div>
+              <div className="cache-build__card-metrics">
+                <span>
+                  {fmtNum(web.done)} / {fmtNum(web.total)} 篇
+                </span>
+                <span>{webFinished ? 100 : webPct}%</span>
+                <span>{index.webMetricOk.replace('{count}', String(web.hits))}</span>
+                <span>{index.webMetricNoBody.replace('{count}', String(web.dropped))}</span>
+                {web.failed > 0 ? <span>{index.metricFailed.replace('{count}', String(web.failed))}</span> : null}
+              </div>
+              <p className="settings__field-hint" data-testid="cache-build-web">
+                {webFinished
+                  ? webFinishedLabel || index.webChipDone
+                  : webCancelled
+                    ? index.webStoppedHint
+                    : index.webRate.replace('{rate}', String(web.ratePerSec)).replace('{eta}', fmtEta(web.etaSeconds))}
+                {!webFinished && !webCancelled && web.total - web.done > 0 && web.currentTitle ? `　当前：${web.currentTitle.slice(0, 24)}` : ''}
               </p>
-            ) : null}
-            {!rebuildRunning && localPending === 0 && !localReady ? <p className="settings__field-hint">{index.localReady}</p> : null}
-            {(rag.bodyMissing ?? 0) > 0 ? (
-              <p className="settings__field-hint">{index.localBodyMissing.replace('{count}', String(rag.bodyMissing ?? 0))}</p>
-            ) : null}
-          </>
-        ) : (
-          <p className="settings__field-hint">{index.localReady}</p>
-        )}
-      </div>
-
-      {msg ? <p className={`settings__hint ${msg.ok ? 'settings__hint--ok' : 'settings__hint--err'}`}>{msg.text}</p> : null}
-      {status?.message && status.phase !== 'idle' ? <p className="settings__hint">{status.message}</p> : null}
-
-      {/* 抓取节奏档位（2026-10-05 用户裁定：默认标准档；降档只对本次运行有效） */}
-      <div className="settings__field">
-        <span className="settings__field-label">{zhCN.compilation.webCrawlTierTitle}</span>
-        <div className="cache-build__tier">
-          {(['safe', 'standard', 'fast'] as CrawlTier[]).map((k) => (
-            <label key={k} className="cache-build__tier-item">
-              <input type="radio" name="web-crawl-tier" checked={tier === k} disabled={running} onChange={() => void saveTier(k)} />
-              <span>{tierLabel(k)}</span>
-            </label>
-          ))}
+              {web.cacheHits > 0 ? <p className="settings__field-hint">{index.webSkipped.replace('{count}', String(web.cacheHits))}</p> : null}
+            </>
+          ) : plan && status?.phase !== 'syncing' ? (
+            /*
+             * 2026-11-04（改版）：还没开跑时别只留一句灰字——用只读规划显示"已建 / 总数"，
+             * 让这张卡与右边的本地索引卡在视觉上对等，用户一眼知道起点在哪。
+             */
+            <>
+              <div className="cache-build__progress">
+                <div className="cache-build__progress-bar" style={{ width: `${plan.web.total > 0 ? Math.round((plan.web.cached / plan.web.total) * 100) : 0}%` }} />
+              </div>
+              <div className="cache-build__card-metrics">
+                <span>
+                  {fmtNum(plan.web.cached)} / {fmtNum(plan.web.total)} 篇
+                </span>
+                <span>{plan.web.total > 0 ? Math.round((plan.web.cached / plan.web.total) * 100) : 0}%</span>
+                {plan.web.pending > 0 ? <span>{index.planChip.replace('{pending}', fmtNum(plan.web.pending)).replace('{minutes}', String(plan.web.estimatedMinutes))}</span> : null}
+              </div>
+              <p className="settings__field-hint">{plan.web.pending > 0 ? index.webIdle : index.nothingToDo}</p>
+            </>
+          ) : (
+            <p className="settings__field-hint">{index.webIdle}</p>
+          )}
         </div>
-        <p className="settings__field-hint">{zhCN.compilation.webCrawlTierHint}</p>
+
+        <div className="cache-build__card">
+          <div className="cache-build__card-head">
+            <span className="cache-build__card-title">{index.localTitle}</span>
+            {rag ? (
+              <span className={`settings__status-chip${localReady ? ' is-ok' : ''}`}>
+                {localReady ? index.localChipReady : index.localChipPending}
+              </span>
+            ) : null}
+          </div>
+          {rag ? (
+            <>
+              <div className="cache-build__progress">
+                <div
+                  className={`cache-build__progress-bar${localReady ? ' cache-build__progress-bar--done' : ''}`}
+                  style={{ width: `${rebuildRunning ? rag.rebuild.percent : localReady ? 100 : 0}%` }}
+                />
+              </div>
+              <div className="cache-build__card-metrics">
+                <span>
+                  {fmtNum(rag.ready)} / {fmtNum(rag.total)} 篇
+                </span>
+                <span>{rebuildRunning ? `${rag.rebuild.percent}%` : localReady ? '100%' : '0%'}</span>
+                {rag.failed > 0 ? <span>{index.metricFailed.replace('{count}', String(rag.failed))}</span> : null}
+                {localPending > 0 ? <span>{index.localChipPending} {fmtNum(localPending)}</span> : null}
+              </div>
+              {localPending > 0 ? <p className="settings__field-hint">{index.localPending.replace('{count}', fmtNum(localPending))}</p> : null}
+              {rebuildRunning || rag.rebuild.status === 'interrupted' ? (
+                <p className="settings__field-hint">
+                  {index.localProgress
+                    .replace('{percent}', String(rag.rebuild.percent))
+                    .replace('{processed}', String(rag.rebuild.processed))
+                    .replace('{total}', String(rag.rebuild.totalQueued))
+                    .replace('{remaining}', String(rag.rebuild.remaining))}
+                  {rag.rebuild.status === 'interrupted' ? ' ' + index.localInterrupted : ''}
+                </p>
+              ) : null}
+              {!rebuildRunning && localPending === 0 && !localReady ? <p className="settings__field-hint">{index.localReady}</p> : null}
+              {(rag.bodyMissing ?? 0) > 0 ? (
+                <p className="settings__field-hint">{index.localBodyMissing.replace('{count}', String(rag.bodyMissing ?? 0))}</p>
+              ) : null}
+            </>
+          ) : (
+            <p className="settings__field-hint">{index.localReady}</p>
+          )}
+        </div>
       </div>
 
-      {/* 正文缓存占用与清空 */}
-      <div className="settings__field">
-        <span className="settings__field-label">{zhCN.compilation.webCacheTitle}</span>
-        <p className="settings__field-hint" data-testid="cache-build-usage">
-          {cache && cache.entries > 0
-            ? zhCN.compilation.webCacheUsage
-                .replace('{entries}', String(cache.entries))
-                .replace('{mb}', String(Math.round((cache.bytes / 1048576) * 10) / 10)) +
-              `（正文可用 ${cache.byState.ok}、无可用正文 ${cache.byState['no-body']}、白名单外 ${cache.byState.blocked}）`
-            : zhCN.compilation.webCacheEmpty}
-        </p>
-        <p className="settings__field-hint">{zhCN.compilation.webCacheHint}</p>
-        <button
-          type="button"
-          className="source-list__btn"
-          onClick={() => setPendingClear(true)}
-          disabled={clearing || running || (cache?.entries ?? 0) === 0}
-        >
-          {clearing ? zhCN.compilation.webCacheClearing : zhCN.compilation.webCacheClearBtn}
-        </button>
-      </div>
-
-      {/* 引擎自检（确认在跑 Worker 池多线程，还是一直在静默回退单线程） */}
-      {rag?.engine ? (
-        <p className="settings__hint">
-          {index.engine
-            .replace('{pool}', String(rag.engine.poolSize))
-            .replace('{threads}', String(rag.engine.workerThreads || 1))
-            .replace('{errors}', String(rag.engine.workerErrors))
-            .replace('{fallbacks}', String(rag.engine.directFallbacks))}
-          {rag.engine.lastWorkerError ? '：' + rag.engine.lastWorkerError : ''}
-        </p>
-      ) : null}
-      {rag?.lastError ? (
-        <p className="settings__hint settings__hint--err">
-          {index.lastError}：<code>{rag.lastError}</code>
-        </p>
+      {status?.message && status.phase !== 'idle' && banner?.text !== status.message ? (
+        <p className="settings__field-hint">{status.message}</p>
       ) : null}
 
-      {/* 清空缓存确认（2026-11-02）：如实说明会清掉多少正文、多少"无可用正文"标记，以及后果 */}
+      {/* ⑤ 更多设置：这些是低频项，折叠起来但入口常在（功能全保留） */}
+      <details className="cache-build__more" data-testid="cache-build-more">
+        <summary>{index.advanced}</summary>
+        <div className="cache-build__more-body">
+          {status && (status.phase === 'syncing' || status.sync.added > 0 || status.sync.failed > 0) ? (
+            <div className="cache-build__block">
+              <span className="settings__field-label">{index.syncLabel}</span>
+              <p className="settings__field-hint" data-testid="cache-build-sync">
+                {status.phase === 'syncing'
+                  ? status.sync.currentSite
+                    ? index.syncingSites
+                        .replace('{index}', String(Math.max(1, status.sync.siteIndex)))
+                        .replace('{total}', String(status.sync.siteTotal || '?'))
+                        .replace('{site}', status.sync.currentSite)
+                    : index.syncingSitesSimple
+                  : index.syncSummary
+                      .replace('{done}', String(status.sync.siteIndex))
+                      .replace('{total}', String(status.sync.siteTotal))
+                      .replace('{added}', String(status.sync.added)) +
+                    (status.sync.failed > 0 ? index.syncFailedCount.replace('{count}', String(status.sync.failed)) : '')}
+              </p>
+              {status.phase === 'syncing' ? <p className="settings__field-hint">{index.syncPendingHint}</p> : null}
+              {status.phase !== 'syncing' && status.sync.lastSummary ? (
+                <p className="settings__field-hint" data-testid="cache-build-discovery">
+                  {status.sync.lastSummary}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
+          <div className="cache-build__block">
+            <span className="settings__field-label">{index.discoveryLabel}</span>
+            <div className="cache-build__tier">
+              <label className="cache-build__tier-item">
+                <input
+                  type="radio"
+                  name="cache-build-discovery"
+                  checked={discoveryMode === 'auto'}
+                  disabled={running}
+                  onChange={() => void saveDiscoveryMode('auto')}
+                />
+                {index.discoveryAuto}
+              </label>
+              <label className="cache-build__tier-item">
+                <input
+                  type="radio"
+                  name="cache-build-discovery"
+                  checked={discoveryMode === 'manual'}
+                  disabled={running}
+                  onChange={() => void saveDiscoveryMode('manual')}
+                />
+                {index.discoveryManual}
+              </label>
+              {discoveryMode === 'manual' ? (
+                <>
+                  <label className="cache-build__tier-item">
+                    {index.discoveryPages}
+                    <input
+                      type="number"
+                      className="cache-build__year-input"
+                      min={10}
+                      max={2000}
+                      value={discoveryPages}
+                      disabled={running}
+                      onChange={(e) => setDiscoveryPages(Number(e.target.value))}
+                      onBlur={(e) => void saveDiscoveryNumber('webDiscoveryPages', e.target.value)}
+                    />
+                  </label>
+                  <label className="cache-build__tier-item">
+                    {index.discoveryDepth}
+                    <input
+                      type="number"
+                      className="cache-build__year-input"
+                      min={1}
+                      max={8}
+                      value={discoveryDepth}
+                      disabled={running}
+                      onChange={(e) => setDiscoveryDepth(Number(e.target.value))}
+                      onBlur={(e) => void saveDiscoveryNumber('webDiscoveryDepth', e.target.value)}
+                    />
+                  </label>
+                </>
+              ) : null}
+            </div>
+            <p className="settings__field-hint">
+              {discoveryMode === 'auto'
+                ? index.discoveryAutoHint.replace('{pages}', String(discoveryPages)).replace('{depth}', String(discoveryDepth))
+                : index.discoveryManualHint}
+            </p>
+          </div>
+
+          <div className="cache-build__block">
+            <span className="settings__field-label">{zhCN.compilation.webCrawlTierTitle}</span>
+            <div className="cache-build__tier">
+              {(['safe', 'standard', 'fast'] as CrawlTier[]).map((k) => (
+                <label key={k} className="cache-build__tier-item">
+                  <input type="radio" name="web-crawl-tier" checked={tier === k} disabled={running} onChange={() => void saveTier(k)} />
+                  <span>{tierLabel(k)}</span>
+                </label>
+              ))}
+            </div>
+            <p className="settings__field-hint">{zhCN.compilation.webCrawlTierHint}</p>
+          </div>
+
+          <div className="cache-build__block">
+            <span className="settings__field-label">{zhCN.compilation.webCacheTitle}</span>
+            <p className="settings__field-hint" data-testid="cache-build-usage">
+              {cache && cache.entries > 0
+                ? zhCN.compilation.webCacheUsage
+                    .replace('{entries}', fmtNum(cache.entries))
+                    .replace('{mb}', String(Math.round((cache.bytes / 1048576) * 10) / 10)) +
+                  `（正文可用 ${cache.byState.ok}、无可用正文 ${cache.byState['no-body']}、白名单外 ${cache.byState.blocked}）`
+                : zhCN.compilation.webCacheEmpty}
+            </p>
+            <p className="settings__field-hint">{zhCN.compilation.webCacheHint}</p>
+            <div>
+              <button
+                type="button"
+                className="source-list__btn"
+                onClick={() => setPendingClear(true)}
+                disabled={clearing || running || (cache?.entries ?? 0) === 0}
+              >
+                {clearing ? zhCN.compilation.webCacheClearing : zhCN.compilation.webCacheClearBtn}
+              </button>
+            </div>
+          </div>
+
+          {rag?.engine ? (
+            <p className="settings__hint">
+              {index.engine
+                .replace('{pool}', String(rag.engine.poolSize))
+                .replace('{threads}', String(rag.engine.workerThreads || 1))
+                .replace('{errors}', String(rag.engine.workerErrors))
+                .replace('{fallbacks}', String(rag.engine.directFallbacks))}
+              {rag.engine.lastWorkerError ? '：' + rag.engine.lastWorkerError : ''}
+            </p>
+          ) : null}
+          {rag?.lastError ? (
+            <p className="settings__hint settings__hint--err">
+              {index.lastError}：<code>{rag.lastError}</code>
+            </p>
+          ) : null}
+        </div>
+      </details>
+
+      {/* 说明放最后：作为脚注，而不是正文 */}
+      <p className="settings__hint settings__hint--foot">{index.hint}</p>
+
       {pendingClear ? (
         <ConfirmDialog
           title={zhCN.compilation.webCacheClearTitle}

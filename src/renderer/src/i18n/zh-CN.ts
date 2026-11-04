@@ -394,7 +394,26 @@ export const zhCN = {
       discoveryPages: '页数上限',
       discoveryDepth: '层数上限',
       discoveryMeasured: '（上次实测：{pages} 页 / {depth} 层）',
-      planPending: '本次要建立 {pending} 篇，预计约 {minutes} 分钟',
+      /*
+     * 2026-11-04（用户反馈"纯文本堆砌、抓不住重点"）：面板改为「四个数字 + 状态条 + 两张进度卡 + 折叠更多设置」。
+     * 下面这些是新增的短标签（原来的长句仍用于细节行，不删）。
+     */
+    statWebPending: '待建立网页',
+    /* 指标小标签（进度卡里的三四个数字，替代原来一整句） */
+    webMetricOk: '正文可用 {count}',
+    webMetricNoBody: '无正文 {count}',
+    metricFailed: '失败 {count}',
+    statCached: '已缓存正文',
+    statLocalPending: '待索引本地',
+    statNoBody: '无可用正文',
+    planChip: '{pending} 篇 · 约 {minutes} 分钟',
+    planChipDone: '该区间已全部建立',
+    advanced: '更多设置：清单发现 · 抓取档位 · 缓存管理',
+    runningBanner: '正在建立：可以切走做别的事，进度会保留；中途关闭软件，下次点「建立」会接着跑。',
+    doneBanner: '建立完成，可以开始生成汇编了。',
+    localChipReady: '已就绪',
+    localChipPending: '待索引',
+    planPending: '本次要建立 {pending} 篇，预计约 {minutes} 分钟',
       planAlready: '已有 {already} 篇直接跳过（不会重做）',
       /*
        * 2026-11-02（第三项任务）：把估算依据摊开。实测值来自上一次「建立」的真实耗时，
