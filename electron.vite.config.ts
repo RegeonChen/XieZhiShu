@@ -25,6 +25,15 @@ export default defineConfig({
       alias: {
         '@renderer': resolve('src/renderer/src')
       }
+    },
+    build: {
+      /*
+       * 2026-11-11（实测缺陷）：渲染层产物带内容哈希，而 `out/` 在 Vite 项目根之外 →
+       * Vite 默认**不清空** outDir，每次构建新增一份、旧的永远留着。
+       * 实测累积到 214 个文件 / 610 MB，且被 electron-builder 整个打进 asar（安装包虚胖约 1/3）。
+       * 这里显式清空：每次构建只保留本次产物。
+       */
+      emptyOutDir: true
     }
   }
 })
