@@ -1,7 +1,17 @@
 name: Release
 
-# 推送 v* 格式的 tag 时，自动构建 Windows NSIS 安装包并发布为 GitHub Release。
-# 用法：git tag -a v0.1.0 -m "版本说明" && git push origin v0.1.0
+# 推送 v* 格式的 tag 时，自动构建 Windows NSIS 安装包，作为 **CI 产物（workflow artifact）** 保留备查。
+#
+# ⚠️ 2026-11-11（实测事故后收紧）：**CI 不再自动创建/覆盖 GitHub Release 资产**。
+# 原因有两条，都实测踩过：
+#  ① `resources/models/` 在 .gitignore 里、**不在仓库中** → CI 打出的安装包**不含本地嵌入模型**
+#     （约 90 MB），用户装上后语义检索会静默退化成纯词法检索；
+#  ② 用 API 创建 release（tag 自动出现）同样会触发本工作流，`softprops/action-gh-release`
+#     的 `overwrite_files: true` 会把**本地构建的正确安装包覆盖成 CI 的无模型包**——
+#     实测 v0.4.1 / v0.5.0 的资产就被换成了 200.6 MB 的无模型包（正确包分别是 340.5 / 352.7 MB）。
+#
+# 正式发布口径（见 AGENTS.md）：**本地** `npm run dist:win` → 用 API 建 release → 只上传当前版本的
+# exe 与 .blockmap 两个文件。CI 只负责"能编译通过 + 产物备查"。
 on:
   push:
     tags:
@@ -28,7 +38,6 @@ jobs:
       - name: Build & Package (Windows NSIS)
         run: npm run dist:win
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # 不签名（跳过代码签名，避免需要证书）
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
@@ -40,48 +49,3 @@ jobs:
             dist/*.exe
             dist/*.exe.blockmap
           if-no-files-found: error
-
-  release:
-    needs: [build-win]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      # 必须 checkout：发布说明取自仓库里的 docs/release-notes.md，
-      # 不 checkout 的话该文件不在工作区 → Release 正文会静默变成空（v0.3.0 首次发布踩过）。
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: win-installer
-          path: dist/
-
-      # ⚠️ 已知问题（v0.3.0 实测）：`resources/models/` 在 .gitignore 里、**不在仓库中**，
-      # 因此 CI 打出的安装包**不含本地嵌入模型 BGE-small-zh-v1.5（约 90 MB）**，
-      # 装到用户机器上会退化成"纯词法检索"（功能可用，但语义召回失效）。
-      # 正式发布请用**本地构建**的安装包（`npm run dist:win`，含模型）作为 Release 资产，
-      # 或先把模型纳入仓库/改为构建时下载，再让 CI 产物对外发布。
-      - name: Create or update GitHub Release (assets)
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          draft: false
-          prerelease: false
-          body_path: docs/release-notes.md
-          # 同一 tag 重跑时覆盖已上传的同名安装包（否则重发会因资产重名失败）
-          overwrite_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # 正文补偿：action 的 body_path 在 v0.3.0 的实测里没有生效（Release 出成空正文），
-      # 这里再用 runner 自带的 gh CLI 显式写一次；即使失败也不影响资产已经发布。
-      - name: Patch release notes (best effort)
-        continue-on-error: true
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          echo "notes: $(wc -c < docs/release-notes.md) bytes"
-          gh release edit "$GITHUB_REF_NAME" --notes-file docs/release-notes.md
